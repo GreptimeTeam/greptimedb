@@ -30,6 +30,8 @@ use common_batcher::flush_limiter::FlushLimiter;
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
+use common_error::ext::BoxedError;
+use common_query::{Output, WriteCompletion};
 use operator::batcher::PendingRowsBatcher;
 use operator::error::{BatchFlushSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
@@ -171,10 +173,10 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         batch: RecordBatch,
         ctx: QueryContextRef,
         permit: Arc<OwnedSemaphorePermit>,
-    ) -> Result<usize> {
+    ) -> Result<Output> {
         let total_rows = batch.num_rows();
         if total_rows == 0 {
-            return Ok(0);
+            return Ok(Output::new_with_affected_rows(0));
         }
         if table_info.catalog_name != ctx.current_catalog()
             || table_info.schema_name != ctx.current_schema()
@@ -213,19 +215,30 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
             }
             .fail();
         }
-        if !self.pending_rows_batch_sync {
-            return Ok(total_rows);
+        let completion = async move {
+            response_rx
+                .await
+                .map_err(|_| {
+                    UnexpectedSnafu {
+                        violated: "batch worker stopped before reporting its write result"
+                            .to_string(),
+                    }
+                    .build()
+                })?
+                .context(BatchFlushSnafu)
+        };
+        let mut output = Output::new_with_affected_rows(total_rows);
+        if self.pending_rows_batch_sync {
+            completion.await?;
+        } else {
+            output
+                .meta
+                .write_completions
+                .push(WriteCompletion::new(async move {
+                    completion.await.map_err(BoxedError::new)
+                }));
         }
-        response_rx
-            .await
-            .map_err(|_| {
-                UnexpectedSnafu {
-                    violated: "batch worker stopped before reporting its write result".to_string(),
-                }
-                .build()
-            })?
-            .context(BatchFlushSnafu)?;
-        Ok(total_rows)
+        Ok(output)
     }
 }
 
@@ -386,17 +399,20 @@ mod tests {
                         .unwrap()
                         .unwrap();
                 let mut submitted = Some(submitted);
+                let mut completion = None;
                 if sync {
                     assert!(!submitted.as_ref().unwrap().is_finished());
                 } else {
-                    assert_eq!(
-                        timeout(Duration::from_secs(5), submitted.take().unwrap())
-                            .await
-                            .unwrap()
-                            .unwrap()
-                            .unwrap(),
-                        1
-                    );
+                    let mut output = timeout(Duration::from_secs(5), submitted.take().unwrap())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(output.extract_rows_and_cost().0, 1);
+                    assert_eq!(output.meta.write_completions.len(), 1);
+                    let mut pending = Box::pin(output.meta.write_completions.pop().unwrap().wait());
+                    assert!(futures::poll!(pending.as_mut()).is_pending());
+                    completion = Some(pending);
                 }
                 // Early acknowledgement must not release capacity before completion.
                 let acquire = batcher.acquire();
@@ -420,8 +436,14 @@ mod tests {
                         .unwrap();
                     assert_eq!(result.is_err(), fail);
                     if !fail {
-                        assert_eq!(result.unwrap(), 1);
+                        let output = result.unwrap();
+                        assert_eq!(output.extract_rows_and_cost().0, 1);
+                        assert!(output.meta.write_completions.is_empty());
                     }
+                }
+                if let Some(completion) = completion {
+                    let result = timeout(Duration::from_secs(5), completion).await.unwrap();
+                    assert_eq!(result.is_err(), fail);
                 }
                 timeout(Duration::from_secs(5), acquire)
                     .await
@@ -533,9 +555,13 @@ mod tests {
         let (first_result, second_result) = timeout(Duration::from_secs(5), async {
             if shared_request {
                 let permit = batcher.acquire().await.unwrap();
-                tokio::join!(
+                let (first, second) = tokio::join!(
                     batcher.submit(table.clone(), first, influx_ctx, permit.clone()),
                     batcher.submit(table.clone(), second, opentsdb_ctx, permit),
+                );
+                (
+                    first.map(|output| output.extract_rows_and_cost().0),
+                    second.map(|output| output.extract_rows_and_cost().0),
                 )
             } else {
                 let inserter = Inserter::new(

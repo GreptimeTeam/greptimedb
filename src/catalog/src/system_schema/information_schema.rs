@@ -38,7 +38,7 @@ mod views;
 #[cfg(all(test, feature = "enterprise"))]
 mod recycle_bin_test;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
@@ -63,15 +63,15 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
-use store_api::storage::{ScanRequest, TableId};
+use store_api::storage::ScanRequest;
 use table::TableRef;
-use table::metadata::TableType;
+use table::requests::{SEMANTIC_TABLE_SCOPE, TableOptions};
 pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use crate::CatalogManager;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flow_statistics::InformationSchemaFlowStatistics;
@@ -92,9 +92,7 @@ use crate::system_schema::information_schema::table_semantics::InformationSchema
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
 use crate::system_schema::memory_table::MemoryTable;
 pub(crate) use crate::system_schema::predicate::Predicates;
-use crate::system_schema::{
-    SystemSchemaProvider, SystemSchemaProviderInner, SystemTable, SystemTableRef,
-};
+use crate::system_schema::{SystemSchemaProvider, SystemTable, build_system_table};
 
 const DENSE_PRIMARY_KEY_ENCODING: &str = "dense";
 const SPARSE_PRIMARY_KEY_ENCODING: &str = "sparse";
@@ -134,7 +132,6 @@ lazy_static! {
         TABLE_PRIVILEGES,
         GLOBAL_STATUS,
         SESSION_STATUS,
-        PARTITIONS,
         PLUGINS,
         USER_PRIVILEGES,
         PROCESSLIST,
@@ -163,12 +160,31 @@ pub struct MakeInformationTableRequest {
     pub kv_backend: KvBackendRef,
 }
 
+/// The visibility guaranteed by an information-schema table provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InformationSchemaTableScope {
+    /// Every query is filtered to the catalog supplied when constructing the provider.
+    Catalog,
+    /// The table contains catalog-independent or shared data, including compatibility stubs.
+    Global,
+}
+
+impl InformationSchemaTableScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::Global => "global",
+        }
+    }
+}
+
 /// A factory trait for making information schema tables.
 ///
 /// This trait allows for extensibility of the information schema by providing
 /// a way to dynamically create custom information schema tables.
 pub trait InformationSchemaTableFactory {
-    fn make_information_table(&self, req: MakeInformationTableRequest) -> SystemTableRef;
+    /// Creates a table whose scope is declared by its [`InformationTable`] implementation.
+    fn make_information_table(&self, req: MakeInformationTableRequest) -> InformationTableRef;
 }
 
 pub type InformationSchemaTableFactoryRef = Arc<dyn InformationSchemaTableFactory + Send + Sync>;
@@ -192,15 +208,8 @@ impl SystemSchemaProvider for InformationSchemaProvider {
     }
 }
 
-impl SystemSchemaProviderInner for InformationSchemaProvider {
-    fn catalog_name(&self) -> &str {
-        &self.catalog_name
-    }
-    fn schema_name() -> &'static str {
-        INFORMATION_SCHEMA_NAME
-    }
-
-    fn system_table(&self, name: &str) -> Option<SystemTableRef> {
+impl InformationSchemaProvider {
+    fn information_table(&self, name: &str) -> Option<InformationTableRef> {
         if let Some(factory) = self.extra_table_factories.get(name) {
             let req = MakeInformationTableRequest {
                 catalog_name: self.catalog_name.clone(),
@@ -357,142 +366,76 @@ impl InformationSchemaProvider {
     }
 
     fn build_tables(&mut self) {
-        let mut tables = HashMap::new();
+        let mut table_names = HashSet::new();
 
         // SECURITY NOTE:
         // Carefully consider the tables that may expose sensitive cluster configurations,
         // authentication details, and other critical information.
         // Only put these tables under `greptime` catalog to prevent info leak.
         if self.catalog_name == DEFAULT_CATALOG_NAME {
-            tables.insert(
-                BUILD_INFO.to_string(),
-                self.build_table(BUILD_INFO).unwrap(),
-            );
-            tables.insert(
-                REGION_PEERS.to_string(),
-                self.build_table(REGION_PEERS).unwrap(),
-            );
-            tables.insert(
-                CLUSTER_INFO.to_string(),
-                self.build_table(CLUSTER_INFO).unwrap(),
-            );
-            tables.insert(
-                PROCEDURE_INFO.to_string(),
-                self.build_table(PROCEDURE_INFO).unwrap(),
-            );
-            tables.insert(
-                REGION_STATISTICS.to_string(),
-                self.build_table(REGION_STATISTICS).unwrap(),
-            );
-            tables.insert(
-                REGION_INFO.to_string(),
-                self.build_table(REGION_INFO).unwrap(),
-            );
-            tables.insert(
-                SSTS_MANIFEST.to_string(),
-                self.build_table(SSTS_MANIFEST).unwrap(),
-            );
-            tables.insert(
-                SSTS_STORAGE.to_string(),
-                self.build_table(SSTS_STORAGE).unwrap(),
-            );
-            tables.insert(
-                SSTS_INDEX_META.to_string(),
-                self.build_table(SSTS_INDEX_META).unwrap(),
-            );
+            table_names.extend([
+                BUILD_INFO,
+                REGION_PEERS,
+                CLUSTER_INFO,
+                PROCEDURE_INFO,
+                REGION_STATISTICS,
+                REGION_INFO,
+                SSTS_MANIFEST,
+                SSTS_STORAGE,
+                SSTS_INDEX_META,
+            ]);
         }
 
-        tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
-        tables.insert(VIEWS.to_string(), self.build_table(VIEWS).unwrap());
-        tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
-        tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
-        tables.insert(
-            KEY_COLUMN_USAGE.to_string(),
-            self.build_table(KEY_COLUMN_USAGE).unwrap(),
-        );
-        tables.insert(
-            TABLE_CONSTRAINTS.to_string(),
-            self.build_table(TABLE_CONSTRAINTS).unwrap(),
-        );
-        tables.insert(
-            STATISTICS.to_string(),
-            self.build_table(STATISTICS).unwrap(),
-        );
-        tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
-        tables.insert(
-            FLOW_STATISTICS.to_string(),
-            self.build_table(FLOW_STATISTICS).unwrap(),
-        );
-        #[cfg(feature = "enterprise")]
-        tables.insert(
-            RECYCLE_BIN.to_string(),
-            self.build_table(RECYCLE_BIN).unwrap(),
-        );
-        tables.insert(
-            TABLE_SEMANTICS.to_string(),
-            self.build_table(TABLE_SEMANTICS).unwrap(),
-        );
-        if let Some(process_list) = self.build_table(PROCESS_LIST) {
-            tables.insert(PROCESS_LIST.to_string(), process_list);
+        table_names.extend([
+            TABLES,
+            VIEWS,
+            SCHEMATA,
+            COLUMNS,
+            KEY_COLUMN_USAGE,
+            TABLE_CONSTRAINTS,
+            STATISTICS,
+            FLOWS,
+            FLOW_STATISTICS,
+            #[cfg(feature = "enterprise")]
+            RECYCLE_BIN,
+            TABLE_SEMANTICS,
+            PARTITIONS,
+        ]);
+        if self.process_manager.is_some() {
+            table_names.insert(PROCESS_LIST);
         }
-        for name in self.extra_table_factories.keys() {
-            tables.insert(name.clone(), self.build_table(name).expect(name));
-        }
-        // Add memory tables
-        for name in MEMORY_TABLES.iter() {
-            tables.insert((*name).to_string(), self.build_table(name).expect(name));
-        }
-        self.tables = tables;
+        table_names.extend(MEMORY_TABLES.iter().copied());
+        table_names.extend(self.extra_table_factories.keys().map(String::as_str));
+        self.tables = table_names
+            .into_iter()
+            .map(|name| {
+                let table = self.information_table(name).expect(name);
+                let options = TableOptions {
+                    extra_options: HashMap::from([(
+                        SEMANTIC_TABLE_SCOPE.to_string(),
+                        table.scope().as_str().to_string(),
+                    )]),
+                    ..Default::default()
+                };
+                let table = build_system_table(
+                    self.catalog_name.clone(),
+                    INFORMATION_SCHEMA_NAME,
+                    table,
+                    options,
+                );
+                (name.to_string(), table)
+            })
+            .collect();
     }
 }
 
-pub trait InformationTable {
-    fn table_id(&self) -> TableId;
-
-    fn table_name(&self) -> &'static str;
-
-    fn schema(&self) -> SchemaRef;
-
-    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
-
-    fn scan_plan(&self, _request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        Ok(None)
-    }
-
-    fn table_type(&self) -> TableType {
-        TableType::Temporary
-    }
+/// An information-schema table with an explicit visibility guarantee.
+pub trait InformationTable: SystemTable {
+    /// Returns the visibility guaranteed by this table's query implementation.
+    fn scope(&self) -> InformationSchemaTableScope;
 }
 
-// Provide compatibility for legacy `information_schema` code.
-impl<T> SystemTable for T
-where
-    T: InformationTable,
-{
-    fn table_id(&self) -> TableId {
-        InformationTable::table_id(self)
-    }
-
-    fn table_name(&self) -> &'static str {
-        InformationTable::table_name(self)
-    }
-
-    fn schema(&self) -> SchemaRef {
-        InformationTable::schema(self)
-    }
-
-    fn table_type(&self) -> TableType {
-        InformationTable::table_type(self)
-    }
-
-    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        InformationTable::to_stream(self, request)
-    }
-
-    fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        InformationTable::scan_plan(self, request)
-    }
-}
+pub type InformationTableRef = Arc<dyn InformationTable + Send + Sync>;
 
 pub type InformationExtensionRef = Arc<dyn InformationExtension<Error = Error> + Send + Sync>;
 
@@ -597,9 +540,252 @@ impl InformationExtension for NoopInformationExtension {
 
 #[cfg(test)]
 mod tests {
+    use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+    use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+    use common_meta::ddl::test_util::create_table::test_create_table_task;
+    use common_meta::key::schema_name::SchemaNameKey;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::txn::TxnService;
+    use common_meta::wal_provider::RegionWalOptions;
+    use datatypes::schema::Schema;
+    use futures_util::TryStreamExt;
     use store_api::region_info::RegionInfoEntry;
+    use store_api::storage::TableId;
 
     use super::*;
+    use crate::error::Result;
+    use crate::information_schema::NoopInformationExtension;
+    use crate::kvbackend::KvBackendCatalogManagerBuilder;
+    use crate::memory::MemoryCatalogManager;
+    use crate::process_manager::ProcessManager;
+
+    struct ScopedFactory {
+        name: &'static str,
+        scope: InformationSchemaTableScope,
+    }
+
+    impl InformationSchemaTableFactory for ScopedFactory {
+        fn make_information_table(&self, _req: MakeInformationTableRequest) -> InformationTableRef {
+            Arc::new(ScopedTable {
+                name: self.name,
+                scope: self.scope,
+            })
+        }
+    }
+
+    struct ScopedTable {
+        name: &'static str,
+        scope: InformationSchemaTableScope,
+    }
+
+    impl InformationTable for ScopedTable {
+        fn scope(&self) -> InformationSchemaTableScope {
+            self.scope
+        }
+    }
+
+    impl SystemTable for ScopedTable {
+        fn table_id(&self) -> TableId {
+            999
+        }
+
+        fn table_name(&self) -> &'static str {
+            self.name
+        }
+
+        fn schema(&self) -> SchemaRef {
+            Arc::new(Schema::new(vec![]))
+        }
+
+        fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
+            Ok(common_recordbatch::RecordBatches::empty().as_stream())
+        }
+    }
+
+    #[test]
+    fn every_registered_information_schema_table_has_scope() {
+        use InformationSchemaTableScope::{Catalog, Global};
+
+        let manager: Arc<dyn CatalogManager> = MemoryCatalogManager::new();
+        let backend = Arc::new(MemoryKvBackend::default());
+        let factories: HashMap<_, InformationSchemaTableFactoryRef> = [
+            ("future_catalog_table", Catalog),
+            ("future_global_table", Global),
+            (ENGINES, Catalog),
+        ]
+        .into_iter()
+        .map(|(name, scope)| {
+            (
+                name.to_string(),
+                Arc::new(ScopedFactory { name, scope }) as _,
+            )
+        })
+        .collect();
+        let catalog_tables = [
+            TABLES,
+            VIEWS,
+            SCHEMATA,
+            COLUMNS,
+            KEY_COLUMN_USAGE,
+            TABLE_CONSTRAINTS,
+            STATISTICS,
+            FLOWS,
+            FLOW_STATISTICS,
+            TABLE_SEMANTICS,
+            PARTITIONS,
+            REGION_PEERS,
+            #[cfg(feature = "enterprise")]
+            RECYCLE_BIN,
+            "future_catalog_table",
+            ENGINES,
+        ];
+
+        for (catalog, with_process_manager) in [
+            (DEFAULT_CATALOG_NAME, true),
+            (DEFAULT_CATALOG_NAME, false),
+            ("tenant", true),
+            ("tenant", false),
+        ] {
+            let provider = InformationSchemaProvider::new(
+                catalog.to_string(),
+                Arc::downgrade(&manager),
+                Arc::new(FlowMetadataManager::new(backend.clone())),
+                with_process_manager.then(|| Arc::new(ProcessManager::new(String::new(), None))),
+                backend.clone(),
+            );
+            assert_eq!(
+                provider
+                    .table(ENGINES)
+                    .unwrap()
+                    .table_info()
+                    .meta
+                    .options
+                    .extra_options
+                    .get(SEMANTIC_TABLE_SCOPE)
+                    .map(String::as_str),
+                Some(Global.as_str()),
+            );
+            // An extension replacing a built-in supplies the replacement table's scope.
+            let provider = provider.with_extra_table_factories(factories.clone());
+            let expected_count =
+                43 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
+                    - if catalog == DEFAULT_CATALOG_NAME {
+                        0
+                    } else {
+                        9
+                    };
+            assert_eq!(provider.tables().len(), expected_count);
+            for (name, table) in provider.tables() {
+                let scope = if catalog_tables.contains(&name.as_str()) {
+                    Catalog
+                } else {
+                    Global
+                };
+                assert_eq!(
+                    table
+                        .table_info()
+                        .meta
+                        .options
+                        .extra_options
+                        .get(SEMANTIC_TABLE_SCOPE)
+                        .map(String::as_str),
+                    Some(scope.as_str()),
+                    "{catalog}.{name}"
+                );
+            }
+            assert_eq!(
+                provider.table(REGION_PEERS).is_some(),
+                catalog == DEFAULT_CATALOG_NAME
+            );
+            assert_eq!(provider.table(PROCESS_LIST).is_some(), with_process_manager);
+            if let Some(table) = provider.table(PROCESS_LIST) {
+                assert!(table.schema().column_schema_by_name("catalog").is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn newly_accessible_information_schema_tables_filter_catalogs() {
+        let backend = Arc::new(MemoryKvBackend::default());
+        let caches = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(CacheRegistryBuilder::default().build())
+            .add_cache_registry(build_fundamental_cache_registry(backend.clone()));
+        let manager = KvBackendCatalogManagerBuilder::new(
+            Arc::new(NoopInformationExtension),
+            backend.clone(),
+            Arc::new(
+                with_default_composite_cache_registry(caches)
+                    .unwrap()
+                    .build(),
+            ),
+        )
+        .build();
+        let metadata = manager.table_metadata_manager_ref();
+        let flow_metadata = FlowMetadataManager::new(backend.clone());
+        for (catalog, name, id) in [
+            ("tenant_a", "visible_a", 1024),
+            ("tenant_b", "visible_b", 1025),
+        ] {
+            metadata
+                .schema_manager()
+                .create(SchemaNameKey::new(catalog, "public"), None, false)
+                .await
+                .unwrap();
+            let mut info = test_create_table_task(name, id).table_info;
+            info.catalog_name = catalog.to_string();
+            info.meta
+                .options
+                .extra_options
+                .insert(SEMANTIC_TABLE_SCOPE.to_string(), "catalog".to_string());
+            metadata
+                .create_table_metadata(
+                    info,
+                    TableRouteValue::physical(vec![]),
+                    RegionWalOptions::default(),
+                )
+                .await
+                .unwrap();
+            let (txn, _) = flow_metadata
+                .flow_name_manager()
+                .build_create_txn(catalog, name, id)
+                .unwrap();
+            backend.txn(txn).await.unwrap();
+        }
+
+        for (catalog, visible, hidden) in [
+            ("tenant_a", "visible_a", "visible_b"),
+            ("tenant_b", "visible_b", "visible_a"),
+        ] {
+            for name in [TABLE_SEMANTICS, STATISTICS, FLOW_STATISTICS] {
+                let table = manager
+                    .table(catalog, INFORMATION_SCHEMA_NAME, name, None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let batches = table
+                    .scan_to_stream(ScanRequest::default())
+                    .await
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                let output = batches
+                    .iter()
+                    .map(|batch| batch.pretty_print())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(output.contains(visible), "{catalog}.{name}: {output}");
+                assert!(!output.contains(hidden), "{catalog}.{name}: {output}");
+            }
+        }
+        assert!(
+            !manager
+                .information_schema_provider()
+                .tables()
+                .contains_key("visible_a")
+        );
+    }
 
     #[test]
     fn test_datanode_inspect_region_info_build_plan() {

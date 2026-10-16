@@ -92,6 +92,17 @@ impl TestEnv {
         }
     }
 
+    /// Returns a new env whose metric engine runs over `mito`, an engine of
+    /// `mito_env`.
+    pub fn with_mito_engine(mito_env: MitoTestEnv, mito: MitoEngine) -> Self {
+        let metric = MetricEngine::try_new(mito.clone(), EngineConfig::default()).unwrap();
+        Self {
+            mito_env,
+            mito,
+            metric,
+        }
+    }
+
     /// Returns a new env with specific `prefix` and `mito_env` for test.
     pub async fn with_mito_env(mut mito_env: MitoTestEnv) -> Self {
         let mito = mito_env.create_engine(MitoConfig::default()).await;
@@ -119,6 +130,17 @@ impl TestEnv {
 
     pub fn metric(&self) -> MetricEngine {
         self.metric.clone()
+    }
+
+    /// Restarts Mito without closing regions and recreates the metric metadata cache.
+    /// Callers stop the old metric engine's metadata flush task before restarting.
+    pub async fn reopen_engine(&mut self, config: EngineConfig) {
+        let mito_config = self.mito.mito_config().clone();
+        self.mito = self
+            .mito_env
+            .reopen_engine(self.mito.clone(), mito_config)
+            .await;
+        self.metric = MetricEngine::try_new(self.mito.clone(), config).unwrap();
     }
 
     /// Creates a new follower engine with the same config as the leader engine.

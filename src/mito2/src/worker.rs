@@ -1010,6 +1010,13 @@ struct RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Publishes a loaded region together with its resident compaction state.
+    fn register_region(&mut self, region: MitoRegionRef) {
+        self.compaction_scheduler
+            .register_region(&region.version_control, &region.access_layer);
+        self.regions.insert_region(region);
+    }
+
     /// Starts the worker loop.
     async fn run(&mut self) {
         let init_check_delay = worker_init_check_delay();
@@ -1338,6 +1345,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         match notify {
+            BackgroundNotify::RegionOpened { region, registered } => {
+                self.register_region(region);
+                self.region_count.inc();
+
+                // Finish this opening batch before the worker can process a close/reopen,
+                // without waiting for the background opener to resume after the ACK.
+                let senders = self.opening_regions.remove_sender(region_id);
+                if let Some(state) = &self.series_index_task_state {
+                    state.wake();
+                }
+                let _ = registered.send(());
+                for sender in senders {
+                    sender.send(Ok(0));
+                }
+            }
+            BackgroundNotify::CompactionUnit(req) => {
+                self.handle_compaction_unit(region_id, req).await;
+            }
+            BackgroundNotify::CompactionDdlComplete {
+                generation,
+                request_index,
+            } => {
+                self.compaction_scheduler
+                    .on_ddl_complete(region_id, generation, request_index);
+            }
             BackgroundNotify::CompactionPickFinished(req) => {
                 self.handle_compaction_pick_finished(region_id, req).await
             }
@@ -1360,9 +1392,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
-            }
-            BackgroundNotify::CompactionCancelled(req) => {
-                self.handle_compaction_cancelled(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
@@ -1446,6 +1475,14 @@ impl WorkerListener {
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerListener {
         WorkerListener { listener }
+    }
+
+    /// Notifies the background opener after the worker acknowledges region registration.
+    pub(crate) async fn on_region_open_registered(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_open_registered(_region_id).await;
+        }
     }
 
     /// Flush is finished successfully.
@@ -1553,6 +1590,34 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_compaction_commit_begin(_region_id).await;
+        }
+    }
+
+    /// Exposes a per-unit test gate before merge starts.
+    pub(crate) async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_compaction_unit_merge_begin(_region_id, _plan_id)
+                .await;
+        }
+    }
+
+    /// Exposes a per-unit test gate between manifest commit and worker notification.
+    pub(crate) async fn on_compaction_unit_committed(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_compaction_unit_committed(_region_id, _plan_id)
+                .await;
+        }
+    }
+
+    /// Reports unit visibility to the test listener independently of request completion.
+    pub(crate) fn on_compaction_unit_applied(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_unit_applied(_region_id, _plan_id);
         }
     }
 

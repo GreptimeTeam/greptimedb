@@ -31,6 +31,7 @@ use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{InformationSchemaTableScope, InformationTable};
 
 /// A memory table with specified schema and columns.
 #[derive(Debug)]
@@ -101,6 +102,12 @@ impl DfPartitionStream for MemoryTable {
                     .map_err(Into::into)
             }),
         ))
+    }
+}
+
+impl InformationTable for MemoryTable {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
     }
 }
 

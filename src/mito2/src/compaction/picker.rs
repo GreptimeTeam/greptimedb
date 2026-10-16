@@ -31,11 +31,6 @@ use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::file_purger::FilePurger;
 use crate::sst::version::LevelMeta;
 
-#[async_trait::async_trait]
-pub(crate) trait CompactionTask: Debug + Send + Sync + 'static {
-    async fn run(&mut self);
-}
-
 /// Picker picks input SST files for compaction.
 /// Different compaction strategy may implement different pickers.
 #[async_trait::async_trait]

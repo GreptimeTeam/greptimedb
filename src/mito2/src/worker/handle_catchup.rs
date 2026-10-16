@@ -73,7 +73,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
                 .with_expected_last_entry_id(request.entry_id)
-                .with_location_id(request.location_id)
                 .with_replay_checkpoint_entry_id(request.checkpoint.map(|c| c.entry_id));
 
             match task.run().await {
@@ -133,7 +132,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .open(&self.config, &self.wal)
         .await?;
         debug_assert!(!reopened_region.is_writable());
-        self.regions.insert_region(reopened_region.clone());
+        self.register_region(reopened_region.clone());
         if let Some(state) = &self.series_index_task_state {
             state.wake();
         }

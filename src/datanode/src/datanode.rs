@@ -19,17 +19,22 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use catalog::information_schema::NoopInformationExtension;
+use catalog::kvbackend::KvBackendCatalogManagerBuilder;
+use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE};
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::NodeManagerRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_query::prelude::set_default_prefix;
 use common_stat::ResourceStatImpl;
@@ -41,7 +46,6 @@ use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
 use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
-use log_store::kafka::{GlobalIndexCollector, default_index_file};
 use log_store::noop::log_store::NoopLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
@@ -54,7 +58,8 @@ use object_store::ObjectStore;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
-use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
+use query::dummy_catalog::TableProviderFactoryRef;
+use query::region_query::RegionQueryHandlerFactoryRef;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -80,8 +85,9 @@ use crate::event_listener::{
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::partition_expr_fetcher::MetaPartitionExprFetcher;
+use crate::region_query::DatanodeRegionQueryHandler;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
-use crate::store::{self, new_object_store_without_cache};
+use crate::store;
 use crate::utils::{RegionOpenRequests, build_region_open_requests};
 
 /// Datanode service.
@@ -357,6 +363,7 @@ impl DatanodeBuilder {
                 schema_metadata_manager,
                 region_event_listener,
                 file_ref_manager,
+                cache_registry.clone(),
             )
             .await?;
 
@@ -497,14 +504,41 @@ impl DatanodeBuilder {
         schema_metadata_manager: SchemaMetadataManagerRef,
         event_listener: RegionServerEventListenerRef,
         file_ref_manager: FileReferenceManagerRef,
+        cache_registry: Arc<LayeredCacheRegistry>,
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
+        // Keep `with_dist_planner` false: datanodes execute received MergeScan plans.
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
+            Arc::new(NoopInformationExtension),
+            self.kv_backend.clone(),
+            cache_registry.clone(),
+        )
+        .build();
+        let partition_manager = catalog_manager.partition_manager();
+
+        // MergeScan region requests stream until completion, so they have no client timeout.
+        let mut channel_config = ChannelConfig {
+            timeout: None,
+            ..Default::default()
+        };
+        if opts.grpc.flight_compression.transport_compression() {
+            channel_config.accept_compression = true;
+            channel_config.send_compression = true;
+        }
+        let node_manager: NodeManagerRef = Arc::new(NodeClients::new(channel_config));
+        let region_query_handler =
+            if let Some(factory) = self.plugins.get::<RegionQueryHandlerFactoryRef>() {
+                factory.build(partition_manager.clone(), node_manager)
+            } else {
+                DatanodeRegionQueryHandler::arc(partition_manager.clone(), node_manager)
+            };
+
         let query_engine_factory = QueryEngineFactory::try_new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
-            DummyCatalogManager::arc(),
-            None,
-            None,
+            catalog_manager,
+            Some(partition_manager),
+            Some(region_query_handler),
             None,
             None,
             None,
@@ -648,29 +682,7 @@ impl DatanodeBuilder {
                 builder.try_build().await.context(BuildMitoEngineSnafu)?
             }
             DatanodeWalConfig::Kafka(kafka_config) => {
-                if kafka_config.create_index && opts.node_id.is_none() {
-                    warn!("The WAL index creation only available in distributed mode.")
-                }
-                let global_index_collector = if kafka_config.create_index
-                    && let Some(node_id) = opts.node_id
-                {
-                    let operator = new_object_store_without_cache(
-                        &opts.storage.store,
-                        &opts.storage.data_home,
-                    )
-                    .await?;
-                    let path = default_index_file(node_id);
-                    Some(Self::build_global_index_collector(
-                        kafka_config.dump_index_interval,
-                        operator,
-                        path,
-                    ))
-                } else {
-                    None
-                };
-
-                let log_store =
-                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?;
+                let log_store = Self::build_kafka_log_store(kafka_config).await?;
                 self.topic_stats_reporter = Some(log_store.topic_stats_reporter());
                 let builder = MitoEngineBuilder::new(
                     &opts.storage.data_home,
@@ -790,24 +802,12 @@ impl DatanodeBuilder {
     }
 
     /// Builds [`KafkaLogStore`].
-    async fn build_kafka_log_store(
-        config: &DatanodeKafkaConfig,
-        global_index_collector: Option<GlobalIndexCollector>,
-    ) -> Result<Arc<KafkaLogStore>> {
-        KafkaLogStore::try_new(config, global_index_collector)
+    async fn build_kafka_log_store(config: &DatanodeKafkaConfig) -> Result<Arc<KafkaLogStore>> {
+        KafkaLogStore::try_new(config)
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)
             .map(Arc::new)
-    }
-
-    /// Builds [`GlobalIndexCollector`]
-    fn build_global_index_collector(
-        dump_index_interval: Duration,
-        operator: object_store::ObjectStore,
-        path: String,
-    ) -> GlobalIndexCollector {
-        GlobalIndexCollector::new(dump_index_interval, operator, path)
     }
 }
 
@@ -1060,17 +1060,17 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use cache::build_datanode_cache_registry;
+    use cache::build_datanode_layered_cache_registry;
     use common_base::Plugins;
     use common_base::readable_size::ReadableSize;
     use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
-    use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::key::RegionRoleSet;
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::node_manager::NodeManagerRef;
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
@@ -1080,6 +1080,8 @@ mod tests {
     use mito2::engine::MITO_ENGINE_NAME;
     use object_store::ObjectStore;
     use object_store::manager::ObjectStoreManager;
+    use partition::manager::PartitionRuleManagerRef;
+    use query::region_query::{RegionQueryHandlerFactory, RegionQueryHandlerFactoryRef};
     use store_api::logstore::LogStore;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
@@ -1090,6 +1092,7 @@ mod tests {
         wal_object_store,
     };
     use crate::error::{self, Error};
+    use crate::region_query::DatanodeRegionQueryHandler;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     async fn setup_table_datanode(kv: &KvBackendRef) {
@@ -1118,11 +1121,8 @@ mod tests {
         mock_region_server.register_engine(mock_region.clone());
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
-                .build(),
-        );
+        let layered_cache_registry =
+            Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
 
         let mut builder = DatanodeBuilder::new(
             DatanodeOptions {
@@ -1164,11 +1164,8 @@ mod tests {
         wal: DatanodeWalConfig,
         kv_backend: KvBackendRef,
     ) -> DatanodeBuilder {
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
-                .build(),
-        );
+        let layered_cache_registry =
+            Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
         let mut opts = DatanodeOptions {
             node_id: Some(0),
             wal,
@@ -1444,6 +1441,38 @@ mod tests {
                 ..
             }
         );
+    }
+
+    struct CountingRegionQueryHandlerFactory(Arc<AtomicUsize>);
+
+    impl RegionQueryHandlerFactory for CountingRegionQueryHandlerFactory {
+        fn build(
+            &self,
+            partition_manager: PartitionRuleManagerRef,
+            node_manager: NodeManagerRef,
+        ) -> query::region_query::RegionQueryHandlerRef {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            DatanodeRegionQueryHandler::arc(partition_manager, node_manager)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_uses_installed_region_query_handler_factory() {
+        let data_home = create_temp_dir("region-query-handler-factory");
+        let builds = Arc::new(AtomicUsize::new(0));
+        let plugins = Plugins::new();
+        plugins.insert(Arc::new(CountingRegionQueryHandlerFactory(builds.clone()))
+            as RegionQueryHandlerFactoryRef);
+        let mut builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::default(),
+            Arc::new(MemoryKvBackend::new()),
+        );
+        builder.set_plugins(plugins);
+
+        let mut datanode = builder.build().await.unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        datanode.shutdown().await.unwrap();
     }
 
     #[tokio::test]

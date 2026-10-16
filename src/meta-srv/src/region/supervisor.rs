@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use common_meta::DatanodeId;
+use common_meta::affinity::{AffinityFallback, AffinityReference, AffinityResolverRef};
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
@@ -35,6 +36,7 @@ use common_time::util::current_time_millis;
 use futures::{StreamExt, TryStreamExt};
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{MissedTickBehavior, interval, interval_at};
@@ -43,6 +45,7 @@ use crate::discovery::utils::accept_ingest_workload;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
+use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
 };
@@ -288,6 +291,8 @@ pub struct RegionSupervisor {
     selector_context: SelectorContext,
     /// Candidate node selector.
     selector: RegionSupervisorSelector,
+    /// Resolves the failed node attributes before selection.
+    affinity_resolver: Option<AffinityResolverRef>,
     /// Region migration manager.
     region_migration_manager: RegionMigrationManagerRef,
     /// The maintenance mode manager.
@@ -356,10 +361,29 @@ impl HeartbeatAcceptor {
         Self { sender }
     }
 
-    /// Accepts heartbeats from datanodes.
-    pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
-        if let Err(err) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
-            error!(err; "RegionSupervisor has stop receiving heartbeat.");
+    /// Accepts heartbeats from datanodes without waiting for queue capacity: a full queue
+    /// drops the heartbeat, counted in [`METRIC_META_HEARTBEAT_DROPPED`]. A dropped
+    /// heartbeat costs the failure detector one sample.
+    pub(crate) fn accept(&self, heartbeat: DatanodeHeartbeat) {
+        let datanode_id = heartbeat.datanode_id;
+        match self.sender.try_send(Event::HeartbeatArrived(heartbeat)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                METRIC_META_HEARTBEAT_DROPPED
+                    .with_label_values(&["full"])
+                    .inc();
+                warn!(
+                    "Dropping heartbeat because the region supervisor event queue is full, datanode_id: {}, queue_capacity: {}",
+                    datanode_id,
+                    self.sender.max_capacity()
+                );
+            }
+            Err(TrySendError::Closed(err)) => {
+                METRIC_META_HEARTBEAT_DROPPED
+                    .with_label_values(&["closed"])
+                    .inc();
+                error!(err; "RegionSupervisor has stop receiving heartbeat.");
+            }
         }
     }
 }
@@ -385,14 +409,25 @@ impl RegionSupervisor {
             failure_detector: RegionFailureDetector::new(options),
             failover_counts: HashMap::new(),
             receiver: event_receiver,
-            selector_context,
+            // Failover prioritizes recovery over affinity, independently of DDL policy.
+            selector_context: SelectorContext {
+                affinity_fallback: AffinityFallback::Unconstrained,
+                ..selector_context
+            },
             selector,
+            affinity_resolver: None,
             region_migration_manager,
             runtime_switch_manager,
             peer_resolver,
             kv_backend,
             state: None,
         }
+    }
+
+    /// Sets the resolver used to prepare failover affinity requirements.
+    pub(crate) fn with_affinity_resolver(mut self, resolver: AffinityResolverRef) -> Self {
+        self.affinity_resolver = Some(resolver);
+        self
     }
 
     /// Sets the meta state.
@@ -638,17 +673,46 @@ impl RegionSupervisor {
         regions: &[RegionId],
         failure_datanodes: &[DatanodeId],
     ) -> Result<Vec<(RegionId, Peer)>> {
-        let exclude_peer_ids = HashSet::from_iter(failure_datanodes.iter().cloned());
+        let affinity = if let Some(resolver) = &self.affinity_resolver {
+            match resolver
+                .resolve(&[AffinityReference::Datanode(from_peer_id)])
+                .await
+            {
+                Ok(mut resolved) => {
+                    ensure!(
+                        resolved.len() == 1,
+                        error::UnexpectedSnafu {
+                            violated: "affinity resolution must preserve the number and order of references",
+                        }
+                    );
+                    let affinity = resolved.pop().flatten();
+                    if affinity.is_none() {
+                        warn!(
+                            "Source affinity unavailable for datanode {}; selecting failover peers without affinity",
+                            from_peer_id
+                        );
+                    }
+                    affinity
+                }
+                Err(error) => {
+                    warn!(error; "Failed to resolve failover affinity for datanode {}; selecting without affinity", from_peer_id);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let exclude_peer_ids = HashSet::from_iter(failure_datanodes.iter().copied());
         match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
-                let opt = SelectorOptions {
+                let opts = SelectorOptions {
+                    affinity: affinity.as_ref(),
                     min_required_items: regions.len(),
                     allow_duplication: true,
                     exclude_peer_ids,
                     workload_filter: Some(accept_ingest_workload),
-                    extensions: Default::default(),
                 };
-                let peers = selector.select(&self.selector_context, opt).await?;
+                let peers = selector.select(&self.selector_context, opts).await?;
                 ensure!(
                     peers.len() == regions.len(),
                     error::NoEnoughAvailableNodeSnafu {
@@ -672,6 +736,7 @@ impl RegionSupervisor {
                         from_peer_id,
                         regions,
                         exclude_peer_ids,
+                        affinity.as_ref(),
                     )
                     .await?;
                 ensure!(
@@ -899,14 +964,15 @@ pub(crate) mod tests {
     use tokio::time::sleep;
 
     use super::RegionSupervisorSelector;
+    use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
     use crate::procedure::region_migration::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::manager::{
         RegionMigrationManager, SubmitRegionMigrationTaskResult,
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
-        DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
-        RegionSupervisorTicker,
+        DatanodeHeartbeat, Event, HeartbeatAcceptor, RegionFailureDetectorControl,
+        RegionSupervisor, RegionSupervisorTicker,
     };
     use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
 
@@ -938,6 +1004,204 @@ pub(crate) mod tests {
             ),
             tx,
         )
+    }
+
+    #[tokio::test]
+    async fn test_failover_affinity_fallback_and_selector_errors() {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_meta::affinity::{
+            AffinityFallback, AffinityReference, AffinityRequirements, AffinityResolver,
+        };
+        use common_meta::error::{self as meta_error, Result as MetaResult};
+
+        use crate::error::{self, Result};
+        use crate::metasrv::{SelectTarget, SelectorContext};
+        use crate::selector::{RegionStatAwareSelector, Selector, SelectorOptions};
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Resolution {
+            Disabled,
+            Available,
+            Missing,
+            Error,
+        }
+
+        struct Resolver {
+            result: Resolution,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AffinityResolver for Resolver {
+            async fn resolve(
+                &self,
+                references: &[AffinityReference],
+            ) -> MetaResult<Vec<Option<AffinityRequirements>>> {
+                assert_eq!(references, &[AffinityReference::Datanode(7)]);
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                match self.result {
+                    Resolution::Available => {
+                        Ok(vec![AffinityRequirements::new(HashMap::from([(
+                            "pool".into(),
+                            "a".into(),
+                        )]))])
+                    }
+                    Resolution::Disabled => unreachable!(),
+                    Resolution::Missing => Ok(vec![None]),
+                    Resolution::Error => meta_error::UnexpectedSnafu {
+                        err_msg: "source lookup failed",
+                    }
+                    .fail(),
+                }
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        enum Outcome {
+            Success,
+            Short,
+            Exhausted,
+            Error,
+        }
+        struct FailoverSelector {
+            outcome: Outcome,
+            expected_fallback: AffinityFallback,
+            calls: Mutex<Vec<Option<AffinityRequirements>>>,
+        }
+        impl FailoverSelector {
+            fn select_peers(&self, affinity: Option<&AffinityRequirements>) -> Result<Vec<Peer>> {
+                self.calls.lock().unwrap().push(affinity.cloned());
+                if affinity.is_some() {
+                    match self.outcome {
+                        Outcome::Success => {}
+                        Outcome::Short => return Ok(vec![Peer::empty(9)]),
+                        Outcome::Exhausted => {
+                            return error::NoEnoughAvailableNodeSnafu {
+                                required: 2usize,
+                                available: 0usize,
+                                select_target: SelectTarget::Datanode,
+                            }
+                            .fail();
+                        }
+                        Outcome::Error => {
+                            return error::UnexpectedSnafu {
+                                violated: "selection backend failed",
+                            }
+                            .fail();
+                        }
+                    }
+                }
+                Ok(vec![Peer::empty(9); 2])
+            }
+        }
+        #[async_trait::async_trait]
+        impl Selector for FailoverSelector {
+            type Context = SelectorContext;
+            type Output = Vec<Peer>;
+            async fn select(
+                &self,
+                ctx: &SelectorContext,
+                opts: SelectorOptions<'_>,
+            ) -> Result<Self::Output> {
+                assert_eq!(ctx.affinity_fallback, self.expected_fallback);
+                assert_eq!(opts.exclude_peer_ids, HashSet::from([8]));
+                assert!(opts.workload_filter.is_some());
+                assert!(opts.allow_duplication);
+                assert_eq!(opts.min_required_items, 2);
+                self.select_peers(opts.affinity)
+            }
+        }
+        #[async_trait::async_trait]
+        impl RegionStatAwareSelector for FailoverSelector {
+            type Context = SelectorContext;
+            type Output = Vec<(RegionId, Peer)>;
+            async fn select(
+                &self,
+                ctx: &SelectorContext,
+                source: u64,
+                regions: &[RegionId],
+                excluded: HashSet<u64>,
+                affinity: Option<&AffinityRequirements>,
+            ) -> Result<Self::Output> {
+                assert_eq!(ctx.affinity_fallback, self.expected_fallback);
+                assert_eq!(source, 7);
+                assert_eq!(excluded, HashSet::from([8]));
+                Ok(regions
+                    .iter()
+                    .copied()
+                    .zip(self.select_peers(affinity)?)
+                    .collect())
+            }
+        }
+        for stat_aware in [false, true] {
+            for (resolution, outcome, succeeds) in [
+                (Resolution::Available, Outcome::Success, true),
+                (Resolution::Available, Outcome::Short, false),
+                (Resolution::Available, Outcome::Exhausted, false),
+                (Resolution::Available, Outcome::Error, false),
+                (Resolution::Missing, Outcome::Success, true),
+                (Resolution::Error, Outcome::Success, true),
+                (Resolution::Disabled, Outcome::Success, true),
+            ] {
+                let resolver = Arc::new(Resolver {
+                    result: resolution,
+                    calls: AtomicUsize::new(0),
+                });
+                let selector = Arc::new(FailoverSelector {
+                    outcome,
+                    expected_fallback: AffinityFallback::Unconstrained,
+                    calls: Mutex::new(vec![]),
+                });
+                let (mut supervisor, _sender) = new_test_supervisor();
+                if resolution != Resolution::Disabled {
+                    supervisor = supervisor.with_affinity_resolver(resolver.clone());
+                }
+                supervisor.selector = if stat_aware {
+                    RegionSupervisorSelector::RegionStatAwareSelector(selector.clone())
+                } else {
+                    RegionSupervisorSelector::NaiveSelector(selector.clone())
+                };
+                let regions = [RegionId::new(1, 1), RegionId::new(1, 2)];
+                // Preserve the caller's exclusion set without adding the source.
+                let result = supervisor.select_peers(7, &regions, &[8]).await;
+                if succeeds {
+                    assert_eq!(
+                        result.unwrap(),
+                        vec![(regions[0], Peer::empty(9)), (regions[1], Peer::empty(9))]
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    match outcome {
+                        Outcome::Short | Outcome::Exhausted => {
+                            assert!(matches!(error, error::Error::NoEnoughAvailableNode { .. }))
+                        }
+                        Outcome::Error => {
+                            assert!(matches!(error, error::Error::Unexpected { .. }))
+                        }
+                        Outcome::Success => unreachable!(),
+                    }
+                }
+                assert_eq!(
+                    resolver.calls.load(Ordering::Relaxed),
+                    usize::from(resolution != Resolution::Disabled)
+                );
+                let calls = selector.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                if let Some(affinity) = calls.first() {
+                    assert_eq!(affinity.is_some(), resolution == Resolution::Available);
+                }
+            }
+        }
+    }
+
+    fn filler_heartbeat() -> DatanodeHeartbeat {
+        DatanodeHeartbeat {
+            datanode_id: 1,
+            regions: vec![],
+            timestamp: 0,
+        }
     }
 
     #[tokio::test]
@@ -1371,5 +1635,40 @@ pub(crate) mod tests {
             .unwrap();
         assert!(supervisor.failure_detector.contains(&detecting_region));
         assert!(supervisor.failover_counts.contains_key(&detecting_region));
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_accept_does_not_block_on_full_queue() {
+        // Regression test for #9419: a full queue used to park the caller.
+        // The supervisor is never run, so the queue stays full.
+        let (mut supervisor, sender) = new_test_supervisor();
+
+        let mut queued = 0;
+        while sender
+            .try_send(Event::HeartbeatArrived(filler_heartbeat()))
+            .is_ok()
+        {
+            queued += 1;
+        }
+        assert_eq!(queued, sender.max_capacity());
+        assert_eq!(sender.capacity(), 0);
+
+        let acceptor = HeartbeatAcceptor::new(sender.clone());
+        let dropped = || {
+            METRIC_META_HEARTBEAT_DROPPED
+                .with_label_values(&["full"])
+                .get()
+        };
+        let dropped_before = dropped();
+        // The full queue drops the heartbeat and counts it.
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(dropped(), dropped_before + 1);
+        assert_eq!(sender.capacity(), 0);
+
+        // Free one slot: the next heartbeat is accepted.
+        supervisor.receiver.try_recv().unwrap();
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(dropped(), dropped_before + 1);
+        assert_eq!(sender.capacity(), 0);
     }
 }

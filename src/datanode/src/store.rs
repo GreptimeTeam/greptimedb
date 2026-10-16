@@ -23,25 +23,6 @@ use snafu::prelude::*;
 use crate::config::ObjectStoreConfig;
 use crate::error::{self, Result};
 
-pub(crate) async fn new_object_store_without_cache(
-    store: &ObjectStoreConfig,
-    data_home: &str,
-) -> Result<ObjectStore> {
-    let object_store = new_raw_object_store(store, data_home)
-        .await
-        .context(error::ObjectStoreSnafu)?;
-    // Enable retry layer and cache layer for non-fs object storages
-    let object_store = if store.is_object_storage() {
-        // Adds retry layer
-        with_retry_layers(object_store)
-    } else {
-        object_store
-    };
-
-    let object_store = with_instrument_layers(object_store, true);
-    Ok(object_store)
-}
-
 /// Cleans up old LRU read cache directories that were removed.
 fn clean_old_read_cache(store: &ObjectStoreConfig, data_home: &str) {
     if !store.is_object_storage() {

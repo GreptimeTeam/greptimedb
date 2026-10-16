@@ -461,6 +461,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to check the WAL history, region_id: {}", region_id))]
+    CheckWalHistory {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
@@ -636,6 +644,13 @@ pub enum Error {
         region_id,
     ))]
     RejectWrite {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} rejects writes while in staging", region_id))]
+    RejectWriteInStaging {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -1087,6 +1102,14 @@ pub enum Error {
         column_name: String,
     },
 
+    #[snafu(display("Failed to retrieve compression options of column {column_name}"))]
+    CompressionOptions {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+        column_name: String,
+    },
+
     #[snafu(display("Failed to create fulltext index creator"))]
     CreateFulltextCreator {
         source: index::fulltext_index::error::Error,
@@ -1450,7 +1473,8 @@ impl ErrorExt for Error {
             WriteWal { source, .. }
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
-            | WaitWalDurable { source, .. } => source.status_code(),
+            | WaitWalDurable { source, .. }
+            | CheckWalHistory { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1541,7 +1565,7 @@ impl ErrorExt for Error {
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
-            RejectWrite { .. } => StatusCode::StorageUnavailable,
+            RejectWrite { .. } | RejectWriteInStaging { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
             EditRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
@@ -1579,6 +1603,7 @@ impl ErrorExt for Error {
             RemoteCompaction { .. } => StatusCode::Unexpected,
 
             IndexOptions { source, .. } => source.status_code(),
+            CompressionOptions { source, .. } => source.status_code(),
             CreateFulltextCreator { source, .. } => source.status_code(),
             CastVector { source, .. } => source.status_code(),
             FulltextPushText { source, .. }
@@ -1639,6 +1664,13 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            PartitionExprVersionMismatch { .. }
+            | RegionNotFound { .. }
+            | RejectWriteInStaging { .. }
+            | RegionState {
+                state: RegionRoleState::Follower,
+                ..
+            } => RetryHint::RetryAfterRouteRefresh,
             ReadParquet { .. }
             | WriteParquet { .. }
             | RejectWrite { .. }
@@ -1661,6 +1693,7 @@ impl ErrorExt for Error {
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
             | WaitWalDurable { source, .. }
+            | CheckWalHistory { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 
@@ -1677,6 +1710,7 @@ impl ErrorExt for Error {
             | ConvertVector { source, .. }
             | ConvertValue { source, .. }
             | IndexOptions { source, .. }
+            | CompressionOptions { source, .. }
             | CastVector { source, .. } => source.retry_hint(),
 
             BuildIndexApplier { source, .. }
@@ -1720,6 +1754,63 @@ mod tests {
     use snafu::IntoError;
 
     use super::*;
+    use crate::region::RegionLeaderState;
+
+    #[test]
+    fn test_partition_version_mismatch_retry_hint() {
+        let error = PartitionExprVersionMismatchSnafu {
+            region_id: RegionId::new(1, 1),
+            request_version: 1u64,
+            expected_version: 2u64,
+        }
+        .build();
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+    }
+
+    #[test]
+    fn test_region_state_retry_hint() {
+        let region_id = RegionId::new(1, 1);
+        let writable = RegionRoleState::Leader(RegionLeaderState::Writable);
+        let follower_error = RegionStateSnafu {
+            region_id,
+            state: RegionRoleState::Follower,
+            expect: writable,
+        }
+        .build();
+        assert_eq!(
+            follower_error.retry_hint(),
+            RetryHint::RetryAfterRouteRefresh
+        );
+        assert_eq!(follower_error.status_code(), StatusCode::RegionNotReady);
+        let leader_error = RegionStateSnafu {
+            region_id,
+            state: writable,
+            expect: RegionRoleState::Follower,
+        }
+        .build();
+        assert_eq!(leader_error.retry_hint(), RetryHint::Retryable);
+        for (error, status, hint) in [
+            (
+                RejectWriteSnafu { region_id }.build(),
+                StatusCode::StorageUnavailable,
+                RetryHint::Retryable,
+            ),
+            (
+                RejectWriteInStagingSnafu { region_id }.build(),
+                StatusCode::StorageUnavailable,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            (
+                RegionNotFoundSnafu { region_id }.build(),
+                StatusCode::RegionNotFound,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+        ] {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.retry_hint(), hint);
+        }
+    }
 
     #[test]
     fn test_manifest_update_persistence() {

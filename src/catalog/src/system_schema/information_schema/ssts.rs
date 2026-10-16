@@ -30,9 +30,10 @@ use store_api::storage::{ScanRequest, TableId};
 use crate::CatalogManager;
 use crate::error::{ProjectSchemaSnafu, Result};
 use crate::information_schema::{
-    DatanodeInspectKind, DatanodeInspectRequest, InformationTable, SSTS_INDEX_META, SSTS_MANIFEST,
-    SSTS_STORAGE,
+    DatanodeInspectKind, DatanodeInspectRequest, InformationSchemaTableScope, InformationTable,
+    SSTS_INDEX_META, SSTS_MANIFEST, SSTS_STORAGE,
 };
+use crate::system_schema::SystemTable;
 use crate::system_schema::utils;
 
 fn projected_schema(schema: &SchemaRef, request: &ScanRequest) -> Result<SchemaRef> {
@@ -75,6 +76,12 @@ impl InformationSchemaSstsManifest {
 }
 
 impl InformationTable for InformationSchemaSstsManifest {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaSstsManifest {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_SSTS_MANIFEST_TABLE_ID
     }
@@ -134,6 +141,12 @@ impl InformationSchemaSstsStorage {
 }
 
 impl InformationTable for InformationSchemaSstsStorage {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaSstsStorage {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_SSTS_STORAGE_TABLE_ID
     }
@@ -194,6 +207,12 @@ impl InformationSchemaSstsIndexMeta {
 }
 
 impl InformationTable for InformationSchemaSstsIndexMeta {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaSstsIndexMeta {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_SSTS_INDEX_META_TABLE_ID
     }

@@ -189,6 +189,7 @@ macro_rules! http_tests {
 
                 test_pipeline_api,
                 test_pipeline_name_in_header,
+                test_json_stream_ingestion,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
                 test_pipeline_auto_transform_with_select,
@@ -200,6 +201,7 @@ macro_rules! http_tests {
                 test_pipeline_suffix_template,
                 test_pipeline_context,
                 test_pipeline_with_vrl,
+                test_pipeline_vrl_host_access,
                 test_pipeline_with_hint_vrl,
                 test_pipeline_one_to_many_vrl,
                 test_pipeline_2,
@@ -227,8 +229,10 @@ macro_rules! http_tests {
                 test_splunk_raw,
                 test_log_query,
                 test_jaeger_query_api,
+                test_jaeger_v3_query_api,
                 test_jaeger_query_api_for_trace_v1,
                 test_jaeger_query_api_for_trace_v2,
+                test_jaeger_search_limit_returns_latest_traces,
 
                 test_influxdb_write,
                 test_influxdb_write_with_hints,
@@ -2475,6 +2479,7 @@ pub async fn test_promql_over_non_millisecond_physical_tables(store_type: Storag
         "query_range?query=unit_gauge&start=0&end=5&step=1",
         "query?query=avg_over_time(unit_gauge[1m])&time=2",
         "query?query=rate(unit_gauge[1m])&time=2",
+        "query?query=unit_gauge[1m]&time=2",
     ];
     for path in query_paths {
         let mut baseline: Option<(String, PrometheusResponse)> = None;
@@ -2537,6 +2542,24 @@ pub async fn test_promql_over_non_millisecond_physical_tables(store_type: Storag
                 "values": [
                     [1.0, "1.0"], [2.0, "2.0"], [3.0, "2.0"], [4.0, "2.0"], [5.0, "2.0"]
                 ]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=unit_gauge[1m]&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "matrix",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "values": [[1.0, "1.0"], [2.0, "2.0"]]
             }]
         }))
         .unwrap()
@@ -3263,7 +3286,6 @@ providers = []"#,
         r#"
 enable_telemetry = true
 auto_create_table = true
-experimental_metric_export = false
 max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
@@ -3499,6 +3521,7 @@ enable_heap_profiling = true
 
 [pipeline]
 cache_ttl = "10s"
+allow_vrl_host_access = false
 
 [event_recorder]
 ttl = "2months 29days 2h 52m 48s"
@@ -3523,6 +3546,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "disable_ec2_metadata =",
         "cache_path =",
         "cache_capacity =",
+        "trace_aux_cache_size =",
         "memory_pool_size =",
         "scan_memory_limit =",
         "sas_token =",
@@ -5440,7 +5464,11 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
         .body(compressed_unknown_read_request)
         .send()
         .await;
-    assert_eq!(unknown_result.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(unknown_result.status(), StatusCode::OK);
+    let body = prom_store::snappy_decompress(&unknown_result.bytes().await).unwrap();
+    let response = ReadResponse::decode(&body[..]).unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert!(response.results[0].timeseries.is_empty());
 
     guard.remove_all().await;
 }
@@ -6991,6 +7019,72 @@ table_suffix: _${type}
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_vrl_host_access(storage_type: StorageType) {
+    let pipeline = r#"
+processors:
+  - vrl:
+      source: |
+        .value = is_string(get_env_var("GREPTIME_VRL_HOST_ACCESS_TEST") ?? "missing")
+        .
+transform:
+  - field: value
+    type: boolean
+"#;
+
+    for allow_vrl_host_access in [false, true] {
+        let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+            "test_pipeline_vrl_host_access",
+        )
+        .with_default_store_type(storage_type)
+        .with_pipeline_options(pipeline::PipelineOptions {
+            // Force named dry-runs to reload and compile the stored definition.
+            cache_ttl: Duration::ZERO,
+            allow_vrl_host_access,
+        })
+        .build()
+        .await;
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+        let response = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(json!({"pipeline": pipeline, "data": "[{}]"}).to_string())
+            .send()
+            .await;
+        let expected_status = if allow_vrl_host_access {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(response.status(), expected_status);
+        if !allow_vrl_host_access {
+            assert!(response.text().await.contains("undefined function"));
+        }
+
+        let response = client
+            .post("/v1/pipelines/host_policy")
+            .header("Content-Type", "application/x-yaml")
+            .body(pipeline)
+            .send()
+            .await;
+        assert_eq!(response.status(), expected_status);
+
+        if allow_vrl_host_access {
+            let response = client
+                .post("/v1/pipelines/_dryrun")
+                .header("Content-Type", "application/json")
+                .body(json!({"pipeline_name": "host_policy", "data": "[{}]"}).to_string())
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        instance.guard.remove_all().await;
+    }
+}
+
 pub async fn test_pipeline_with_vrl(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -7930,7 +8024,7 @@ transform:
         assert_eq!(
             body["error"],
             json!(
-                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"
+                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-json-stream, application/x-ndjson, text/plain"
             )
         );
 
@@ -8083,6 +8177,59 @@ transform:
         v,
         r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
     );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_json_stream_ingestion(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_json_stream_ingestion").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+transform:
+  - field: message
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data as concatenated JSON (the `json_stream` format of fluentbit)
+    let data_body = r#"{"time": "2024-05-25 20:16:37.217", "message": "hello"}{"time": "2024-05-25 20:16:37.218", "message": "hello world"}"#;
+    let res = client
+        .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/x-json-stream")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. check data
+    validate_data(
+        "json_stream_ingestion",
+        &client,
+        "select message, time from logs1",
+        r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -9623,7 +9770,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
 
-    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -9676,7 +9823,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part1","CREATE TABLE IF NOT EXISTS \"trace_table_part1\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\n\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part1","CREATE TABLE IF NOT EXISTS \"trace_table_part1\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\n\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -9713,7 +9860,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part4","CREATE TABLE IF NOT EXISTS \"trace_table_part4\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '4',\n  trace_id >= '4' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < 'c',\n  trace_id >= 'c'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part4","CREATE TABLE IF NOT EXISTS \"trace_table_part4\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '4',\n  trace_id >= '4' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < 'c',\n  trace_id >= 'c'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -9750,7 +9897,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part32","CREATE TABLE IF NOT EXISTS \"trace_table_part32\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '08',\n  trace_id >= '08' AND trace_id < '10',\n  trace_id >= '10' AND trace_id < '18',\n  trace_id >= '18' AND trace_id < '20',\n  trace_id >= '20' AND trace_id < '28',\n  trace_id >= '28' AND trace_id < '30',\n  trace_id >= '30' AND trace_id < '38',\n  trace_id >= '38' AND trace_id < '40',\n  trace_id >= '40' AND trace_id < '48',\n  trace_id >= '48' AND trace_id < '50',\n  trace_id >= '50' AND trace_id < '58',\n  trace_id >= '58' AND trace_id < '60',\n  trace_id >= '60' AND trace_id < '68',\n  trace_id >= '68' AND trace_id < '70',\n  trace_id >= '70' AND trace_id < '78',\n  trace_id >= '78' AND trace_id < '80',\n  trace_id >= '80' AND trace_id < '88',\n  trace_id >= '88' AND trace_id < '90',\n  trace_id >= '90' AND trace_id < '98',\n  trace_id >= '98' AND trace_id < 'a0',\n  trace_id >= 'a0' AND trace_id < 'a8',\n  trace_id >= 'a8' AND trace_id < 'b0',\n  trace_id >= 'b0' AND trace_id < 'b8',\n  trace_id >= 'b8' AND trace_id < 'c0',\n  trace_id >= 'c0' AND trace_id < 'c8',\n  trace_id >= 'c8' AND trace_id < 'd0',\n  trace_id >= 'd0' AND trace_id < 'd8',\n  trace_id >= 'd8' AND trace_id < 'e0',\n  trace_id >= 'e0' AND trace_id < 'e8',\n  trace_id >= 'e8' AND trace_id < 'f0',\n  trace_id >= 'f0' AND trace_id < 'f8',\n  trace_id >= 'f8'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part32","CREATE TABLE IF NOT EXISTS \"trace_table_part32\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),\n  \"duration_nano\" BIGINT NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '08',\n  trace_id >= '08' AND trace_id < '10',\n  trace_id >= '10' AND trace_id < '18',\n  trace_id >= '18' AND trace_id < '20',\n  trace_id >= '20' AND trace_id < '28',\n  trace_id >= '28' AND trace_id < '30',\n  trace_id >= '30' AND trace_id < '38',\n  trace_id >= '38' AND trace_id < '40',\n  trace_id >= '40' AND trace_id < '48',\n  trace_id >= '48' AND trace_id < '50',\n  trace_id >= '50' AND trace_id < '58',\n  trace_id >= '58' AND trace_id < '60',\n  trace_id >= '60' AND trace_id < '68',\n  trace_id >= '68' AND trace_id < '70',\n  trace_id >= '70' AND trace_id < '78',\n  trace_id >= '78' AND trace_id < '80',\n  trace_id >= '80' AND trace_id < '88',\n  trace_id >= '88' AND trace_id < '90',\n  trace_id >= '90' AND trace_id < '98',\n  trace_id >= '98' AND trace_id < 'a0',\n  trace_id >= 'a0' AND trace_id < 'a8',\n  trace_id >= 'a8' AND trace_id < 'b0',\n  trace_id >= 'b0' AND trace_id < 'b8',\n  trace_id >= 'b8' AND trace_id < 'c0',\n  trace_id >= 'c0' AND trace_id < 'c8',\n  trace_id >= 'c8' AND trace_id < 'd0',\n  trace_id >= 'd0' AND trace_id < 'd8',\n  trace_id >= 'd8' AND trace_id < 'e0',\n  trace_id >= 'e0' AND trace_id < 'e8',\n  trace_id >= 'e8' AND trace_id < 'f0',\n  trace_id >= 'f0' AND trace_id < 'f8',\n  trace_id >= 'f8'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.entity.service.id' = 'service_name',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -10391,6 +10538,56 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
             .contains("Discarded 2 spans after pre-write request failure"),
         "unexpected error body: {body:?}"
     );
+
+    // Raw bytes and JSONB values of `x` from different resources share one chunk.
+    // That conflict must not keep the unrelated resource `c` out of schema
+    // planning: `n` is planned as String, so `c`'s value is not coerced to the
+    // Int64 that per-span writes would pick from resource `a` first.
+    let mixed_table_name = "trace_type_mixed_binary_json";
+    let mixed_resources = [
+        (
+            "mixed-a",
+            vec![
+                json!({"key": "x", "value": {"bytesValue": "AQI="}}),
+                make_int_attr("n", 1),
+            ],
+        ),
+        (
+            "mixed-b",
+            vec![json!({"key": "x", "value": {"arrayValue": {"values": [{"intValue": "1"}]}}})],
+        ),
+        ("mixed-c", vec![make_string_attr("n", "abc")]),
+    ];
+    let mut mixed_req = ExportTraceServiceRequest::default();
+    for (i, (service_name, attributes)) in mixed_resources.into_iter().enumerate() {
+        let id = 0x71 + i;
+        mixed_req.resource_spans.extend(
+            make_trace_v1_request(
+                service_name,
+                vec![make_trace_v1_span(
+                    &format!("{id:032x}"),
+                    &format!("{id:016x}"),
+                    service_name,
+                    1_736_480_942_446_000_000,
+                    1_736_480_942_446_100_000,
+                    attributes,
+                )],
+            )
+            .resource_spans,
+        );
+    }
+    let res = send_trace_v1_req(&client, mixed_table_name, mixed_req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+    validate_data(
+        "otlp_traces_v1_mixed_binary_json_rows",
+        &client,
+        &format!(
+            "select service_name, \"span_attributes.n\" from {} order by service_name",
+            mixed_table_name
+        ),
+        r#"[["mixed-a","1"],["mixed-c","abc"]]"#,
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -11470,6 +11667,324 @@ pub async fn test_log_query(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_jaeger_v3_query_api(
+    store_type: StorageType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_v3_query_api").await;
+    let client = TestClient::new(app).await;
+    for (path, expected_status, expected) in [
+        ("services", StatusCode::OK, json!({"services":[]})),
+        (
+            "trace-summaries?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z",
+            StatusCode::OK,
+            json!({"summaries":[]}),
+        ),
+        (
+            "operations?service=checkout",
+            StatusCode::OK,
+            json!({"operations":[]}),
+        ),
+        (
+            "traces/00000000000000000000000000000001",
+            StatusCode::NOT_FOUND,
+            json!({"error":{"httpCode":404,"message":"No traces found"}}),
+        ),
+    ] {
+        let response = client
+            .get(&format!("/v1/jaeger/api/v3/{path}"))
+            .send()
+            .await;
+        assert_eq!(response.status(), expected_status, "{path}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.text().await)?,
+            expected
+        );
+    }
+    for path in [
+        "operations",
+        "traces",
+        "traces/not-hex",
+        "traces/0000000000000001?startTime=invalid",
+        "traces/0000000000000001?rawTraces=invalid",
+        "traces?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
+        "trace-summaries?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
+    ] {
+        let response = client
+            .get(&format!("/v1/jaeger/api/v3/{path}"))
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["error"]["httpCode"], 400);
+    }
+
+    // The parent starts before the search window. A matching child must return the whole trace.
+    let start = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .ok_or("Timestamp out of range")? as u64;
+    let start = start / 1_000_000_000 * 1_000_000_000 + 123;
+    let timestamp = |ns: u64| {
+        chrono::DateTime::from_timestamp_nanos(ns as i64)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    };
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({"resourceSpans":[
+        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","one")]},
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
+            "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000001", "name":"parent", "kind":2,
+            "startTimeUnixNano":start.to_string(), "endTimeUnixNano":(start+2000).to_string()
+         }]}]},
+        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","two"), {"key":"resource.bytes","value":{"bytesValue":"AQID/w=="}}]},
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
+            "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000002", "parentSpanId":"0000000000000001", "name":"child", "kind":3,
+            "traceState":"vendor=value", "startTimeUnixNano":(start+1000).to_string(), "endTimeUnixNano":(start+1999).to_string(),
+            "attributes":[make_int_attr("http.status_code",500),make_bool_attr("failed",true),
+                {"key":"bytes","value":{"bytesValue":"AQID/w=="}},
+                {"key":"integers","value":{"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}}},
+                {"key":"nested","value":{"arrayValue":{"values":[{"intValue":"9223372036854775807"},{"kvlistValue":{"values":[make_string_attr("key","value")]}}]}}}],
+            "events":[{"name":"exception","timeUnixNano":(start+1011).to_string(),"attributes":[make_string_attr("message","failure")]}],
+            "links":[{"traceId":"000000000000000000000000000000cd","spanId":"0000000000000003","traceState":"link=value","attributes":[make_bool_attr("remote",true)]}],
+            "status":{"code":2,"message":"failure"}
+         }, {
+            "traceId":"000000000000000000000000000000cd", "spanId":"0000000000000003", "name":"boundary", "kind":2,
+            "startTimeUnixNano":(start+2000).to_string(), "endTimeUnixNano":(start+3000).to_string()
+         }]}]}
+    ]}))?;
+    for pipeline in [
+        "greptime_trace_v0",
+        GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
+        GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME,
+    ] {
+        let table = format!("jaeger_api_v3_{pipeline}");
+        let response = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-pipeline-name"),
+                    HeaderValue::from_str(pipeline)?,
+                ),
+                (
+                    HeaderName::from_static("x-greptime-trace-table-name"),
+                    HeaderValue::from_str(&table)?,
+                ),
+            ],
+            "/v1/otlp/v1/traces",
+            request.encode_to_vec(),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        for (path, expected) in [
+            ("services", json!({"services":["checkout"]})),
+            (
+                "operations?service=checkout&span_kind=client",
+                json!({"operations":[{"name":"child","spanKind":"client"}]}),
+            ),
+            (
+                "operations?service=checkout&spanKind=client",
+                json!({"operations":[{"name":"child","spanKind":"client"}]}),
+            ),
+        ] {
+            let response = client
+                .get(&format!("/v1/jaeger/api/v3/{path}"))
+                .header("x-greptime-trace-table-name", &table)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.text().await)?,
+                expected
+            );
+        }
+        for flushed in [false, true] {
+            if flushed {
+                let response = client
+                    .post("/v1/sql")
+                    .form(&[("sql", format!("ADMIN FLUSH_TABLE('{table}')"))])
+                    .send()
+                    .await;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            let response = client.get(&format!(
+                "/v1/jaeger/api/v3/trace-summaries?query.serviceName=checkout&query.startTimeMin={}&query.startTimeMax={}",
+                timestamp(start+1000), timestamp(start+2000),
+            )).header("x-greptime-trace-table-name", &table).send().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_str(&response.text().await)?;
+            assert_eq!(
+                body,
+                json!({"summaries":[{
+                    "traceId":"000000000000000000000000000000ab",
+                    "rootServiceName":"checkout", "rootOperationName":"parent",
+                    "minStartTimeUnixNano":start.to_string(), "maxEndTimeUnixNano":(start+2000).to_string(),
+                    "spanCount":2, "errorSpanCount":1, "orphanSpanCount":0,
+                    "services":[{"name":"checkout", "spanCount":2, "errorSpanCount":1}],
+                }]})
+            );
+            for path in [
+                "traces/00000000000000AB".to_string(),
+                format!(
+                    "traces/00000000000000AB?startTime={}",
+                    timestamp(start + 1000)
+                ),
+                format!("traces/00000000000000AB?endTime={}", timestamp(start + 500)),
+                format!(
+                    "traces/00000000000000AB?start_time={}&end_time={}",
+                    timestamp(start + 500),
+                    timestamp(start + 999)
+                ),
+                format!(
+                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.searchDepth=0",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000)
+                ),
+                format!(
+                    "traces?query.service_name=checkout&query.operation_name=child&query.start_time_min={}&query.start_time_max={}&query.num_traces=1&query.duration_min=999ns&query.duration_max=999ns&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"http.status_code":"500","failed":"true"}"#)
+                ),
+                format!(
+                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"service.instance.id":"two"}"#)
+                ),
+            ] {
+                let response = client
+                    .get(&format!("/v1/jaeger/api/v3/{path}"))
+                    .header("x-greptime-trace-table-name", &table)
+                    .send()
+                    .await;
+                let status = response.status();
+                let body: Value = serde_json::from_str(&response.text().await)?;
+                assert_eq!(status, StatusCode::OK, "{pipeline}: {path}: {body}");
+                let resources = body["result"]["resourceSpans"]
+                    .as_array()
+                    .ok_or("Missing resource spans")?;
+                let spans: Vec<_> = resources
+                    .iter()
+                    .flat_map(|r| r["scopeSpans"][0]["spans"].as_array().unwrap())
+                    .collect();
+                assert_eq!(spans.len(), 2, "{body}");
+                assert!(
+                    spans
+                        .iter()
+                        .all(|span| span["traceId"] == "000000000000000000000000000000ab")
+                );
+                let child = spans
+                    .iter()
+                    .find(|span| span["name"] == "child")
+                    .ok_or("Missing child span")?;
+                assert_eq!(child["startTimeUnixNano"], (start + 1000).to_string());
+                assert_eq!(child["endTimeUnixNano"], (start + 1999).to_string());
+                assert_eq!(child["parentSpanId"], "0000000000000001");
+                assert_eq!(child["kind"], 3);
+                assert_eq!(child["status"]["code"], 2);
+                assert_eq!(child["traceState"], "vendor=value");
+                assert_eq!(
+                    child["events"][0]["timeUnixNano"],
+                    (start + 1011).to_string()
+                );
+                assert_eq!(child["links"][0]["traceState"], "link=value");
+                assert_eq!(
+                    child["links"][0]["attributes"][0]["value"]["boolValue"],
+                    true
+                );
+                let nested = child["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|attr| attr["key"] == "nested")
+                    .unwrap();
+                assert_eq!(
+                    nested["value"]["arrayValue"]["values"][0]["intValue"],
+                    "9223372036854775807"
+                );
+                let attribute = |values: &Value, key: &str| {
+                    values
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|attr| attr["key"] == key)
+                        .unwrap()["value"]
+                        .clone()
+                };
+                assert_eq!(
+                    attribute(&child["attributes"], "integers"),
+                    json!({"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}})
+                );
+                if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                    assert_eq!(
+                        attribute(&child["attributes"], "bytes"),
+                        json!({"bytesValue":"AQID/w=="})
+                    );
+                }
+                for resource in resources {
+                    let span = &resource["scopeSpans"][0]["spans"][0];
+                    let attrs = resource["resource"]["attributes"].as_array().unwrap();
+                    let instance = attrs
+                        .iter()
+                        .find(|attr| attr["key"] == "service.instance.id")
+                        .unwrap();
+                    assert_eq!(
+                        instance["value"]["stringValue"],
+                        if span["name"] == "parent" {
+                            "one"
+                        } else {
+                            "two"
+                        }
+                    );
+                    let scope_attrs = &resource["scopeSpans"][0]["scope"]["attributes"];
+                    assert_eq!(
+                        attribute(scope_attrs, "scope.key"),
+                        json!({"stringValue":"value"})
+                    );
+                    if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                        assert_eq!(
+                            attribute(scope_attrs, "scope.bytes"),
+                            json!({"bytesValue":"AQID/w=="})
+                        );
+                        if span["name"] == "child" {
+                            assert_eq!(
+                                attribute(&resource["resource"]["attributes"], "resource.bytes"),
+                                json!({"bytesValue":"AQID/w=="})
+                            );
+                        }
+                    }
+                }
+            }
+            // Instance `one` is on the parent, which starts before the search window.
+            let response = client
+                .get(&format!(
+                    "/v1/jaeger/api/v3/traces?query.startTimeMin={}&query.startTimeMax={}&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"service.instance.id":"one"}"#)
+                ))
+                .header("x-greptime-trace-table-name", &table)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{pipeline}");
+        }
+        // Legacy clients continue receiving Jaeger JSON at the old URL.
+        let response = client
+            .get("/v1/jaeger/api/traces/000000000000000000000000000000ab")
+            .header("x-greptime-trace-table-name", &table)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["data"][0]["spans"].as_array().unwrap().len(), 2);
+    }
+    guard.remove_all().await;
+    Ok(())
+}
+
 pub async fn test_jaeger_query_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -12142,6 +12657,88 @@ pub async fn test_jaeger_query_api_for_trace_v2(
     Ok(())
 }
 
+pub async fn test_jaeger_search_limit_returns_latest_traces(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_search_limit").await;
+    let client = TestClient::new(app).await;
+
+    // Twelve single-span traces spread over all trace partitions. The oldest
+    // traces get the smallest ids and are written first, so neither id nor
+    // write order points at the newest ones.
+    let now = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    let traces = (0..12u64)
+        .map(|i| {
+            let start = now - (60 - i) * 1_000_000_000;
+            (format!("{:x}{:031x}", i, i + 1), start)
+        })
+        .collect::<Vec<_>>();
+    let spans = traces
+        .iter()
+        .map(|(trace_id, start)| {
+            json!({
+                "traceId": trace_id,
+                "spanId": &trace_id[16..],
+                "name": "op",
+                "kind": 2,
+                "startTimeUnixNano": start.to_string(),
+                "endTimeUnixNano": (start + 1_000).to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "svc"}}]},
+            "scopeSpans": [{"scope": {"name": "s"}, "spans": spans}],
+        }]
+    });
+    let req: ExportTraceServiceRequest = serde_json::from_value(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let mut expected = traces[9..]
+        .iter()
+        .map(|(trace_id, _)| trace_id.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    let path = format!(
+        "/v1/jaeger/api/traces?service=svc&operation=op&start={}&end={}&limit=3",
+        (now - 120_000_000_000) / 1_000,
+        now / 1_000
+    );
+    for _ in 0..5 {
+        let res = client.get(&path).send().await;
+        assert_eq!(StatusCode::OK, res.status());
+        let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+        let mut found = resp["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|trace| trace["traceID"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, expected);
+    }
+
+    guard.remove_all().await;
+}
+
 pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -12465,7 +13062,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL,\\n  \\\"duration_nano\\\" BIGINT NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL,\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.entity.service.id' = 'service_name',\\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\\n  'greptime.semantic.signal_type' = 'trace',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
+    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),\\n  \\\"duration_nano\\\" BIGINT NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.entity.service.id' = 'service_name',\\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\\n  'greptime.semantic.signal_type' = 'trace',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
     validate_data(
         "trace_v1_create_table",
         &client,

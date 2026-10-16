@@ -14,11 +14,13 @@
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[2] / '.github/scripts/agent-observability-summary.py'
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location('observability_summary', SCRIPT)
 summary = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(summary)

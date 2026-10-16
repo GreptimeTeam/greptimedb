@@ -56,6 +56,7 @@ meta-srv = { workspace = true, features = ["mock"] }
 mito2.workspace = true
 object-store.workspace = true
 operator.workspace = true
+pipeline.workspace = true
 prost.workspace = true
 query.workspace = true
 rand.workspace = true
@@ -107,7 +108,6 @@ opentelemetry-proto.workspace = true
 operator = { workspace = true, features = ["testing"] }
 otel-arrow-rust.workspace = true
 paste.workspace = true
-pipeline.workspace = true
 plugins.workspace = true
 prost.workspace = true
 rand.workspace = true
@@ -123,6 +123,7 @@ sqlx = { workspace = true, features = [
     "chrono",
 ] }
 store-api.workspace = true
+temp-env.workspace = true
 time = "0.3"
 tokio-postgres = { workspace = true }
 tokio-util.workspace = true

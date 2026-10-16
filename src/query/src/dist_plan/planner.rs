@@ -50,6 +50,7 @@ use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
+use crate::optimizer::expr_depth;
 use crate::region_query::RegionQueryHandlerRef;
 
 /// Planner for converting merge sort logical plan to physical plan.
@@ -228,7 +229,6 @@ impl ExtensionPlanner for DistExtensionPlanner {
             self.region_query_handler.clone(),
             query_ctx,
             session.config().target_partitions(),
-            merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
         )?;
@@ -448,6 +448,7 @@ impl DistExtensionPlanner {
         session: &dyn Session,
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
+        expr_depth::validate_plan(plan)?;
         let session_state = session
             .as_any()
             .downcast_ref::<SessionState>()

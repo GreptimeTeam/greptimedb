@@ -128,6 +128,188 @@ async fn read(store: &ObjectStore, path: &str) -> (SchemaRef, Vec<RecordBatch>) 
 }
 
 #[tokio::test]
+async fn single_table_plan_filters_other_routing_ids_before_export() {
+    let mut unit = unit();
+    unit.logical_tables.retain(|id, _| *id == 1025);
+    let schema = unit.physical_table.schema();
+    let input = expand_export_batch(
+        &batch(
+            vec![Some(1027), Some(1025), Some(1024), Some(1025), Some(1026)],
+            vec![
+                Some("other"),
+                Some("selected-a"),
+                None,
+                Some("selected-b"),
+                None,
+            ],
+        ),
+        schema.arrow_schema().clone(),
+    )
+    .unwrap();
+    unit.physical_table = table::test_util::MemTable::table(
+        "phy",
+        GreptimeRecordBatch::from_df_record_batch(schema, input),
+    );
+    let context = datafusion::prelude::SessionContext::new_with_config(
+        datafusion::prelude::SessionConfig::new().with_target_partitions(4),
+    );
+    let batches = context
+        .execute_logical_plan(unit.build_plan(None).unwrap())
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let summary = export_stream(
+        &unit,
+        stream(batches),
+        &store,
+        LogicalTableExportLimits::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 2);
+    assert_eq!(summary.files, 1);
+    let (_, output) = read(&store, "cpu.v1.parquet").await;
+    let hosts = output
+        .iter()
+        .flat_map(|batch| batch.column(0).as_string::<i32>().iter())
+        .collect::<Vec<_>>();
+    assert_eq!(hosts, vec![Some("selected-a"), Some("selected-b")]);
+}
+
+#[tokio::test]
+async fn dictionary_null_values_write_the_logical_parquet_schema() {
+    let input = batch(vec![Some(1025); 4], vec![Some("placeholder"); 4]);
+    let mut columns = input.columns().to_vec();
+    columns[2] = Arc::new(
+        DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from(vec![Some(0), Some(1), None, Some(0)]),
+            Arc::new(StringArray::from(vec![Some("host"), None])),
+        )
+        .unwrap(),
+    );
+    let input = RecordBatch::try_new(input.schema(), columns).unwrap();
+    let unit = unit();
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let summary = export_stream(
+        &unit,
+        stream(vec![input]),
+        &store,
+        LogicalTableExportLimits::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 4);
+    let (schema, output) = read(&store, "cpu.v1.parquet").await;
+    assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
+    let hosts = output
+        .iter()
+        .flat_map(|batch| batch.column(0).as_string::<i32>().iter())
+        .collect::<Vec<_>>();
+    assert_eq!(hosts, vec![Some("host"), None, None, Some("host")]);
+}
+
+#[tokio::test]
+async fn dictionary_slices_share_backing_and_respect_budget() {
+    let input = batch(vec![Some(1025); 8192], vec![Some("host"); 8192])
+        .project(&[2, 3, 1])
+        .unwrap();
+    let schema = unit().logical_tables[&1025].schema.clone();
+    let budget = ExportWriteBudget::new(1);
+    let token = CancellationToken::new();
+    let conversion = expand_bounded_slice(
+        input.clone(),
+        schema.clone(),
+        7,
+        8192,
+        1024 * 1024,
+        &budget,
+        &token,
+    );
+    tokio::pin!(conversion);
+    // Sharing an admitted batch completes without waiting for a conversion worker.
+    let std::task::Poll::Ready(result) = futures::poll!(&mut conversion) else {
+        panic!("compatible slice dispatched a conversion worker");
+    };
+    let (payload, rows) = result.unwrap();
+    assert_eq!(rows, 8185);
+    let input_values = input.column(0).as_dictionary::<UInt32Type>().values();
+    let output_values = payload
+        .batch
+        .column(0)
+        .as_dictionary::<UInt32Type>()
+        .values();
+    assert!(Arc::ptr_eq(input_values, output_values));
+    assert!(64 * 1024 * 1024 - budget.available().1 >= input.get_array_memory_size());
+    drop(payload);
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+
+    // A batch which does not fit still takes the bounded conversion path.
+    let (payload, rows) =
+        expand_bounded_slice(input.clone(), schema.clone(), 7, 8192, 128, &budget, &token)
+            .await
+            .unwrap();
+    assert_eq!(rows, 1);
+    drop(payload);
+    assert!(
+        expand_bounded_slice(input, schema, 7, 8192, 1, &budget, &token)
+            .await
+            .is_err()
+    );
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+}
+
+#[test]
+fn dictionary_size_bound_limits_inline_work() {
+    let values = (0..1025).map(|i| format!("host-{i}")).collect::<Vec<_>>();
+    let dictionary = DictionaryArray::<UInt32Type>::new(
+        UInt32Array::from(vec![0; 2048]),
+        Arc::new(StringArray::from_iter_values(values.iter())),
+    );
+    let input = RecordBatch::try_from_iter([("host", Arc::new(dictionary) as ArrayRef)]).unwrap();
+    assert!(
+        estimate_batch_bytes_upper_bound(&input, 2048, &[])
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        rows_within_budget(&input, 0, 2048, 128, &[]).unwrap(),
+        (3, 114)
+    );
+}
+
+#[tokio::test]
+async fn narrow_batches_share_row_groups() {
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let batches = (0..8)
+        .map(|_| batch(vec![Some(1025); 8192], vec![Some("host"); 8192]))
+        .collect();
+    let summary = export_stream(
+        &unit(),
+        stream(batches),
+        &store,
+        LogicalTableExportLimits::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 65536);
+    let bytes = store.read("cpu.v1.parquet").await.unwrap().to_bytes();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    assert_eq!(reader.metadata().num_row_groups(), 1);
+    let rows: usize = reader
+        .build()
+        .unwrap()
+        .map(|batch| batch.unwrap().num_rows())
+        .sum();
+    assert_eq!(rows, summary.rows);
+}
+
+#[tokio::test]
 async fn routes_across_batches_and_writes_empty_files() {
     let unit = unit();
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
@@ -250,6 +432,19 @@ async fn existing_outputs_are_not_overwritten() {
 }
 
 #[test]
+fn repeated_dictionary_budget_preserves_null_and_offset_charges() {
+    let host = "x".repeat(64);
+    let input = batch(vec![Some(1025); 8], vec![Some(host.as_str()); 8])
+        .project(&[2, 4, 1])
+        .unwrap();
+    // Each row charges 96 bytes for the dictionary value, 32 for null, and 24 for time.
+    assert_eq!(rows_within_budget(&input, 0, 8, 1215, &[]).unwrap().0, 7);
+    let (rows, estimated) = rows_within_budget(&input, 0, 8, 1280, &[]).unwrap();
+    assert_eq!(rows, 8);
+    assert!((1216..=1280).contains(&estimated));
+}
+
+#[test]
 fn dictionary_and_nested_histogram_values_are_bounded_before_expansion() {
     let dictionary = DictionaryArray::<UInt32Type>::try_new(
         UInt32Array::from(vec![0, 0, 0]),
@@ -291,6 +486,25 @@ fn validates_selected_schemas_and_projects_only_selected_columns() {
             .unwrap();
     assert_eq!(one.scan_projection, vec![0, 3]);
     assert_eq!(one.logical_tables[&1025].projection, vec![1]);
+    let LogicalPlan::Filter(filter) = one.build_plan(None).unwrap() else {
+        panic!("single-table export must filter the routing key without sorting");
+    };
+    let datafusion_expr::Expr::BinaryExpr(predicate) = filter.predicate else {
+        panic!("expected table-id equality");
+    };
+    assert_eq!(predicate.op, datafusion_expr::Operator::Eq);
+    assert!(matches!(
+        predicate.left.as_ref(),
+        datafusion_expr::Expr::Column(column) if column.name == TABLE_ID
+    ));
+    assert!(matches!(
+        predicate.right.as_ref(),
+        datafusion_expr::Expr::Literal(datafusion_common::ScalarValue::UInt32(Some(1025)), _)
+    ));
+    assert!(matches!(
+        unit.build_plan(None).unwrap(),
+        LogicalPlan::Sort(_)
+    ));
     assert!(
         LogicalTableExport::try_new(unit.physical_table.clone(), &[selected.clone(), selected])
             .is_err()
@@ -333,7 +547,7 @@ async fn cancellation_drops_input_and_aborts_active_upload() {
 }
 
 #[tokio::test]
-async fn native_histogram_parquet_roundtrip() {
+async fn supported_metric_types_parquet_roundtrip() {
     fn sample(data_type: &DataType) -> ArrayRef {
         match data_type {
             DataType::Struct(fields) => Arc::new(StructArray::new(
@@ -359,44 +573,102 @@ async fn native_histogram_parquet_roundtrip() {
             other => panic!("unexpected histogram field {other}"),
         }
     }
-    let data_type = common_query::native_histogram::native_histogram_arrow_type();
-    let field = Field::new("histogram", data_type.clone(), true);
-    let unit = LogicalTableExport::try_new(
-        table(
-            1024,
-            "phy",
-            vec![Field::new(TABLE_ID, DataType::UInt32, false), field.clone()],
-            true,
-        ),
-        &[table(1025, "histogram", vec![field], false)],
-    )
-    .unwrap();
-    let batch = RecordBatch::try_from_iter_with_nullable([
-        (
-            TABLE_ID,
-            Arc::new(UInt32Array::from(vec![1025; 2])) as ArrayRef,
-            false,
-        ),
-        ("histogram", sample(&data_type), true),
-    ])
-    .unwrap();
-    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-    let summary = export_stream(
-        &unit,
-        stream(vec![batch.clone()]),
-        &store,
-        export_limits(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(summary.rows, 2);
-    let (schema, batches) = read(&store, "histogram.parquet").await;
-    assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
-    assert_eq!(
-        arrow::compute::concat_batches(&schema, &batches).unwrap(),
-        batch.project(&[1]).unwrap()
-    );
+    use common_datasource::file_format::parquet::packed_reader::{
+        PackReadWindows, PackedParquetReader,
+    };
+    use common_datasource::packed_snapshot::{PACK_INDEX_FILE, PackIndex};
+    use common_datasource::packed_writer::PackedWriter;
+    use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
+    use futures::TryStreamExt;
+
+    let timestamps: [ArrayRef; 4] = [
+        Arc::new(arrow::array::TimestampSecondArray::from(vec![4, 5])),
+        Arc::new(arrow::array::TimestampMillisecondArray::from(vec![4, 5])),
+        Arc::new(arrow::array::TimestampMicrosecondArray::from(vec![4, 5])),
+        Arc::new(arrow::array::TimestampNanosecondArray::from(vec![4, 5])),
+    ];
+    let values = [
+        Arc::new(Float64Array::from(vec![Some(3.5), None])) as ArrayRef,
+        sample(&common_query::native_histogram::native_histogram_arrow_type()),
+    ];
+    for timestamp in timestamps {
+        for value in &values {
+            let logical = RecordBatch::try_from_iter_with_nullable([
+                ("ts", timestamp.clone(), false),
+                (
+                    "host",
+                    Arc::new(StringArray::from(vec![Some(""), None])) as ArrayRef,
+                    true,
+                ),
+                ("value", value.clone(), true),
+            ])
+            .unwrap();
+            let mut fields = vec![Field::new(TABLE_ID, DataType::UInt32, false)];
+            fields.extend(logical.schema().fields().iter().map(|f| f.as_ref().clone()));
+            let unit = LogicalTableExport::try_new(
+                table(1024, "phy", fields.clone(), true),
+                &[table(1025, "metric", fields[1..].to_vec(), false)],
+            )
+            .unwrap();
+            let mut columns = vec![Arc::new(UInt32Array::from(vec![1025; 2])) as ArrayRef];
+            columns.extend_from_slice(logical.columns());
+            let input = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+            for packed in [false, true] {
+                let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+                let writer = packed.then(|| PackedWriter::new(store.clone()).unwrap());
+                let summary = export_stream_managed(
+                    &unit,
+                    stream(vec![input.clone()]),
+                    &store,
+                    export_limits(),
+                    &CancellationToken::new(),
+                    ExportWriteBudget::new(1),
+                    writer.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(summary.rows, 2);
+                let batches = if let Some(writer) = writer {
+                    writer
+                        .lock()
+                        .await
+                        .finish(&CancellationToken::new())
+                        .await
+                        .unwrap();
+                    let index: PackIndex = serde_json::from_slice(
+                        &store.read(PACK_INDEX_FILE).await.unwrap().to_bytes(),
+                    )
+                    .unwrap();
+                    index.validate_membership(["metric"]).unwrap();
+                    let entry = &index.tables[0];
+                    let object = &index.objects[0];
+                    let reader = PackedParquetReader::new(
+                        PackReadWindows::new(store.clone()),
+                        object.path.clone(),
+                        object.length,
+                        entry.offset,
+                        entry.length,
+                    )
+                    .unwrap();
+                    ParquetRecordBatchStreamBuilder::new(reader)
+                        .await
+                        .unwrap()
+                        .build()
+                        .unwrap()
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .unwrap()
+                } else {
+                    read(&store, "metric.parquet").await.1
+                };
+                assert_eq!(batches[0].schema().fields(), logical.schema().fields());
+                assert_eq!(
+                    arrow::compute::concat_batches(&logical.schema(), &batches).unwrap(),
+                    logical
+                );
+            }
+        }
+    }
 }
 
 struct PausedFileWriter {
@@ -748,9 +1020,12 @@ async fn retained_backing_is_reserved_before_conversion_and_until_payload_drop()
     drop(blocker);
     let (payload, rows) = convert.await.unwrap();
     assert_eq!(rows, 1);
-    assert!(
-        64 * 1024 * 1024 - budget.available().1 >= full + payload.batch.get_array_memory_size()
-    );
+    assert!(matches!(
+        payload.batch.column(0).data_type(),
+        DataType::Dictionary(_, _)
+    ));
+    // The retained dictionary shares its input buffers, so they are charged once.
+    assert!(64 * 1024 * 1024 - budget.available().1 >= full);
     drop(payload);
     assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
     assert!(budget.reserve(64 * 1024 * 1024 + 1, &token).await.is_err());

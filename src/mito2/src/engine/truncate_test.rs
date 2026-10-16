@@ -42,6 +42,7 @@ struct FlushCommitListener {
     commit_started: Notify,
     cancel_requested: Notify,
     resume_flush: Notify,
+    compaction_scheduled: AtomicUsize,
 }
 
 impl FlushCommitListener {
@@ -67,6 +68,10 @@ impl EventListener for FlushCommitListener {
 
     fn on_flush_cancel_requested(&self, _region_id: RegionId) {
         self.cancel_requested.notify_one();
+    }
+
+    fn on_compaction_scheduled(&self, _region_id: RegionId) {
+        self.compaction_scheduled.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -897,6 +902,101 @@ async fn test_engine_discard_unflushed_after_flush_commit_started_with_format(fl
         3,
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
     );
+}
+
+#[tokio::test]
+async fn test_engine_truncate_all_after_flush_commit_skips_compaction() {
+    test_engine_truncate_all_after_flush_commit_skips_compaction_with_format(false).await;
+    test_engine_truncate_all_after_flush_commit_skips_compaction_with_format(true).await;
+}
+
+async fn test_engine_truncate_all_after_flush_commit_skips_compaction_with_format(
+    flat_format: bool,
+) {
+    let mut env = TestEnv::with_prefix("truncate-all-after-flush-commit").await;
+    let listener = Arc::new(FlushCommitListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                default_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    let flush_engine = engine.clone();
+    let flush_task = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_commit_started())
+        .await
+        .expect("flush did not reach the commit gate");
+
+    // The region is idle and the flush is past cancellation, so the truncate
+    // queues behind the flush and only runs after the flush commits.
+    let truncate_engine = engine.clone();
+    let truncate_task = tokio::spawn(async move {
+        truncate_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::All),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_cancel_requested())
+        .await
+        .expect("truncate did not queue behind the committing flush");
+    assert!(!truncate_task.is_finished());
+
+    listener.resume_flush();
+    tokio::time::timeout(Duration::from_secs(5), flush_task)
+        .await
+        .expect("flush did not finish")
+        .expect("flush task panicked")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), truncate_task)
+        .await
+        .expect("truncate did not finish")
+        .expect("truncate task panicked")
+        .unwrap();
+
+    assert_eq!(
+        0,
+        engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+            .num_files()
+    );
+    // The committing flush dispatches the queued truncate, which puts the region
+    // into `Truncating` before `handle_flush_finished` schedules compaction. No
+    // compaction may be scheduled while the region is truncating.
+    assert_eq!(0, listener.compaction_scheduled.load(Ordering::Relaxed));
 }
 
 async fn test_engine_truncate_during_flush_with_format(flat_format: bool, unflushed_only: bool) {

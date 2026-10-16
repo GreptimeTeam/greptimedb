@@ -18,6 +18,7 @@ use std::str::FromStr;
 use snafu::OptionExt;
 
 pub mod error;
+pub mod metrics;
 pub mod selector;
 pub mod slow_query_event;
 

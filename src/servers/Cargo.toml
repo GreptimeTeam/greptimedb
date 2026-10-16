@@ -40,6 +40,7 @@ common-batcher.workspace = true
 common-catalog.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
+common-frontend.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-mem-prof = { workspace = true, optional = true }
@@ -90,7 +91,7 @@ notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
 # Wait for https://github.com/databendlabs/opensrv/pull/81
-opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "f3135e5f00401e06075cf241c0cc26489e45b20a" }
+opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "1f3d88ccaafb5721be6cfcc3ccbca48642426119" }
 opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true

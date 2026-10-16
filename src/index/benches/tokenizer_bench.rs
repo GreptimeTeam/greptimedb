@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::AsyncRead;
 use index::fulltext_index::create::{FulltextIndexCreator, TantivyFulltextIndexCreator};
-use index::fulltext_index::tokenizer::{ChineseTokenizer, EnglishTokenizer, Tokenizer};
+use index::fulltext_index::tokenizer::{ScriptTokenizer, Tokenizer};
 use index::fulltext_index::{Analyzer, Config};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 
@@ -86,8 +86,8 @@ impl PuffinWriter for NoopPuffinWriter {
     }
 }
 
-fn bench_english_tokenizer(c: &mut Criterion) {
-    let tokenizer = EnglishTokenizer;
+fn bench_tokenizer_english_text(c: &mut Criterion) {
+    let tokenizer = ScriptTokenizer;
 
     let texts = vec![
         ("short", "Hello, world! This is a test."),
@@ -125,7 +125,7 @@ fn bench_english_tokenizer(c: &mut Criterion) {
         ),
     ];
 
-    let mut group = c.benchmark_group("english_tokenizer");
+    let mut group = c.benchmark_group("tokenizer_english_text");
 
     for (size, text) in texts {
         group.bench_with_input(BenchmarkId::new("tokenize", size), &text, |b, text| {
@@ -136,7 +136,7 @@ fn bench_english_tokenizer(c: &mut Criterion) {
     group.finish();
 
     // Benchmark with repeated tokenization to simulate real-world usage
-    let mut repeat_group = c.benchmark_group("english_tokenizer_repeated");
+    let mut repeat_group = c.benchmark_group("tokenizer_english_text_repeated");
 
     let sample_text = "The quick brown fox jumps over the lazy dog. This sentence contains most letters of the alphabet.";
 
@@ -157,9 +157,9 @@ fn bench_english_tokenizer(c: &mut Criterion) {
     repeat_group.finish();
 }
 
-fn bench_chinese_tokenizer(c: &mut Criterion) {
-    let tokenizer = ChineseTokenizer;
-    let mut group = c.benchmark_group("chinese_tokenizer");
+fn bench_tokenizer_chinese_text(c: &mut Criterion) {
+    let tokenizer = ScriptTokenizer;
+    let mut group = c.benchmark_group("tokenizer_chinese_text");
 
     for (name, text) in CHINESE_TOKENIZER_TEXTS {
         group.throughput(Throughput::Bytes(text.len() as u64));
@@ -170,7 +170,7 @@ fn bench_chinese_tokenizer(c: &mut Criterion) {
 
     group.finish();
 
-    let mut repeat_group = c.benchmark_group("chinese_tokenizer_repeated");
+    let mut repeat_group = c.benchmark_group("tokenizer_chinese_text_repeated");
     let sample_text = CHINESE_TOKENIZER_TEXTS
         .iter()
         .find(|(name, _)| *name == "mixed_log")
@@ -253,8 +253,8 @@ fn bench_tantivy_chinese_fulltext_index(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_english_tokenizer,
-    bench_chinese_tokenizer,
+    bench_tokenizer_english_text,
+    bench_tokenizer_chinese_text,
     bench_tantivy_chinese_fulltext_index
 );
 criterion_main!(benches);

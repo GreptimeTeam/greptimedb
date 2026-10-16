@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
+use common_frontend::metrics;
 use common_query::Output;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::Timezone;
@@ -182,8 +183,9 @@ impl MysqlInstanceShim {
 
     /// Retrieve the query and logical plan by a given statement key
     fn plan(&self, stmt_key: &str) -> Option<SqlPlan> {
-        let guard = self.prepared_stmts.read();
-        guard.get(stmt_key).cloned()
+        let plan = self.prepared_stmts.read().get(stmt_key).cloned();
+        metrics::record_cache_lookup("mysql_prepared_stmt", plan.is_some());
+        plan
     }
 
     /// Save the prepared statement and return the parameters and result columns
@@ -1051,6 +1053,23 @@ mod tests {
             1,
             1024,
         )
+    }
+
+    #[test]
+    fn test_prepared_statement_cache_metrics() {
+        use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
+
+        let hits = CACHE_HIT.with_label_values(&["mysql_prepared_stmt"]);
+        let misses = CACHE_MISS.with_label_values(&["mysql_prepared_stmt"]);
+        let before = (hits.get(), misses.get());
+        let mut shim = create_shim();
+        assert!(shim.plan("stmt").is_none());
+        shim.save_plan(SqlPlan::Shortcut("SELECT 1".into()), "stmt".into())
+            .unwrap();
+        assert!(shim.plan("stmt").is_some());
+        shim.do_close("stmt".into());
+        assert!(shim.plan("stmt").is_none());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 2));
     }
 
     #[test]

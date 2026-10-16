@@ -1,0 +1,256 @@
+name: Object Store WAL S3 Benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      smoke:
+        description: 'Smoke run: ubuntu-latest and the MinIO fixture instead of EC2 and S3, 50000 rows, one round; its numbers mean nothing'
+        type: boolean
+        default: false
+      greptimedb_tag:
+        description: 'Docker Hub greptime/greptimedb tag; nightly = the newest v*-nightly-* tag (latest is a release without the object store WAL)'
+        type: string
+        default: nightly
+      greptimedb_image:
+        description: 'Full image reference with a tag or digest; used instead of greptimedb_tag when set'
+        type: string
+        default: ''
+      configs:
+        description: 'WAL configurations: R (Raft Engine, sync_write), R0 (Raft Engine, standalone default), D (durable), E (enqueued)'
+        type: string
+        default: R,D,E
+      extra_env:
+        description: 'Environment for every GreptimeDB container: a JSON object or K=V lines'
+        type: string
+        default: ''
+      restart:
+        description: 'After each load, SIGKILL the server, restart it on the same prefix and data home, and time recovery; object store cells flush every 10ms'
+        type: boolean
+        default: false
+      groups:
+        description: 'JSON list of cell groups, each overriding configs, extra_env, concurrency, rounds, rows, restart, plus idle_seconds and partitions (regions of the loaded table), or mode crash with cycles, kill_after [min, max] and pin, or mode drop with write_seconds; empty = one group from the inputs above'
+        type: string
+        default: ''
+      instance_type:
+        description: EC2 instance type in the bucket region; the d of c6id gives a local NVMe instance store for the Raft Engine WAL
+        type: string
+        default: c6id.2xlarge
+      concurrency:
+        description: Comma-separated loader concurrency levels
+        type: string
+        default: '1,8'
+      rows:
+        description: Dataset rows (2000000 = o11ybench profile D)
+        type: number
+        default: 2000000
+      batch_rows:
+        description: Rows per write request
+        type: number
+        default: 1000
+      rounds:
+        description: Rounds; the configuration order alternates between rounds (R, D, E then E, D, R)
+        type: number
+        default: 2
+      runtime_image:
+        description: 'o11ybench runtime image: auto = AWS ECR Public; explicit tag/digest overrides'
+        type: string
+        default: auto
+      benchmark_timeout_minutes:
+        description: Benchmark job timeout in minutes (1..360)
+        type: number
+        default: 240
+      janitor_ttl_hours:
+        description: Instance lifetime before janitor eligibility (1..168 hours; at least timeout + 2h)
+        type: number
+        default: 8
+permissions:
+  contents: read
+env:
+  SMOKE: ${{ inputs.smoke }}
+  GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
+  GREPTIMEDB_IMAGE_INPUT: ${{ inputs.greptimedb_image }}
+  CONFIGS: ${{ inputs.configs }}
+  EXTRA_ENV: ${{ inputs.extra_env }}
+  RESTART: ${{ inputs.restart }}
+  OSWAL_GROUPS: ${{ inputs.groups }}
+  REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
+  CONCURRENCY: ${{ inputs.concurrency }}
+  ROWS: ${{ inputs.rows }}
+  BATCH_ROWS: ${{ inputs.batch_rows }}
+  ROUNDS: ${{ inputs.rounds }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:77a84e1c8136@sha256:c482993ec177b026235d6cd0c61d4fb6d6f1088bc78bdc0e5964a5398de6dba0' }}
+  BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
+  JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      instance_type: ${{ steps.runner.outputs.instance_type }}
+      greptimedb_ref: ${{ steps.plan.outputs.greptimedb_ref }}
+      runtime_image: ${{ steps.runtime.outputs.runtime_image }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Test benchmark scripts
+      run: |
+        python3 greptimedb/tests/perf/test_oswal_s3_bench_scripts.py
+        python3 greptimedb/tests/perf/test_ci_runner_scripts.py
+    - name: Validate plan, budgets and image tag
+      id: plan
+      run: |
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" \
+          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --restart "$RESTART" --groups "$OSWAL_GROUPS" \
+          --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT"
+    - name: Resolve CI runner
+      id: runner
+      run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider AWS --instance-type "$REQUESTED_INSTANCE_TYPE"
+    - name: Check bucket and runner regions
+      env:
+        BUCKET_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+        RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
+      run: python3 greptimedb/.github/scripts/oswal-s3-bench.py regions --bucket "$BUCKET_REGION" --runner "$RUNNER_REGION"
+    - name: Check the runtime image
+      id: runtime
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh check-runtime "$RUNTIME_IMAGE"
+  provision:
+    needs: validate
+    if: ${{ !inputs.smoke }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.aws.outputs.label }}
+      instance_id: ${{ steps.aws.outputs.instance_id }}
+      runner_name: ${{ steps.aws.outputs.runner_name }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.EC2_RUNNER_REGION }}
+    - uses: astral-sh/setup-uv@v6
+    - name: Create ephemeral EC2 runner
+      id: aws
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ vars.EC2_RUNNER_REGION }}
+        AWS_EC2_IMAGE_ID: ${{ vars.BENCHMARK_EC2_IMAGE_ID || 'auto' }}
+        AWS_EC2_INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
+        AWS_EC2_SUBNET_ID: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+        AWS_EC2_SECURITY_GROUP_ID: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+        AWS_EC2_SYSTEM_DISK_GIB: '60'
+        AWS_EC2_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
+        AWS_EC2_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-provision.py
+  benchmark:
+    needs:
+    - validate
+    - provision
+    if: ${{ !cancelled() && needs.validate.result == 'success' && (inputs.smoke || needs.provision.result == 'success') }}
+    runs-on: ${{ inputs.smoke && 'ubuntu-latest' || needs.provision.outputs.label }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
+    env:
+      INSTANCE_TYPE: ${{ inputs.smoke && 'ubuntu-latest' || needs.validate.outputs.instance_type }}
+      GREPTIMEDB_REF: ${{ needs.validate.outputs.greptimedb_ref }}
+      RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
+      RUN_PREFIX: oswal-bench/${{ github.run_id }}-${{ github.run_attempt }}
+      OWNER: o11ybench-oswal-${{ github.run_id }}-${{ github.run_attempt }}
+      RESULTS: ${{ github.workspace }}/oswal-results
+      CORPUS_DIR: ${{ github.workspace }}/oswal-corpus
+      PLAN: ${{ github.workspace }}/oswal-results/plan.json
+      WAL_ROOT: /mnt/oswal-wal
+      S3_BUCKET: ${{ inputs.smoke && 'greptime' || vars.AWS_CI_TEST_BUCKET }}
+      S3_REGION: ${{ inputs.smoke && 'us-west-2' || vars.AWS_CI_TEST_BUCKET_REGION }}
+      S3_ENDPOINT: ${{ inputs.smoke && 'http://127.0.0.1:9000' || '' }}
+      S3_CONTAINER_ENDPOINT: ${{ inputs.smoke && 'http://host.docker.internal:9000' || '' }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Set up benchmark dependencies
+      uses: ./greptimedb/.github/actions/setup-benchmark
+    - uses: astral-sh/setup-uv@v6
+    - name: Start the MinIO fixture
+      if: inputs.smoke
+      run: |
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh greptime/minio:2024
+        docker compose -f greptimedb/tests-integration/fixtures/docker-compose.yml up -d --wait minio
+    - name: Pull images and write the plan
+      run: |
+        bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \
+          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --restart "$RESTART" --groups "$OSWAL_GROUPS"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" \
+          --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
+    - name: Probe the bucket
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: uv run greptimedb/.github/scripts/oswal-s3-bench.py probe --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
+    - name: Put the Raft Engine WAL on the instance store
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh wal-disk "$WAL_ROOT"
+    - name: Generate the dataset once
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh generate
+    - name: Load every cell
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh cells
+    - name: Summary
+      if: always()
+      run: python3 greptimedb/.github/scripts/oswal-s3-bench-summary.py --root "$RESULTS" >> "$GITHUB_STEP_SUMMARY"
+    - name: Delete the run's S3 prefix
+      if: always()
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: uv run greptimedb/.github/scripts/oswal-s3-bench.py cleanup --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
+    - name: Check the results hold no credentials
+      if: always()
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh scrub
+    - name: Upload results (no corpus)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: oswal-s3-bench-${{ inputs.smoke && 'smoke' || 'ec2' }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ env.RESULTS }}
+        if-no-files-found: warn
+        retention-days: 14
+  teardown:
+    needs:
+    - provision
+    - benchmark
+    if: ${{ always() && !inputs.smoke && (needs.provision.outputs.instance_id != '' || needs.provision.result != 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.EC2_RUNNER_REGION }}
+    - uses: astral-sh/setup-uv@v6
+    - name: Delete EC2 and unregister runner
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ vars.EC2_RUNNER_REGION }}
+        AWS_EC2_INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+        AWS_EC2_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
+        AWS_EC2_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-teardown.py

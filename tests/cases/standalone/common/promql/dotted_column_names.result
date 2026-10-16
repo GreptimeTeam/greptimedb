@@ -424,9 +424,9 @@ TQL EXPLAIN (0, 10, '5s') topk(1, {"otel.m"});
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| Projection: otel.m.v.val, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.ts.time_|
-|_|_Sort: otel.m.ts.time ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST_|
-|_|_Filter: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS Float64) <= Float64(1)_|
-|_|_WindowAggr: windowExpr=[[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]_|
+|_|_Sort: otel.m.ts.time ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST_|
+|_|_Filter: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS Float64) <= Float64(1)_|
+|_|_WindowAggr: windowExpr=[[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
@@ -435,10 +435,10 @@ TQL EXPLAIN (0, 10, '5s') topk(1, {"otel.m"});
 |_|_TableScan: otel.m, partial_filters=[otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | physical_plan | ProjectionExec: expr=[v.val@4 as v.val, service.name@1 as service.name, Host@2 as Host, host@3 as host, ts.time@0 as ts.time]_|
-|_|_SortPreservingMergeExec: [ts.time@0 ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 ASC NULLS LAST]_|
-|_|_FilterExec: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 AS Float64) <= 1_|
-|_|_BoundedWindowAggExec: wdw=[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
-|_|_SortExec: expr=[ts.time@0 ASC NULLS LAST, v.val@4 DESC, service.name@1 DESC, Host@2 DESC, host@3 DESC], preserve_REDACTED
+|_|_SortPreservingMergeExec: [ts.time@0 ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 ASC NULLS LAST]_|
+|_|_FilterExec: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 AS Float64) <= 1_|
+|_|_BoundedWindowAggExec: wdw=[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
+|_|_SortExec: expr=[ts.time@0 ASC NULLS LAST, isnan(v.val@4) ASC, v.val@4 DESC, service.name@1 DESC, Host@2 DESC, host@3 DESC], preserve_REDACTED
 |_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|

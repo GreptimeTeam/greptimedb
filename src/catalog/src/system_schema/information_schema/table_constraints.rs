@@ -40,7 +40,10 @@ use crate::information_schema::Predicates;
 use crate::information_schema::key_column_usage::{
     CONSTRAINT_NAME_PRI, CONSTRAINT_NAME_TIME_INDEX,
 };
-use crate::system_schema::information_schema::{InformationTable, TABLE_CONSTRAINTS};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, TABLE_CONSTRAINTS,
+};
 
 /// The `TABLE_CONSTRAINTS` table describes which tables have constraints.
 #[derive(Debug)]
@@ -102,6 +105,12 @@ impl InformationSchemaTableConstraints {
 }
 
 impl InformationTable for InformationSchemaTableConstraints {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaTableConstraints {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_TABLE_CONSTRAINTS_TABLE_ID
     }

@@ -36,9 +36,10 @@ use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
 use crate::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
-    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions, WriteRetryOptions,
 };
 
+/// Configures frontend protocols, query execution, and distributed write retries.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FrontendOptions {
@@ -50,8 +51,6 @@ pub struct FrontendOptions {
     /// even if a request sets the `auto_create_table` hint to `true`. When `true`
     /// (default), the per-request hint still applies. Default: `true`.
     pub auto_create_table: bool,
-    /// Enables experimental Parquet database exports using shared Metric scans.
-    pub experimental_metric_export: bool,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -76,6 +75,8 @@ pub struct FrontendOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub datanode: DatanodeClientOptions,
+    /// Retry policy for retryable distributed write failures.
+    pub write_retry: WriteRetryOptions,
     pub user_provider: Option<String>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
@@ -96,7 +97,6 @@ impl Default for FrontendOptions {
             default_timezone: None,
             default_column_prefix: None,
             auto_create_table: true,
-            experimental_metric_export: false,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -113,6 +113,7 @@ impl Default for FrontendOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             datanode: DatanodeClientOptions::default(),
+            write_retry: WriteRetryOptions::default(),
             user_provider: None,
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
@@ -229,6 +230,84 @@ mod tests {
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
 
     #[test]
+    fn test_pipeline_host_access_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.allow_vrl_host_access);
+        let options: FrontendOptions =
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+        assert!(options.pipeline.allow_vrl_host_access);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
+
+    #[test]
+    fn test_write_retry_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert_eq!(defaults.write_retry, WriteRetryOptions::default());
+        let options: FrontendOptions = toml::from_str(
+            r#"
+[write_retry]
+max_retries = 5
+initial_backoff = "250ms"
+max_backoff = "5s"
+backoff_multiplier = 3.0
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            options.write_retry,
+            WriteRetryOptions {
+                max_retries: 5,
+                initial_backoff: Duration::from_millis(250),
+                max_backoff: Duration::from_secs(5),
+                backoff_multiplier: 3.0,
+            }
+        );
+        options.write_retry.validate().unwrap();
+        let serialized = toml::to_string(&options).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.write_retry, parsed.write_retry);
+        let disabled: FrontendOptions = toml::from_str("[write_retry]\nmax_retries = 0").unwrap();
+        assert_eq!(disabled.write_retry.max_retries, 0);
+        assert_eq!(
+            disabled.write_retry.initial_backoff,
+            defaults.write_retry.initial_backoff
+        );
+    }
+
+    #[test]
+    fn test_write_retry_config_from_env() {
+        temp_env::with_vars(
+            [
+                ("FRONTEND_RETRY_TEST__WRITE_RETRY__MAX_RETRIES", Some("4")),
+                (
+                    "FRONTEND_RETRY_TEST__WRITE_RETRY__INITIAL_BACKOFF",
+                    Some("500ms"),
+                ),
+                ("FRONTEND_RETRY_TEST__WRITE_RETRY__MAX_BACKOFF", Some("8s")),
+                (
+                    "FRONTEND_RETRY_TEST__WRITE_RETRY__BACKOFF_MULTIPLIER",
+                    Some("1.5"),
+                ),
+            ],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_RETRY_TEST").unwrap();
+                assert_eq!(
+                    options.write_retry,
+                    WriteRetryOptions {
+                        max_retries: 4,
+                        initial_backoff: Duration::from_millis(500),
+                        max_backoff: Duration::from_secs(8),
+                        backoff_multiplier: 1.5,
+                    }
+                );
+            },
+        );
+    }
+
+    #[test]
     fn test_logical_batcher_protocols_from_env() {
         temp_env::with_vars(
             [
@@ -311,9 +390,6 @@ max_batch_rows = 25
     #[test]
     fn test_toml() {
         let opts = FrontendOptions::default();
-        assert!(!opts.experimental_metric_export);
-        let enabled: FrontendOptions = toml::from_str("experimental_metric_export = true").unwrap();
-        assert!(enabled.experimental_metric_export);
         let toml_string = toml::to_string(&opts).unwrap();
         let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed.otlp, opts.otlp);

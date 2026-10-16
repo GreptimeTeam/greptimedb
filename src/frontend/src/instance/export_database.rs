@@ -12,19 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use auth::{
     PermissionAction, PermissionChecker, PermissionCheckerRef, PermissionReq,
     PermissionTableTarget, PermissionTableTargets,
 };
-use common_error::ext::BoxedError;
 use common_query::Output;
-use common_recordbatch::RecordBatches;
 use common_telemetry::error;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::vectors::StringVector;
 use operator::statement::export_database::{DatabaseExportSummary, PreparedDatabaseExport};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -51,35 +44,11 @@ pub(crate) fn parse_metric_export_requested(options: &OptionMap) -> Result<bool>
 }
 
 impl Instance {
-    pub(crate) fn show_metric_export_capability(&self) -> Result<Output> {
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "EXPERIMENTAL_METRIC_EXPORT",
-            ConcreteDataType::string_datatype(),
-            false,
-        )]));
-        let batches = RecordBatches::try_from_columns(
-            schema,
-            vec![Arc::new(StringVector::from(vec![
-                self.experimental_metric_export.to_string(),
-            ])) as datatypes::vectors::VectorRef],
-        )
-        .map_err(BoxedError::new)
-        .context(crate::error::ExternalSnafu)?;
-        Ok(Output::new_with_record_batches(batches))
-    }
-
     pub(crate) async fn copy_metric_database(
         &self,
         arg: CopyDatabaseArgument,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        if !self.experimental_metric_export {
-            return Err(operator::error::InvalidDatabaseExportSnafu {
-                reason: "experimental_metric_export is disabled on this frontend",
-            }
-            .build()
-            .into());
-        }
         let req = operator::statement::to_copy_database_request(arg, &ctx)?;
         let plan = self.prepare_database_export(req, None, &ctx).await?;
         let cancellation = CancellationToken::new();
