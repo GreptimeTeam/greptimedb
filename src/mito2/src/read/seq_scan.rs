@@ -46,8 +46,9 @@ use crate::read::range_cache::{
 };
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, compute_parallel_channel_size,
-    scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
+    MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream,
+    compute_parallel_channel_size, scan_flat_file_ranges, scan_flat_mem_ranges,
+    should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
@@ -739,7 +740,11 @@ pub(crate) async fn build_flat_sources(
     let needs_merge =
         ordered_sources.iter().flatten().count() > 1 || (compaction && stream_ctx.ranges.len() > 1);
     let split_batch_size = if needs_merge {
-        should_split_flat_batches_for_merge(stream_ctx, range_meta)
+        should_split_flat_batches_for_merge(stream_ctx, range_meta).filter(|rows_per_series| {
+            // Compaction writes every merged batch out, so splitting short series
+            // would hand the SST writer and indexer one tiny batch per series.
+            !compaction || *rows_per_series >= MIN_COMPACTION_SPLIT_ROWS
+        })
     } else {
         None
     };
