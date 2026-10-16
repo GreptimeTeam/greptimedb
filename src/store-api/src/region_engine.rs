@@ -30,7 +30,8 @@ use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
-use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering};
+use datatypes::series::SeriesOrdering;
+use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
 use futures::future::join_all;
@@ -492,27 +493,33 @@ pub enum RawLabelSource {
         /// Logical tag names mapped to physical column identifiers.
         logical_tags: Arc<[BoundTag]>,
     },
-    /// The stream supplies a complete metric name and label set in each chunk.
+    /// The stream supplies a complete metric name and label set in each chunk, not a partial
+    /// label projection; `Some(metric)` is a complete name/label set (the name itself may be
+    /// absent).
     Explicit,
 }
 
 /// A stream of raw series chunks with stable schema, label binding, and ordering.
 ///
-/// Chunks for a read key are contiguous, with strictly increasing timestamps within and across
-/// chunks. `is_last` marks the last chunk of that key in this stream, not across streams; merge
-/// code must recompute finalization globally across all relevant inputs before downstream
-/// per-input-series finalization (not aggregate or vector-match state). `RawLabelSource` keeps
-/// the stream's label interpretation self-contained through transport rather than relying on a
-/// local source handle.
+/// Every series has strictly increasing timestamps within and across chunks; timestamps are
+/// unique per series. `Interleaved` permits a series to resume after another series; `Contiguous`
+/// and `KeyThenTime` guarantee each series' chunks are contiguous. `KeyThenTime` uses the complete
+/// stream identity compatible with its label binding, not just a TSID or hash. These are
+/// per-stream guarantees, not query-global order, partition ownership, or finality. `is_last`
+/// marks the last chunk of that series in this stream only; merging requires recomputing
+/// per-input-series finalization across all related inputs, not aggregate-group finality.
+/// `RawLabelSource` keeps label interpretation self-contained through transport. Stream finality
+/// applies to all related input series, not aggregate groups or vector-match state.
 pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send {
     /// Returns the schema shared by all chunks; raw schemas have no evaluation grid.
     fn schema(&self) -> &Arc<SeriesSchema>;
     /// Returns scan-bound label metadata. `PrimaryKey` chunks leave `metric` as `None`, meaning
     /// labels are undecoded, not that the metric name is missing; `Explicit` chunks supply
-    /// `Some` with a complete metric name and labels.
+    /// `Some` with the complete name/label set, not a partial projection. The metric name itself
+    /// may be absent.
     fn label_source(&self) -> &RawLabelSource;
     /// Returns this stream's ordering guarantee.
-    fn ordering(&self) -> RawSeriesOrdering;
+    fn ordering(&self) -> SeriesOrdering;
 }
 
 /// A pinned raw-series stream that can be sent between threads.
@@ -523,7 +530,8 @@ pub type SendableRawSeriesStream = Pin<Box<dyn RawSeriesStream>>;
 pub struct SeriesInfo {
     /// Complete encoded primary key, not a TSID or hash alone.
     pub primary_key: datatypes::arrow::buffer::Buffer,
-    /// Complete explicit metric and labels, or `None` for primary-key label binding.
+    /// Complete explicit metric name and labels, not a partial label projection; or `None` for
+    /// primary-key label binding (undecoded, not nameless). The metric name itself may be absent.
     pub metric: Option<datatypes::series::MetricName>,
 }
 
@@ -533,9 +541,9 @@ pub struct SeriesInfo {
 /// indexes, not protocol identifiers; each has exactly one complete identity returned by
 /// [`PreparedSeriesSource::series_info`], and that identity matches chunks for that ordinal.
 /// Every reader exposes the same fixed schema, label binding, and ordering before polling,
-/// including for an empty range, and describes labels independently of this source's lifetime. `PrimaryKey` output has `metric: None`; `Explicit` output has a
-/// complete `Some(metric)` matching each chunk. [`RawSeriesOrdering::Contiguous`] and
-/// [`RawSeriesOrdering::ReadKeyThenTime`] describe stream order, not ordinal enumeration order.
+/// including for an empty range, and describes labels independently of this source's lifetime.
+/// `PrimaryKey` output has `metric: None` (undecoded); `Explicit` output has a complete
+/// `Some(metric)` matching each chunk. Ordering describes the stream, not ordinal enumeration.
 ///
 /// Preparation, identity lookup, and reader creation do not load sample payloads or perform
 /// hidden blocking I/O. The selected set is bound to the partition's immutable MVCC view,
@@ -549,6 +557,10 @@ pub struct SeriesInfo {
 pub trait PreparedSeriesSource: Send + Sync {
     /// Returns the exact, stable number of selected local series ordinals.
     fn num_series(&self) -> usize;
+
+    /// Returns label binding shared by series metadata and every reader, without opening or
+    /// polling a reader; the binding is self-contained for remote consumers.
+    fn label_source(&self) -> &RawLabelSource;
 
     /// Returns identity metadata for an ordinal without polling sample data.
     fn series_info(&self, ordinal: usize) -> Result<SeriesInfo, BoxedError>;

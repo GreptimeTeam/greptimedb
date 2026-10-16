@@ -24,6 +24,27 @@ use std::sync::Arc;
 
 use crate::error::{InvalidSeriesSnafu, Result};
 
+/// Ordering guarantee within one stream and each of its output partitions.
+///
+/// Every series has strictly increasing sample positions, including across chunks; positions
+/// are raw timestamps or, for evaluated series, current-stage evaluation times or grid positions.
+/// They need not all be explicit times on the grid. No mode permits
+/// duplicate positions. `Interleaved` permits A1, B1, A2; only the latter two modes keep each
+/// series contiguous. `KeyThenTime` also orders by this stream's series identity, then time:
+/// raw streams use the complete bound-compatible identity (not just a TSID or hash), while
+/// evaluated streams use current name/label identity, not storage primary keys or object address/hash.
+/// This ordering
+/// is not a query-global ordering, partition-ownership rule, or finality guarantee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeriesOrdering {
+    /// Series chunks may interleave; positions within each series remain strictly increasing.
+    Interleaved,
+    /// Each series is contiguous; distinct series need not be ordered.
+    Contiguous,
+    /// Series are ordered by stream identity and then by strictly increasing position.
+    KeyThenTime,
+}
+
 /// A label with shared UTF-8 name and value strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Label {
