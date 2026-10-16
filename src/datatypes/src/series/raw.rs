@@ -85,16 +85,10 @@ impl RawTimestamps {
     }
 }
 
-/// Ordering guarantee for chunks in one input stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RawSeriesOrdering {
-    /// Each complete primary key's chunks are contiguous; distinct keys need not be ordered.
-    Contiguous,
-    /// Chunks are ordered by complete primary key and then by timestamp.
-    ReadKeyThenTime,
-}
-
 /// One raw source batch, with fields aligned to its timestamps.
+///
+/// `metric: None` means labels are not yet decoded because identity is bound by the source; it
+/// does not mean the metric name is absent. An explicit `Some(metric)` is always complete.
 ///
 /// Public fields allow direct access and construction, which bypasses the checks in
 /// [`RawSeriesChunk::try_new`]; callers crossing a trust boundary must validate input.
