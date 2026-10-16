@@ -16,16 +16,22 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use api::v1::helper::row;
 use api::v1::value::ValueData;
-use api::v1::{Rows, SemanticType};
+use api::v1::{ArrowIpc, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{DfRecordBatch, RecordBatches};
+use common_test_util::flight::encode_to_flight_data;
 use common_time::Timestamp;
 use common_wal::options::WAL_OPTIONS_KEY;
+use datatypes::arrow::array::{
+    ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray,
+};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use futures::TryStreamExt;
@@ -35,13 +41,14 @@ use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{
-    PathType, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequirements,
+    PathType, RegionBulkInsertsRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
+    RegionPutRequest, RegionRequirements,
 };
 use store_api::storage::RegionId;
 
 use super::*;
 use crate::region::version::VersionControlData;
+use crate::region_write_ctx::test_hooks::arm_bulk_install_barrier;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, TestEnv, build_delete_rows_for_key, build_rows,
     build_rows_for_key, delete_rows, delete_rows_schema, flush_region, kafka_log_store_factory,
@@ -1871,4 +1878,169 @@ async fn restart_without_region_close(
         .await
         .unwrap();
     engine
+}
+
+/// Builds a bulk insert request for a region created by [CreateRequestBuilder]
+/// with its default columns `(tag_0, field_0, ts)`.
+fn build_bulk_insert_request(region_id: RegionId, num_rows: usize) -> RegionBulkInsertsRequest {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tag_0", DataType::Utf8, true),
+        Field::new("field_0", DataType::Float64, true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let tag = Arc::new(StringArray::from_iter_values(
+        (0..num_rows).map(|v| format!("a{v}")),
+    )) as ArrayRef;
+    let field = Arc::new(Float64Array::from_iter_values(
+        (0..num_rows).map(|v| v as f64),
+    )) as ArrayRef;
+    let ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+        (0..num_rows).map(|v| v as i64 * 1000),
+    )) as ArrayRef;
+    let payload = DfRecordBatch::try_new(schema, vec![tag, field, ts]).unwrap();
+    let (schema, record_batch) = encode_to_flight_data(payload.clone());
+
+    RegionBulkInsertsRequest {
+        skip_wal: false,
+        region_id,
+        payload,
+        raw_data: ArrowIpc {
+            schema: schema.data_header,
+            data_header: record_batch.data_header,
+            payload: record_batch.data_body,
+        },
+        partition_expr_version: None,
+        aligned_schema_version: None,
+    }
+}
+
+/// Builds a bulk insert request whose WAL entry can't be encoded. The batch
+/// misses `field_0`, so the worker fills it and clears `raw_data`, and its
+/// all-null dictionary `tag_0` column can't be encoded into a single IPC
+/// message.
+fn build_unencodable_bulk_insert_request(region_id: RegionId) -> RegionBulkInsertsRequest {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "tag_0",
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            true,
+        ),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let tag = Arc::new(DictionaryArray::<UInt32Type>::from_iter([None::<&str>])) as ArrayRef;
+    let ts = Arc::new(TimestampMillisecondArray::from_iter_values([0])) as ArrayRef;
+    let payload = DfRecordBatch::try_new(schema, vec![tag, ts]).unwrap();
+
+    RegionBulkInsertsRequest {
+        skip_wal: false,
+        region_id,
+        payload,
+        // The worker clears it after filling the missing column.
+        raw_data: ArrowIpc::default(),
+        partition_expr_version: None,
+        aligned_schema_version: None,
+    }
+}
+
+async fn scan_num_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    batches.iter().map(|batch| batch.num_rows()).sum()
+}
+
+#[tokio::test]
+async fn test_bulk_insert_encode_failure_keeps_worker_batch() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    // A single worker so requests of all regions share one batch.
+    let engine = env
+        .create_engine(MitoConfig {
+            num_workers: 1,
+            ..Default::default()
+        })
+        .await;
+
+    let blocker_region_id = RegionId::new(1, 1);
+    let region_id = RegionId::new(1, 2);
+    let other_region_id = RegionId::new(1, 3);
+    for id in [blocker_region_id, region_id, other_region_id] {
+        engine
+            .handle_request(
+                id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Pauses the worker in a bulk write of the blocker region so the requests
+    // below queue up and reach the worker as one batch.
+    let mut barrier = arm_bulk_install_barrier(
+        blocker_region_id,
+        engine
+            .get_region(blocker_region_id)
+            .unwrap()
+            .version_control
+            .clone(),
+    );
+    let blocker_engine = engine.clone();
+    let blocker = tokio::spawn(async move {
+        blocker_engine
+            .handle_request(
+                blocker_region_id,
+                RegionRequest::BulkInserts(build_bulk_insert_request(blocker_region_id, 1)),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), barrier.wait_until_reached())
+        .await
+        .expect("bulk write never reached the install barrier");
+
+    let mut receivers = Vec::new();
+    for (id, request) in [
+        (region_id, build_unencodable_bulk_insert_request(region_id)),
+        (region_id, build_bulk_insert_request(region_id, 3)),
+        (
+            other_region_id,
+            build_bulk_insert_request(other_region_id, 2),
+        ),
+    ] {
+        let metadata = engine.inner.get_metadata(id).ok();
+        let (request, receiver) = WorkerRequest::try_from_region_request(
+            id,
+            RegionRequest::BulkInserts(request),
+            metadata,
+        )
+        .unwrap();
+        engine
+            .inner
+            .workers
+            .submit_to_worker(id, request)
+            .await
+            .unwrap();
+        receivers.push(receiver);
+    }
+    barrier.release();
+    assert_eq!(1, blocker.await.unwrap().unwrap().affected_rows);
+
+    let [failed, same_region, other_region] = receivers.try_into().unwrap();
+    let err = failed.await.unwrap().unwrap_err();
+    assert_eq!(StatusCode::Unsupported, err.status_code(), "{err:?}");
+    // Requests after the failed one in the same batch are still written.
+    assert_eq!(3, same_region.await.unwrap().unwrap());
+    assert_eq!(2, other_region.await.unwrap().unwrap());
+    assert_eq!(3, scan_num_rows(&engine, region_id).await);
+    assert_eq!(2, scan_num_rows(&engine, other_region_id).await);
 }
