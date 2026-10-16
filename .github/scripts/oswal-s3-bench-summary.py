@@ -39,15 +39,16 @@ POSITION_BITS = 20
 
 def parse_metrics(text: str) -> dict:
     """Map each unlabeled sample to its value, each histogram to its buckets, and the S3
-    requests (data files and WAL together) to their count per operation; the local cache
+    operations (data files and WAL together, as OpenDAL counts its calls: a paginated list or a
+    multipart write is one operation over several HTTP requests) to their count per kind; the local cache
     stores report through the same layer under another scheme and are left out."""
-    samples, buckets, requests = {}, {}, {}
+    samples, buckets, operations = {}, {}, {}
     for line in text.splitlines():
         match = SAMPLE.fullmatch(line.strip())
         if match and match.group(1) == "opendal_operation_duration_seconds_count":
             operation = re.search(r'operation="([^"]+)"', match.group(2) or "")
             if operation and re.search(r'scheme="s3"', match.group(2) or ""):
-                requests[operation.group(1)] = requests.get(operation.group(1), 0) + float(match.group(3))
+                operations[operation.group(1)] = operations.get(operation.group(1), 0) + float(match.group(3))
             continue
         if not match or not match.group(1).startswith(PREFIX):
             continue
@@ -58,7 +59,7 @@ def parse_metrics(text: str) -> dict:
         else:
             samples[name] = value
     return {"samples": samples, "buckets": {name: sorted(items) for name, items in buckets.items()},
-            "requests": requests}
+            "operations": operations}
 
 
 def quantile(q: float, buckets: list) -> float | None:
@@ -154,8 +155,8 @@ def traffic(end: dict, start: dict, seconds, wal: dict) -> dict:
             "objects_per_second": per_second, "mean_object_bytes": mean,
             "sealed_on_size": None if per_second is None else
             per_second > 1.05 / interval_seconds(wal) or (mean or 0) >= 0.9 * 8 * 2**20,
-            "requests": {op: n - start["requests"].get(op, 0) for op, n in end["requests"].items()
-                         if n != start["requests"].get(op, 0)}}
+            "operations": {op: n - start["operations"].get(op, 0) for op, n in end["operations"].items()
+                           if n != start["operations"].get(op, 0)}}
 
 
 def crash_cycles(path: Path, wal: dict) -> list:
@@ -173,7 +174,7 @@ def crash_cycles(path: Path, wal: dict) -> list:
                   "indexed_before_kill": before.get("indexed_objects"),
                   "recovery_seconds": after["samples"].get("recovery_seconds_sum") if once else None,
                   "recovered_objects": after["samples"].get("recovered_objects_total", 0 if once else None),
-                  "restart_requests": after["requests"],
+                  "restart_operations": after["operations"],
                   "replay": replay(path / f"server-restart-{cycle['cycle']}.log", after)}
     return cycles
 
@@ -231,12 +232,12 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
         row[counter] = metrics["samples"].get(counter, 0 if active else None)
     created = row["created_objects_total"]
     row["creates_per_minute"] = created * 60 / load_seconds if created is not None and load_seconds else None
-    row |= traffic(metrics, {"samples": {}, "requests": {}}, load_seconds, cell.get("wal", {}))
-    row["restart_requests"] = restarted["requests"]
+    row |= traffic(metrics, {"samples": {}, "operations": {}}, load_seconds, cell.get("wal", {}))
+    row["restart_operations"] = restarted["operations"]
     if cell.get("idle_seconds"):
         idle = traffic(final, metrics, cell["idle_seconds"], cell.get("wal", {}))
         end = final["samples"].get("created_objects_total")
-        row["idle"] = {"seconds": cell["idle_seconds"], "requests": idle["requests"],
+        row["idle"] = {"seconds": cell["idle_seconds"], "operations": idle["operations"],
                        "creates": None if end is None else end - metrics["samples"].get("created_objects_total", 0)}
     if row["mode"] == "drop":
         written = read_metrics(path / "metrics-written.prom")["samples"]
@@ -287,8 +288,8 @@ def ratios(rows: list) -> list:
     return result
 
 
-def operations(requests: dict) -> str:
-    return ", ".join(f"{op} {n:,.0f}" for op, n in sorted(requests.items())) or "—"
+def operations(counts: dict) -> str:
+    return ", ".join(f"{op} {n:,.0f}" for op, n in sorted(counts.items())) or "—"
 
 
 def overrides(env: dict) -> str:
@@ -327,8 +328,8 @@ def render(run: dict, rows: list, pairs: list) -> str:
             *(fmt(r[c]) for c in COUNTERS[1:]), fmt(r["server_cpu_cores"], 2),
             "—" if r["host_cpu_busy"] is None else f"{r['host_cpu_busy']:.0%} of {r['host_cpus'] or '?'}",
             f"`{r['wal_device'] or '—'}` |"]))
-    lines += ["", "| Cell | WAL MB/s | Objects/s | Mean object MiB | Sealed on size | Requests during the load "
-              "| Requests of the restart | Idle s | Idle creates | Idle requests |",
+    lines += ["", "| Cell | WAL MB/s | Objects/s | Mean object MiB | Sealed on size | S3 operations during the load "
+              "| S3 operations of the restart | Idle s | Idle creates | Idle S3 operations |",
               "| --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | --- |"]
     for r in loads:
         idle = r.get("idle") or {}
@@ -336,8 +337,8 @@ def render(run: dict, rows: list, pairs: list) -> str:
             f"| {label(r)}", fmt(r["wal_mb_per_second"], 1), fmt(r["objects_per_second"], 1),
             fmt(r["mean_object_bytes"], 2, 1 / 2**20),
             "—" if r["sealed_on_size"] is None else ("yes" if r["sealed_on_size"] else "no"),
-            operations(r["requests"]), operations(r["restart_requests"]) if "restart" in r else "—",
-            fmt(idle.get("seconds")), fmt(idle.get("creates")), operations(idle["requests"]) if idle else "—"]) + " |")
+            operations(r["operations"]), operations(r["restart_operations"]) if "restart" in r else "—",
+            fmt(idle.get("seconds")), fmt(idle.get("creates")), operations(idle["operations"]) if idle else "—"]) + " |")
     crashes = [r for r in rows if r["mode"] == "crash"]
     if crashes:
         lines += ["", "| Cell | Cycle | Kill after s | Acked | Present | Lost | Lost rows | Extra | In flight "
@@ -358,7 +359,7 @@ def render(run: dict, rows: list, pairs: list) -> str:
                     fmt(c.get("restart_seconds"), 2), fmt(c.get("recovery_seconds"), 3),
                     fmt(c.get("recovered_objects")), fmt(c.get("pin_rows")), verdict]) + " |")
         lines += ["", "| Cell | Cycle | Load s | WAL MB/s | Objects/s | Mean object MiB | Sealed on size "
-                  "| Requests until the kill | Requests of the restart |",
+                  "| S3 operations until the kill | S3 operations of the restart |",
                   "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |"]
         for r in crashes:
             for c in r["cycles"]:
@@ -366,7 +367,7 @@ def render(run: dict, rows: list, pairs: list) -> str:
                     f"| {r['id']}", fmt(c["cycle"]), fmt(c.get("load_seconds"), 1), fmt(c["wal_mb_per_second"], 1),
                     fmt(c["objects_per_second"], 1), fmt(c["mean_object_bytes"], 2, 1 / 2**20),
                     "—" if c["sealed_on_size"] is None else ("yes" if c["sealed_on_size"] else "no"),
-                    operations(c["requests"]), operations(c["restart_requests"])]) + " |")
+                    operations(c["operations"]), operations(c["restart_operations"])]) + " |")
         pinned = [r for r in crashes if r.get("objects_samples")]
         if pinned:
             lines += ["", "| Cell | Indexed objects every 30 s | Missing samples | Deleted objects at the end "
