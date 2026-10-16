@@ -303,10 +303,10 @@ impl RawSeriesChunkCursor {
                 return Ok(Some(batch));
             }
             builder.push(row)?;
-            if builder.is_full() {
-                if let Some(batch) = builder.flush()? {
-                    return Ok(Some(batch));
-                }
+            if builder.is_full()
+                && let Some(batch) = builder.flush()?
+            {
+                return Ok(Some(batch));
             }
         }
     }
