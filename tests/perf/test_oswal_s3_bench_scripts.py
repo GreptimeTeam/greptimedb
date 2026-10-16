@@ -929,15 +929,19 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 2)
 
     def test_a_pinned_cell_fails_when_objects_the_pin_held_are_collected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            # One object lies below the pin; the first server collects more before its first periodic sample.
-            cells, _, _, _ = self.run_crash(root, pin=True, full_metrics="1", env={
-                "FAKE_COUNT": "1", "FAKE_COLLECTING": "1", "OSWAL_SAMPLE_SECONDS": "30"})
-            cell = root / "results" / "cells" / "crash-1-8-D"
-            self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 11, cells.stdout + cells.stderr)
-            self.assertFalse((cell / "objects.tsv").exists())
-            self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 1)
+        # Each server collects two objects before its kill and no periodic sample is taken. With one
+        # object below the pin the first server already exceeds it; with two, only both together do.
+        for below_pin, failed_cycle in (("1", 1), ("2", 2)):
+            with self.subTest(below_pin=below_pin), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                cells, _, _, _ = self.run_crash(root, pin=True, full_metrics=below_pin, env={
+                    "FAKE_COUNT": "1", "FAKE_COLLECTING": "1", "OSWAL_SAMPLE_SECONDS": "30"})
+                cell = root / "results" / "cells" / "crash-1-8-D"
+                self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 11,
+                                 cells.stdout + cells.stderr)
+                self.assertFalse((cell / "objects.tsv").exists())
+                self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), failed_cycle)
+                self.assertIn(f"cycle {failed_cycle} collected WAL objects the pin held", cells.stdout + cells.stderr)
 
     def test_a_pinned_cell_may_collect_the_objects_below_its_pin_late(self):
         with tempfile.TemporaryDirectory() as directory:
