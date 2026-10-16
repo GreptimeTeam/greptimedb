@@ -70,8 +70,10 @@ API under `src/meta-srv/src/service/admin/`.
   supervisor; without one, allocation skips source lookup. DDL configurators can
   install a query provider before procedure loaders are registered. Repartition
   and failover resolve source requirements before selection. Each selector allows
-  one unconstrained retry on candidate shortage only when explicitly configured;
-  metadata errors propagate. Procedure state is unchanged.
+  one unconstrained retry on candidate shortage when its context permits it.
+  Failover always permits this retry and continues without affinity when source
+  resolution fails or returns no requirements; DDL/repartition retain their own
+  policy. Candidate discovery errors still propagate. Procedure state is unchanged.
 - **Selector stats fields**: keep `selector/` implementations in sync with the
   stats they consume.
 
