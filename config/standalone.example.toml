@@ -541,6 +541,9 @@ max_running_procedures = 128
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
 
+## Enables bounded native raw-series instant-vector execution. Unsupported queries retain ordinary execution before native consumption.
+experimental_native_promql = false
+
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.

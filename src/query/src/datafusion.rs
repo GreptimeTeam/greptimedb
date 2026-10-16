@@ -16,6 +16,7 @@
 
 mod error;
 mod json_expr_planner;
+pub(crate) mod native_promql;
 mod pg_oid_alias_expr_planner;
 mod planner;
 
@@ -97,7 +98,7 @@ pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
 /// Whether to fallback to the original plan when failed to push down.
 pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
 
-fn raw_expr_supported(expr: &Expr) -> bool {
+pub(crate) fn raw_expr_supported(expr: &Expr) -> bool {
     let mut supported = true;
     let _ = expr.apply(|node| {
         match node {
@@ -604,6 +605,11 @@ impl DatafusionQueryEngine {
             .query_planner()
             .create_physical_plan(&optimized_plan, state)
             .await?;
+        let physical_plan = if self.state.experimental_native_promql() {
+            native_promql::try_select(&optimized_plan, physical_plan)?
+        } else {
+            physical_plan
+        };
 
         logger.phy_plan = Some(physical_plan.clone());
         drop(logger);

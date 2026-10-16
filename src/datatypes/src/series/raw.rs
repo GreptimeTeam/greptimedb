@@ -120,7 +120,8 @@ pub struct RawSeriesChunk {
     pub time: RawTimeAxis,
     /// Field values aligned with the source timestamps.
     pub fields: SeriesFields,
-    /// Whether this is the final chunk for this input stream's series, not all regions.
+    /// Whether this is the final chunk for this series in the stream exposing it.
+    /// A merge must recompute this marker across all of its inputs.
     pub is_last: bool,
 }
 

@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(test)]
+#[path = "standalone/native_promql_tests.rs"]
+mod native_promql_tests;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -91,6 +95,7 @@ pub struct GreptimeDbStandaloneBuilder {
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
     mito_config: Option<mito2::config::MitoConfig>,
+    query_options: Option<query::options::QueryOptions>,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -112,7 +117,15 @@ impl GreptimeDbStandaloneBuilder {
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
             mito_config: None,
+            query_options: None,
         }
+    }
+
+    /// Overrides the query options for this test instance.
+    #[must_use]
+    pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
+        self.query_options = Some(options);
+        self
     }
 
     /// Overrides the Mito configuration for this test instance.
@@ -400,6 +413,10 @@ impl GreptimeDbStandaloneBuilder {
             },
             ..StandaloneOptions::default()
         };
+
+        if let Some(query_options) = &self.query_options {
+            standalone_opts.query = query_options.clone();
+        }
 
         if let Some(config) = &self.mito_config {
             for engine in &mut standalone_opts.region_engine {

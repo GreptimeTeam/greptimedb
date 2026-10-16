@@ -288,6 +288,88 @@ fn fixture(
     )
 }
 
+fn named_fixture() -> (
+    Arc<RegionScanExec>,
+    Arc<Mutex<State>>,
+    store_api::metadata::RegionMetadataRef,
+) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
+        ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
+    ]));
+    let batch = RecordBatch::new(
+        schema.clone(),
+        vec![
+            Arc::new(datatypes::vectors::StringVector::from_slice(&["node"])) as VectorRef,
+            Arc::new(datatypes::vectors::Float64Vector::from_slice([2.0])) as VectorRef,
+            Arc::new(datatypes::vectors::Float64Vector::from_slice([1.0])) as VectorRef,
+            Arc::new(TimestampMillisecondVector::from_slice([42])) as VectorRef,
+        ],
+    )
+    .unwrap();
+    let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: 7,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 11,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 12,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 13,
+        })
+        .primary_key(vec![7]);
+    let metadata = Arc::new(builder.build().unwrap());
+    let raw_schema = Arc::new(SeriesSchema {
+        fields: vec![
+            FieldSpec {
+                name: Arc::from("aux"),
+            },
+            FieldSpec {
+                name: Arc::from("value"),
+            },
+        ]
+        .into(),
+        eval_grid: None,
+    });
+    let state = Arc::new(Mutex::new(State::default()));
+    let scanner = TestScanner {
+        properties: ScannerProperties::default(),
+        metadata: metadata.clone(),
+        batches,
+        raw_schema: Some(raw_schema),
+        chunks: vec![],
+        state: state.clone(),
+    };
+    (
+        Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap()),
+        state,
+        metadata,
+    )
+}
+
 fn series_schema() -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
         fields: vec![FieldSpec {
@@ -313,6 +395,102 @@ fn chunk(schema: &SeriesSchema) -> RawSeriesChunk {
 }
 fn context() -> Arc<TaskContext> {
     datafusion::prelude::SessionContext::new().task_ctx()
+}
+
+#[test]
+fn named_series_scan_uses_actual_metadata_and_requested_field_order() {
+    let (scan, state, metadata) = named_fixture();
+    let scan = Arc::new(scan.with_new_partitions(vec![vec![]], 1).unwrap());
+    let native = scan
+        .try_to_named_series_scan(
+            "cpu",
+            &["host".to_string()],
+            &["aux".to_string(), "value".to_string()],
+        )
+        .unwrap()
+        .unwrap();
+    let RawLabelSource::PrimaryKey {
+        physical_metadata,
+        logical_tags,
+        ..
+    } = native.label_source()
+    else {
+        panic!("expected primary-key label source");
+    };
+    assert!(Arc::ptr_eq(&metadata, physical_metadata));
+    assert_eq!(logical_tags.len(), 1);
+    assert_eq!(logical_tags[0].column_id, 7);
+    assert_ne!(logical_tags[0].column_id, 1);
+    assert_eq!(logical_tags[0].name.as_ref(), "host");
+    assert_eq!(
+        native
+            .series_schema
+            .fields
+            .iter()
+            .map(|field| field.name.as_ref())
+            .collect::<Vec<_>>(),
+        ["aux", "value"]
+    );
+    let state = state.lock().unwrap();
+    assert_eq!(state.preflights, 1);
+    assert_eq!(state.raw_calls, 0);
+    assert_eq!(state.legacy_calls, 0);
+}
+
+#[test]
+fn named_series_scan_declines_invalid_names_before_raw_preflight() {
+    let (scan, state, _) = named_fixture();
+    let scan = Arc::new(scan.with_new_partitions(vec![vec![]], 1).unwrap());
+    for (tags, fields) in [
+        (vec!["missing"], vec!["value"]),
+        (vec!["aux"], vec!["value"]),
+        (vec!["ts"], vec!["value"]),
+        (vec!["host", "host"], vec!["value"]),
+        (vec!["__sequence"], vec!["value"]),
+        (vec!["__table_id"], vec!["value"]),
+        (vec!["host"], vec!["missing"]),
+        (vec!["host"], vec!["ts"]),
+        (vec!["host"], vec!["value", "value"]),
+    ] {
+        let tags = tags.into_iter().map(str::to_string).collect::<Vec<_>>();
+        let fields = fields.into_iter().map(str::to_string).collect::<Vec<_>>();
+        assert!(
+            scan.clone()
+                .try_to_named_series_scan("cpu", &tags, &fields)
+                .unwrap()
+                .is_none()
+        );
+    }
+    let state = state.lock().unwrap();
+    assert_eq!(state.preflights, 0);
+    assert_eq!(state.raw_calls, 0);
+}
+
+#[tokio::test]
+async fn named_series_scan_raw_capability_declines_and_legacy_scan_is_unchanged() {
+    let (scan, state, _) = named_fixture();
+    state.lock().unwrap().raw_schema = Some(None);
+    let scan = Arc::new(scan.with_new_partitions(vec![vec![]], 1).unwrap());
+    assert!(
+        scan.clone()
+            .try_to_named_series_scan(
+                "cpu",
+                &["host".to_string()],
+                &["aux".to_string(), "value".to_string()]
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(state.lock().unwrap().preflights, 1);
+    assert_eq!(state.lock().unwrap().raw_calls, 0);
+    let rows = scan
+        .execute(0, context())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    assert_eq!(state.lock().unwrap().legacy_calls, 1);
 }
 
 #[tokio::test]

@@ -362,6 +362,9 @@ metadata_cache_tti = "5m"
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
+## Enables bounded native raw-series instant-vector execution. Unsupported queries retain ordinary execution before native consumption.
+## This frontend option does not configure datanodes.
+experimental_native_promql = false
 ## Whether to allow query fallback when push down optimize fails.
 ## Default to false, meaning when push down optimize failed, return error msg
 allow_query_fallback = false

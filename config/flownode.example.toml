@@ -155,6 +155,9 @@ default_ratio = 1.0
 ## Default to 1, so it won't use too much cpu or memory
 parallelism = 1
 
+## Enables bounded native raw-series instant-vector execution. Unsupported queries retain ordinary execution before native consumption.
+experimental_native_promql = false
+
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.

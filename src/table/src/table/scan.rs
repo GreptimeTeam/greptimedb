@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -19,7 +20,7 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_query::request::RawSeriesRequest;
+use common_query::request::{RawSeriesRequest, RawSeriesTag};
 use common_query::series_frame::{pack_raw_series, raw_series_frame_schema_with_ordering};
 use common_recordbatch::adapter::{
     RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
@@ -413,6 +414,92 @@ impl RegionScanExec {
             .unwrap()
             .properties()
             .query_stat_counters()
+    }
+
+    /// Resolves authorized logical names against this prepared scanner's physical metadata,
+    /// then selects a native raw-series leaf through the existing binding path.
+    ///
+    /// The caller is responsible for authorizing the logical table and supplying its complete
+    /// logical tag names and requested field names. This method does not discover logical schema
+    /// or authorize names; it resolves them only against this scanner's metadata snapshot.
+    pub fn try_to_named_series_scan(
+        self: Arc<Self>,
+        metric_name: &str,
+        logical_tags: &[String],
+        field_names: &[String],
+    ) -> DfResult<Option<Arc<SeriesScanExec>>> {
+        if !self.is_partition_set || field_names.is_empty() {
+            return Ok(None);
+        }
+
+        if !self.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let binding = {
+            let scanner = self.scanner.lock().unwrap();
+            let metadata = scanner.metadata();
+            if scanner.properties().num_partitions().max(1) != 1 {
+                return Ok(None);
+            }
+
+            let primary_key_ids = metadata
+                .primary_key_columns()
+                .map(|column| column.column_id)
+                .collect::<HashSet<_>>();
+            let mut names = HashSet::new();
+            let mut column_ids = HashSet::new();
+            let mut tags = Vec::with_capacity(logical_tags.len());
+            for name in logical_tags {
+                if !names.insert(name.as_str())
+                    || name == "__name__"
+                    || store_api::metric_engine_consts::is_metric_engine_internal_column(name)
+                    || store_api::storage::consts::is_internal_column(name)
+                {
+                    return Ok(None);
+                }
+                let Some(column) = metadata.column_by_name(name) else {
+                    return Ok(None);
+                };
+                if column.semantic_type != SemanticType::Tag
+                    || store_api::storage::consts::ReservedColumnId::is_reserved(column.column_id)
+                    || !primary_key_ids.contains(&column.column_id)
+                    || !column_ids.insert(column.column_id)
+                {
+                    return Ok(None);
+                }
+                tags.push(RawSeriesTag {
+                    column_id: column.column_id,
+                    name: name.clone(),
+                });
+            }
+
+            let mut fields = Vec::with_capacity(field_names.len());
+            for name in field_names {
+                if !names.insert(name.as_str()) {
+                    return Ok(None);
+                }
+                let Some(column) = metadata.column_by_name(name) else {
+                    return Ok(None);
+                };
+                if column.semantic_type != SemanticType::Field
+                    || store_api::storage::consts::ReservedColumnId::is_reserved(column.column_id)
+                    || !column_ids.insert(column.column_id)
+                {
+                    return Ok(None);
+                }
+                fields.push(column.column_id);
+            }
+
+            RawSeriesRequest {
+                version: 1,
+                physical_metadata: metadata.as_ref().clone(),
+                metric_name: metric_name.to_string(),
+                logical_tags: tags,
+                field_ids: fields,
+            }
+        };
+
+        self.try_to_bound_series_scan(&binding)
     }
 
     /// Selects a native raw-series leaf only when the prepared scanner matches the binding.
@@ -1198,6 +1285,39 @@ mod test {
             schema,
             RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap(),
         )
+    }
+
+    #[test]
+    fn named_series_scan_requires_prepared_single_partition() {
+        let (_, plan) = dynamic_filter_fixture(5686);
+        let plan = Arc::new(plan);
+        assert!(
+            plan.clone()
+                .try_to_named_series_scan("cpu", &[], &["a".to_string()])
+                .unwrap()
+                .is_none()
+        );
+
+        let prepared = Arc::new(
+            plan.with_new_partitions(vec![vec![]], 1)
+                .expect("prepare scanner partitions"),
+        );
+        for (tags, fields) in [
+            (vec![], vec!["missing".to_string()]),
+            (vec!["a".to_string()], vec!["a".to_string()]),
+            (
+                vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string()],
+                vec!["a".to_string()],
+            ),
+        ] {
+            assert!(
+                prepared
+                    .clone()
+                    .try_to_named_series_scan("cpu", &tags, &fields)
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

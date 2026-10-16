@@ -91,6 +91,9 @@ pub struct QueryOptions {
     /// Whether to expose per-region query load metrics.
     #[serde(skip)]
     pub enable_per_region_metrics: bool,
+    /// Enables bounded native raw-series instant-vector execution. Defaults to `false`;
+    /// unsupported queries retain ordinary execution before native consumption.
+    pub experimental_native_promql: bool,
     /// Experimental: spill-to-disk mode.
     /// - `default`: preserve DataFusion built-in OS temp directory behavior.
     /// - `custom`: explicitly configure spill path, max directory size, and compression.
@@ -120,6 +123,7 @@ impl Default for QueryOptions {
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
+            experimental_native_promql: false,
             experimental_spill_mode: QuerySpillMode::Default,
             experimental_spill_path: None,
             experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
@@ -830,6 +834,25 @@ mod flow_extension_tests {
 #[cfg(test)]
 mod query_options_tests {
     use super::*;
+
+    #[test]
+    fn test_experimental_native_promql_option() {
+        assert!(!QueryOptions::default().experimental_native_promql);
+
+        let enabled: QueryOptions = toml::from_str("experimental_native_promql = true").unwrap();
+        assert!(enabled.experimental_native_promql);
+
+        for value in [false, true] {
+            let options = QueryOptions {
+                experimental_native_promql: value,
+                ..Default::default()
+            };
+            let serialized = toml::to_string(&options).unwrap();
+            assert!(serialized.contains(&format!("experimental_native_promql = {value}")));
+            let parsed: QueryOptions = toml::from_str(&serialized).unwrap();
+            assert_eq!(parsed.experimental_native_promql, value);
+        }
+    }
 
     #[test]
     fn test_parse_spill_options_from_toml() {
