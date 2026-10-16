@@ -185,8 +185,7 @@ line (ask the user; some prefer to keep it).
 
 ## 6. Human-curated sections (insert after the `Release date:` line)
 
-**Style.** Follow the Google developer documentation style guide (apply the
-`tech-doc-style-english` skill if it is installed): sentence-case headings, active voice, present
+**Style.** Follow the Google developer documentation style guide: sentence-case headings, active voice, present
 tense for behavior, American spelling, serial comma, code font for identifiers, bold only for UI
 names. Keep it short:
 - Intro: two sentences at most, what the release covers and its main theme.
@@ -294,18 +293,15 @@ The release note is also published as a blog post in **`GreptimeTeam/docs`**.
   template. The checklist items are the author's to confirm: check the ones you did, and for one
   that doesn't apply, check it and say why. For pre-releases, state the tagged SHA (§3) under
   Verification.
-- **Build the site before opening the PR.** A new worktree has no `node_modules`, and an old
-  install can miss dependencies added since. Use the pnpm version pinned in `package.json`
-  (`packageManager`); a newer pnpm fails the frozen install with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`:
+- **Build the site before opening the PR.** A new worktree has no `node_modules`. Install with
+  the pnpm version pinned in `package.json` (`packageManager`), as CI does:
   ```
   cd /tmp/docs-release-note
   pm=$(jq -r .packageManager package.json)   # e.g. pnpm@8.6.0
   npx -y "$pm" install --frozen-lockfile
   npx -y "$pm" build
   ```
-  The docs repo's husky hook sources `.husky/_/husky.sh`, an ignored file that exists only in a
-  checkout where husky was installed; if `git commit` fails on it, copy `<docs>/.husky/_` into
-  the worktree. If the build fails, fix it or stop; don't mark the PR ready for review.
+  If the build fails, fix it or stop; don't mark the PR ready for review.
 - Commit with sign-off, push, open a **draft** PR, then remove the worktree:
   ```
   git -C /tmp/docs-release-note add blog/release-X-Y-Z.md
