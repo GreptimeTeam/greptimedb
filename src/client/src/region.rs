@@ -28,15 +28,12 @@ use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_error::ext::{BoxedError, ErrorExt, PlainError};
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::Datanode;
-use common_query::error::Error as CommonQueryError;
-use common_query::request::{QueryRequest, RAW_SERIES_REQUEST_EXTENSION_KEY, RawSeriesRequest};
-use common_query::series_frame::{raw_series_frame_ordering, unpack_raw_series};
-use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
+use common_query::request::{QueryRequest, RawSeriesRequest};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
@@ -112,69 +109,10 @@ impl RegionRequester {
     /// not evidence of provenance or an independent authorization grant.
     pub async fn handle_raw_series_query(
         &self,
-        mut request: QueryRequest,
+        request: QueryRequest,
         binding: RawSeriesRequest,
     ) -> MetaResult<SendableRawSeriesStream> {
-        if request.region_id != binding.physical_metadata.region_id {
-            return Err(BoxedError::new(PlainError::new(
-                "raw-series request region does not match binding".to_string(),
-                StatusCode::InvalidArguments,
-            )))
-            .context(meta_error::ExternalSnafu);
-        }
-        let (expected_schema, label_source) = binding
-            .bind(Arc::new(binding.physical_metadata.clone()))
-            .map_err(|error| {
-                BoxedError::new(CommonQueryError::GeneralDataFusion {
-                    error,
-                    location: location!(),
-                })
-            })
-            .context(meta_error::ExternalSnafu)?;
-        if request
-            .header
-            .as_ref()
-            .and_then(|header| header.query_context.as_ref())
-            .is_some_and(|context| {
-                context
-                    .extensions
-                    .contains_key(RAW_SERIES_REQUEST_EXTENSION_KEY)
-            })
-        {
-            return Err(BoxedError::new(PlainError::new(
-                "raw-series request marker already exists".to_string(),
-                StatusCode::InvalidArguments,
-            )))
-            .context(meta_error::ExternalSnafu);
-        }
-        let extension = binding
-            .to_extension_value()
-            .map_err(|error| {
-                BoxedError::new(CommonQueryError::GeneralDataFusion {
-                    error,
-                    location: location!(),
-                })
-            })
-            .context(meta_error::ExternalSnafu)?;
-        request
-            .header
-            .get_or_insert_default()
-            .query_context
-            .get_or_insert_default()
-            .extensions
-            .insert(RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(), extension);
-        let stream = Datanode::handle_query(self, request).await?;
-        let ordering = raw_series_frame_ordering(stream.schema().arrow_schema().as_ref());
-        let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
-        ordering
-            .and_then(|ordering| unpack_raw_series(stream, expected_schema, label_source, ordering))
-            .map_err(|error| {
-                BoxedError::new(CommonQueryError::GeneralDataFusion {
-                    error,
-                    location: location!(),
-                })
-            })
-            .context(meta_error::ExternalSnafu)
+        Datanode::handle_raw_series_query(self, request, binding).await
     }
 
     pub async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
@@ -502,6 +440,7 @@ mod tests {
     };
     use common_error::ext::RetryHint;
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+    use common_query::request::RAW_SERIES_REQUEST_EXTENSION_KEY;
     use common_recordbatch::adapter::RecordBatchMetrics;
     use datatypes::arrow::array::Int32Array;
     use datatypes::prelude::{ConcreteDataType, VectorRef};

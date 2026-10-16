@@ -1810,3 +1810,230 @@ async fn test_native_histogram_raw_flight_preserves_payload_across_flush() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_native_raw_series_through_production_datanode_trait() {
+    use api::v1::region::{ListMetadataRequest, RegionRequest, region_request};
+    use client::client_manager::NodeClients;
+    use common_meta::node_manager::DatanodeManager;
+    use common_meta::peer::Peer;
+    use common_query::request::RAW_SERIES_REQUEST_EXTENSION_KEY;
+    use common_query::request::{QueryRequest as LogicalQueryRequest, RawSeriesTag};
+    use datafusion::common::TableReference;
+    use datafusion_expr::{col, lit};
+    use datatypes::series::raw::RawSeriesOrdering;
+    use datatypes::series::samples::SampleRef;
+    use futures_util::TryStreamExt;
+    use mito2::test_util::sst_util::new_primary_key;
+    use store_api::metadata::RegionMetadata;
+    use store_api::region_engine::RawLabelSource;
+
+    const TABLE: &str = "native_trait_raw_series_tcp";
+    common_telemetry::init_default_ut_logging();
+    let cluster = build_cluster("test_native_raw_series_through_production_datanode_trait").await;
+    let frontend = cluster.fe_instance().clone();
+    execute_sql(&frontend, &format!(
+        "CREATE TABLE {TABLE} (host STRING, left_value DOUBLE, right_value DOUBLE, predicate_value BIGINT, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(host)) ENGINE=mito"
+    )).await;
+    execute_sql(&frontend, &format!(
+        "INSERT INTO {TABLE} VALUES ('alpha', 1.25, 11.0, 9007199254740992, 1000), ('alpha', NULL, -0.0, 9007199254740993, 2000)"
+    )).await;
+
+    let leaders = region_leaders(&frontend, TABLE).await;
+    assert_eq!(1, leaders.len());
+    let (&region_id, &(node_id, ref address)) = leaders.iter().next().unwrap();
+    // The fixture frontend uses duplex clients; this fresh production client uses counted TCP.
+    let datanode = NodeClients::default()
+        .datanode(&Peer {
+            id: node_id,
+            addr: address.clone(),
+            ..Default::default()
+        })
+        .await;
+    let list_response = datanode
+        .handle(RegionRequest {
+            header: Some(RegionRequestHeader::default()),
+            body: Some(region_request::Body::ListMetadata(ListMetadataRequest {
+                region_ids: vec![region_id],
+            })),
+        })
+        .await
+        .unwrap();
+    let metadata_list: Vec<Option<RegionMetadata>> =
+        serde_json::from_slice(&list_response.metadata).unwrap();
+    assert_eq!(1, metadata_list.len(), "ListMetadata response count");
+    let metadata = metadata_list
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("metadata for requested region");
+    assert_eq!(region_id, metadata.region_id.as_u64());
+
+    let ctx = query_ctx();
+    let snapshot = region_server(&cluster, node_id)
+        .mito_engine()
+        .unwrap()
+        .find_region(RegionId::from_u64(region_id))
+        .unwrap()
+        .find_committed_sequence();
+    ctx.set_snapshot(region_id, snapshot);
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO {TABLE} VALUES ('alpha', 8.5, 99.0, 9007199254740994, 3000)"),
+    )
+    .await;
+
+    let base = plan_sql(&frontend, &format!("SELECT * FROM {TABLE}"), &ctx).await;
+    let source = table_source(&base).expect("ordinary plan table source");
+    let field_id = |name: &str| metadata.column_by_name(name).unwrap().column_id;
+    let plan = LogicalPlanBuilder::scan_with_filters(
+        TableReference::bare(TABLE),
+        source,
+        Some(vec![
+            metadata
+                .column_metadatas
+                .iter()
+                .position(|c| c.column_schema.name == "right_value")
+                .unwrap(),
+            metadata
+                .column_metadatas
+                .iter()
+                .position(|c| c.column_schema.name == "left_value")
+                .unwrap(),
+        ]),
+        vec![col("predicate_value").gt(lit(9_007_199_254_740_992_i64))],
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let binding = RawSeriesRequest {
+        version: 1,
+        physical_metadata: metadata.clone(),
+        metric_name: TABLE.to_string(),
+        logical_tags: vec![RawSeriesTag {
+            column_id: field_id("host"),
+            name: "host".into(),
+        }],
+        field_ids: vec![field_id("right_value"), field_id("left_value")],
+    };
+    let header = region_request_header(&ctx);
+    let baseline = rpc_requests(&cluster, node_id);
+    let raw = datanode
+        .handle_raw_series_query(
+            LogicalQueryRequest {
+                header: Some(header.clone()),
+                region_id: RegionId::from_u64(region_id),
+                plan: plan.clone(),
+            },
+            binding.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        baseline + 1,
+        rpc_requests(&cluster, node_id),
+        "exactly one TCP Flight DoGet"
+    );
+    assert_eq!(
+        vec!["right_value", "left_value"],
+        raw.schema()
+            .fields
+            .iter()
+            .map(|f| f.name.as_ref())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(RawSeriesOrdering::ReadKeyThenTime, raw.ordering());
+    assert!(matches!(
+        raw.label_source(),
+        RawLabelSource::PrimaryKey { .. }
+    ));
+    let chunks = raw.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(1, chunks.len());
+    let chunk = &chunks[0];
+    assert!(chunk.is_last);
+    assert!(chunk.metric.is_none());
+    assert_eq!(2, chunk.fields.len());
+    assert_eq!(chunk.time.len(), chunk.fields.get(0).unwrap().len());
+    assert_eq!(chunk.time.len(), chunk.fields.get(1).unwrap().len());
+    assert_eq!(new_primary_key(&["alpha"]), chunk.read_key.as_slice());
+    assert_eq!(&[2000], chunk.time.as_explicit().unwrap().as_ref());
+    assert!(
+        matches!(chunk.fields.get(0).unwrap().sample(0), SampleRef::Float(v) if v.to_bits() == (-0.0_f64).to_bits())
+    );
+    assert!(matches!(
+        chunk.fields.get(1).unwrap().sample(0),
+        SampleRef::Missing
+    ));
+
+    let stale_baseline = rpc_requests(&cluster, node_id);
+    let mut stale = binding.clone();
+    stale.physical_metadata.schema_version += 1;
+    let message = expect_raw_unsupported(
+        datanode
+            .handle_raw_series_query(
+                LogicalQueryRequest {
+                    header: Some(header.clone()),
+                    region_id: RegionId::from_u64(region_id),
+                    plan: plan.clone(),
+                },
+                stale,
+            )
+            .await,
+    )
+    .await;
+    assert!(
+        message.contains("Raw-series metadata mismatch"),
+        "stale metadata rejection was not diagnostic: {message}"
+    );
+    assert_eq!(stale_baseline + 1, rpc_requests(&cluster, node_id));
+
+    let mut marked_header = header.clone();
+    marked_header
+        .query_context
+        .as_mut()
+        .unwrap()
+        .extensions
+        .insert(
+            RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(),
+            "{}".to_string(),
+        );
+    let marker_baseline = rpc_requests(&cluster, node_id);
+    let message = expect_raw_unsupported(
+        datanode
+            .handle_raw_series_query(
+                LogicalQueryRequest {
+                    header: Some(marked_header),
+                    region_id: RegionId::from_u64(region_id),
+                    plan: plan.clone(),
+                },
+                binding.clone(),
+            )
+            .await,
+    )
+    .await;
+    assert!(
+        message.contains("marker already exists"),
+        "unexpected marker rejection: {message}"
+    );
+    assert_eq!(marker_baseline, rpc_requests(&cluster, node_id));
+
+    let mismatch_baseline = rpc_requests(&cluster, node_id);
+    let message = expect_raw_unsupported(
+        datanode
+            .handle_raw_series_query(
+                LogicalQueryRequest {
+                    header: Some(header),
+                    region_id: RegionId::from_u64(region_id + 1),
+                    plan,
+                },
+                binding,
+            )
+            .await,
+    )
+    .await;
+    assert!(
+        message.contains("region does not match binding"),
+        "unexpected region rejection: {message}"
+    );
+    assert_eq!(mismatch_baseline, rpc_requests(&cluster, node_id));
+}

@@ -420,3 +420,220 @@ impl GreptimeDbStandaloneBuilder {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::region::{
+        ListMetadataRequest, RegionRequest, RegionRequestHeader, region_request,
+    };
+    use common_meta::peer::Peer;
+    use common_query::request::{QueryRequest, RawSeriesRequest, RawSeriesTag};
+    use datafusion::common::{ScalarValue, TableReference};
+    use datafusion::logical_expr::TableSource;
+    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
+    use datatypes::series::raw::RawSeriesOrdering;
+    use datatypes::series::samples::SampleRef;
+    use frontend::instance::Instance;
+    use futures_util::TryStreamExt;
+    use mito2::test_util::sst_util::new_primary_key;
+    use query::parser::QueryLanguageParser;
+    use session::context::{QueryContext, QueryContextRef};
+    use store_api::metadata::RegionMetadata;
+    use store_api::region_engine::RawLabelSource;
+
+    use super::GreptimeDbStandaloneBuilder;
+    use crate::test_util::execute_sql;
+
+    fn table_source(plan: &LogicalPlan) -> Option<Arc<dyn TableSource>> {
+        match plan {
+            LogicalPlan::TableScan(scan) => Some(scan.source.clone()),
+            _ => plan.inputs().into_iter().find_map(table_source),
+        }
+    }
+
+    async fn plan_sql(
+        frontend: &Arc<Instance>,
+        sql: &str,
+        query_ctx: QueryContextRef,
+    ) -> LogicalPlan {
+        let statement = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+        frontend
+            .statement_executor()
+            .plan(&statement, query_ctx)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_native_raw_series_default_and_revalidation() {
+        common_telemetry::init_default_ut_logging();
+        const TABLE: &str = "standalone_native_raw_series";
+        let standalone = GreptimeDbStandaloneBuilder::new(TABLE).build().await;
+        let frontend = standalone.fe_instance().clone();
+        execute_sql(&frontend, &format!("CREATE TABLE {TABLE} (host STRING, sample_value DOUBLE, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(host)) ENGINE=mito")).await;
+        execute_sql(
+            &frontend,
+            &format!("INSERT INTO {TABLE} VALUES ('alpha', 1.5, 1000), ('alpha', NULL, 2000)"),
+        )
+        .await;
+
+        let table = frontend
+            .catalog_manager()
+            .table("greptime", "public", TABLE, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let table_id = table.table_info().ident.table_id;
+        let partitions = frontend
+            .partition_manager()
+            .batch_find_table_partitions(&[table_id])
+            .await
+            .unwrap()[&table_id]
+            .clone();
+        assert_eq!(1, partitions.len());
+        let region_id = partitions[0].id;
+
+        let datanode = frontend.node_manager().datanode(&Peer::empty(0)).await;
+        let response = datanode
+            .handle(RegionRequest {
+                header: Some(RegionRequestHeader::default()),
+                body: Some(region_request::Body::ListMetadata(ListMetadataRequest {
+                    region_ids: vec![region_id.as_u64()],
+                })),
+            })
+            .await
+            .unwrap();
+        let metadata: Vec<Option<RegionMetadata>> =
+            serde_json::from_slice(&response.metadata).unwrap();
+        assert_eq!(1, metadata.len());
+        let metadata = metadata[0].as_ref().unwrap();
+        assert_eq!(region_id, metadata.region_id);
+        let region = standalone.mito_engine.find_region(region_id).unwrap();
+        let snapshot = region.find_committed_sequence();
+        let column_id = |name: &str| {
+            metadata
+                .column_metadatas
+                .iter()
+                .find(|column| column.column_schema.name == name)
+                .unwrap()
+                .column_id
+        };
+        let host_id = column_id("host");
+        let value_id = column_id("sample_value");
+
+        let ctx = QueryContext::with_db_name(None);
+        ctx.set_snapshot(region_id.as_u64(), snapshot);
+        let ctx = Arc::new(ctx);
+        let base = plan_sql(&frontend, &format!("SELECT * FROM {TABLE}"), ctx.clone()).await;
+        let source = table_source(&base).unwrap();
+        let plan = LogicalPlanBuilder::scan_with_filters(
+            TableReference::bare(TABLE),
+            source,
+            Some(vec![
+                metadata
+                    .column_metadatas
+                    .iter()
+                    .position(|c| c.column_id == value_id)
+                    .unwrap(),
+            ]),
+            vec![col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(1000), None)))],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let binding = RawSeriesRequest {
+            version: 1,
+            physical_metadata: metadata.clone(),
+            metric_name: TABLE.to_string(),
+            logical_tags: vec![RawSeriesTag {
+                column_id: host_id,
+                name: "host".into(),
+            }],
+            field_ids: vec![value_id],
+        };
+        let request = || QueryRequest {
+            header: Some(RegionRequestHeader {
+                query_context: Some(ctx.as_ref().into()),
+                ..Default::default()
+            }),
+            region_id,
+            plan: plan.clone(),
+        };
+        let raw = datanode
+            .handle_raw_series_query(request(), binding.clone())
+            .await
+            .unwrap();
+        assert_eq!(RawSeriesOrdering::ReadKeyThenTime, raw.ordering());
+        match raw.label_source() {
+            RawLabelSource::PrimaryKey {
+                metric_name,
+                logical_tags,
+                ..
+            } => {
+                assert_eq!(TABLE, metric_name.as_ref());
+                assert_eq!(1, logical_tags.len());
+                assert_eq!(host_id, logical_tags[0].column_id);
+                assert_eq!("host", logical_tags[0].name.as_ref());
+            }
+            RawLabelSource::Explicit => panic!("expected key-backed source"),
+        }
+        assert_eq!("sample_value", raw.schema().fields[0].name.as_ref());
+        let chunks = raw.try_collect::<Vec<_>>().await.unwrap();
+        let mut timestamps = Vec::new();
+        let mut values = Vec::new();
+        for chunk in &chunks {
+            assert_eq!(new_primary_key(&["alpha"]), chunk.read_key.as_slice());
+            assert!(chunk.metric.is_none());
+            assert_eq!(1, chunk.fields.len());
+            assert_eq!(chunk.time.len(), chunk.fields.get(0).unwrap().len());
+            timestamps.extend_from_slice(chunk.time.as_explicit().unwrap());
+            for i in 0..chunk.time.len() {
+                values.push(chunk.fields.get(0).unwrap().sample(i));
+            }
+        }
+        assert_eq!(vec![1000, 2000], timestamps);
+        assert_eq!(2, values.len());
+        assert!(matches!(values[0], SampleRef::Float(1.5)));
+        assert!(matches!(values[1], SampleRef::Missing));
+        assert!(chunks.last().unwrap().is_last);
+        assert!(
+            chunks
+                .iter()
+                .take(chunks.len() - 1)
+                .all(|chunk| !chunk.is_last)
+        );
+
+        execute_sql(
+            &frontend,
+            &format!("INSERT INTO {TABLE} VALUES ('alpha', 9.5, 3000)"),
+        )
+        .await;
+        let old = datanode
+            .handle_raw_series_query(request(), binding.clone())
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            vec![1000, 2000],
+            old.iter()
+                .flat_map(|chunk| chunk.time.as_explicit().unwrap().iter().copied())
+                .collect::<Vec<_>>()
+        );
+
+        let mut stale = binding;
+        stale.physical_metadata.schema_version += 1;
+        let error = match datanode.handle_raw_series_query(request(), stale).await {
+            Ok(_) => panic!("stale raw-series metadata unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Raw-series metadata mismatch"),
+            "unexpected stale binding error chain: {message}"
+        );
+    }
+}

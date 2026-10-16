@@ -399,12 +399,22 @@ impl RegionServer {
         self.handle_read_inner(request).await
     }
 
-    async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+    async fn handle_read_inner(
+        &self,
+        mut request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
             None
         };
+
+        let raw_series = take_raw_series_request(&mut request.header).map_err(|err| {
+            crate::error::InvalidQueryContextSnafu {
+                reason: err.to_string(),
+            }
+            .build()
+        })?;
 
         let ctx = request
             .header
@@ -418,6 +428,22 @@ impl RegionServer {
                 .build()
             })?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
+
+        ensure!(
+            raw_series
+                .as_ref()
+                .is_none_or(|raw| raw.physical_metadata.region_id == request.region_id),
+            InvalidQueryContextSnafu {
+                reason: "raw-series region does not match request region".to_string()
+            }
+        );
+        ensure!(
+            raw_series.is_none() || !has_initial_remote_dyn_filter(&request.header, &query_ctx),
+            InvalidQueryContextSnafu {
+                reason: "raw-series request cannot include initial remote dynamic filters"
+                    .to_string()
+            }
+        );
 
         let region_id = request.region_id;
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
@@ -436,7 +462,11 @@ impl RegionServer {
 
         let stream = self
             .inner
-            .handle_read(QueryRequest { plan, ..request }, query_ctx.clone())
+            .handle_read_with_raw_series(
+                QueryRequest { plan, ..request },
+                query_ctx.clone(),
+                raw_series,
+            )
             .await?;
 
         let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
@@ -1915,15 +1945,6 @@ impl RegionServerInner {
         Ok(())
     }
 
-    pub async fn handle_read(
-        self: &Arc<Self>,
-        request: QueryRequest,
-        query_ctx: QueryContextRef,
-    ) -> Result<SendableRecordBatchStream> {
-        self.handle_read_with_raw_series(request, query_ctx, None)
-            .await
-    }
-
     async fn handle_read_with_raw_series(
         self: &Arc<Self>,
         request: QueryRequest,
@@ -2129,6 +2150,7 @@ mod tests {
     use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+    use datafusion_expr::table_scan;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -2354,6 +2376,70 @@ mod tests {
             err,
             Error::InvalidQueryContext { reason, .. } if reason.contains("initial remote dynamic filters")
         ));
+    }
+
+    #[tokio::test]
+    async fn test_handle_read_rejects_invalid_raw_series_requests_before_provider() {
+        let server = mock_region_server();
+        let raw = raw_series_fixture();
+        let schema = raw.physical_metadata.schema.arrow_schema();
+        let plan = table_scan(Some("normal_table"), schema.as_ref(), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let region_id = RegionId::new(100, 1);
+        let valid_marker = raw.to_extension_value().unwrap();
+        let cases = [
+            (
+                "{}".to_string(),
+                region_id,
+                false,
+                "Invalid raw-series request",
+            ),
+            (
+                valid_marker.clone(),
+                region_id,
+                false,
+                "raw-series region does not match request region",
+            ),
+            (
+                valid_marker,
+                raw.physical_metadata.region_id,
+                true,
+                "raw-series request cannot include initial remote dynamic filters",
+            ),
+        ];
+
+        for (raw_marker, request_region_id, with_dynamic_filter, expected_reason) in cases {
+            let mut extensions =
+                HashMap::from([(RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(), raw_marker)]);
+            if with_dynamic_filter {
+                extensions.insert(
+                    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
+                    "{}".to_string(),
+                );
+            }
+            let request = QueryRequest {
+                header: Some(RegionRequestHeader {
+                    query_context: Some(ApiQueryContext {
+                        extensions,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                region_id: request_region_id,
+                plan: plan.clone(),
+            };
+            let err = server
+                .handle_read(request)
+                .await
+                .err()
+                .expect("invalid raw-series request should be rejected before provider");
+            assert!(matches!(
+                err,
+                Error::InvalidQueryContext { reason, .. } if reason.contains(expected_reason)
+            ));
+        }
     }
 
     #[test]
