@@ -2788,6 +2788,7 @@ dependencies = [
  "common-macro",
  "common-recordbatch",
  "common-time",
+ "criterion 0.7.0",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
