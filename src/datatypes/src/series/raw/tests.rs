@@ -46,8 +46,8 @@ fn metric() -> MetricName {
     .unwrap()
 }
 
-fn times(values: Vec<i64>) -> RawTimeAxis {
-    RawTimeAxis::try_new(values.into()).unwrap()
+fn times(values: Vec<i64>) -> RawTimestamps {
+    RawTimestamps::try_new(values.into()).unwrap()
 }
 
 fn float_fields(first: Vec<Option<f64>>, second: Option<Vec<Option<f64>>>) -> SeriesFields {
@@ -64,8 +64,13 @@ fn constructors_reject_invalid_chunk_boundaries_and_unordered_timestamps() {
     let key = Buffer::from(vec![1_u8]);
     let fields = float_fields(vec![Some(1.0), Some(2.0)], None);
 
-    assert!(RawTimeAxis::try_new(vec![1_i64, 1].into()).is_err());
-    assert!(RawTimeAxis::try_new(vec![2_i64, 1].into()).is_err());
+    assert!(RawTimestamps::try_new(vec![1_i64, 1].into()).is_err());
+    assert!(RawTimestamps::try_new(vec![2_i64, 1].into()).is_err());
+    assert!(
+        RawTimestamps::try_new(ScalarBuffer::from(Vec::<i64>::new()))
+            .unwrap()
+            .is_empty()
+    );
 
     assert!(
         RawSeriesChunk::try_new(
@@ -101,22 +106,6 @@ fn constructors_reject_invalid_chunk_boundaries_and_unordered_timestamps() {
         .is_err()
     );
 
-    // Public enum construction bypasses RawTimeAxis::try_new, so chunk construction
-    // must independently reject duplicate and descending timestamps.
-    for unordered in [vec![1_i64, 1], vec![2_i64, 1]] {
-        assert!(
-            RawSeriesChunk::try_new(
-                &schema,
-                key.clone(),
-                None,
-                RawTimeAxis::Explicit(unordered.into()),
-                fields.clone(),
-                true,
-            )
-            .is_err()
-        );
-    }
-
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(10, 5, 2).unwrap()).unwrap());
     let grid_schema = SeriesSchema {
         fields: schema.fields.clone(),
@@ -131,9 +120,9 @@ fn constructors_reject_invalid_chunk_boundaries_and_unordered_timestamps() {
 #[test]
 fn sliced_axes_and_chunks_keep_shared_buffers_and_values_alive() {
     let time_owner: ScalarBuffer<i64> = vec![0, 10, 20, 30, 40, 80].into();
-    let time_source = RawTimeAxis::try_new(time_owner.clone()).unwrap();
+    let time_source = RawTimestamps::try_new(time_owner.clone()).unwrap();
     let time = time_source.slice(1, 4).unwrap();
-    let time_buffer = time.as_explicit().unwrap();
+    let time_buffer = time.as_buffer();
     assert_eq!(time_buffer.as_ptr(), time_owner.as_ptr().wrapping_add(1));
 
     let nan_payload = f64::from_bits(0x7ff8_0000_0000_0042);
@@ -160,12 +149,12 @@ fn sliced_axes_and_chunks_keep_shared_buffers_and_values_alive() {
     ])
     .unwrap();
     let key_source = Buffer::from(vec![0_u8, 0xA1, 0xB2, 0xC3, 0xD4, 0xFF]);
-    let read_key = key_source.slice_with_length(1, 4);
-    assert_eq!(read_key.as_ptr(), key_source.as_ptr().wrapping_add(1));
+    let primary_key = key_source.slice_with_length(1, 4);
+    assert_eq!(primary_key.as_ptr(), key_source.as_ptr().wrapping_add(1));
 
     let schema = schema(&["first", "second"]);
     let chunk =
-        RawSeriesChunk::try_new(&schema, read_key, Some(metric()), time, fields, true).unwrap();
+        RawSeriesChunk::try_new(&schema, primary_key, Some(metric()), time, fields, true).unwrap();
     let Some(crate::series::samples::DenseSamplesRef::Float(first)) =
         chunk.fields.get(0).unwrap().dense()
     else {
@@ -181,7 +170,7 @@ fn sliced_axes_and_chunks_keep_shared_buffers_and_values_alive() {
     drop(time_owner);
     drop(float_owner);
     drop(second_owner);
-    assert_eq!(chunk.read_key.as_slice(), &[0xA1, 0xB2, 0xC3, 0xD4]);
+    assert_eq!(chunk.primary_key.as_slice(), &[0xA1, 0xB2, 0xC3, 0xD4]);
     assert_eq!(
         (0..4)
             .map(|i| chunk.time.timestamp(i).unwrap())
@@ -224,9 +213,9 @@ fn sliced_axes_and_chunks_keep_shared_buffers_and_values_alive() {
 }
 
 #[test]
-fn raw_time_axis_checks_bounds_and_retains_exact_end_slices() {
+fn raw_timestamps_check_bounds_and_retain_exact_end_slices() {
     let source: ScalarBuffer<i64> = vec![4, 8, 12].into();
-    let axis = RawTimeAxis::try_new(source.clone()).unwrap();
+    let axis = RawTimestamps::try_new(source.clone()).unwrap();
     assert!(axis.slice(usize::MAX, 1).is_err());
     assert!(axis.slice(2, usize::MAX).is_err());
     assert!(axis.slice(3, 1).is_err());
@@ -272,11 +261,11 @@ fn raw_chunks_preserve_native_unmaterialized_and_explicit_metrics() {
         false,
     )
     .unwrap();
-    assert_eq!(native.read_key.as_slice(), &[0, 0x12, 0x34, 0x56]);
+    assert_eq!(native.primary_key.as_slice(), &[0, 0x12, 0x34, 0x56]);
     assert!(native.metric.is_none());
-    assert!(tagless.read_key.is_empty());
+    assert!(tagless.primary_key.is_empty());
     assert!(tagless.metric.is_none());
-    assert_eq!(explicit.read_key.as_slice(), &[0, 0xAB, 0xCD, 0xEF]);
+    assert_eq!(explicit.primary_key.as_slice(), &[0, 0xAB, 0xCD, 0xEF]);
     assert_eq!(explicit.metric.as_ref().unwrap().name(), Some("cpu"));
     assert_eq!(
         explicit.metric.as_ref().unwrap().get("host"),
