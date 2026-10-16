@@ -974,6 +974,7 @@ dependencies = [
  "hmac 0.12.1",
  "pbkdf2",
  "rand 0.9.4",
+ "serde",
  "sha1 0.10.6",
  "sha2 0.10.9",
  "snafu 0.8.6",
