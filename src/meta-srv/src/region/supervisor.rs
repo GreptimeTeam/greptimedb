@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
 use common_meta::DatanodeId;
 use common_meta::affinity::{AffinityFallback, AffinityReference, AffinityResolverRef};
 use common_meta::datanode::Stat;
@@ -410,7 +409,11 @@ impl RegionSupervisor {
             failure_detector: RegionFailureDetector::new(options),
             failover_counts: HashMap::new(),
             receiver: event_receiver,
-            selector_context,
+            // Failover prioritizes recovery over affinity, independently of DDL policy.
+            selector_context: SelectorContext {
+                affinity_fallback: AffinityFallback::Unconstrained,
+                ..selector_context
+            },
             selector,
             affinity_resolver: None,
             region_migration_manager,
@@ -671,26 +674,31 @@ impl RegionSupervisor {
         failure_datanodes: &[DatanodeId],
     ) -> Result<Vec<(RegionId, Peer)>> {
         let affinity = if let Some(resolver) = &self.affinity_resolver {
-            let mut resolved = resolver
+            match resolver
                 .resolve(&[AffinityReference::Datanode(from_peer_id)])
                 .await
-                .map_err(BoxedError::new)
-                .context(error::OtherSnafu)?;
-            ensure!(
-                resolved.len() == 1,
-                error::UnexpectedSnafu {
-                    violated: "affinity resolution must preserve the number and order of references",
+            {
+                Ok(mut resolved) => {
+                    ensure!(
+                        resolved.len() == 1,
+                        error::UnexpectedSnafu {
+                            violated: "affinity resolution must preserve the number and order of references",
+                        }
+                    );
+                    let affinity = resolved.pop().flatten();
+                    if affinity.is_none() {
+                        warn!(
+                            "Source affinity unavailable for datanode {}; selecting failover peers without affinity",
+                            from_peer_id
+                        );
+                    }
+                    affinity
                 }
-            );
-            let affinity = resolved.pop().flatten();
-            ensure!(
-                affinity.is_some()
-                    || self.selector_context.affinity_fallback == AffinityFallback::Unconstrained,
-                error::UnexpectedSnafu {
-                    violated: "source affinity requirements are unavailable"
+                Err(error) => {
+                    warn!(error; "Failed to resolve failover affinity for datanode {}; selecting without affinity", from_peer_id);
+                    None
                 }
-            );
-            affinity
+            }
         } else {
             None
         };
@@ -999,7 +1007,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_failover_passes_affinity_and_propagates_errors() {
+    async fn test_failover_affinity_fallback_and_selector_errors() {
         use std::collections::HashSet;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1128,91 +1136,14 @@ pub(crate) mod tests {
             }
         }
         for stat_aware in [false, true] {
-            for (resolution, fallback, outcome, expected_calls, succeeds) in [
-                (
-                    Resolution::Available,
-                    AffinityFallback::Error,
-                    Outcome::Success,
-                    1,
-                    true,
-                ),
-                (
-                    Resolution::Available,
-                    AffinityFallback::Error,
-                    Outcome::Short,
-                    1,
-                    false,
-                ),
-                (
-                    Resolution::Available,
-                    AffinityFallback::Error,
-                    Outcome::Exhausted,
-                    1,
-                    false,
-                ),
-                (
-                    Resolution::Available,
-                    AffinityFallback::Error,
-                    Outcome::Error,
-                    1,
-                    false,
-                ),
-                (
-                    Resolution::Missing,
-                    AffinityFallback::Error,
-                    Outcome::Success,
-                    0,
-                    false,
-                ),
-                (
-                    Resolution::Error,
-                    AffinityFallback::Error,
-                    Outcome::Success,
-                    0,
-                    false,
-                ),
-                (
-                    Resolution::Available,
-                    AffinityFallback::Unconstrained,
-                    Outcome::Short,
-                    1,
-                    false,
-                ),
-                (
-                    Resolution::Available,
-                    AffinityFallback::Unconstrained,
-                    Outcome::Exhausted,
-                    1,
-                    false,
-                ),
-                (
-                    Resolution::Available,
-                    AffinityFallback::Unconstrained,
-                    Outcome::Error,
-                    1,
-                    false,
-                ),
-                (
-                    Resolution::Missing,
-                    AffinityFallback::Unconstrained,
-                    Outcome::Success,
-                    1,
-                    true,
-                ),
-                (
-                    Resolution::Error,
-                    AffinityFallback::Unconstrained,
-                    Outcome::Success,
-                    0,
-                    false,
-                ),
-                (
-                    Resolution::Disabled,
-                    AffinityFallback::Unconstrained,
-                    Outcome::Success,
-                    1,
-                    true,
-                ),
+            for (resolution, outcome, succeeds) in [
+                (Resolution::Available, Outcome::Success, true),
+                (Resolution::Available, Outcome::Short, false),
+                (Resolution::Available, Outcome::Exhausted, false),
+                (Resolution::Available, Outcome::Error, false),
+                (Resolution::Missing, Outcome::Success, true),
+                (Resolution::Error, Outcome::Success, true),
+                (Resolution::Disabled, Outcome::Success, true),
             ] {
                 let resolver = Arc::new(Resolver {
                     result: resolution,
@@ -1220,11 +1151,10 @@ pub(crate) mod tests {
                 });
                 let selector = Arc::new(FailoverSelector {
                     outcome,
-                    expected_fallback: fallback,
+                    expected_fallback: AffinityFallback::Unconstrained,
                     calls: Mutex::new(vec![]),
                 });
                 let (mut supervisor, _sender) = new_test_supervisor();
-                supervisor.selector_context.affinity_fallback = fallback;
                 if resolution != Resolution::Disabled {
                     supervisor = supervisor.with_affinity_resolver(resolver.clone());
                 }
@@ -1243,20 +1173,14 @@ pub(crate) mod tests {
                     );
                 } else {
                     let error = result.unwrap_err();
-                    if resolution == Resolution::Error {
-                        assert!(matches!(error, error::Error::Other { .. }));
-                    } else if resolution == Resolution::Missing {
-                        assert!(matches!(error, error::Error::Unexpected { .. }));
-                    } else {
-                        match outcome {
-                            Outcome::Short | Outcome::Exhausted => {
-                                assert!(matches!(error, error::Error::NoEnoughAvailableNode { .. }))
-                            }
-                            Outcome::Error => {
-                                assert!(matches!(error, error::Error::Unexpected { .. }))
-                            }
-                            Outcome::Success => unreachable!(),
+                    match outcome {
+                        Outcome::Short | Outcome::Exhausted => {
+                            assert!(matches!(error, error::Error::NoEnoughAvailableNode { .. }))
                         }
+                        Outcome::Error => {
+                            assert!(matches!(error, error::Error::Unexpected { .. }))
+                        }
+                        Outcome::Success => unreachable!(),
                     }
                 }
                 assert_eq!(
@@ -1264,7 +1188,7 @@ pub(crate) mod tests {
                     usize::from(resolution != Resolution::Disabled)
                 );
                 let calls = selector.calls.lock().unwrap();
-                assert_eq!(calls.len(), expected_calls);
+                assert_eq!(calls.len(), 1);
                 if let Some(affinity) = calls.first() {
                     assert_eq!(affinity.is_some(), resolution == Resolution::Available);
                 }
