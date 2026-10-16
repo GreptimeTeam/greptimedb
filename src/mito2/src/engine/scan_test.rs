@@ -5201,9 +5201,9 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         for chunk in chunks {
             let axis = chunk.time.as_buffer().as_ref();
             times.extend(axis.iter().copied());
-            for index in 0..axis.len() {
+            for (index, &time) in axis.iter().enumerate() {
                 output_values.push((
-                    axis[index],
+                    time,
                     match chunk.fields.get(0).unwrap().sample(index) {
                         SampleRef::Float(value) => value,
                         _ => panic!("expected float sample"),
