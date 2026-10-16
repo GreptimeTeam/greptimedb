@@ -57,6 +57,7 @@ use store_api::region_engine::{
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::new_fs_cache_store;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
@@ -163,6 +164,9 @@ pub(crate) struct WorkerGroup {
     intermediate_manager: IntermediateManager,
     /// Schema metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
+    /// Raised once the group begins to stop and kept raised: a flush that
+    /// waits for the WAL to become durable gives up then.
+    stopping: CancellationToken,
 }
 
 impl WorkerGroup {
@@ -241,6 +245,7 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        let stopping = CancellationToken::new();
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -269,6 +274,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    stopping: stopping.clone(),
                 }
                 .start()
             })
@@ -287,12 +293,23 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
+            stopping,
         })
+    }
+
+    /// Tells the group that it is about to stop: from now on a flush that
+    /// waits for the WAL to become durable gives up, so that closing regions
+    /// and stopping the group do not wait for a log store stopped after them.
+    pub(crate) fn begin_stop(&self) {
+        self.stopping.cancel();
     }
 
     /// Stops the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
         info!("Stop region worker group");
+        // Before any scheduler stops: stopping the flush scheduler waits for
+        // its running flushes and runs its queued ones.
+        self.begin_stop();
 
         // TODO(yingwen): Do we need to stop gracefully?
         // Stops the scheduler gracefully.
@@ -457,6 +474,7 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        let stopping = CancellationToken::new();
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -484,6 +502,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    stopping: stopping.clone(),
                 }
                 .start()
             })
@@ -502,6 +521,7 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
+            stopping,
         })
     }
 
@@ -594,6 +614,7 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    stopping: CancellationToken,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -693,6 +714,7 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
+            stopping: self.stopping,
             plugins: self.plugins,
         };
         let handle = common_runtime::spawn_global(async move {
@@ -1005,6 +1027,8 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
+    /// Raised once the worker group begins to stop.
+    stopping: CancellationToken,
     /// Plugins for flush hooks.
     plugins: Plugins,
 }

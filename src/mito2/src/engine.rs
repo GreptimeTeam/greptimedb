@@ -1475,6 +1475,14 @@ impl RegionEngine for MitoEngine {
         self.inner.get_metadata(region_id).map_err(BoxedError::new)
     }
 
+    /// From now on a flush that waits for the WAL to become durable gives up,
+    /// so that closing regions and stopping the engine do not wait for a log
+    /// store stopped after the engine. A flush whose entries are durable
+    /// still commits.
+    fn begin_stop(&self) {
+        self.inner.workers.begin_stop();
+    }
+
     /// Stop the engine.
     ///
     /// Stopping the engine doesn't stop the underlying log store as other components might

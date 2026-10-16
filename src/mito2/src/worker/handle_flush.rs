@@ -246,6 +246,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             durability_barrier: self
                 .wal
                 .durability_barrier(region.region_id, &region.provider),
+            stopping: self.stopping.clone(),
         }
     }
 }

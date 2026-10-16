@@ -22,16 +22,18 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use common_base::cancellation::CancellableFuture;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::datatypes::SchemaRef;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, ensure};
+use store_api::logstore::EntryId;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionFlushReason;
 use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::{
     AccessLayerRef, Metrics, OperationType, SstInfoArray, SstWriteRequest, WriteType,
@@ -288,6 +290,8 @@ pub(crate) struct RegionFlushTask {
     pub(crate) partition_expr: Option<String>,
     /// Waits until the WAL is durable through the entry id the flush records.
     pub(crate) durability_barrier: DurabilityBarrier,
+    /// Raised once the engine begins to stop, see [wait_for_durable_wal].
+    pub(crate) stopping: CancellationToken,
 }
 
 struct FlushTaskWaiters {
@@ -518,13 +522,14 @@ impl RegionFlushTask {
         // The manifest may name only a durable entry as flushed. A log store
         // that acknowledges appends before their entries are durable can have
         // handed out `last_entry_id` for an entry that is still in its backlog.
-        // A DDL that cancels the flush must not wait behind that upload.
-        let durable = self.durability_barrier.wait(version_data.last_entry_id);
-        tokio::pin!(durable);
-        match CancellableFuture::new(durable.as_mut(), state.cancel_handle()).await {
-            Ok(result) => result?,
-            Err(_) => return FlushCancelledSnafu.fail(),
-        }
+        wait_for_durable_wal(
+            self.region_id,
+            &self.durability_barrier,
+            version_data.last_entry_id,
+            state,
+            &self.stopping,
+        )
+        .await?;
 
         let edit = RegionEdit {
             files_to_add: file_metas,
@@ -903,6 +908,41 @@ impl RegionFlushTask {
         assert_eq!(self.region_id, other.region_id);
         // Now we only merge senders. They share the same flush reason.
         self.senders.append(&mut other.senders);
+    }
+}
+
+/// Waits until the WAL of the region is durable through `entry_id`, and fails
+/// with [Error::FlushCancelled] when the flush is cancelled or the engine
+/// begins to stop first.
+///
+/// A DDL that cancels the flush must not wait behind an upload, and neither
+/// must a stopping engine: the log store stops only after the engine, so a
+/// wait for uploads that keep failing would hold the stop up for good. The
+/// barrier is polled first, so a flush whose entries are already durable
+/// still commits while the engine stops.
+pub(crate) async fn wait_for_durable_wal(
+    region_id: RegionId,
+    barrier: &DurabilityBarrier,
+    entry_id: EntryId,
+    state: &CancellableTaskState,
+    stopping: &CancellationToken,
+) -> Result<()> {
+    let durable_or_stopping = async {
+        tokio::select! {
+            biased;
+            result = barrier.wait(entry_id) => Some(result),
+            () = stopping.cancelled() => None,
+        }
+    };
+    match CancellableFuture::new(durable_or_stopping, state.cancel_handle()).await {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            warn!(
+                "Flush of region {region_id} stops waiting for the WAL to become durable through entry {entry_id} because the engine is stopping"
+            );
+            FlushCancelledSnafu.fail()
+        }
+        Err(_) => FlushCancelledSnafu.fail(),
     }
 }
 
@@ -1692,6 +1732,7 @@ mod tests {
             is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
+            stopping: CancellationToken::new(),
         }
     }
 
@@ -1843,6 +1884,7 @@ mod tests {
             is_staging: false,
             partition_expr: None,
             durability_barrier: DurabilityBarrier::noop(),
+            stopping: CancellationToken::new(),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -2134,6 +2176,7 @@ mod tests {
                 is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
+                stopping: CancellationToken::new(),
             })
             .collect();
         // Schedule first task.
@@ -2441,6 +2484,7 @@ mod tests {
                 is_staging: false,
                 partition_expr: None,
                 durability_barrier: DurabilityBarrier::noop(),
+                stopping: CancellationToken::new(),
             })
             .collect();
         // Schedule first task.

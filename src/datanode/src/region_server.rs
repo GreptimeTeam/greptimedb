@@ -1986,6 +1986,12 @@ impl RegionServerInner {
             .collect::<Vec<_>>();
         let num_regions = regions.len();
 
+        // A close can flush the region, and that flush can wait for a log
+        // store that stops only after the engines.
+        for engine in self.engines.read().unwrap().values() {
+            engine.begin_stop();
+        }
+        let mut first_error = None;
         for (region_id, engine) in regions {
             let closed = engine
                 .handle_request(
@@ -1995,7 +2001,15 @@ impl RegionServerInner {
                 .await;
             match closed {
                 Ok(_) => debug!("Region {region_id} is closed"),
-                Err(e) => warn!("Failed to close region {region_id}, err: {e}"),
+                Err(e) => {
+                    // The close failed to flush writes that skipped the WAL,
+                    // which nothing replays.
+                    error!(e; "Failed to close region {region_id}, its unflushed writes that skipped the WAL are lost");
+                    record_shutdown_error(
+                        &mut first_error,
+                        Err(e).context(HandleRegionRequestSnafu { region_id }),
+                    );
+                }
             }
         }
         self.region_map.clear();
@@ -2003,7 +2017,6 @@ impl RegionServerInner {
 
         drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
-        let mut first_error = None;
         for (engine_name, engine) in engines {
             let result = engine
                 .stop()
