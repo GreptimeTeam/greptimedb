@@ -226,10 +226,19 @@ pub fn query_to_plan(
             }
             MatcherType::Re | MatcherType::Nre => {
                 let pattern = anchored_label_regex(value);
-                let label = label
-                    .cast_to(&DataType::Utf8, dataframe.schema())
-                    .context(error::DataFrameSnafu)?;
-                let label = coalesce(vec![label, lit("")]);
+                let label = match label
+                    .get_type(dataframe.schema())
+                    .context(error::DataFrameSnafu)?
+                {
+                    // Preserve DataFusion's existing type handling for binary labels.
+                    DataType::Binary | DataType::LargeBinary | DataType::BinaryView => label,
+                    _ => {
+                        let label = label
+                            .cast_to(&DataType::Utf8, dataframe.schema())
+                            .context(error::DataFrameSnafu)?;
+                        coalesce(vec![label, lit("")])
+                    }
+                };
                 let matched = regexp_match(label, lit(pattern), None);
                 conditions.push(if m_type == MatcherType::Re {
                     matched.is_not_null()
@@ -1297,6 +1306,78 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn test_remote_read_binary_label_regex_preserves_type_handling() {
+        for bytes in [b"a".as_slice(), b"\xff".as_slice(), b"".as_slice()] {
+            let labels = arrow::array::BinaryArray::from(vec![Some(bytes), None]);
+            for label_type in [
+                DataType::Binary,
+                DataType::LargeBinary,
+                DataType::BinaryView,
+            ] {
+                let ctx = SessionContext::new();
+                let batch = DfRecordBatch::try_from_iter(vec![
+                    (
+                        greptime_timestamp(),
+                        Arc::new(TimestampMillisecondArray::from(vec![1000; 2])) as ArrayRef,
+                    ),
+                    ("tag", casts::cast(&labels, &label_type).unwrap()),
+                ])
+                .unwrap();
+                ctx.register_batch("metrics", batch).unwrap();
+                for op in [MatcherType::Re, MatcherType::Nre] {
+                    let matched = regexp_match(ident("tag"), lit("a"), None);
+                    let old_condition = if op == MatcherType::Re {
+                        matched.is_not_null()
+                    } else {
+                        matched.is_null()
+                    };
+                    let old = ctx
+                        .table("metrics")
+                        .await
+                        .unwrap()
+                        .filter(old_condition)
+                        .unwrap()
+                        .collect()
+                        .await;
+                    let query = Query {
+                        start_timestamp_ms: 1000,
+                        end_timestamp_ms: 1000,
+                        matchers: vec![LabelMatcher {
+                            name: "tag".into(),
+                            value: "a".into(),
+                            r#type: op as i32,
+                        }],
+                        ..Default::default()
+                    };
+                    let plan = query_to_plan(
+                        ctx.table("metrics").await.unwrap(),
+                        &query,
+                        greptime_timestamp(),
+                    )
+                    .unwrap();
+                    let current = ctx
+                        .execute_logical_plan(plan)
+                        .await
+                        .unwrap()
+                        .collect()
+                        .await;
+                    match (old, current) {
+                        (Ok(old), Ok(current)) => {
+                            assert_eq!(old, current, "{label_type:?}: {op:?}")
+                        }
+                        (Err(old), Err(current)) => {
+                            assert_eq!(old.to_string(), current.to_string())
+                        }
+                        (old, current) => {
+                            panic!("{label_type:?}: {op:?}: old={old:?}, current={current:?}")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
