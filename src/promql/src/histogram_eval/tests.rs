@@ -368,3 +368,36 @@ fn close(a: f64, b: f64, epsilon: f64) -> bool {
     };
     equal || (a.abs() < 1e-10 && b.abs() < 1e-10)
 }
+
+/// Bounds +0 and -0 compare equal and keep input order, so coalescing keeps the first one:
+/// `1 / histogram_quantile(0, sort_desc(h))` over `le` "+Inf", "0", "-0" is +Inf.
+#[test]
+fn classic_bounds_keep_the_first_signed_zero() {
+    let grid = Arc::new(
+        datatypes::series::time::EvalGrid::try_new(
+            datatypes::series::time::GridSpec::try_new(0, 1_000, 1).unwrap(),
+        )
+        .unwrap(),
+    );
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let buckets: Vec<_> = [("+Inf", 3.0), ("0", 2.0), ("-0", 1.0)]
+        .iter()
+        .map(|(le, count)| {
+            let labels = Labels::from([
+                ("__name__".to_string(), "h".to_string()),
+                ("le".to_string(), le.to_string()),
+            ]);
+            let points = BTreeMap::from([(0, f64::to_bits(*count))]);
+            mixed_series(&schema, &labels, &points, &BTreeMap::new()).unwrap()
+        })
+        .collect();
+    let result = evaluate_histograms(HistogramFunction::Quantile(0.0), &schema, &buckets).unwrap();
+    let points = points_of(&result[0]);
+    assert_eq!(1.0 / f64::from_bits(points[&0]), f64::INFINITY);
+}

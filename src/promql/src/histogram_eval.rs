@@ -90,8 +90,14 @@ pub fn evaluate_histograms(
     let mut native_buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
     for mut group in groups.into_values() {
-        // Pre-sorting by bound keeps the buckets of every point sorted.
-        group.classic.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Pre-sorting by bound keeps the buckets of every point sorted. Like Go's comparison,
+        // +0 and -0 are equal and keep input order, and coalescing keeps the first bound.
+        group
+            .classic
+            .sort_by(|a, b| match (a.0.is_nan(), b.0.is_nan()) {
+                (false, false) => a.0.partial_cmp(&b.0).expect("neither is NaN"),
+                (nan_a, nan_b) => nan_a.cmp(&nan_b),
+            });
         let ranges = group
             .classic
             .iter()
