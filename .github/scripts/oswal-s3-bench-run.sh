@@ -10,24 +10,58 @@ runtime() {
         --security-opt no-new-privileges --cap-drop ALL "$@"
 }
 
+# Pin the runtime image to its digest from the registry's manifest alone: an anonymous pull from ECR
+# Public on a hosted runner can exceed the registry's data limit. The benchmark host checks the contents.
 check_runtime() {
-    local image=$1 resolved
+    local image=$1 repository digest attempt
     [[ "$image" == public.ecr.aws/* ]] || { echo 'The runtime image must come from AWS ECR Public' >&2; return 1; }
-    bash "$here/pull-benchmark-image.sh" "$image"
-    resolved=$(docker image inspect "$image" | jq -er '.[0].RepoDigests[0]')
-    docker run --rm --entrypoint sh "$resolved" -c \
-        'test -f scripts/agent-observability/greptimedb.sh && test -f scripts/generate_agent_observations.py' \
-        || { echo 'The runtime image lacks the agent observability loader or generator' >&2; return 1; }
-    printf 'runtime_image=%s\n' "$resolved" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+    for attempt in 1 2 3; do
+        digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$image" | jq -er .digest) && break
+        ((attempt < 3)) || { echo "Cannot read the manifest of $image" >&2; return 1; }
+        sleep $((attempt * 10))
+    done
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "$image has no sha256 manifest digest" >&2; return 1; }
+    # A reference that names a digest must be served under it.
+    [[ "$image" != *@* || "${image##*@}" == "$digest" ]] || { echo "$image is served as $digest" >&2; return 1; }
+    repository=${image%@*}
+    [[ "${repository##*/}" != *:* ]] || repository=${repository%:*}
+    printf 'runtime_image=%s@%s\n' "$repository" "$digest" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+}
+
+# Pull every GreptimeDB image of the run, pin it to its digest and record the version and
+# commit it reports, before any instance is allocated.
+check_images() {
+    local entry image resolved info version commit checked=()
+    while IFS= read -r entry; do
+        image=$(jq -r .image <<< "$entry")
+        bash "$here/pull-benchmark-image.sh" "$image"
+        resolved=$(docker image inspect "$image" | jq -er '[.[0].RepoDigests[]? | select(test("@sha256:[0-9a-f]{64}$"))][0]') \
+            || { echo "$image has no sha256 repository digest" >&2; return 1; }
+        info=$(docker run --rm --entrypoint greptime "$resolved" --version)
+        version=$(sed -n 's/^version: //p' <<< "$info") commit=$(sed -n 's/^commit: //p' <<< "$info")
+        [[ -n "$version" && -n "$commit" ]] || { echo "$image reports no version or commit" >&2; return 1; }
+        echo "${image}: $resolved, version $version, commit $commit"
+        checked+=("$(jq -c --arg image "$resolved" --arg version "$version" --arg commit "$commit" \
+            '{label, image: $image, requested: .image, version: $version, commit: $commit}' <<< "$entry")")
+    done < <(jq -c '.[]' <<< "$1")
+    ((${#checked[@]})) || { echo 'No GreptimeDB image to check' >&2; return 1; }
+    printf 'greptimedb_images=%s\n' "$(jq -sc . <<< "${checked[*]}")" >> "${GITHUB_OUTPUT:-/dev/stdout}"
 }
 
 pull_images() {
-    : "${RESULTS:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_REF:?}"
+    : "${RESULTS:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_IMAGES:?}"
+    local image images=()
     mkdir -p "$RESULTS/images"
     bash "$here/pull-benchmark-image.sh" "$RUNTIME_IMAGE"
-    bash "$here/pull-benchmark-image.sh" "$GREPTIMEDB_REF"
+    docker run --rm --entrypoint sh "$RUNTIME_IMAGE" -c \
+        'test -f scripts/agent-observability/greptimedb.sh && test -f scripts/generate_agent_observations.py' \
+        || { echo 'The runtime image lacks the agent observability loader or generator' >&2; return 1; }
+    while IFS= read -r image; do
+        bash "$here/pull-benchmark-image.sh" "$image"
+        images+=("$image")
+    done < <(jq -r '.[].image' <<< "$GREPTIMEDB_IMAGES")
     docker image inspect "$RUNTIME_IMAGE" > "$RESULTS/images/runtime.json"
-    docker image inspect "$GREPTIMEDB_REF" > "$RESULTS/images/greptimedb.json"
+    docker image inspect "${images[@]}" > "$RESULTS/images/greptimedb.json"
 }
 
 wal_disk() {
@@ -92,6 +126,8 @@ elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN {printf "%.3f", b - a}'; }
 # CPU seconds the server's cgroup used, and busy and total jiffies of the host.
 server_cpu() { docker exec "$cid" cat /sys/fs/cgroup/cpu.stat 2>/dev/null | awk '/^usage_usec / {printf "%.3f", $2 / 1e6}' || true; }
 host_cpu() { awk '/^cpu / {print $2 + $3 + $4 + $7 + $8 + $9, $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9}' /proc/stat 2>/dev/null || true; }
+# The host's 1, 5 and 15 minute load averages as a JSON list.
+host_load() { awk '{printf "[%s, %s, %s]", $1, $2, $3}' "${OSWAL_LOADAVG:-/proc/loadavg}" 2>/dev/null || true; }
 
 # A server's log is named after the phase it started in, whatever phase stops it.
 start_server() {
@@ -294,6 +330,7 @@ finish() {
     [[ -z "$wal_dir" ]] || sudo -n rm -rf "$wal_dir"
     [[ -z "$home_dir" ]] || sudo -n rm -rf "$home_dir"
     jq -n --argjson spec "$spec" --arg device "$wal_device" --arg version "$version" \
+        --arg host_load_start "$host_load_start" --arg host_load_end "$(host_load)" \
         --arg load_seconds "$load_seconds" --argjson exit_code "$rc" --argjson scraped "$metrics_scraped" \
         --argjson restart_scraped "$restart_scraped" --arg restart_seconds "$restart_seconds" \
         --arg restart_query_seconds "$restart_query_seconds" --arg restart_count "$restart_count" \
@@ -306,21 +343,26 @@ finish() {
           restart_scraped: $restart_scraped, restart_seconds: ($restart_seconds | tonumber? // null),
           restart_query_seconds: ($restart_query_seconds | tonumber? // null),
           restart_count: ($restart_count | tonumber? // null),
-          indexed_before_kill: ($indexed_before_kill | tonumber? // null)}' > "$dir/cell.json"
+          indexed_before_kill: ($indexed_before_kill | tonumber? // null),
+          host_load_start: ($host_load_start | fromjson? // null), host_load_end: ($host_load_end | fromjson? // null)}' \
+        > "$dir/cell.json"
     exit "$rc"
 }
 
 # One cell in its own process, so errexit holds inside it. The cell's state is
 # global because the EXIT trap runs after this function returns.
 cell() {
-    : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_IMAGE:?}"
+    : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_IMAGES:?}"
     : "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
     spec=$1 cid= wal_dir= home_dir= version= load_seconds= metrics_scraped=false id= phase= server_phase=
     restart_scraped=false restart_seconds= restart_query_seconds= restart_count= server_cpu_seconds= host_cpu_busy=
-    indexed_before_kill=
-    local concurrency setting started cpu_before host_before host_after corpus partitions load script
-    id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec")
+    indexed_before_kill= host_load_start=$(host_load)
+    local concurrency setting started cpu_before host_before host_after corpus partitions load script label
+    id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec") label=$(jq -r .image <<< "$spec")
     dir="$RESULTS/cells/$id" name="$OWNER-$id"
+    # The digest the image of the cell's label was pinned to before the run.
+    GREPTIMEDB_IMAGE=$(jq -er --arg label "$label" '.[] | select(.label == $label) | .image' <<< "$GREPTIMEDB_IMAGES") \
+        || { echo "$id: no image labelled '$label'" >&2; exit 1; }
     mkdir -p "$dir"
     # The root holds data/ and the WAL's default prefix wal/ side by side.
     local settings=(STORAGE__TYPE=S3 "STORAGE__BUCKET=$S3_BUCKET" "STORAGE__REGION=$S3_REGION"
@@ -419,6 +461,7 @@ scrub() {
 
 case "${1:-}" in
     check-runtime) check_runtime "${2:?}" ;;
+    check-images) check_images "${2:?}" ;;
     pull) pull_images ;;
     wal-disk) wal_disk "${2:?}" ;;
     generate) generate ;;
@@ -434,5 +477,5 @@ case "${1:-}" in
         done < <(jq -c '.cells[]' "$PLAN")
         exit "$failed" ;;
     scrub) scrub ;;
-    *) echo "usage: $0 check-runtime IMAGE | pull | wal-disk DIR | generate | cells | scrub" >&2; exit 2 ;;
+    *) echo "usage: $0 check-runtime IMAGE | check-images JSON | pull | wal-disk DIR | generate | cells | scrub" >&2; exit 2 ;;
 esac
