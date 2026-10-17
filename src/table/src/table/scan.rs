@@ -42,6 +42,7 @@ use datafusion::physical_plan::{
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
+use datafusion_expr::Expr;
 use datafusion_physical_expr::expressions::{
     BinaryExpr, Column, DynamicFilterPhysicalExpr, is_null,
 };
@@ -51,13 +52,37 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
+
+fn restricted_to_single_table_id(filters: &[Expr]) -> bool {
+    filters.iter().any(|filter| match filter {
+        Expr::BinaryExpr(binary) if binary.op == Operator::Eq => {
+            matches!(
+                (&*binary.left, &*binary.right),
+                (Expr::Column(column), Expr::Literal(_, _))
+                    if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            ) || matches!(
+                (&*binary.left, &*binary.right),
+                (Expr::Literal(_, _), Expr::Column(column))
+                    if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            )
+        }
+        Expr::InList(list) if !list.negated && list.list.len() == 1 => {
+            matches!(&*list.expr, Expr::Column(column) if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                && matches!(list.list[0], Expr::Literal(_, _))
+        }
+        _ => false,
+    })
+}
 
 /// The name of [`RegionScanExec`] plan node.
 pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
@@ -118,6 +143,9 @@ impl RegionScanExec {
         }
 
         let metadata = scanner.metadata();
+        let has_internal_tsid = metadata
+            .column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+            .is_some_and(|column| column.column_id == ReservedColumnId::tsid());
         // Keep the primary key columns in the order reported by the metadata (for a metric
         // region that is the physical row key order). Reordering them would let a projected
         // logical tag look like a prefix of the row key, which yields ordering and
@@ -185,16 +213,15 @@ impl RegionScanExec {
                 }
                 orderings.push(pk_time_ordering);
 
-                // Metric engine physical tables keep tag columns alongside `__tsid`. When `__tsid`
-                // is present, the scan output is also ordered by `(__tsid, time index)` which can
-                // help eliminate redundant sorts for promql plans (e.g. SeriesDivide).
-                //
-                // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
-                // the same thing, thus present in one `OrderingEquivalenceClass`.
-                if let (Ok(tsid_col), Some(ts)) = (
-                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
-                    ts_col.clone(),
-                ) {
+                // Preserve metric TSID properties only for its reserved internal column,
+                // not a same-named user column.
+                if has_internal_tsid
+                    && restricted_to_single_table_id(&request.filters)
+                    && let (Ok(tsid_col), Some(ts)) = (
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
+                        ts_col.clone(),
+                    )
+                {
                     orderings.push(vec![
                         PhysicalSortExpr::new(
                             Arc::new(tsid_col) as _,
@@ -223,20 +250,22 @@ impl RegionScanExec {
         };
 
         let partitioning = match request.distribution {
-            Some(TimeSeriesDistribution::PerSeries) => {
+            Some(TimeSeriesDistribution::PerSeries)
+                if has_internal_tsid && restricted_to_single_table_id(&request.filters) =>
+            {
                 match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
-                    Ok(tsid_col) => {
-                        Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
-                    }
-                    Err(_) if pk_columns.len() == pk_names.len() => {
-                        Partitioning::Hash(pk_columns.clone(), num_output_partition)
-                    }
+                    Ok(tsid) => Partitioning::Hash(vec![Arc::new(tsid) as _], num_output_partition),
+                    // The reserved `__tsid` column is not part of the scan output, so
+                    // the per-series hash distribution cannot be claimed for it.
                     Err(_) => Partitioning::UnknownPartitioning(num_output_partition),
                 }
             }
-            Some(TimeSeriesDistribution::TimeWindowed) | None => {
-                Partitioning::UnknownPartitioning(num_output_partition)
+            Some(TimeSeriesDistribution::PerSeries) if pk_columns.len() == pk_names.len() => {
+                Partitioning::Hash(pk_columns.clone(), num_output_partition)
             }
+            Some(TimeSeriesDistribution::PerSeries)
+            | Some(TimeSeriesDistribution::TimeWindowed)
+            | None => Partitioning::UnknownPartitioning(num_output_partition),
         };
 
         let properties = Arc::new(PlanProperties::new(
@@ -711,6 +740,8 @@ mod test {
     use datafusion::physical_plan::metrics::MetricValue;
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion::prelude::SessionContext;
+    use datafusion_expr::Expr;
+    use datafusion_expr::expr::InList;
     use datatypes::arrow::array::Array;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -725,6 +756,23 @@ mod test {
     use store_api::storage::{RegionId, TimeSeriesDistribution};
 
     use super::*;
+
+    #[test]
+    fn restricted_to_single_table_id_handles_in_lists() {
+        let singleton_in = Expr::InList(InList {
+            expr: Box::new(datafusion_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)),
+            list: vec![datafusion_expr::lit(1_i32)],
+            negated: false,
+        });
+        let singleton_not_in = Expr::InList(InList {
+            expr: Box::new(datafusion_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)),
+            list: vec![datafusion_expr::lit(1_i32)],
+            negated: true,
+        });
+
+        assert!(restricted_to_single_table_id(&[singleton_in]));
+        assert!(!restricted_to_single_table_id(&[singleton_not_in]));
+    }
 
     #[derive(Debug)]
     struct RepeatableScanner {
@@ -1217,6 +1265,345 @@ mod test {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_per_series_uses_internal_tsid_hash_and_ordering() {
+        for logical_region in [false, true] {
+            let schema = Arc::new(Schema::new(vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            ]));
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(datatypes::vectors::UInt64Vector::from_slice([1])) as _,
+                    Arc::new(datatypes::vectors::StringVector::from_slice(&["host"])) as _,
+                    Arc::new(TimestampMillisecondVector::from_slice([1])) as _,
+                ],
+            )
+            .unwrap();
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5686));
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        DATA_SCHEMA_TSID_COLUMN_NAME,
+                        ConcreteDataType::uint64_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: ReservedColumnId::tsid(),
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "host",
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 3,
+                })
+                .primary_key(vec![ReservedColumnId::tsid(), 2]);
+            let metadata = Arc::new(builder.build().unwrap());
+            let batches = RecordBatches::try_new(schema.clone(), vec![batch]).unwrap();
+            let mut properties = ScannerProperties::default();
+            properties.set_logical_region(logical_region);
+            let scanner = Box::new(RepeatableScanner {
+                batches,
+                properties,
+                metadata: metadata.clone(),
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let plan = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    filters: vec![
+                        Expr::Column(datafusion_common::Column::new_unqualified(
+                            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                        ))
+                        .eq(datafusion_expr::lit(1)),
+                    ],
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(
+                plan.properties.partitioning,
+                Partitioning::Hash(
+                    vec![Arc::new(
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &plan.arrow_schema)
+                            .unwrap()
+                    ) as _],
+                    1
+                )
+            );
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema.clone(), vec![]).unwrap(),
+                properties: ScannerProperties::default(),
+                metadata: metadata.clone(),
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let unrestricted = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                unrestricted.properties.output_partitioning(),
+                &Partitioning::Hash(
+                    vec![
+                        Arc::new(
+                            Column::new_with_schema(
+                                DATA_SCHEMA_TSID_COLUMN_NAME,
+                                &unrestricted.arrow_schema
+                            )
+                            .unwrap()
+                        ) as _,
+                        Arc::new(
+                            Column::new_with_schema("host", &unrestricted.arrow_schema).unwrap()
+                        ) as _,
+                    ],
+                    1,
+                )
+            );
+            let tsid_then_time = [DATA_SCHEMA_TSID_COLUMN_NAME, "ts"].map(|name| {
+                PhysicalSortExpr::new(
+                    Arc::new(Column::new_with_schema(name, &unrestricted.arrow_schema).unwrap()),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                )
+            });
+            assert!(
+                !unrestricted
+                    .properties
+                    .equivalence_properties()
+                    .ordering_satisfy(tsid_then_time.clone())
+                    .unwrap()
+            );
+            for names in [
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "host", "ts"],
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "ts"],
+            ] {
+                let ordering = names.into_iter().map(|name| {
+                    PhysicalSortExpr::new(
+                        Arc::new(Column::new_with_schema(name, &plan.arrow_schema).unwrap()),
+                        SortOptions {
+                            descending: false,
+                            nulls_first: true,
+                        },
+                    )
+                });
+                assert!(
+                    plan.properties
+                        .equivalence_properties()
+                        .ordering_satisfy(ordering)
+                        .unwrap()
+                );
+            }
+
+            let mut metric_metadata =
+                RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
+            metric_metadata
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                        ConcreteDataType::uint32_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: ReservedColumnId::table_id(),
+                })
+                .primary_key(vec![
+                    ReservedColumnId::table_id(),
+                    ReservedColumnId::tsid(),
+                    2,
+                ]);
+            let metric_metadata = Arc::new(metric_metadata.build().unwrap());
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema.clone(), vec![]).unwrap(),
+                properties: ScannerProperties::new(vec![vec![], vec![]], false, 0),
+                metadata: metric_metadata,
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let metric_projection = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    filters: vec![],
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            let partitioning = metric_projection.properties().output_partitioning();
+            let Partitioning::UnknownPartitioning(actual_count) = partitioning else {
+                panic!(
+                    "a metric projection without `__table_id` must not claim TSID partitioning, got {partitioning:?}"
+                );
+            };
+            assert_eq!(*actual_count, 2);
+            assert!(
+                !metric_projection
+                    .properties
+                    .equivalence_properties()
+                    .ordering_satisfy(tsid_then_time.clone())
+                    .unwrap()
+            );
+
+            // A scan that projects away the reserved `__tsid` column must not claim
+            // the per-series hash distribution: the hash column is absent from the
+            // scan output, and the remaining primary keys are incomplete. Match the
+            // variant and compare the count explicitly, because
+            // `Partitioning::UnknownPartitioning` never compares equal.
+            let projected_schema = Arc::new(Schema::new(vec![
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            ]));
+            let projected_batches = RecordBatches::try_new(projected_schema, vec![]).unwrap();
+            let scanner = Box::new(RepeatableScanner {
+                batches: projected_batches,
+                properties: ScannerProperties::new(vec![vec![], vec![], vec![]], false, 0),
+                metadata,
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let plan = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+            let partitioning = plan.properties().output_partitioning();
+            let Partitioning::UnknownPartitioning(actual_count) = partitioning else {
+                panic!(
+                    "a scan without the projected `__tsid` column must not claim hash \
+                     partitioning, got {partitioning:?}"
+                );
+            };
+            assert_eq!(*actual_count, 3);
+        }
+    }
+
+    #[test]
+    fn test_ordinary_per_series_does_not_order_by_user_tsid_field() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5687));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            })
+            .primary_key(vec![2]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let batches = RecordBatches::try_new(schema, vec![]).unwrap();
+        let scanner = Box::new(RepeatableScanner {
+            batches,
+            properties: ScannerProperties::default(),
+            metadata,
+            dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+        });
+        let plan = RegionScanExec::new(
+            scanner,
+            ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.properties.partitioning,
+            Partitioning::Hash(
+                vec![Arc::new(Column::new_with_schema("host", &plan.arrow_schema).unwrap()) as _],
+                1
+            )
+        );
+        assert!(
+            !plan
+                .properties
+                .equivalence_properties()
+                .ordering_satisfy([PhysicalSortExpr::new(
+                    Arc::new(
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &plan.arrow_schema,)
+                            .unwrap(),
+                    ),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                )])
+                .unwrap()
+        );
     }
 
     #[test]

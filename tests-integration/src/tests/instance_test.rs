@@ -33,6 +33,7 @@ use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::error as server_error;
+use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 
@@ -255,6 +256,285 @@ WHERE greptime_timestamp = (
     assert!(
         explain.contains("MergeSortExec"),
         "query_parallelism=1 with five regions should keep the distributed merge stage stable; explain:\n{explain}"
+    );
+}
+
+/// The metric engine owns the internal `__tsid` column, so an ordinary table must
+/// not be able to declare it: the reserved name is rejected while the table is
+/// actually created instead of silently changing how a `GROUP BY <sid>, <time
+/// index>` query is planned. The rejection is checked after the catalog existence
+/// lookup, so a no-op `IF NOT EXISTS` keeps working for an existing table. Grouping
+/// by an ordinary column plus the time index must still preserve every row at every
+/// query parallelism. A logical metric table is not exempt either: it reports
+/// `engine = metric` but owns no `__tsid`, so adding the reserved name there is
+/// rejected as well and the logical table keeps its rows.
+#[apply(both_instances_cases)]
+async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    for ddl in [
+        r#"CREATE TABLE audit_reserved (
+            __tsid BIGINT,
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY
+        )"#,
+        r#"CREATE TABLE audit_reserved (
+            __tsid BIGINT,
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY
+        ) ENGINE = mito"#,
+    ] {
+        let error = try_execute_sql(&frontend, ddl)
+            .await
+            .expect_err("an ordinary table must not declare `__tsid`");
+        let message = error.output_msg();
+        assert!(
+            message.contains("column name `__tsid` is reserved by the metric engine"),
+            "unexpected error for rejected CREATE TABLE: {message}"
+        );
+    }
+    assert!(
+        try_execute_sql(&frontend, "SELECT * FROM audit_reserved")
+            .await
+            .is_err(),
+        "a rejected CREATE TABLE must not create a table"
+    );
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_min (
+            sid BIGINT,
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY
+        )"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO audit_min VALUES (1, 0, 'a'), (1, 0, 'b')",
+    )
+    .await;
+
+    fn result_rows(result: &str) -> Vec<Vec<String>> {
+        result
+            .lines()
+            .filter(|line| line.trim_start().starts_with('|'))
+            .map(|line| {
+                line.trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(|cell| cell.trim().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    // A live ALTER cannot introduce the reserved column either.
+    let error = try_execute_sql(&frontend, "ALTER TABLE audit_min ADD COLUMN __tsid BIGINT")
+        .await
+        .expect_err("an ordinary table must not be able to add `__tsid`");
+    let message = error.output_msg();
+    assert!(
+        message.contains("column name `__tsid` is reserved by the metric engine"),
+        "unexpected error for rejected ALTER TABLE: {message}"
+    );
+
+    // Repeating the reserved name in the ignored definition of an `IF NOT EXISTS`
+    // create stays a no-op for the existing table.
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE IF NOT EXISTS audit_min (
+            __tsid BIGINT,
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY
+        )"#,
+    )
+    .await;
+
+    // Direct gRPC DDL bypasses the SQL parser, so the reserved name is rejected
+    // while the target table is created there as well.
+    let grpc_request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+        expr: Some(api::v1::ddl_request::Expr::CreateTable(
+            api::v1::CreateTableExpr {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "audit_grpc_reserved".to_string(),
+                column_defs: vec![
+                    api::v1::ColumnDef {
+                        name: "__tsid".to_string(),
+                        data_type: api::v1::ColumnDataType::Uint64 as _,
+                        is_nullable: false,
+                        semantic_type: api::v1::SemanticType::Tag as i32,
+                        ..Default::default()
+                    },
+                    api::v1::ColumnDef {
+                        name: "ts".to_string(),
+                        data_type: api::v1::ColumnDataType::TimestampMillisecond as _,
+                        is_nullable: false,
+                        semantic_type: api::v1::SemanticType::Timestamp as i32,
+                        ..Default::default()
+                    },
+                ],
+                time_index: "ts".to_string(),
+                engine: "mito".to_string(),
+                ..Default::default()
+            },
+        )),
+    });
+    let error = GrpcQueryHandler::do_query(frontend.as_ref(), grpc_request, QueryContext::arc())
+        .await
+        .expect_err("the gRPC DDL ingress must reject the reserved `__tsid` column");
+    let message = error.output_msg();
+    assert!(
+        message.contains("column name `__tsid` is reserved by the metric engine"),
+        "unexpected error for rejected gRPC CreateTable: {message}"
+    );
+
+    // Neither rejected statement may leave a `__tsid` column behind, and the plain
+    // rows must survive them.
+    let plain = execute_sql(&frontend, "SELECT * FROM audit_min ORDER BY sid, ts, host")
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert_eq!(
+        result_rows(&plain),
+        vec![
+            vec!["sid", "ts", "host"],
+            vec!["1", "1970-01-01T00:00:00", "a"],
+            vec!["1", "1970-01-01T00:00:00", "b"],
+        ],
+        "rejected ALTER/CREATE must not add `__tsid` or change the rows: {plain}"
+    );
+
+    let audit_query =
+        "SELECT sid, ts, count(*) AS n FROM audit_min GROUP BY sid, ts ORDER BY sid, ts";
+    for parallelism in [1, 4] {
+        let result = execute_sql_with_query_parallelism(&frontend, audit_query, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            result_rows(&result),
+            vec![
+                vec!["sid", "ts", "n"],
+                vec!["1", "1970-01-01T00:00:00", "2"],
+            ],
+            "unexpected audit_min result with query_parallelism={parallelism}:\\n{result}"
+        );
+    }
+
+    // A logical metric table reports `engine = metric` without the physical-table
+    // option, so it does not own the internal `__tsid` column: the reserved name is
+    // rejected instead of binding by name to the internal column, which would leave
+    // every later read of the logical table broken.
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_metric_phy (
+            ts TIMESTAMP(3) TIME INDEX,
+            val DOUBLE
+        ) ENGINE = metric WITH ('physical_metric_table' = '')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_metric_logical (
+            ts TIMESTAMP(3) TIME INDEX,
+            val DOUBLE,
+            host STRING PRIMARY KEY
+        ) ENGINE = metric WITH ('on_physical_table' = 'audit_metric_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO audit_metric_logical (ts, val, host) \
+         VALUES ('2024-01-01 00:00:00', 1.5, 'a')",
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_metric_logical_two (
+            ts TIMESTAMP(3) TIME INDEX,
+            val DOUBLE,
+            host STRING PRIMARY KEY
+        ) ENGINE = metric WITH ('on_physical_table' = 'audit_metric_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO audit_metric_logical_two (ts, val, host) \
+         VALUES ('2024-01-01 00:00:00', 2.5, 'a')",
+    )
+    .await;
+    for parallelism in [1, 4] {
+        let result = execute_sql_with_query_parallelism(
+            &frontend,
+            "SELECT __tsid, ts, count(*) AS n FROM audit_metric_phy GROUP BY __tsid, ts ORDER BY __tsid, ts",
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert_eq!(
+            result_rows(&result),
+            vec![
+                vec!["__tsid", "ts", "n"],
+                vec![
+                    result_rows(&result)[1][0].as_str(),
+                    "2024-01-01T00:00:00",
+                    "2"
+                ],
+            ],
+            "physical-table grouping must combine identical TSID/time across logical tables at parallelism={parallelism}:\n{result}"
+        );
+    }
+
+    for table in ["audit_metric_logical", "audit_metric_logical_two"] {
+        let logical = execute_sql(
+            &frontend,
+            &format!("SELECT host, val, ts FROM {table} ORDER BY ts"),
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert_eq!(
+            result_rows(&logical).len(),
+            2,
+            "logical reads remain correct: {logical}"
+        );
+    }
+
+    let error = try_execute_sql(
+        &frontend,
+        "ALTER TABLE audit_metric_logical ADD COLUMN __tsid STRING PRIMARY KEY",
+    )
+    .await
+    .expect_err("a logical metric table must not be able to add `__tsid`");
+    let message = error.output_msg();
+    assert!(
+        message.contains("column name `__tsid` is reserved by the metric engine"),
+        "unexpected error for rejected logical metric ALTER TABLE: {message}"
+    );
+
+    // The rejected ALTER must not leave the logical table in a broken state.
+    let logical = execute_sql(
+        &frontend,
+        "SELECT host, val, ts FROM audit_metric_logical ORDER BY ts",
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    assert_eq!(
+        result_rows(&logical),
+        vec![
+            vec!["host", "val", "ts"],
+            vec!["a", "1.5", "2024-01-01T00:00:00"],
+        ],
+        "the rejected ALTER must not break reads from the logical metric table: {logical}"
     );
 }
 
@@ -1557,6 +1837,35 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     .await
     .data;
     assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    // The reserved `__tsid` name is rejected when the declared external table is
+    // actually created, and no table is left behind.
+    let error = try_execute_sql(
+        &instance,
+        &format!(
+            r#"create external table test_table_tsid(
+                            __tsid bigint,
+                            ts timestamp default 0,
+                            host string,
+                            cpu double default 0,
+                            memory double,
+                            time index (ts)
+                        ) with (location='{location}', format='csv');"#
+        ),
+    )
+    .await
+    .expect_err("an external table must not declare `__tsid`");
+    let message = error.output_msg();
+    assert!(
+        message.contains("column name `__tsid` is reserved by the metric engine"),
+        "unexpected error for rejected CREATE EXTERNAL TABLE: {message}"
+    );
+    assert!(
+        try_execute_sql(&instance, "SELECT * FROM test_table_tsid")
+            .await
+            .is_err(),
+        "a rejected CREATE EXTERNAL TABLE must not create a table"
+    );
 }
 
 #[apply(standalone_instance_case)]
@@ -3728,7 +4037,9 @@ async fn try_execute_sql_with(
     sql: &str,
     query_ctx: QueryContextRef,
 ) -> server_error::Result<Output> {
-    instance.do_query(sql, query_ctx).await.remove(0)
+    SqlQueryHandler::do_query(instance.as_ref(), sql, query_ctx)
+        .await
+        .remove(0)
 }
 
 async fn execute_sql_with(
