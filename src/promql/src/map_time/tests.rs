@@ -25,7 +25,7 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use super::{DateFunction, date_of_eval_time, map_date, time};
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
-    canonical_bits, golden_cases, labels_of, metric_of, points_of, series_of,
+    Labels, canonical_bits, golden_cases, labels_of, metric_of, points_of, series_of,
 };
 
 fn schema(grid: Arc<EvalGrid>) -> Arc<SeriesSchema> {
@@ -108,9 +108,14 @@ fn map_date_drops_histograms_and_maps_chunks() {
         Series::try_new(
             &schema,
             metric_of(
-                &[("__name__", "m"), ("host", "a")]
-                    .map(|(n, v)| (n.into(), v.into()))
-                    .into(),
+                &[
+                    ("__name__", "m"),
+                    ("__type__", "gauge"),
+                    ("__unit__", "seconds"),
+                    ("host", "a"),
+                ]
+                .map(|(n, v)| (n.into(), v.into()))
+                .into(),
             ),
             TimeAxis::Grid(range.clone()),
             SeriesFields::one(fields),
@@ -150,7 +155,10 @@ fn map_date_drops_histograms_and_maps_chunks() {
         points_of(&hours),
         BTreeMap::from([(2, 1f64.to_bits()), (3, 2f64.to_bits())])
     );
-    assert_eq!(hours.metric.name(), None);
+    assert_eq!(
+        labels_of(&hours.metric),
+        Labels::from([("host".into(), "a".into())])
+    );
 
     let chunked = Samples::try_from_chunks(vec![floats(&[60.0]), floats(&[120.0, 180.0])]).unwrap();
     let minutes = map_date(DateFunction::Minute, &schema, &series(chunked))
