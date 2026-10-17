@@ -81,6 +81,19 @@ pub trait FlightCraft: Send + Sync + 'static {
         let _ = request;
         Err(Status::unimplemented("Not yet implemented"))
     }
+
+    /// Handles a Flight action.
+    ///
+    /// A handler that supports no action answers with a bare `Unimplemented`
+    /// status that carries no error metadata, so a caller can tell an absent
+    /// action apart from an action that failed.
+    async fn do_action(
+        &self,
+        request: Request<Action>,
+    ) -> TonicResult<Response<TonicStream<arrow_flight::Result>>> {
+        let _ = request;
+        Err(Status::unimplemented("Not yet implemented"))
+    }
 }
 
 pub type FlightCraftRef = Arc<dyn FlightCraft>;
@@ -107,6 +120,13 @@ impl FlightCraft for FlightCraftRef {
         request: Request<Streaming<FlightData>>,
     ) -> TonicResult<Response<TonicStream<PutResult>>> {
         self.as_ref().do_put(request).await
+    }
+
+    async fn do_action(
+        &self,
+        request: Request<Action>,
+    ) -> TonicResult<Response<TonicStream<arrow_flight::Result>>> {
+        self.as_ref().do_action(request).await
     }
 }
 
@@ -177,8 +197,11 @@ impl<T: FlightCraft> FlightService for FlightCraftWrapper<T> {
 
     type DoActionStream = TonicStream<arrow_flight::Result>;
 
-    async fn do_action(&self, _: Request<Action>) -> TonicResult<Response<Self::DoActionStream>> {
-        Err(Status::unimplemented("Not yet implemented"))
+    async fn do_action(
+        &self,
+        request: Request<Action>,
+    ) -> TonicResult<Response<Self::DoActionStream>> {
+        self.0.do_action(request).await
     }
 
     type ListActionsStream = TonicStream<ActionType>;
@@ -747,5 +770,102 @@ mod tests {
 
         let err = extract_flow_extensions(&metadata).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// A handler that implements `do_get` only.
+    struct NoActionFlight;
+
+    #[async_trait::async_trait]
+    impl FlightCraft for NoActionFlight {
+        async fn do_get(
+            &self,
+            _: Request<Ticket>,
+        ) -> TonicResult<Response<TonicStream<FlightData>>> {
+            Err(Status::unimplemented("Not yet implemented"))
+        }
+    }
+
+    /// A handler that answers one action.
+    struct OneActionFlight;
+
+    #[async_trait::async_trait]
+    impl FlightCraft for OneActionFlight {
+        async fn do_get(
+            &self,
+            _: Request<Ticket>,
+        ) -> TonicResult<Response<TonicStream<FlightData>>> {
+            Err(Status::unimplemented("Not yet implemented"))
+        }
+
+        async fn do_action(
+            &self,
+            request: Request<Action>,
+        ) -> TonicResult<Response<TonicStream<arrow_flight::Result>>> {
+            assert_eq!(
+                "greptime.prepare_raw_series.v1",
+                request.into_inner().r#type
+            );
+            let items: Vec<TonicResult<arrow_flight::Result>> = vec![Ok(arrow_flight::Result {
+                body: Bytes::from_static(b"forwarded"),
+            })];
+            Ok(Response::new(Box::pin(futures::stream::iter(items))))
+        }
+    }
+
+    fn action_request() -> Request<Action> {
+        Request::new(Action {
+            r#type: "greptime.prepare_raw_series.v1".to_string(),
+            body: Bytes::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_default_do_action_is_bare_unimplemented() {
+        let service = FlightCraftWrapper(NoActionFlight);
+
+        let status = match service.do_action(action_request()).await {
+            Err(status) => status,
+            Ok(_) => panic!("a handler without actions must reject them"),
+        };
+
+        assert_eq!(tonic::Code::Unimplemented, status.code());
+        assert!(
+            status.metadata().is_empty(),
+            "a bare Unimplemented must not carry error metadata: {:?}",
+            status.metadata()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flight_craft_ref_forwards_do_action() {
+        let handler: FlightCraftRef = Arc::new(OneActionFlight);
+
+        let response = handler
+            .do_action(action_request())
+            .await
+            .expect("the arc reference must forward the action");
+        let mut results = response.into_inner();
+        assert_eq!(
+            Bytes::from_static(b"forwarded"),
+            results.next().await.expect("one result").unwrap().body
+        );
+        assert!(results.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_flight_service_wrapper_forwards_do_action() {
+        let handler: FlightCraftRef = Arc::new(OneActionFlight);
+        let wrapper = FlightCraftWrapper(Arc::clone(&handler));
+
+        let response = wrapper
+            .do_action(action_request())
+            .await
+            .expect("the service wrapper must forward the action");
+        let mut results = response.into_inner();
+        assert_eq!(
+            Bytes::from_static(b"forwarded"),
+            results.next().await.expect("one result").unwrap().body
+        );
+        assert!(results.next().await.is_none());
     }
 }
