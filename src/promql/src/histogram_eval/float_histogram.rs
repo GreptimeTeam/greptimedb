@@ -26,7 +26,7 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
 
-use super::native::{CUSTOM_BUCKETS_SCHEMA, bound, kahan_inc};
+use crate::histogram_eval::native::{CUSTOM_BUCKETS_SCHEMA, bound, kahan_inc};
 
 type Buckets = Vec<(i32, f64)>;
 
