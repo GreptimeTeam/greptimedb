@@ -18,8 +18,8 @@
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::histogram::{BucketSideView, HistogramView};
 
-use super::bounds::EXPONENTIAL_BOUNDS;
-pub(super) use crate::functions::kahan_inc;
+use crate::functions::kahan_inc;
+use crate::histogram_eval::bounds::EXPONENTIAL_BOUNDS;
 
 pub(super) const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 
