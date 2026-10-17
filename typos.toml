@@ -8,6 +8,8 @@ typs = "typs"
 unqualifed = "unqualifed"
 excluder = "excluder"
 consts = "consts"
+# Unicode general category "decimal digit" in regex classes.
+Nd = "Nd"
 # Upstream crate rskafka defines a `DeadlineExceded` error variant, but it is misspelled. 
 # We need to extend the word list to avoid typos in our codebase.
 Exceded = "Exceded"
