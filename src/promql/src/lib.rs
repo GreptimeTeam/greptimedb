@@ -18,3 +18,4 @@ pub mod functions;
 pub mod instant_eval;
 mod metrics;
 pub mod range_array;
+pub mod source;

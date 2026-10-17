@@ -1,0 +1,169 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#[cfg(test)]
+mod tests;
+
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use common_error::ext::BoxedError;
+use datatypes::error::InvalidSeriesSnafu;
+use datatypes::series::SeriesOrdering;
+use datatypes::series::raw::RawSeriesChunk;
+use datatypes::series::samples::SeriesSchema;
+use futures::Stream;
+use mito_codec::labels::{DecodedLabels, LabelProjection, PrimaryKeyLabelDecoder};
+use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
+
+/// Materializes complete metric labels from a scan-bound raw-series source.
+///
+/// The caller supplies an already-bound source. Adjacent-chunk pack/unpack validation remains
+/// the caller's responsibility, and nonadjacent key recurrence is governed by the producer
+/// contract. Explicit labels are retained as supplied; their completeness cannot be inferred
+/// from the schema. No authorization or cross-stream completion is performed here.
+pub fn materialize_raw_labels(
+    source: SendableRawSeriesStream,
+) -> Result<SendableRawSeriesStream, BoxedError> {
+    let schema = Arc::clone(source.schema());
+    let label_source = source.label_source().clone();
+    let ordering = source.ordering();
+    if schema.eval_grid.is_some() {
+        return Err(BoxedError::new(
+            InvalidSeriesSnafu {
+                reason: "raw series schema cannot have an evaluation grid",
+            }
+            .build(),
+        ));
+    }
+    if schema.fields.is_empty() {
+        return Err(BoxedError::new(
+            InvalidSeriesSnafu {
+                reason: "raw series schema must have fields",
+            }
+            .build(),
+        ));
+    }
+    let decoder = match &label_source {
+        RawLabelSource::PrimaryKey { .. } => Some(
+            PrimaryKeyLabelDecoder::new(&label_source, LabelProjection::All)
+                .map_err(BoxedError::new)?,
+        ),
+        RawLabelSource::Explicit => None,
+    };
+
+    Ok(Box::pin(MaterializedRawSeriesStream {
+        source: Some(source),
+        schema,
+        ordering,
+        decoder,
+        label_source: RawLabelSource::Explicit,
+    }))
+}
+
+struct MaterializedRawSeriesStream {
+    source: Option<SendableRawSeriesStream>,
+    schema: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
+    decoder: Option<PrimaryKeyLabelDecoder>,
+    label_source: RawLabelSource,
+}
+
+impl Stream for MaterializedRawSeriesStream {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let Some(source) = this.source.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match source.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => {
+                this.source = None;
+                this.decoder = None;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => {
+                this.source = None;
+                this.decoder = None;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(Some(Ok(chunk))) => {
+                let result = this.materialize(chunk);
+                if result.is_err() {
+                    this.source = None;
+                    this.decoder = None;
+                }
+                Poll::Ready(Some(result))
+            }
+        }
+    }
+}
+
+impl RawSeriesStream for MaterializedRawSeriesStream {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        &self.schema
+    }
+
+    fn label_source(&self) -> &RawLabelSource {
+        &self.label_source
+    }
+
+    fn ordering(&self) -> SeriesOrdering {
+        self.ordering
+    }
+}
+
+impl MaterializedRawSeriesStream {
+    fn materialize(&mut self, chunk: RawSeriesChunk) -> Result<RawSeriesChunk, BoxedError> {
+        let metric = match (&mut self.decoder, chunk.metric) {
+            (Some(decoder), None) => {
+                match decoder
+                    .decode(&chunk.primary_key)
+                    .map_err(BoxedError::new)?
+                {
+                    DecodedLabels::Complete(metric) => Some(metric),
+                    DecodedLabels::Projected(_) => {
+                        return Err(BoxedError::new(
+                            InvalidSeriesSnafu {
+                                reason: "primary-key decoder returned projected labels",
+                            }
+                            .build(),
+                        ));
+                    }
+                }
+            }
+            (None, Some(metric)) => Some(metric),
+            _ => {
+                return Err(BoxedError::new(
+                    InvalidSeriesSnafu {
+                        reason: "raw chunk label mode does not match source",
+                    }
+                    .build(),
+                ));
+            }
+        };
+        RawSeriesChunk::try_new(
+            &self.schema,
+            chunk.primary_key,
+            metric,
+            chunk.time,
+            chunk.fields,
+            chunk.is_last,
+        )
+        .map_err(BoxedError::new)
+    }
+}
