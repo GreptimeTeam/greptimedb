@@ -36,6 +36,7 @@ pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
     PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
 };
+pub(crate) use aggr_over_time::{extremum, stddev, stdvar};
 pub use changes::Changes;
 use datafusion::arrow::array::{
     ArrayRef, DictionaryArray, Float64Array, TimestampMillisecondArray,
@@ -66,6 +67,7 @@ pub use native_histogram::{
 };
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
+pub(crate) use quantile::window_quantile;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
 pub use resets::Resets;
 pub use round::Round;

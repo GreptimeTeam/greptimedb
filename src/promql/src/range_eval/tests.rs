@@ -23,6 +23,7 @@ use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::series::histogram::{
@@ -36,7 +37,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel};
-use crate::functions::{Delta, IDelta, Increase, Rate};
+use crate::functions::{
+    AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime,
+    PresentOverTime, QuantileOverTime, Rate, StddevOverTime, StdvarOverTime, SumOverTime,
+};
 use crate::grid_series::reference::{Dense, assert_series_eq, special_value};
 use crate::range_array::RangeArray;
 
@@ -207,19 +211,23 @@ fn reference_windows(
         })
         .map(|(timestamp, values)| (timestamp + window.offset_ms, values.clone()))
         .collect();
-    let windows = grid
-        .timestamps()
+    let windows = windows_of(&kept, grid, window);
+    (kept, windows)
+}
+
+/// Rows of `rows`, already on the evaluation timeline, inside each grid point's window.
+fn windows_of(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Vec<Range<usize>> {
+    grid.timestamps()
         .iter()
         .map(|&eval_ts| {
-            let inside: Vec<_> = (0..kept.len())
-                .filter(|&row| kept[row].0 > eval_ts - window.range_ms && kept[row].0 <= eval_ts)
+            let inside: Vec<_> = (0..rows.len())
+                .filter(|&row| rows[row].0 > eval_ts - window.range_ms && rows[row].0 <= eval_ts)
                 .collect();
             inside
                 .first()
                 .map_or(0..0, |&first| first..first + inside.len())
         })
-        .collect();
-    (kept, windows)
+        .collect()
 }
 
 /// Applies the probe to the valid samples of every reference window.
@@ -250,8 +258,11 @@ fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) 
         .collect()
 }
 
-/// Evaluates every reference window with the ordinary range UDF, on the same row layout
+/// Evaluates every reference window with the ordinary range UDF, on the row layout
 /// `RangeManipulate` produces: shifted timestamps and nullable values per field.
+///
+/// `sum_over_time` and `avg_over_time` get only the field's valid rows: Arrow's lane-wise sum
+/// depends on where null slots sit, which the evaluator does not keep.
 fn udf_reference(
     function: RangeFunction,
     rows: &[Row],
@@ -259,22 +270,33 @@ fn udf_reference(
     window: RangeWindow,
     fields: usize,
 ) -> Dense {
-    let (kept, windows) = reference_windows(rows, grid, window);
-    let ranges: Vec<_> = windows
-        .iter()
-        .map(|rows| (rows.start as u32, rows.len() as u32))
-        .collect();
-    let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from_iter_values(
-        kept.iter().map(|(timestamp, _)| *timestamp),
-    ));
-    let mut dense = vec![vec![None; fields]; ranges.len()];
+    let (kept, _) = reference_windows(rows, grid, window);
+    let mut dense = vec![vec![None; fields]; grid.timestamps().len()];
     for field in 0..fields {
+        let rows: Vec<_> = if matches!(
+            function,
+            RangeFunction::SumOverTime | RangeFunction::AvgOverTime
+        ) {
+            kept.iter()
+                .filter(|(_, values)| values[field].is_some())
+                .cloned()
+                .collect()
+        } else {
+            kept.clone()
+        };
+        let ranges: Vec<_> = windows_of(&rows, grid, window)
+            .iter()
+            .map(|rows| (rows.start as u32, rows.len() as u32))
+            .collect();
+        let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from_iter_values(
+            rows.iter().map(|(timestamp, _)| *timestamp),
+        ));
         let values: ArrayRef = Arc::new(Float64Array::from_iter(
-            kept.iter().map(|(_, values)| values[field]),
+            rows.iter().map(|(_, values)| values[field]),
         ));
         let mut args = vec![
             ColumnarValue::Array(Arc::new(
-                RangeArray::from_ranges(timestamps.clone(), ranges.iter().copied())
+                RangeArray::from_ranges(timestamps, ranges.iter().copied())
                     .unwrap()
                     .into_dict(),
             )),
@@ -290,17 +312,30 @@ fn udf_reference(
             RangeFunction::Delta => Delta::scalar_udf(),
             RangeFunction::Irate => IDelta::<true>::scalar_udf(),
             RangeFunction::Idelta => IDelta::<false>::scalar_udf(),
+            RangeFunction::AvgOverTime => AvgOverTime::scalar_udf(),
+            RangeFunction::MinOverTime => MinOverTime::scalar_udf(),
+            RangeFunction::MaxOverTime => MaxOverTime::scalar_udf(),
+            RangeFunction::SumOverTime => SumOverTime::scalar_udf(),
+            RangeFunction::CountOverTime => CountOverTime::scalar_udf(),
+            RangeFunction::LastOverTime => LastOverTime::scalar_udf(),
+            RangeFunction::PresentOverTime => PresentOverTime::scalar_udf(),
+            RangeFunction::StddevOverTime => StddevOverTime::scalar_udf(),
+            RangeFunction::StdvarOverTime => StdvarOverTime::scalar_udf(),
+            RangeFunction::QuantileOverTime(_) => QuantileOverTime::scalar_udf(),
         };
-        if matches!(
-            function,
-            RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta
-        ) {
-            args.push(ColumnarValue::Array(Arc::new(
-                TimestampMillisecondArray::new(grid.timestamps().clone(), None),
-            )));
-            args.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![
-                window.range_ms,
-            ]))));
+        match function {
+            RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta => {
+                args.push(ColumnarValue::Array(Arc::new(
+                    TimestampMillisecondArray::new(grid.timestamps().clone(), None),
+                )));
+                args.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![
+                    window.range_ms,
+                ]))));
+            }
+            RangeFunction::QuantileOverTime(quantile) => {
+                args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(quantile))));
+            }
+            _ => {}
         }
         let arg_fields = args
             .iter()
@@ -387,6 +422,21 @@ fn functions_match_range_udfs() {
         RangeFunction::Delta,
         RangeFunction::Irate,
         RangeFunction::Idelta,
+        RangeFunction::AvgOverTime,
+        RangeFunction::MinOverTime,
+        RangeFunction::MaxOverTime,
+        RangeFunction::SumOverTime,
+        RangeFunction::CountOverTime,
+        RangeFunction::LastOverTime,
+        RangeFunction::PresentOverTime,
+        RangeFunction::StddevOverTime,
+        RangeFunction::StdvarOverTime,
+        RangeFunction::QuantileOverTime(-0.5),
+        RangeFunction::QuantileOverTime(0.0),
+        RangeFunction::QuantileOverTime(0.9),
+        RangeFunction::QuantileOverTime(1.0),
+        RangeFunction::QuantileOverTime(1.5),
+        RangeFunction::QuantileOverTime(f64::NAN),
     ] {
         for seed in 0..300 {
             let mut rng = StdRng::seed_from_u64(seed);

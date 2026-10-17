@@ -223,7 +223,11 @@ fn window_samples<'a>(
 /// Prometheus returns an empty vector for a range without float samples rather than the NaN
 /// that [`quantile_impl`] yields for an empty slice, so the emptiness check belongs here and
 /// not in the shared kernel.
-fn window_quantile(values: &[f64], quantile: f64, scratch: &mut Vec<f64>) -> Option<f64> {
+pub(crate) fn window_quantile(
+    values: &[f64],
+    quantile: f64,
+    scratch: &mut Vec<f64>,
+) -> Option<f64> {
     if values.is_empty() {
         return None;
     }

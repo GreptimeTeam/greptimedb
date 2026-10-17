@@ -14,8 +14,14 @@
 
 //! Float range-vector functions as window kernels, sharing their arithmetic with the range UDFs.
 
+use datafusion::arrow::array::Float64Array;
+use datafusion::arrow::buffer::ScalarBuffer;
+use datafusion::arrow::compute;
+
 use super::{FloatWindow, WindowKernel};
-use crate::functions::{add_counter_resets, extrapolate, instant_delta};
+use crate::functions::{
+    add_counter_resets, extrapolate, extremum, instant_delta, stddev, stdvar, window_quantile,
+};
 
 /// A PromQL range-vector function over float samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,6 +31,17 @@ pub enum RangeFunction {
     Delta,
     Irate,
     Idelta,
+    AvgOverTime,
+    MinOverTime,
+    MaxOverTime,
+    SumOverTime,
+    CountOverTime,
+    LastOverTime,
+    PresentOverTime,
+    StddevOverTime,
+    StdvarOverTime,
+    /// `quantile_over_time` with a constant quantile.
+    QuantileOverTime(f64),
 }
 
 impl RangeFunction {
@@ -36,8 +53,45 @@ impl RangeFunction {
             Self::Delta => Box::new(extrapolated::<false, false>),
             Self::Irate => Box::new(last_two::<true>),
             Self::Idelta => Box::new(last_two::<false>),
+            Self::AvgOverTime => {
+                let mut scratch = Vec::new();
+                Box::new(move |window| {
+                    sum(&mut scratch, window.values).map(|sum| sum / window.values.len() as f64)
+                })
+            }
+            Self::MinOverTime => Box::new(|window| extremum(window.values.iter().copied(), true)),
+            Self::MaxOverTime => Box::new(|window| extremum(window.values.iter().copied(), false)),
+            Self::SumOverTime => {
+                let mut scratch = Vec::new();
+                Box::new(move |window| sum(&mut scratch, window.values))
+            }
+            Self::CountOverTime => Box::new(|window| Some(window.values.len() as f64)),
+            Self::LastOverTime => Box::new(|window| window.values.last().copied()),
+            Self::PresentOverTime => Box::new(|_| Some(1.0)),
+            Self::StddevOverTime => Box::new(|window| stddev(window.values.iter().copied())),
+            Self::StdvarOverTime => Box::new(|window| stdvar(window.values.iter().copied())),
+            Self::QuantileOverTime(quantile) => {
+                let mut scratch = Vec::new();
+                Box::new(move |window| window_quantile(window.values, quantile, &mut scratch))
+            }
         }
     }
+}
+
+/// Sums like the `sum_over_time` UDF: Arrow's lane-wise `sum` over the window's samples.
+///
+/// `scratch` keeps the buffer the window is copied into between calls.
+fn sum(scratch: &mut Vec<f64>, values: &[f64]) -> Option<f64> {
+    let mut buffer = std::mem::take(scratch);
+    buffer.clear();
+    buffer.extend_from_slice(values);
+    let array = Float64Array::new(ScalarBuffer::from(buffer), None);
+    let sum = compute::sum(&array);
+    let (_, buffer, _) = array.into_parts();
+    if let Ok(buffer) = buffer.into_inner().into_vec() {
+        *scratch = buffer;
+    }
+    sum
 }
 
 fn extrapolated<const IS_COUNTER: bool, const IS_RATE: bool>(
