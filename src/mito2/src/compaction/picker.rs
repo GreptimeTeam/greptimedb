@@ -128,6 +128,7 @@ pub fn new_picker(
     region_options: &RegionOptions,
     max_background_tasks: Option<usize>,
     time_range: Option<TimestampRange>,
+    manual: bool,
 ) -> Arc<dyn Picker> {
     if let compact_request::Options::StrictWindow(window) = compact_request_options {
         let window = if window.window_seconds == 0 {
@@ -150,6 +151,7 @@ pub fn new_picker(
                 append_mode: region_options.append_mode,
                 max_background_tasks,
                 time_range,
+                all_windows_inactive: manual,
             },
         };
         if region_options.merge_mode() == MergeMode::LastNonNull {

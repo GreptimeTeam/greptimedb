@@ -124,6 +124,10 @@ pub struct TwcsPicker {
     pub max_background_tasks: Option<usize>,
     /// Optional time range that constrains candidate compaction windows.
     pub(crate) time_range: Option<TimestampRange>,
+    /// Picks the active window like an inactive one. Manual compactions set it,
+    /// so a window that stopped receiving writes still gets its overlaps
+    /// resolved.
+    pub(crate) all_windows_inactive: bool,
 }
 
 impl TwcsPicker {
@@ -264,7 +268,7 @@ impl TwcsPicker {
 
         let (l0_files, l1_files): (Vec<_>, Vec<_>) =
             files.into_iter().partition(|file| file.level() == 0);
-        if active_window == Some(window.time_window) {
+        if !self.all_windows_inactive && active_window == Some(window.time_window) {
             self.pick_active_window(l0_files, l1_files, mapper)
         } else if window.files.len() < self.inactive_window_trigger_file_num
             && l1_files.len() < self.inactive_window_l1_merge_trigger
@@ -1324,6 +1328,7 @@ mod tests {
                 append_mode: false,
                 max_background_tasks: None,
                 time_range: None,
+                all_windows_inactive: false,
             };
 
             let output = picker.pick(&compaction_region).await.unwrap().unwrap();
@@ -1347,6 +1352,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
         let compaction_region = compaction_region_with_expired_sst().await;
 
@@ -1403,6 +1409,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker.pick(&compaction_region).await.unwrap().unwrap();
@@ -1465,6 +1472,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         assert!(picker.pick(&compaction_region).await.unwrap().is_none());
@@ -2022,6 +2030,7 @@ mod tests {
                 append_mode: false,
                 max_background_tasks: None,
                 time_range: None,
+                all_windows_inactive: false,
             }
             .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
             .await
@@ -2173,6 +2182,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         }
         .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
         .await
@@ -2244,6 +2254,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2292,6 +2303,7 @@ mod tests {
             append_mode: true,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2326,6 +2338,7 @@ mod tests {
             append_mode: true,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2371,6 +2384,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2398,6 +2412,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let windows_no_limit = assign_to_windows(files.iter(), 3);
@@ -2445,6 +2460,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2497,6 +2513,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2544,6 +2561,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2593,6 +2611,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3600);
@@ -2642,6 +2661,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3600);
@@ -2676,6 +2696,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: Some(1),
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2776,6 +2797,7 @@ mod tests {
                 Timestamp::new_millisecond(7_200),
                 Timestamp::new_millisecond(7_800),
             ),
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2811,6 +2833,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2839,6 +2862,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2868,6 +2892,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2897,6 +2922,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2925,6 +2951,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -2968,6 +2995,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3150,6 +3178,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         for (case, files, expected_level, expected_len) in [
@@ -3201,6 +3230,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3238,6 +3268,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3288,6 +3319,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3335,6 +3367,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
+            all_windows_inactive: false,
         }
     }
 
@@ -3345,6 +3378,27 @@ mod tests {
             .convert_to(TimeUnit::Second)
             .unwrap()
             .value()
+    }
+
+    #[tokio::test]
+    async fn test_manual_compaction_resolves_active_window_overlaps() {
+        let files = priority_test_files(5, 1, 100, true);
+        for (all_windows_inactive, expected) in [(false, 0), (true, 1)] {
+            let picker = TwcsPicker {
+                all_windows_inactive,
+                ..priority_test_picker(1)
+            };
+            let output = picker
+                .build_output_with_time_range(
+                    RegionId::from_u64(1),
+                    assign_to_windows(files.iter(), 1),
+                    Some(5),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(expected, output.len(), "manual: {all_windows_inactive}");
+        }
     }
 
     #[tokio::test]
@@ -3448,6 +3502,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3479,6 +3534,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3510,6 +3566,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3541,6 +3598,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker
@@ -3680,6 +3738,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: Some(1),
             time_range: None,
+            all_windows_inactive: false,
         };
 
         for (case, key_range, extra_size, overlapping_a, expected_inputs) in [
@@ -3930,6 +3989,7 @@ mod tests {
                 append_mode: false,
                 max_background_tasks: Some(1),
                 time_range: None,
+                all_windows_inactive: false,
             };
 
             for active_window in [Some(0), None] {
@@ -4071,6 +4131,7 @@ mod tests {
             append_mode: false,
             max_background_tasks: None,
             time_range: None,
+            all_windows_inactive: false,
         };
 
         let output = picker

@@ -1806,6 +1806,7 @@ async fn preview_regular_compaction(
         &version.options,
         None,
         None,
+        false,
     );
     let compaction_region = CompactionRegion {
         region_id,
@@ -2777,9 +2778,9 @@ async fn test_compaction_region_with_format(flat_format: bool) {
     //          -[15.........29]- (delete)
     //           [15.....24]
     // Count-first compaction consumes the first 4 SSTs as soon as the trigger is reached.
-    // The compacted output and final flush leave 2 SSTs.
+    // The manual compaction then merges the compacted output with the final flush.
     assert_eq!(
-        2,
+        1,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
