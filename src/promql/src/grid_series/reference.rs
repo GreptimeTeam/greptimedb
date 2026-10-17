@@ -163,6 +163,8 @@ pub(crate) struct GoldenCase {
     pub(crate) histograms: Vec<BTreeMap<usize, String>>,
     /// Result series by label set, or the error message.
     pub(crate) outcome: Result<BTreeMap<Labels, Points>, String>,
+    /// Native histogram points of the result series, as written by the generator.
+    pub(crate) result_histograms: BTreeMap<Labels, BTreeMap<usize, String>>,
 }
 
 /// Parses a fixture whose label pairs are separated by `|`.
@@ -202,6 +204,7 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
         let grid = GridSpec::try_new(grid[0], grid[1], grid[2] as u64).unwrap();
         let mut inputs = Vec::new();
         let mut histograms = Vec::new();
+        let mut result_histograms = BTreeMap::new();
         let mut outcome = Ok(BTreeMap::new());
         for line in &lines[2..] {
             if let Some(message) = line.strip_prefix("error ") {
@@ -218,6 +221,9 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
                     histograms.push(histogram_points);
                 }
                 "result" => {
+                    if !histogram_points.is_empty() {
+                        result_histograms.insert(entry.0.clone(), histogram_points);
+                    }
                     outcome.as_mut().unwrap().insert(entry.0, entry.1);
                 }
                 other => panic!("unexpected line {other}"),
@@ -229,6 +235,7 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
             inputs,
             histograms,
             outcome,
+            result_histograms,
         });
     }
     cases

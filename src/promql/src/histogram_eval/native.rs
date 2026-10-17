@@ -18,7 +18,9 @@
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::histogram::{BucketSideView, HistogramView};
 
-const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
+use super::bounds::EXPONENTIAL_BOUNDS;
+
+pub(super) const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct NativeBucket {
@@ -115,7 +117,7 @@ fn bucket(h: &HistogramView<'_>, idx: i32, count: f64, positive: bool) -> Result
 }
 
 /// Go `getBound`.
-fn bound(idx: i32, schema: i32, custom_values: &[f64]) -> Result<f64> {
+pub(super) fn bound(idx: i32, schema: i32, custom_values: &[f64]) -> Result<f64> {
     if schema == CUSTOM_BUCKETS_SCHEMA {
         let len = custom_values.len() as i64;
         return match i64::from(idx) {
@@ -125,17 +127,47 @@ fn bound(idx: i32, schema: i32, custom_values: &[f64]) -> Result<f64> {
             _ => Err(invalid_layout()),
         };
     }
-    if !(-4..=8).contains(&schema) {
-        return Err(invalid_layout());
+    if schema < 0 {
+        if schema < -4 {
+            return Err(invalid_layout());
+        }
+        let exp = i64::from(idx) << -schema;
+        if exp == 1024 {
+            // The last bucket of finite values; its computed bound would overflow to +Inf,
+            // which Go reserves for the bucket of infinite observations.
+            return Ok(f64::MAX);
+        }
+        return Ok(ldexp(1.0, exp));
     }
-    // The upper bound of bucket `idx` is 2^(idx / 2^schema).
-    let exponent = f64::from(idx) * 2f64.powi(-schema);
-    if exponent == 1024.0 {
-        // The last bucket of finite values; its computed bound would overflow to +Inf, which
-        // Go reserves for the bucket of infinite observations.
+    // Go's table entries are not all correctly rounded, and bounds become zero thresholds that
+    // are compared exactly, so the table is used rather than computing `2^(idx / 2^schema)`.
+    let bounds = EXPONENTIAL_BOUNDS
+        .get(schema as usize)
+        .ok_or_else(invalid_layout)?;
+    let frac = bounds[(idx & ((1 << schema) - 1)) as usize];
+    let exp = i64::from(idx >> schema) + 1;
+    if frac == 0.5 && exp == 1025 {
         return Ok(f64::MAX);
     }
-    Ok(exponent.exp2())
+    Ok(ldexp(frac, exp))
+}
+
+/// Go `math.Ldexp` for a positive normal `frac`.
+fn ldexp(frac: f64, exp: i64) -> f64 {
+    let bits = frac.to_bits();
+    let exp = exp + ((bits >> 52) & 0x7FF) as i64 - 1023;
+    if exp < -1075 {
+        return 0.0;
+    }
+    if exp > 1023 {
+        return f64::INFINITY;
+    }
+    let (exp, scale) = if exp < -1022 {
+        (exp + 53, 1.0 / (1u64 << 53) as f64)
+    } else {
+        (exp, 1.0)
+    };
+    scale * f64::from_bits((bits & !(0x7FF << 52)) | (((exp + 1023) as u64) << 52))
 }
 
 fn invalid_layout() -> DataFusionError {
@@ -350,7 +382,7 @@ pub(super) fn variance(h: &HistogramView<'_>, buckets: &mut Vec<NativeBucket>) -
 }
 
 /// Prometheus `kahansum.Inc`.
-fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
+pub(super) fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
     let t = sum + inc;
     if t.is_infinite() {
         return (t, 0.0);
