@@ -308,6 +308,11 @@ impl RangeEvaluator {
             state.cursor += 1;
         }
         for field in &mut self.fields {
+            // After the last window, samples are still ingested so that the overflow and
+            // histogram checks do not depend on how the series is chunked, but none are kept.
+            if state.cursor == grid.len() {
+                field.head = field.timestamps.len();
+            }
             field.timestamps.drain(..field.head);
             field.values.drain(..field.head);
             field.head = 0;
