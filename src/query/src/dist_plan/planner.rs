@@ -16,12 +16,14 @@
 
 use std::sync::Arc;
 
-use ahash::HashMap;
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use arrow_schema::SortOptions;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+use common_meta::rpc::router::RegionRoute;
 use common_telemetry::debug;
+use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::catalog::Session;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
@@ -34,8 +36,10 @@ use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use datatypes::prelude::ConcreteDataType;
-use partition::expr::PartitionExpr;
+use datatypes::value::Value;
+use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
+use partition::overlap::associate_from_to;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -51,7 +55,7 @@ use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
 use crate::optimizer::expr_depth;
-use crate::region_query::RegionQueryHandlerRef;
+use crate::region_query::{RegionQueryHandlerRef, RegionQueryTarget};
 
 /// Planner for converting merge sort logical plan to physical plan.
 ///
@@ -148,6 +152,9 @@ pub struct DistExtensionPlanner {
     partition_rule_manager: PartitionRuleManagerRef,
     region_query_handler: RegionQueryHandlerRef,
     enable_per_region_metrics: bool,
+    /// Gates the quadratic route-overlap proof with the existing native PromQL option.
+    /// Ordinary region selection runs identically either way.
+    capture_native_raw_route: bool,
 }
 
 impl DistExtensionPlanner {
@@ -156,12 +163,14 @@ impl DistExtensionPlanner {
         partition_rule_manager: PartitionRuleManagerRef,
         region_query_handler: RegionQueryHandlerRef,
         enable_per_region_metrics: bool,
+        capture_native_raw_route: bool,
     ) -> Self {
         Self {
             catalog_manager,
             partition_rule_manager,
             region_query_handler,
             enable_per_region_metrics,
+            capture_native_raw_route,
         }
     }
 }
@@ -201,7 +210,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(optimized_plan).await;
         };
 
-        let Ok(regions) = self.get_regions(&table_name, input_plan).await else {
+        let Ok((regions, native_raw_route)) = self.get_regions(&table_name, input_plan).await
+        else {
             // no peers found, going to execute them locally
             return fallback(optimized_plan).await;
         };
@@ -232,6 +242,12 @@ impl ExtensionPlanner for DistExtensionPlanner {
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
         )?;
+        // Captured provenance only: ordinary execution of `MergeScanExec` never
+        // reads it, so a missing capture keeps the plan exactly as before.
+        let merge_scan_plan = match native_raw_route {
+            Some(native_raw_route) => merge_scan_plan.with_native_raw_route(native_raw_route),
+            None => merge_scan_plan,
+        };
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
 }
@@ -244,16 +260,26 @@ impl DistExtensionPlanner {
         Ok(extractor.table_name)
     }
 
+    /// Selects the regions of the ordinary distributed plan and captures the
+    /// native raw route of the same physical route, if it can be proven.
+    ///
+    /// Every ordinary selection path (pruned and all fallbacks) returns the
+    /// regions a `MergeScanExec` would use, plus the frozen region targets
+    /// captured in that exact order. The capture is provenance for a native raw
+    /// consumer and is `None` when it is disabled or the route cannot be proven;
+    /// capturing never changes the ordinary region selection or its error
+    /// handling.
     async fn get_regions(
         &self,
         table_name: &TableName,
         logical_plan: &LogicalPlan,
-    ) -> Result<Vec<RegionId>> {
+    ) -> Result<(Vec<RegionId>, Option<CaptureNativeRawRoute>)> {
         let mut extractor = TableScanExtractor::default();
         let _ = logical_plan.visit(&mut extractor)?;
         // Resolving by name again could bind an authorized scan to a replacement table.
-        let table = match extractor.captured_table {
-            Some(table) => table,
+        let captured_table = extractor.captured_table;
+        let table = match &captured_table {
+            Some(table) => table.clone(),
             None => self
                 .catalog_manager
                 .table(
@@ -293,87 +319,107 @@ impl DistExtensionPlanner {
             partition_columns,
             all_regions,
         );
-        if partition_columns.is_empty() {
-            return Ok(all_regions);
-        }
-        // Extract predicates from logical plan
-        let partition_expressions = match PredicateExtractor::extract_partition_expressions(
-            logical_plan,
-            &partition_columns,
-        ) {
-            Ok(expressions) => expressions,
-            Err(err) => {
-                common_telemetry::debug!(
-                    "Failed to extract partition expressions for table {} (id: {}), using all regions: {:?}",
-                    table_name,
-                    table.table_info().table_id(),
-                    err
-                );
-                return Ok(all_regions);
+        // Ordinary region selection. Every fallback keeps all regions, exactly
+        // as before the native raw route existed.
+        let regions = 'pruning: {
+            if partition_columns.is_empty() {
+                break 'pruning all_regions;
             }
-        };
+            // Extract predicates from logical plan
+            let partition_expressions = match PredicateExtractor::extract_partition_expressions(
+                logical_plan,
+                &partition_columns,
+            ) {
+                Ok(expressions) => expressions,
+                Err(err) => {
+                    common_telemetry::debug!(
+                        "Failed to extract partition expressions for table {} (id: {}), using all regions: {:?}",
+                        table_name,
+                        table.table_info().table_id(),
+                        err
+                    );
+                    break 'pruning all_regions;
+                }
+            };
 
-        if partition_expressions.is_empty() {
-            return Ok(all_regions);
-        }
+            if partition_expressions.is_empty() {
+                break 'pruning all_regions;
+            }
 
-        let Some(partition_column_types) = self
-            .partition_column_types_for_pruning(
-                table_name,
-                table_info.as_ref(),
-                physical_table_id,
+            let Some(partition_column_types) = self
+                .partition_column_types_for_pruning(
+                    table_name,
+                    table_info.as_ref(),
+                    physical_table_id,
+                    &partition_expressions,
+                    &all_regions,
+                )
+                .await
+            else {
+                break 'pruning all_regions;
+            };
+
+            // Get partition information for the table if partition rule manager is available
+            let partitions = match create_partitions_from_region_routes(
+                table_info.table_id(),
+                &physical_table_route.region_routes,
+            ) {
+                Ok(partitions) => partitions,
+                Err(err) => {
+                    common_telemetry::debug!(
+                        "Failed to get partition information for table {}, using all regions: {:?}",
+                        table_name,
+                        err
+                    );
+                    break 'pruning all_regions;
+                }
+            };
+            if partitions.is_empty() {
+                break 'pruning all_regions;
+            }
+            // Apply region pruning based on partition rules
+            let pruned_regions = match ConstraintPruner::prune_regions(
                 &partition_expressions,
-                &all_regions,
+                &partitions,
+                partition_column_types,
+            ) {
+                Ok(regions) => regions,
+                Err(err) => {
+                    common_telemetry::debug!(
+                        "Failed to prune regions for table {}, using all regions: {:?}",
+                        table_name,
+                        err
+                    );
+                    break 'pruning all_regions;
+                }
+            };
+
+            common_telemetry::debug!(
+                "Region pruning for table {}: {} partition expressions applied, pruned from {} to {} regions",
+                table_name,
+                partition_expressions.len(),
+                all_regions.len(),
+                pruned_regions.len()
+            );
+
+            pruned_regions
+        };
+
+        // Captured from the same physical route that selected the regions above,
+        // in the same order. This never mutates or reorders `regions`; the
+        // experimental gate only skips the capture.
+        let native_raw_route = if self.capture_native_raw_route {
+            capture_native_raw_route(
+                captured_table.as_ref(),
+                &table_info,
+                physical_table_id,
+                &physical_table_route.region_routes,
+                &regions,
             )
-            .await
-        else {
-            return Ok(all_regions);
+        } else {
+            None
         };
-
-        // Get partition information for the table if partition rule manager is available
-        let partitions = match create_partitions_from_region_routes(
-            table_info.table_id(),
-            &physical_table_route.region_routes,
-        ) {
-            Ok(partitions) => partitions,
-            Err(err) => {
-                common_telemetry::debug!(
-                    "Failed to get partition information for table {}, using all regions: {:?}",
-                    table_name,
-                    err
-                );
-                return Ok(all_regions);
-            }
-        };
-        if partitions.is_empty() {
-            return Ok(all_regions);
-        }
-        // Apply region pruning based on partition rules
-        let pruned_regions = match ConstraintPruner::prune_regions(
-            &partition_expressions,
-            &partitions,
-            partition_column_types,
-        ) {
-            Ok(regions) => regions,
-            Err(err) => {
-                common_telemetry::debug!(
-                    "Failed to prune regions for table {}, using all regions: {:?}",
-                    table_name,
-                    err
-                );
-                return Ok(all_regions);
-            }
-        };
-
-        common_telemetry::debug!(
-            "Region pruning for table {}: {} partition expressions applied, pruned from {} to {} regions",
-            table_name,
-            partition_expressions.len(),
-            all_regions.len(),
-            pruned_regions.len()
-        );
-
-        Ok(pruned_regions)
+        Ok((regions, native_raw_route))
     }
 
     /// Resolves the partition-column types that are safe to use for region pruning.
@@ -472,6 +518,199 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
         .collect()
 }
 
+/// Frozen route provenance of an ordinary distributed plan for a native raw
+/// consumer.
+///
+/// `targets` pairs each region selected by the ordinary plan with the leader
+/// target of the physical route that selected it, in the exact order the
+/// ordinary `MergeScanExec` uses. It is only built when the routed partition
+/// expressions express an explicit, non-empty, pairwise-disjoint millisecond
+/// timestamp domain on the table captured from the authorized scan, and
+/// ordinary execution never reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CaptureNativeRawRoute {
+    /// `targets[i]` is the frozen leader target of the i-th selected region.
+    pub(crate) targets: Vec<(RegionId, RegionQueryTarget)>,
+}
+
+/// Freezes the leader target of every `selected_regions` entry from
+/// `region_routes`, the physical route that selected them.
+///
+/// Returns `None` whenever that route cannot be proven to be an explicit,
+/// non-empty, pairwise-disjoint timestamp domain. Declining is not an error and
+/// never changes the ordinary region selection or its error handling: the
+/// capture is provenance that the ordinary plan already ignores.
+fn capture_native_raw_route(
+    captured_table: Option<&TableRef>,
+    table_info: &TableInfo,
+    physical_table_id: u32,
+    region_routes: &[RegionRoute],
+    selected_regions: &[RegionId],
+) -> Option<CaptureNativeRawRoute> {
+    // Only the table captured from the authorized scan can prove the route: a
+    // name-only lookup may have bound the plan to a replacement table.
+    let captured_table = captured_table?;
+    if captured_table.table_type() != TableType::Base
+        || table_info.meta.engine != MITO_ENGINE
+        // A logical table shares another physical table's route, so its region
+        // ids do not identify the routes below.
+        || table_info.table_id() != physical_table_id
+    {
+        return None;
+    }
+    if selected_regions.is_empty() {
+        return None;
+    }
+
+    let timestamp_column = table_info.meta.schema.timestamp_column()?;
+    // The native raw consumer currently supports millisecond timestamps only.
+    if timestamp_column.data_type.as_timestamp()?.unit() != TimeUnit::Millisecond {
+        return None;
+    }
+    // A nullable timestamp column can hold `NULL`s that belong to every
+    // partition domain, so the domains would not stay disjoint.
+    if timestamp_column.is_nullable() {
+        return None;
+    }
+
+    let selected_expressions =
+        selected_route_expressions(table_info.table_id(), region_routes, selected_regions)?;
+    // The supported grammar proves every selected domain non-empty on its own;
+    // see [`explicit_timestamp_bound`] for the exact shapes that are accepted.
+    if !selected_expressions.iter().all(|expr| {
+        explicit_timestamp_bound(expr, &timestamp_column.name)
+            .is_some_and(|(op, value)| is_nonempty_timestamp_bound(&op, value))
+    }) {
+        return None;
+    }
+    // `associate_from_to` proves only that the selected domains are pairwise
+    // disjoint: it normalizes the values to order-preserving ordinals and
+    // reports, per expression, which expressions it overlaps. Requiring each row
+    // to name exactly its own index is what makes the domains disjoint from one
+    // another, on top of every one of them being non-empty.
+    let overlaps = associate_from_to(&selected_expressions, &selected_expressions).ok()?;
+    if overlaps
+        .iter()
+        .enumerate()
+        .any(|(index, overlaps)| overlaps.len() != 1 || overlaps[0] != index)
+    {
+        return None;
+    }
+
+    let mut route_by_region_number = HashMap::with_capacity(region_routes.len());
+    for route in region_routes {
+        // Two routes for one region number cannot be mapped one-to-one.
+        if route_by_region_number
+            .insert(route.region.id.region_number(), route)
+            .is_some()
+        {
+            return None;
+        }
+    }
+
+    let mut seen = HashSet::with_capacity(selected_regions.len());
+    let mut targets = Vec::with_capacity(selected_regions.len());
+    for region_id in selected_regions {
+        // A duplicated region would be dispatched twice.
+        if !seen.insert(*region_id) {
+            return None;
+        }
+        let route = route_by_region_number.get(&region_id.region_number())?;
+        // The lookup is by region number, but only the full region id identifies
+        // this table's route: another table's route can carry the same region
+        // number, and freezing its target would dispatch a foreign region.
+        if route.region.id != *region_id {
+            return None;
+        }
+        // Reads go to the region leader, so a staging or downgrading leader
+        // must not be frozen as a query target.
+        if route.is_leader_staging() || route.is_leader_downgrading() {
+            return None;
+        }
+        let leader_peer = route.leader_peer.clone()?;
+        targets.push((*region_id, RegionQueryTarget::new(leader_peer)));
+    }
+
+    Some(CaptureNativeRawRoute { targets })
+}
+
+/// Collects the explicit partition expression of every selected region.
+///
+/// The expressions are decoded from the same router routes as the region ids and
+/// are returned in the ordinary selection order, so the proof checks exactly the
+/// regions the ordinary plan scans. A region without an explicit expression (for
+/// example a default region) declines the capture.
+fn selected_route_expressions(
+    table_id: u32,
+    region_routes: &[RegionRoute],
+    selected_regions: &[RegionId],
+) -> Option<Vec<PartitionExpr>> {
+    let partitions = create_partitions_from_region_routes(table_id, region_routes).ok()?;
+    let mut expressions = HashMap::with_capacity(partitions.len());
+    for partition in partitions {
+        if let Some(expression) = partition.partition_expr {
+            expressions.insert(partition.id, expression);
+        }
+    }
+    selected_regions
+        .iter()
+        .map(|region_id| expressions.get(region_id).cloned())
+        .collect()
+}
+
+/// Returns the standalone `Column ↔ Timestamp(ms)` comparison of `expr` in
+/// column-against-value order, or `None` if `expr` is not exactly one such
+/// comparison.
+///
+/// The route decoder canonicalizes reversed operands. Only one comparison is
+/// supported: conjunctions can contain empty discrete domains that the shared
+/// overlap helper cannot prove, and remain outside this proof grammar.
+fn explicit_timestamp_bound(
+    expr: &PartitionExpr,
+    timestamp_column: &str,
+) -> Option<(RestrictedOp, Timestamp)> {
+    let (Operand::Column(column), Operand::Value(value)) = (&*expr.lhs, &*expr.rhs) else {
+        return None;
+    };
+    let op = expr.op.clone();
+    if column.as_str() != timestamp_column {
+        return None;
+    }
+    if !matches!(
+        op,
+        RestrictedOp::Eq
+            | RestrictedOp::Lt
+            | RestrictedOp::LtEq
+            | RestrictedOp::Gt
+            | RestrictedOp::GtEq
+    ) {
+        return None;
+    }
+    match value {
+        Value::Timestamp(ts) if ts.unit() == TimeUnit::Millisecond => Some((op, *ts)),
+        _ => None,
+    }
+}
+
+/// Returns whether `op` against `value` is satisfied by at least one
+/// representable millisecond timestamp, i.e. the domain is not empty.
+///
+/// Only the strict comparisons against the representable range bounds can be
+/// unsatisfiable, and the bound check uses the timestamp value directly instead
+/// of any interval arithmetic.
+fn is_nonempty_timestamp_bound(op: &RestrictedOp, value: Timestamp) -> bool {
+    match op {
+        RestrictedOp::Eq => {
+            value >= Timestamp::MIN_MILLISECOND && value <= Timestamp::MAX_MILLISECOND
+        }
+        RestrictedOp::Lt => value > Timestamp::MIN_MILLISECOND,
+        RestrictedOp::LtEq => value >= Timestamp::MIN_MILLISECOND,
+        RestrictedOp::Gt => value < Timestamp::MAX_MILLISECOND,
+        RestrictedOp::GtEq => value <= Timestamp::MAX_MILLISECOND,
+        RestrictedOp::NotEq | RestrictedOp::And | RestrictedOp::Or => false,
+    }
+}
+
 /// Extract the scan name and captured table identity from a logical plan.
 #[derive(Default)]
 struct TableScanExtractor {
@@ -547,22 +786,25 @@ mod tests {
     use async_trait::async_trait;
     use catalog::memory::MemoryCatalogManager;
     use catalog::{CatalogManagerRef, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::cache::new_table_route_cache;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
+    use common_time::timestamp::Timestamp;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col as df_col, lit};
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, TableSource, col as df_col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::Value;
     use moka::future::CacheBuilder;
     use partition::cache::new_partition_info_cache;
-    use partition::expr::{PartitionExpr, col as partition_col};
+    use partition::expr::{Operand, PartitionExpr, RestrictedOp, col as partition_col};
     use partition::manager::PartitionRuleManager;
     use session::ReadPreference;
     use store_api::storage::RegionId;
@@ -571,7 +813,7 @@ mod tests {
     use table::table_name::TableName;
     use table::test_util::EmptyTable;
 
-    use super::DistExtensionPlanner;
+    use super::{CaptureNativeRawRoute, DistExtensionPlanner, capture_native_raw_route};
     use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
 
     const LOGICAL_TABLE_ID: u32 = 1024;
@@ -749,6 +991,7 @@ mod tests {
             partition_rule_manager,
             Arc::new(UnusedRegionQueryHandler),
             false,
+            false,
         );
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(logical_table),
@@ -786,10 +1029,11 @@ mod tests {
     async fn region_routing_uses_captured_table() {
         let (mut planner, plan, table_name) = planner_and_plan(vec![0], vec![None]).await;
         planner.catalog_manager = MemoryCatalogManager::with_default_setup();
-        assert_eq!(
-            vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
-            planner.get_regions(&table_name, &plan).await.unwrap()
-        );
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(vec![RegionId::new(LOGICAL_TABLE_ID, 1)], regions);
+        // The captured table is not the physical route owner, so the reason for
+        // using it is not provable and the capture is declined.
+        assert!(native_raw_route.is_none());
     }
 
     #[tokio::test]
@@ -797,10 +1041,9 @@ mod tests {
         let (planner, plan, table_name) =
             planner_and_plan(vec![0, 1], physical_partition_expressions()).await;
 
-        assert_eq!(
-            vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
-            planner.get_regions(&table_name, &plan).await.unwrap()
-        );
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(vec![RegionId::new(LOGICAL_TABLE_ID, 1)], regions);
+        assert!(native_raw_route.is_none());
     }
 
     #[tokio::test]
@@ -808,7 +1051,9 @@ mod tests {
         let (planner, plan, table_name) =
             planner_and_plan(vec![0], physical_partition_expressions()).await;
 
-        assert_all_logical_regions(planner.get_regions(&table_name, &plan).await.unwrap());
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_all_logical_regions(regions);
+        assert!(native_raw_route.is_none());
     }
 
     #[tokio::test]
@@ -817,7 +1062,776 @@ mod tests {
         expressions[1] = None;
         let (planner, plan, table_name) = planner_and_plan(vec![0, 1], expressions).await;
 
-        assert_all_logical_regions(planner.get_regions(&table_name, &plan).await.unwrap());
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_all_logical_regions(regions);
+        assert!(native_raw_route.is_none());
+    }
+
+    // ------------------------- native raw route capture ----------------------
+
+    /// Table id of the base table used by the native raw route tests.
+    const NATIVE_TABLE_ID: u32 = 4096;
+    /// Timestamp split between the explicit domains of the native route tests.
+    const NATIVE_SPLIT_MS: i64 = 1_700_000_000_000;
+
+    /// Table info of a base table with an explicit timestamp column.
+    fn native_table_info_with(
+        table_id: u32,
+        name: &str,
+        engine: &str,
+        timestamp_type: ConcreteDataType,
+        timestamp_nullable: bool,
+        partition_key_indices: Vec<usize>,
+    ) -> TableInfo {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("ts", timestamp_type, timestamp_nullable).with_time_index(true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+        ]));
+        let meta = TableMeta {
+            schema,
+            primary_key_indices: vec![],
+            value_indices: vec![],
+            engine: engine.to_string(),
+            next_column_id: 2,
+            options: Default::default(),
+            created_on: Default::default(),
+            updated_on: Default::default(),
+            partition_key_indices,
+            column_ids: vec![0, 1],
+        };
+        TableInfoBuilder::default()
+            .table_id(table_id)
+            .table_version(0)
+            .name(name.to_string())
+            .catalog_name(DEFAULT_CATALOG_NAME.to_string())
+            .schema_name(DEFAULT_SCHEMA_NAME.to_string())
+            .desc(None)
+            .table_type(TableType::Base)
+            .meta(meta)
+            .build()
+            .unwrap()
+    }
+
+    /// Table info of a base mito table partitioned on a millisecond timestamp.
+    fn native_table_info(table_id: u32, name: &str, engine: &str, ts_nullable: bool) -> TableInfo {
+        native_table_info_with(
+            table_id,
+            name,
+            engine,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ts_nullable,
+            vec![0],
+        )
+    }
+
+    fn native_timestamp_value(ms: i64) -> Value {
+        Value::Timestamp(Timestamp::new_millisecond(ms))
+    }
+
+    fn native_ts_before(split_ms: i64) -> PartitionExpr {
+        partition_col("ts").lt(native_timestamp_value(split_ms))
+    }
+
+    fn native_ts_at(split_ms: i64) -> PartitionExpr {
+        partition_col("ts").eq(native_timestamp_value(split_ms))
+    }
+
+    fn native_ts_after(split_ms: i64) -> PartitionExpr {
+        partition_col("ts").gt(native_timestamp_value(split_ms))
+    }
+
+    fn native_ts_at_or_after(split_ms: i64) -> PartitionExpr {
+        partition_col("ts").gt_eq(native_timestamp_value(split_ms))
+    }
+
+    fn native_region_route(
+        region_number: u32,
+        expression: Option<PartitionExpr>,
+        leader_peer_id: Option<u64>,
+    ) -> RegionRoute {
+        native_region_route_for_table(NATIVE_TABLE_ID, region_number, expression, leader_peer_id)
+    }
+
+    /// A route whose region id belongs to `table_id`, which may differ from the
+    /// table the capture is asked about.
+    fn native_region_route_for_table(
+        table_id: u32,
+        region_number: u32,
+        expression: Option<PartitionExpr>,
+        leader_peer_id: Option<u64>,
+    ) -> RegionRoute {
+        RegionRoute {
+            region: Region {
+                id: RegionId::new(table_id, region_number),
+                partition_expr: expression
+                    .map(|expression| expression.as_json_str().unwrap())
+                    .unwrap_or_default(),
+                ..Default::default()
+            },
+            leader_peer: leader_peer_id.map(|id| Peer::new(id, format!("127.0.0.1:{id}"))),
+            ..Default::default()
+        }
+    }
+
+    fn native_target(peer_id: u64) -> RegionQueryTarget {
+        RegionQueryTarget::new(Peer::new(peer_id, format!("127.0.0.1:{peer_id}")))
+    }
+
+    /// Routes of the canonical explicit half-domain split.
+    fn native_half_domain_routes() -> Vec<RegionRoute> {
+        vec![
+            native_region_route(1, Some(native_ts_before(NATIVE_SPLIT_MS)), Some(11)),
+            native_region_route(2, Some(native_ts_at_or_after(NATIVE_SPLIT_MS)), Some(22)),
+        ]
+    }
+
+    fn native_region_ids() -> Vec<RegionId> {
+        vec![
+            RegionId::new(NATIVE_TABLE_ID, 1),
+            RegionId::new(NATIVE_TABLE_ID, 2),
+        ]
+    }
+
+    /// Builds a planner whose scan captures `info` over `routes`, the physical
+    /// region routes of that same table.
+    ///
+    /// `ts_filter` adds a filter on the timestamp column, which routes the
+    /// selection through pruning. `by_name_scan` scans a DataFusion provider
+    /// instead of a [`DfTableProviderAdapter`], which forces the ordinary name
+    /// lookup and leaves the scan without a captured table.
+    async fn native_planner_and_plan(
+        info: TableInfo,
+        routes: Vec<RegionRoute>,
+        ts_filter: Option<i64>,
+        by_name_scan: bool,
+    ) -> (DistExtensionPlanner, LogicalPlan, TableName) {
+        let table = EmptyTable::from_table_info(&info);
+        let catalog_manager = MemoryCatalogManager::with_default_setup();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: info.catalog_name.clone(),
+                schema: info.schema_name.clone(),
+                table_name: info.name.clone(),
+                table_id: info.table_id(),
+                table: table.clone(),
+            })
+            .unwrap();
+
+        let backend = Arc::new(MemoryKvBackend::default());
+        let metadata_manager = TableMetadataManager::new(backend.clone());
+        metadata_manager
+            .create_table_metadata(
+                info.clone(),
+                TableRouteValue::physical(routes),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let table_route_cache = Arc::new(new_table_route_cache(
+            "native-raw-route-routes".to_string(),
+            CacheBuilder::new(16).build(),
+            backend.clone(),
+        ));
+        let partition_info_cache = Arc::new(new_partition_info_cache(
+            "native-raw-route-partitions".to_string(),
+            CacheBuilder::new(16).build(),
+            table_route_cache.clone(),
+        ));
+        let partition_rule_manager = Arc::new(PartitionRuleManager::new(
+            backend,
+            table_route_cache,
+            partition_info_cache,
+        ));
+        let catalog_manager: CatalogManagerRef = catalog_manager;
+        let planner = DistExtensionPlanner::new(
+            catalog_manager,
+            partition_rule_manager,
+            Arc::new(UnusedRegionQueryHandler),
+            false,
+            // The native raw route fixtures exercise the enabled capture.
+            true,
+        );
+        let table_source: Arc<dyn TableSource> = if by_name_scan {
+            Arc::new(DefaultTableSource::new(Arc::new(
+                datafusion::datasource::empty::EmptyTable::new(
+                    info.meta.schema.arrow_schema().clone(),
+                ),
+            )))
+        } else {
+            Arc::new(DefaultTableSource::new(Arc::new(
+                DfTableProviderAdapter::new(table),
+            )))
+        };
+        let mut builder =
+            LogicalPlanBuilder::scan_with_filters(info.name.clone(), table_source, None, vec![])
+                .unwrap();
+        if let Some(split_ms) = ts_filter {
+            builder = builder
+                .filter(
+                    df_col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(split_ms), None))),
+                )
+                .unwrap();
+        }
+        let plan = builder.build().unwrap();
+        let table_name =
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, info.name.clone());
+        (planner, plan, table_name)
+    }
+
+    /// Captures `selected` regions of `routes` without going through a logical
+    /// plan, to isolate one proof condition at a time.
+    fn capture_native_selected(
+        info: &TableInfo,
+        routes: &[RegionRoute],
+        selected: &[RegionId],
+    ) -> Option<CaptureNativeRawRoute> {
+        let table = EmptyTable::from_table_info(info);
+        capture_native_raw_route(Some(&table), info, info.table_id(), routes, selected)
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_captures_explicit_half_domains() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let (mut planner, plan, table_name) =
+            native_planner_and_plan(info, native_half_domain_routes(), None, false).await;
+        // The capture must come from the table captured by the scan: an empty
+        // catalog cannot rebind the authorized scan to a replacement table.
+        planner.catalog_manager = MemoryCatalogManager::with_default_setup();
+
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(native_region_ids(), regions);
+        let native_raw_route = native_raw_route.expect("two explicit half domains are provable");
+        assert_eq!(
+            vec![
+                (RegionId::new(NATIVE_TABLE_ID, 1), native_target(11)),
+                (RegionId::new(NATIVE_TABLE_ID, 2), native_target(22)),
+            ],
+            native_raw_route.targets
+        );
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_captures_on_pruning_path() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let (planner, plan, table_name) = native_planner_and_plan(
+            info,
+            native_half_domain_routes(),
+            Some(NATIVE_SPLIT_MS),
+            false,
+        )
+        .await;
+
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        // Timestamp predicates are not pruned yet, so the ordinary plan keeps
+        // every region; the capture still describes exactly those regions.
+        assert_eq!(native_region_ids(), regions);
+        let native_raw_route = native_raw_route.expect("the pruning fallback captures the route");
+        assert_eq!(2, native_raw_route.targets.len());
+        assert_eq!(
+            (RegionId::new(NATIVE_TABLE_ID, 1), native_target(11)),
+            native_raw_route.targets[0]
+        );
+        assert_eq!(
+            (RegionId::new(NATIVE_TABLE_ID, 2), native_target(22)),
+            native_raw_route.targets[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_declines_pruned_subset_without_changing_it() {
+        // A table partitioned on `host`: the pruner returns a proper subset,
+        // whose domains are not timestamp domains, so only the ordinary ids
+        // survive.
+        let info = native_table_info_with(
+            NATIVE_TABLE_ID,
+            "native",
+            MITO_ENGINE,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            vec![1],
+        );
+        let routes = vec![
+            native_region_route(
+                1,
+                Some(partition_col("host").lt(Value::String("m".into()))),
+                Some(11),
+            ),
+            native_region_route(
+                2,
+                Some(partition_col("host").gt_eq(Value::String("m".into()))),
+                Some(22),
+            ),
+        ];
+        let (planner, plan, table_name) = native_planner_and_plan(info, routes, None, false).await;
+        let plan = LogicalPlanBuilder::from(plan)
+            .filter(df_col("host").eq(lit("a")))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(vec![RegionId::new(NATIVE_TABLE_ID, 1)], regions);
+        assert!(native_raw_route.is_none());
+    }
+
+    #[test]
+    fn native_raw_route_preserves_selected_subset_and_order() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let routes = vec![
+            native_region_route(1, Some(native_ts_before(NATIVE_SPLIT_MS)), Some(11)),
+            native_region_route(2, Some(native_ts_at(NATIVE_SPLIT_MS)), Some(22)),
+            native_region_route(3, Some(native_ts_after(NATIVE_SPLIT_MS)), Some(33)),
+        ];
+
+        // A pruned selection in pruning order, which is not route order.
+        let selected = vec![
+            RegionId::new(NATIVE_TABLE_ID, 3),
+            RegionId::new(NATIVE_TABLE_ID, 1),
+        ];
+        let captured = capture_native_selected(&info, &routes, &selected)
+            .expect("three disjoint timestamp domains are provable");
+        assert_eq!(
+            vec![
+                (RegionId::new(NATIVE_TABLE_ID, 3), native_target(33)),
+                (RegionId::new(NATIVE_TABLE_ID, 1), native_target(11)),
+            ],
+            captured.targets
+        );
+
+        // The complete selection keeps route order.
+        let all = vec![
+            RegionId::new(NATIVE_TABLE_ID, 1),
+            RegionId::new(NATIVE_TABLE_ID, 2),
+            RegionId::new(NATIVE_TABLE_ID, 3),
+        ];
+        let captured = capture_native_selected(&info, &routes, &all)
+            .expect("the complete selection is provable");
+        assert_eq!(
+            vec![
+                (RegionId::new(NATIVE_TABLE_ID, 1), native_target(11)),
+                (RegionId::new(NATIVE_TABLE_ID, 2), native_target(22)),
+                (RegionId::new(NATIVE_TABLE_ID, 3), native_target(33)),
+            ],
+            captured.targets
+        );
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_declines_overlapping_boundary() {
+        // `ts <= split` and `ts >= split` share the split, so the domains are
+        // not disjoint even though both are explicit.
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let routes = vec![
+            native_region_route(
+                1,
+                Some(partition_col("ts").lt_eq(native_timestamp_value(NATIVE_SPLIT_MS))),
+                Some(11),
+            ),
+            native_region_route(2, Some(native_ts_at_or_after(NATIVE_SPLIT_MS)), Some(22)),
+        ];
+        let (planner, plan, table_name) = native_planner_and_plan(info, routes, None, false).await;
+
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(native_region_ids(), regions);
+        assert!(native_raw_route.is_none());
+    }
+
+    #[test]
+    fn native_raw_route_declines_disjunction() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let disjunction = PartitionExpr::new(
+            Operand::Expr(native_ts_before(NATIVE_SPLIT_MS)),
+            RestrictedOp::Or,
+            Operand::Expr(native_ts_at_or_after(NATIVE_SPLIT_MS)),
+        );
+        let routes = vec![native_region_route(1, Some(disjunction), Some(11))];
+
+        assert!(
+            capture_native_selected(&info, &routes, &[RegionId::new(NATIVE_TABLE_ID, 1)]).is_none()
+        );
+    }
+
+    #[test]
+    fn native_raw_route_declines_mixed_columns() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let mixed = native_ts_before(NATIVE_SPLIT_MS)
+            .and(partition_col("host").lt(Value::String("m".into())));
+        let routes = vec![
+            native_region_route(1, Some(mixed), Some(11)),
+            native_region_route(2, Some(native_ts_at_or_after(NATIVE_SPLIT_MS)), Some(22)),
+        ];
+
+        assert!(capture_native_selected(&info, &routes, &native_region_ids()).is_none());
+    }
+
+    #[test]
+    fn native_raw_route_declines_spaced_ordinal_conjunction() {
+        // `ts > 0 AND ts < 1` is empty over millisecond integers, but the
+        // ordinal normalization spaces 0 and 1 apart and would call them
+        // overlapping, so the conjunction must decline before the overlap proof.
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let empty_conjunction = partition_col("ts")
+            .gt(native_timestamp_value(0))
+            .and(native_ts_before(1));
+        let routes = vec![native_region_route(1, Some(empty_conjunction), Some(11))];
+
+        assert!(
+            capture_native_selected(&info, &routes, &[RegionId::new(NATIVE_TABLE_ID, 1)]).is_none()
+        );
+    }
+
+    #[test]
+    fn native_raw_route_declines_adjacent_exclusive_conjunction() {
+        // Adjacent exclusive domains are disjoint, but they are still expressed
+        // as conjunctions, which the supported grammar does not accept.
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let lower =
+            native_ts_at_or_after(NATIVE_SPLIT_MS).and(native_ts_before(NATIVE_SPLIT_MS + 1_000));
+        let routes = vec![
+            native_region_route(1, Some(lower), Some(11)),
+            native_region_route(
+                2,
+                Some(native_ts_at_or_after(NATIVE_SPLIT_MS + 1_000)),
+                Some(22),
+            ),
+        ];
+
+        assert!(
+            capture_native_selected(&info, &routes, &[RegionId::new(NATIVE_TABLE_ID, 1)]).is_none()
+        );
+    }
+
+    #[test]
+    fn native_raw_route_declines_contradictory_equality_conjunction() {
+        // `ts = 5 AND ts = 6` is empty, but an equality short-circuits the range
+        // the overlap helper derives, so the conjunction must decline first.
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let contradictory = native_ts_at(5).and(native_ts_at(6));
+        let routes = vec![native_region_route(1, Some(contradictory), Some(11))];
+
+        assert!(
+            capture_native_selected(&info, &routes, &[RegionId::new(NATIVE_TABLE_ID, 1)]).is_none()
+        );
+    }
+
+    #[test]
+    fn native_raw_route_declines_empty_strict_bounds() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let selected = [RegionId::new(NATIVE_TABLE_ID, 1)];
+
+        // No millisecond timestamp is below the minimum or above the maximum.
+        let below_min = vec![native_region_route(
+            1,
+            Some(partition_col("ts").lt(Value::Timestamp(Timestamp::MIN_MILLISECOND))),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&info, &below_min, &selected).is_none());
+
+        let above_max = vec![native_region_route(
+            1,
+            Some(partition_col("ts").gt(Value::Timestamp(Timestamp::MAX_MILLISECOND))),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&info, &above_max, &selected).is_none());
+
+        // The same bounds with the operands flipped describe the same empty
+        // domains.
+        let flipped_below_min = vec![native_region_route(
+            1,
+            Some(PartitionExpr::new(
+                Operand::Value(Value::Timestamp(Timestamp::MIN_MILLISECOND)),
+                RestrictedOp::Gt,
+                Operand::Column("ts".to_string()),
+            )),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&info, &flipped_below_min, &selected).is_none());
+
+        let flipped_above_max = vec![native_region_route(
+            1,
+            Some(PartitionExpr::new(
+                Operand::Value(Value::Timestamp(Timestamp::MAX_MILLISECOND)),
+                RestrictedOp::Lt,
+                Operand::Column("ts".to_string()),
+            )),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&info, &flipped_above_max, &selected).is_none());
+
+        // Inclusive bounds at the same edges are non-empty.
+        let at_max = vec![native_region_route(
+            1,
+            Some(partition_col("ts").gt_eq(Value::Timestamp(Timestamp::MAX_MILLISECOND))),
+            Some(11),
+        )];
+        let captured = capture_native_selected(&info, &at_max, &selected)
+            .expect("the maximum millisecond timestamp is representable");
+        assert_eq!(vec![(selected[0], native_target(11))], captured.targets);
+    }
+
+    #[test]
+    fn native_raw_route_declines_foreign_table_route_with_same_region_number() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let foreign_table_id = NATIVE_TABLE_ID + 1;
+        // The routes belong to another table but carry the same region numbers
+        // and provable domains, so only the full region id can reject them.
+        let routes = vec![
+            native_region_route_for_table(
+                foreign_table_id,
+                1,
+                Some(native_ts_before(NATIVE_SPLIT_MS)),
+                Some(11),
+            ),
+            native_region_route_for_table(
+                foreign_table_id,
+                2,
+                Some(native_ts_at_or_after(NATIVE_SPLIT_MS)),
+                Some(22),
+            ),
+        ];
+
+        assert!(capture_native_selected(&info, &routes, &native_region_ids()).is_none());
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_declines_foreign_table_route_without_changing_ordinary_ids() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let foreign_table_id = NATIVE_TABLE_ID + 1;
+        let routes = vec![
+            native_region_route_for_table(
+                foreign_table_id,
+                1,
+                Some(native_ts_before(NATIVE_SPLIT_MS)),
+                Some(11),
+            ),
+            native_region_route_for_table(
+                foreign_table_id,
+                2,
+                Some(native_ts_at_or_after(NATIVE_SPLIT_MS)),
+                Some(22),
+            ),
+        ];
+        let (planner, plan, table_name) = native_planner_and_plan(info, routes, None, false).await;
+
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        // The ordinary plan still selects its own region ids from the route, and
+        // only the capture declines.
+        assert_eq!(native_region_ids(), regions);
+        assert!(native_raw_route.is_none());
+    }
+
+    #[test]
+    fn native_raw_route_declines_unsupported_timestamp_bounds() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let selected = [RegionId::new(NATIVE_TABLE_ID, 1)];
+
+        // Milliseconds are the only supported unit.
+        let seconds = vec![native_region_route(
+            1,
+            Some(partition_col("ts").lt(Value::Timestamp(Timestamp::new_second(1_700_000_000)))),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&info, &seconds, &selected).is_none());
+
+        // The value must be a timestamp, not another type.
+        let integer = vec![native_region_route(
+            1,
+            Some(partition_col("ts").lt(Value::Int64(NATIVE_SPLIT_MS))),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&info, &integer, &selected).is_none());
+
+        // `!=` does not describe a domain.
+        let not_eq = vec![native_region_route(
+            1,
+            Some(partition_col("ts").not_eq(native_timestamp_value(NATIVE_SPLIT_MS))),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&info, &not_eq, &selected).is_none());
+
+        // The timestamp column type must be millisecond as well.
+        let second_column_info = native_table_info_with(
+            NATIVE_TABLE_ID,
+            "native",
+            MITO_ENGINE,
+            ConcreteDataType::timestamp_second_datatype(),
+            false,
+            vec![0],
+        );
+        let second_column = vec![native_region_route(
+            1,
+            Some(partition_col("ts").lt(native_timestamp_value(NATIVE_SPLIT_MS))),
+            Some(11),
+        )];
+        assert!(capture_native_selected(&second_column_info, &second_column, &selected).is_none());
+    }
+
+    #[test]
+    fn native_raw_route_accepts_flipped_operands() {
+        // The shared collider flips `value op column` the same way, so the
+        // capture accepts it too.
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let routes = vec![
+            native_region_route(
+                1,
+                Some(PartitionExpr::new(
+                    Operand::Value(native_timestamp_value(NATIVE_SPLIT_MS)),
+                    RestrictedOp::Gt,
+                    Operand::Column("ts".to_string()),
+                )),
+                Some(11),
+            ),
+            native_region_route(2, Some(native_ts_at_or_after(NATIVE_SPLIT_MS)), Some(22)),
+        ];
+
+        // `split > ts` is `ts < split`, so region 1 and region 2 are disjoint.
+        let captured = capture_native_selected(&info, &routes, &native_region_ids())
+            .expect("flipped operands describe the same domains");
+        assert_eq!(2, captured.targets.len());
+        assert_eq!(
+            (RegionId::new(NATIVE_TABLE_ID, 1), native_target(11)),
+            captured.targets[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_declines_missing_expression() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let routes = vec![
+            native_region_route(1, Some(native_ts_before(NATIVE_SPLIT_MS)), Some(11)),
+            // The default region has no explicit expression at all.
+            native_region_route(2, None, Some(22)),
+        ];
+        let (planner, plan, table_name) = native_planner_and_plan(info, routes, None, false).await;
+
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(native_region_ids(), regions);
+        assert!(native_raw_route.is_none());
+    }
+
+    #[test]
+    fn native_raw_route_declines_missing_leader() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let routes = vec![
+            native_region_route(1, Some(native_ts_before(NATIVE_SPLIT_MS)), Some(11)),
+            native_region_route(2, Some(native_ts_at_or_after(NATIVE_SPLIT_MS)), None),
+        ];
+
+        assert!(capture_native_selected(&info, &routes, &native_region_ids()).is_none());
+    }
+
+    #[test]
+    fn native_raw_route_declines_staging_or_downgrading_leader() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let mut routes = native_half_domain_routes();
+        assert!(capture_native_selected(&info, &routes, &native_region_ids()).is_some());
+
+        routes[1].leader_state = Some(LeaderState::Staging);
+        assert!(capture_native_selected(&info, &routes, &native_region_ids()).is_none());
+
+        routes[1].leader_state = Some(LeaderState::Downgrading);
+        assert!(capture_native_selected(&info, &routes, &native_region_ids()).is_none());
+    }
+
+    #[test]
+    fn native_raw_route_declines_duplicate_regions() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let routes = native_half_domain_routes();
+
+        let duplicated_selection = [
+            RegionId::new(NATIVE_TABLE_ID, 1),
+            RegionId::new(NATIVE_TABLE_ID, 1),
+        ];
+        assert!(capture_native_selected(&info, &routes, &duplicated_selection).is_none());
+
+        // Two routes for one region number cannot be mapped one-to-one.
+        let duplicated_routes = vec![
+            native_region_route(1, Some(native_ts_before(NATIVE_SPLIT_MS)), Some(11)),
+            native_region_route(1, Some(native_ts_at_or_after(NATIVE_SPLIT_MS)), Some(22)),
+        ];
+        assert!(
+            capture_native_selected(
+                &info,
+                &duplicated_routes,
+                &[RegionId::new(NATIVE_TABLE_ID, 1)]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn native_raw_route_declines_unprovable_tables() {
+        let routes = native_half_domain_routes();
+        let selected = native_region_ids();
+
+        // A logical table whose route resolves to another physical table.
+        let logical_info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let table = EmptyTable::from_table_info(&logical_info);
+        assert!(
+            capture_native_raw_route(
+                Some(&table),
+                &logical_info,
+                PHYSICAL_TABLE_ID,
+                &routes,
+                &selected,
+            )
+            .is_none()
+        );
+
+        // A non-mito engine.
+        let metric_info = native_table_info(NATIVE_TABLE_ID, "native", "metric", false);
+        assert!(capture_native_selected(&metric_info, &routes, &selected).is_none());
+
+        // A nullable timestamp column cannot prove disjointness.
+        let nullable_info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, true);
+        assert!(capture_native_selected(&nullable_info, &routes, &selected).is_none());
+
+        // Without a captured table the name lookup may bind a replacement.
+        assert!(
+            capture_native_raw_route(None, &logical_info, NATIVE_TABLE_ID, &routes, &selected,)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_declines_name_lookup_without_captured_table() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let (planner, plan, table_name) =
+            native_planner_and_plan(info, native_half_domain_routes(), None, true).await;
+
+        // The ordinary plan still resolves the table by name and keeps every
+        // region; only the capture is skipped.
+        let (regions, native_raw_route) = planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(native_region_ids(), regions);
+        assert!(native_raw_route.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_raw_route_capture_follows_experimental_flag() {
+        let info = native_table_info(NATIVE_TABLE_ID, "native", MITO_ENGINE, false);
+        let (mut planner, plan, table_name) =
+            native_planner_and_plan(info, native_half_domain_routes(), None, false).await;
+
+        // Enabled: the same provable half domains capture completely, in
+        // ordinary region order.
+        let (enabled_regions, enabled_route) =
+            planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(native_region_ids(), enabled_regions);
+        assert_eq!(
+            vec![
+                (RegionId::new(NATIVE_TABLE_ID, 1), native_target(11)),
+                (RegionId::new(NATIVE_TABLE_ID, 2), native_target(22)),
+            ],
+            enabled_route.expect("the enabled fixture captures").targets
+        );
+
+        // Disabled: the same regions in the same order, and no capture at all.
+        planner.capture_native_raw_route = false;
+        let (disabled_regions, disabled_route) =
+            planner.get_regions(&table_name, &plan).await.unwrap();
+        assert_eq!(enabled_regions, disabled_regions);
+        assert!(disabled_route.is_none());
     }
 
     fn assert_all_logical_regions(mut regions: Vec<RegionId>) {
