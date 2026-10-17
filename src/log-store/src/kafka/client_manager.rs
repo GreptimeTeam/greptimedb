@@ -19,13 +19,14 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::kafka::common::DEFAULT_BACKOFF_CONFIG;
 use dashmap::DashMap;
 use rskafka::client::ClientBuilder;
-use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
+use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use snafu::ResultExt;
 use store_api::logstore::provider::KafkaProvider;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result, TlsConfigSnafu};
 use crate::kafka::log_store::TopicStat;
+use crate::kafka::partition_client::{DEFAULT_TLS_RECORD_LIMIT, RotatingPartitionClient};
 use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
 // Each topic only has one partition for now.
@@ -38,12 +39,12 @@ pub(crate) type ClientManagerRef = Arc<ClientManager>;
 /// Topic client.
 #[derive(Debug, Clone)]
 pub(crate) struct Client {
-    client: Arc<PartitionClient>,
+    client: Arc<RotatingPartitionClient>,
     producer: OrderedBatchProducerRef,
 }
 
 impl Client {
-    pub(crate) fn client(&self) -> &Arc<PartitionClient> {
+    pub(crate) fn client(&self) -> &Arc<RotatingPartitionClient> {
         &self.client
     }
 
@@ -55,13 +56,16 @@ impl Client {
 /// Manages client construction and accesses.
 #[derive(Debug)]
 pub(crate) struct ClientManager {
-    client: rskafka::client::Client,
+    client: Arc<rskafka::client::Client>,
     /// Used to initialize a new [Client].
     mutex: Mutex<()>,
     instances: RwLock<HashMap<Arc<KafkaProvider>, Client>>,
 
     flush_batch_size: usize,
     compression: Compression,
+    /// Rotates the broker connection of each topic after writing this many TLS records.
+    /// `None` if the connections are not encrypted.
+    tls_record_limit: Option<u64>,
 
     /// The stats of each topic.
     topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
@@ -90,11 +94,16 @@ impl ClientManager {
         })?;
 
         Ok(Self {
-            client,
+            client: Arc::new(client),
             mutex: Mutex::new(()),
             instances: RwLock::new(HashMap::new()),
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
+            tls_record_limit: config
+                .connection
+                .tls
+                .is_some()
+                .then_some(DEFAULT_TLS_RECORD_LIMIT),
             topic_stats,
         })
     }
@@ -132,7 +141,7 @@ impl ClientManager {
         // Sets to Retry to retry connecting if the kafka cluster replies with an UnknownTopic error.
         // That's because the topic is believed to exist as the metasrv is expected to create required topics upon start.
         // The reconnecting won't stop until succeed or a different error returns.
-        let client = self
+        let partition_client = self
             .client
             .partition_client(
                 provider.topic.as_str(),
@@ -143,8 +152,12 @@ impl ClientManager {
             .context(BuildPartitionClientSnafu {
                 topic: &provider.topic,
                 partition: DEFAULT_PARTITION,
-            })
-            .map(Arc::new)?;
+            })?;
+        let client = Arc::new(RotatingPartitionClient::new(
+            self.client.clone(),
+            partition_client,
+            self.tls_record_limit,
+        ));
 
         let (tx, rx) = OrderedBatchProducer::channel();
         let producer = Arc::new(OrderedBatchProducer::new(
