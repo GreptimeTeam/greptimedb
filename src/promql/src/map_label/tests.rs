@@ -84,3 +84,31 @@ fn label_functions_match_prometheus() {
         "{matched} matched, {merged} merged, {failed} failed"
     );
 }
+
+/// Replacement templates expand as Go's `regexp.Expand` does; expectations come from Go.
+#[test]
+fn replacements_expand_like_go() {
+    let regex = regex::Regex::new("^(?s:(?P<word>[a-z]+)-([0-9]+))$").unwrap();
+    let captures = regex.captures("abc-42").unwrap();
+    for (template, expected) in [
+        ("$01", ""),
+        ("${01}", ""),
+        ("$1", "abc"),
+        ("${1}x", "abcx"),
+        ("$1x", ""),
+        ("$$", "$"),
+        ("$", "$"),
+        ("${1", "${1"),
+        ("$word", "abc"),
+        ("${word}!", "abc!"),
+        ("$2$1", "42abc"),
+        ("$-", "$-"),
+        ("$0", "abc-42"),
+        ("$9", ""),
+        ("$1234567890", ""),
+    ] {
+        let mut out = String::new();
+        super::expand(&regex, &captures, template, &mut out);
+        assert_eq!(out, expected, "{template}");
+    }
+}

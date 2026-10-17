@@ -53,10 +53,56 @@ pub fn label_replace(
             continue;
         };
         value.clear();
-        captures.expand(replacement, &mut value);
+        expand(&compiled, &captures, replacement, &mut value);
         set_label(&mut series.metric, dst, &value)?;
     }
     merge_same_labelset(schema, series)
+}
+
+/// Go `regexp.Expand`, whose template syntax differs from `regex::Captures::expand`: a numeric
+/// reference with a leading zero, like `$01`, or of more than nine digits is a group name.
+fn expand(regex: &Regex, captures: &regex::Captures<'_>, template: &str, out: &mut String) {
+    let mut rest = template;
+    while let Some(dollar) = rest.find('$') {
+        out.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 1..];
+        if let Some(after) = rest.strip_prefix('$') {
+            out.push('$');
+            rest = after;
+            continue;
+        }
+        let (braced, body) = match rest.strip_prefix('{') {
+            Some(body) => (true, body),
+            None => (false, rest),
+        };
+        let len = body
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(body.len());
+        let name = &body[..len];
+        let closed = !braced || body[len..].starts_with('}');
+        if name.is_empty() || !closed {
+            // Malformed; Go keeps the `$` as text.
+            out.push('$');
+            continue;
+        }
+        rest = &body[len + usize::from(braced)..];
+        let number = (name.bytes().all(|b| b.is_ascii_digit())
+            && !(name.len() > 1 && name.starts_with('0')))
+        .then(|| name.parse::<usize>().ok())
+        .flatten()
+        .filter(|_| name.len() <= 9);
+        let group = match number {
+            Some(number) => captures.get(number),
+            None => regex
+                .capture_names()
+                .position(|group| group == Some(name))
+                .and_then(|index| captures.get(index)),
+        };
+        if let Some(group) = group {
+            out.push_str(group.as_str());
+        }
+    }
+    out.push_str(rest);
 }
 
 /// `label_join(v, dst, separator, src...)`: `dst` is set to the values of `src` joined by

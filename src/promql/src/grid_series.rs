@@ -162,7 +162,7 @@ pub(crate) fn label_set(metric: &MetricName) -> LabelSet {
 }
 
 /// Merges series that share a label set into one, as Prometheus does after a function that
-/// rewrites labels or drops `__name__`; two of them present at one point fail.
+/// rewrites labels or drops `__name__`; two of them holding one field at one point fail.
 pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> Result<Vec<Series>> {
     let mut groups: HashMap<LabelSet, Vec<usize>> = HashMap::with_capacity(series.len());
     let mut collided = false;
@@ -186,6 +186,7 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut rows = Vec::new();
     let mut values = vec![None; schema.fields.len()];
+    let mut merged = vec![None; schema.fields.len()];
     for (labels, members) in groups {
         if let [member] = members[..] {
             output.extend(series[member].take());
@@ -208,19 +209,32 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
             }
         }
         rows.sort_unstable_by_key(|&(point, _, _)| point);
-        if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-            let labels: Vec<_> = labels
-                .iter()
-                .map(|(name, value)| format!("{name}=\"{value}\""))
-                .collect();
-            return Err(DataFusionError::Execution(format!(
-                "vector cannot contain metrics with the same labelset {{{}}}",
-                labels.join(", ")
-            )));
-        }
-        for &(point, member, row) in &rows {
-            read_row(series[member].as_ref().unwrap(), row, &mut values)?;
-            builder.push(point, &values)?;
+        let mut start = 0;
+        while start < rows.len() {
+            let point = rows[start].0;
+            let end = start + rows[start..].partition_point(|&(p, _, _)| p == point);
+            // Rows of one point merge field by field; only a field present twice collides.
+            merged.iter_mut().for_each(|value| *value = None);
+            for &(_, member, row) in &rows[start..end] {
+                read_row(series[member].as_ref().unwrap(), row, &mut values)?;
+                for (slot, value) in merged.iter_mut().zip(&values) {
+                    if value.is_some() {
+                        if slot.is_some() {
+                            let labels: Vec<_> = labels
+                                .iter()
+                                .map(|(name, value)| format!("{name}=\"{value}\""))
+                                .collect();
+                            return Err(DataFusionError::Execution(format!(
+                                "vector cannot contain metrics with the same labelset {{{}}}",
+                                labels.join(", ")
+                            )));
+                        }
+                        *slot = *value;
+                    }
+                }
+            }
+            builder.push(point, &merged)?;
+            start = end;
         }
         let metric = series[members[0]].as_ref().unwrap().metric.clone();
         output.extend(builder.finish(metric)?);
