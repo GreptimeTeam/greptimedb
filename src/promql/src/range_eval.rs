@@ -136,6 +136,7 @@ impl RangeEvaluator {
     ///
     /// Returns the evaluated series on its `is_last` chunk, or `None` there when no grid point
     /// has a result.
+    ///
     /// The evaluator must not be reused after an error.
     pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<Series>> {
         self.check_chunk(chunk)?;
