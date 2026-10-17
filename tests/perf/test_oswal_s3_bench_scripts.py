@@ -1316,35 +1316,40 @@ printf '{{"mediaType": "application/vnd.oci.image.index.v1+json", "digest": "{di
             self.assertNotIn("docker run", (root / "fake.log").read_text())
 
     def test_the_benchmark_host_checks_the_runtime_contents_before_pulling_greptimedb(self):
+        # The fake runs the step's own check in a directory standing in for the image's working directory.
         fake_docker = r"""#!/usr/bin/env bash
 printf '%s\n' "docker $*" >> "$FAKE_LOG"
 case "$1" in
-    run) exit "${FAKE_CONTENTS_RC:-0}" ;;
+    run) cd "$FAKE_RUNTIME_ROOT" && exec sh -c "$7" ;;
     image) echo '[{}]' ;;
 esac
 """
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for name, body in (("docker", fake_docker), ("timeout", '#!/usr/bin/env bash\nshift 2\nexec "$@"\n')):
-                (root / name).write_text(body)
-                (root / name).chmod(0o755)
-            runtime = "public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime@sha256:" + "c" * 64
-            env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
-                                "RESULTS": str(root / "results"), "RUNTIME_IMAGE": runtime,
-                                "GREPTIMEDB_IMAGES": json.dumps([{"label": "", "image": "greptimedb@sha256:" + "a" * 64}])}
-            done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "pull"], env=env,
-                                  capture_output=True, text=True, timeout=60)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            log = (root / "fake.log").read_text().splitlines()
-            self.assertEqual([line.split()[1] for line in log], ["pull", "run", "pull", "image", "image"])
-            self.assertIn(f"docker run --rm --entrypoint sh {runtime} -c test -f scripts/agent-observability/greptimedb.sh", log[1])
-            (root / "fake.log").unlink()
-            done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "pull"],
-                                  env=env | {"FAKE_CONTENTS_RC": "1"}, capture_output=True, text=True, timeout=60)
-            self.assertNotEqual(done.returncode, 0)
-            self.assertIn("lacks the agent observability loader or generator", done.stderr)
-            self.assertNotIn("greptimedb@sha256", (root / "fake.log").read_text())
-
+        loader, generator = "scripts/agent-observability/greptimedb.sh", "scripts/generate_agent_observations.py"
+        for present, passes in (((loader, generator), True), ((generator,), False), ((loader,), False)):
+            with self.subTest(present=present), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name, body in (("docker", fake_docker), ("timeout", '#!/usr/bin/env bash\nshift 2\nexec "$@"\n')):
+                    (root / name).write_text(body)
+                    (root / name).chmod(0o755)
+                for path in present:
+                    (root / "image" / path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / "image" / path).write_text("")
+                runtime = "public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime@sha256:" + "c" * 64
+                env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
+                                    "FAKE_RUNTIME_ROOT": str(root / "image"), "RESULTS": str(root / "results"),
+                                    "RUNTIME_IMAGE": runtime,
+                                    "GREPTIMEDB_IMAGES": json.dumps([{"label": "", "image": "greptimedb@sha256:" + "a" * 64}])}
+                done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "pull"], env=env,
+                                      capture_output=True, text=True, timeout=60)
+                log = (root / "fake.log").read_text().splitlines()
+                self.assertTrue(log[1].startswith(f"docker run --rm --entrypoint sh {runtime} -c "), log[1])
+                if passes:
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertEqual([line.split()[1] for line in log], ["pull", "run", "pull", "image", "image"])
+                else:
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn("lacks the agent observability loader or generator", done.stderr)
+                    self.assertEqual([line.split()[1] for line in log], ["pull", "run"])
 
 if __name__ == "__main__":
     unittest.main()
