@@ -87,6 +87,19 @@ fn clamp_follows_go_min_max_and_empties_reversed_bounds() {
             None,
         ],
     );
+    // Either zero can win in Go's Max; the sign shows through a later `1 / x`.
+    let zero = output(MathOp::ClampMin { min: -0.0 }).unwrap();
+    assert_floats(
+        &zero,
+        &[
+            Some(f64::INFINITY),
+            Some(-0.0),
+            Some(-0.0),
+            Some(0.0),
+            Some(f64::NAN),
+            None,
+        ],
+    );
     assert!(output(MathOp::Clamp { min: 2.0, max: 1.0 }).is_none());
     assert!(
         output(MathOp::Clamp {
