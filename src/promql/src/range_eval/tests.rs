@@ -27,18 +27,21 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel};
+use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel, subquery_grid};
 use crate::functions::{
     Changes, CountOverTime, IDelta, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Resets,
 };
+use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
-    Dense, assert_series_eq, assert_series_eq_any_nan, special_value,
+    Dense, assert_series_eq, assert_series_eq_any_nan, random_dense, special_value,
 };
 use crate::range_array::RangeArray;
 
@@ -95,7 +98,17 @@ fn metric(host: u64) -> MetricName {
 
 fn probe_evaluator(fields: usize, grid: Arc<EvalGrid>, window: RangeWindow) -> RangeEvaluator {
     let kernel: WindowKernel = Box::new(probe);
-    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel).unwrap()
+    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, true).unwrap()
+}
+
+/// A probe evaluator whose anchored result is evaluated at every point, like `predict_linear`.
+fn per_point_probe_evaluator(
+    fields: usize,
+    grid: Arc<EvalGrid>,
+    window: RangeWindow,
+) -> RangeEvaluator {
+    let kernel: WindowKernel = Box::new(probe);
+    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, false).unwrap()
 }
 
 /// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
@@ -201,25 +214,45 @@ fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
         .collect()
 }
 
-/// Rows without stale markers and, for each grid point, the range of those rows in its window,
-/// found by scanning all rows independently of chunking and cursors.
+/// Rows on the evaluation timeline, without stale rows when `drop_stale`, and for each grid
+/// point the range of those rows in its window, found by scanning all rows independently of
+/// chunking and cursors.
 fn reference_windows(
     rows: &[Row],
     grid: &EvalGrid,
     window: RangeWindow,
+    drop_stale: bool,
 ) -> (Vec<Row>, Vec<Range<usize>>) {
     let kept: Vec<_> = rows
         .iter()
         .filter(|(_, values)| {
-            !values
-                .iter()
-                .flatten()
-                .any(|value| value.to_bits() == PROMETHEUS_STALE_NAN_BITS)
+            !drop_stale
+                || !values
+                    .iter()
+                    .flatten()
+                    .any(|value| value.to_bits() == PROMETHEUS_STALE_NAN_BITS)
         })
-        .map(|(timestamp, values)| (timestamp + window.offset_ms, values.clone()))
+        .map(|(timestamp, values)| (timestamp + fold_offset(grid, window), values.clone()))
         .collect();
     let windows = windows_of(&kept, grid, window);
     (kept, windows)
+}
+
+/// The offset samples are shifted by: with `@`, Prometheus rewrites the offset so that the
+/// anchored window is the window of the first evaluation point.
+fn fold_offset(grid: &EvalGrid, window: RangeWindow) -> i64 {
+    match window.anchor_ms {
+        Some(anchor) => grid.spec().start_ms - (anchor - window.offset_ms),
+        None => window.offset_ms,
+    }
+}
+
+/// The end of the window each grid point reads, on the evaluation timeline.
+fn window_end(grid: &EvalGrid, window: RangeWindow, eval_ts: i64) -> i64 {
+    match window.anchor_ms {
+        Some(_) => grid.spec().start_ms,
+        None => eval_ts,
+    }
 }
 
 /// Rows of `rows`, already on the evaluation timeline, inside each grid point's window.
@@ -227,8 +260,9 @@ fn windows_of(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Vec<Range<u
     grid.timestamps()
         .iter()
         .map(|&eval_ts| {
+            let end = window_end(grid, window, eval_ts);
             let inside: Vec<_> = (0..rows.len())
-                .filter(|&row| rows[row].0 > eval_ts - window.range_ms && rows[row].0 <= eval_ts)
+                .filter(|&row| rows[row].0 > end - window.range_ms && rows[row].0 <= end)
                 .collect();
             inside
                 .first()
@@ -237,9 +271,17 @@ fn windows_of(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Vec<Range<u
         .collect()
 }
 
-/// Applies the probe to the valid samples of every reference window.
-fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) -> Dense {
-    let (kept, windows) = reference_windows(rows, grid, window);
+/// Applies the probe to the valid samples of every reference window. With `@`, a step-invariant
+/// probe is evaluated at the first point and others at each point.
+fn reference(
+    rows: &[Row],
+    grid: &EvalGrid,
+    window: RangeWindow,
+    fields: usize,
+    drop_stale: bool,
+    step_invariant: bool,
+) -> Dense {
+    let (kept, windows) = reference_windows(rows, grid, window, drop_stale);
     grid.timestamps()
         .iter()
         .zip(windows)
@@ -254,7 +296,11 @@ fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) 
                         probe(FloatWindow {
                             timestamps: &timestamps,
                             values: &values,
-                            eval_ts,
+                            eval_ts: if step_invariant {
+                                window_end(grid, window, eval_ts)
+                            } else {
+                                eval_ts
+                            },
                             range_ms: window.range_ms,
                         })
                         .unwrap()
@@ -275,8 +321,9 @@ fn udf_reference(
     grid: &EvalGrid,
     window: RangeWindow,
     fields: usize,
+    drop_stale: bool,
 ) -> Dense {
-    let (kept, windows) = reference_windows(rows, grid, window);
+    let (kept, windows) = reference_windows(rows, grid, window, drop_stale);
     let ranges: Vec<_> = windows
         .iter()
         .map(|rows| (rows.start as u32, rows.len() as u32))
@@ -356,11 +403,15 @@ fn random_window(rng: &mut StdRng) -> (Arc<EvalGrid>, RangeWindow) {
         0 => 0,
         _ => rng.random_range(-20_000..20_000),
     };
+    let anchor_ms = rng
+        .random_bool(0.25)
+        .then(|| rng.random_range(-40_000..60_000));
     (
         grid,
         RangeWindow {
             range_ms,
             offset_ms,
+            anchor_ms,
         },
     )
 }
@@ -371,11 +422,16 @@ fn evaluator_matches_brute_force_reference() {
         let mut rng = StdRng::seed_from_u64(seed);
         let fields = rng.random_range(1..=3);
         let (grid, window) = random_window(&mut rng);
+        let step_invariant = rng.random_bool(0.5);
         // One evaluator serves several series, so state must not leak between them.
-        let mut evaluator = probe_evaluator(fields, grid.clone(), window);
+        let mut evaluator = if step_invariant {
+            probe_evaluator(fields, grid.clone(), window)
+        } else {
+            per_point_probe_evaluator(fields, grid.clone(), window)
+        };
         for host in 0..3 {
             let rows = random_rows(&mut rng, fields);
-            let expected = reference(&rows, &grid, window, fields);
+            let expected = reference(&rows, &grid, window, fields, true, step_invariant);
             let mut result = None;
             for piece in random_chunks(&mut rng, &rows, fields, host) {
                 assert!(
@@ -390,9 +446,9 @@ fn evaluator_matches_brute_force_reference() {
     }
 }
 
-#[test]
-fn functions_match_range_udfs() {
-    for function in [
+/// Functions whose range UDF agrees with Prometheus.
+fn udf_functions() -> Vec<RangeFunction> {
+    vec![
         RangeFunction::Irate,
         RangeFunction::Idelta,
         RangeFunction::MinOverTime,
@@ -402,7 +458,12 @@ fn functions_match_range_udfs() {
         RangeFunction::PresentOverTime,
         RangeFunction::Resets,
         RangeFunction::Changes,
-    ] {
+    ]
+}
+
+#[test]
+fn functions_match_range_udfs() {
+    for function in udf_functions() {
         for seed in 0..300 {
             let mut rng = StdRng::seed_from_u64(seed);
             let fields = rng.random_range(1..=3);
@@ -412,7 +473,7 @@ fn functions_match_range_udfs() {
                     .unwrap();
             for host in 0..3 {
                 let rows = random_rows(&mut rng, fields);
-                let expected = udf_reference(function, &rows, &grid, window, fields);
+                let expected = udf_reference(function, &rows, &grid, window, fields, true);
                 let mut result = None;
                 for piece in random_chunks(&mut rng, &rows, fields, host) {
                     result = evaluator.push(&piece).unwrap();
@@ -428,10 +489,11 @@ fn overlapping_window_spans_chunks() {
     let window = RangeWindow {
         range_ms: 15,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let kernel: WindowKernel = Box::new(sum);
     let mut evaluator =
-        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel).unwrap();
+        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel, true).unwrap();
     let first = chunk(&[(5, vec![Some(1.0)]), (12, vec![Some(2.0)])], 1, 0, false);
     let second = chunk(&[(18, vec![Some(4.0)]), (25, vec![Some(8.0)])], 1, 0, true);
     assert!(evaluator.push(&first).unwrap().is_none());
@@ -446,6 +508,7 @@ fn empty_input_and_series_without_results() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
@@ -462,6 +525,7 @@ fn rejects_invalid_parameters() {
     let zero_range = RangeWindow {
         range_ms: 0,
         offset_ms: 0,
+        anchor_ms: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(
@@ -473,20 +537,10 @@ fn rejects_invalid_parameters() {
         Err(DataFusionError::Plan(_))
     ));
 
-    let mut evaluated = raw_schema(1);
-    evaluated.eval_grid = Some(grid(0, 10, 4));
-    let window = RangeWindow {
-        range_ms: 10,
-        offset_ms: 0,
-    };
-    assert!(matches!(
-        RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, RangeFunction::Rate),
-        Err(DataFusionError::Plan(_))
-    ));
-
     let far_offset = RangeWindow {
         range_ms: 10,
         offset_ms: i64::MAX - 20,
+        anchor_ms: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(
@@ -494,6 +548,21 @@ fn rejects_invalid_parameters() {
             grid(0, 10, 4),
             far_offset,
             RangeFunction::PredictLinear(0.0)
+        ),
+        Err(DataFusionError::Plan(_))
+    ));
+
+    let unrepresentable_anchor = RangeWindow {
+        range_ms: 10,
+        offset_ms: 1,
+        anchor_ms: Some(i64::MIN),
+    };
+    assert!(matches!(
+        RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10, 4),
+            unrepresentable_anchor,
+            RangeFunction::Rate
         ),
         Err(DataFusionError::Plan(_))
     ));
@@ -511,6 +580,7 @@ fn rejects_invalid_chunk_sequences() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let new = || probe_evaluator(1, grid(0, 10, 4), window);
     let row = |timestamp| (timestamp, vec![Some(1.0)]);
@@ -548,6 +618,7 @@ fn offset_overflow_fails_unless_the_sample_is_stale() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 10,
+        anchor_ms: None,
     };
     let late = i64::MAX - 5;
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
@@ -592,6 +663,7 @@ fn rejects_histogram_samples() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     assert!(matches!(
         probe_evaluator(1, grid(0, 10, 4), window).push(&piece),
@@ -604,6 +676,7 @@ fn retains_only_samples_later_windows_need() {
     let window = RangeWindow {
         range_ms: 50,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 10, 1_000), window);
     let rows: Vec<Row> = (0..10_000).map(|i| (i, vec![Some(1.0)])).collect();
@@ -614,6 +687,124 @@ fn retains_only_samples_later_windows_need() {
         // At most one window plus one grid step of samples survives each chunk.
         assert!(evaluator.fields[0].timestamps.len() <= 60);
     }
+}
+
+/// A random evaluated series on `grid`; values may carry the stale bit pattern, which computed
+/// input keeps as an ordinary NaN.
+fn random_evaluated(
+    rng: &mut StdRng,
+    grid: &Arc<EvalGrid>,
+    fields: usize,
+    host: u64,
+) -> (Option<Series>, Vec<Row>) {
+    let mut dense = random_dense(rng, grid.timestamps().len(), fields);
+    for value in dense.iter_mut().flatten().flatten() {
+        if rng.random_bool(0.05) {
+            *value = stale();
+        }
+    }
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(fields).fields,
+        eval_grid: Some(grid.clone()),
+    });
+    let mut builder = GridSeriesBuilder::try_new(schema).unwrap();
+    for (index, row) in dense.iter().enumerate() {
+        builder.push(index, row).unwrap();
+    }
+    let rows = grid
+        .timestamps()
+        .iter()
+        .zip(&dense)
+        .filter(|(_, row)| row.iter().any(Option::is_some))
+        .map(|(timestamp, row)| (*timestamp, row.clone()))
+        .collect();
+    (builder.finish(metric(host)).unwrap(), rows)
+}
+
+#[test]
+fn subquery_series_match_references() {
+    for seed in 0..300 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let fields = rng.random_range(1..=3);
+        let (outer, window) = random_window(&mut rng);
+        let step = rng.random_range(1..4_000);
+        let Some(inner) = subquery_grid(outer.spec(), window, step).unwrap() else {
+            continue;
+        };
+        let inner = Arc::new(EvalGrid::try_new(inner).unwrap());
+        let schema = SeriesSchema {
+            fields: raw_schema(fields).fields,
+            eval_grid: Some(inner.clone()),
+        };
+        let (Some(series), rows) = random_evaluated(&mut rng, &inner, fields, seed) else {
+            continue;
+        };
+        let mut probe =
+            RangeEvaluator::with_kernel(&schema, outer.clone(), window, Box::new(probe), true)
+                .unwrap();
+        let expected = reference(&rows, &outer, window, fields, false, true);
+        assert_series_eq(
+            probe.push_series(&series).unwrap().as_ref(),
+            &expected,
+            &metric(seed),
+        );
+        for function in udf_functions() {
+            let mut evaluator =
+                RangeEvaluator::try_new(&schema, outer.clone(), window, function).unwrap();
+            let expected = udf_reference(function, &rows, &outer, window, fields, false);
+            assert_series_eq(
+                evaluator.push_series(&series).unwrap().as_ref(),
+                &expected,
+                &output_metric(function, seed),
+            );
+        }
+    }
+}
+
+#[test]
+fn subquery_grid_covers_every_step_multiple_in_the_windows() {
+    for seed in 0..2_000 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let (outer, window) = random_window(&mut rng);
+        let spec = outer.spec();
+        let step = rng.random_range(1..4_000);
+        let fold = fold_offset(&outer, window);
+        let last_eval = match window.anchor_ms {
+            Some(_) => spec.start_ms,
+            None => *outer.timestamps().last().unwrap(),
+        };
+        let lower = spec.start_ms - fold - window.range_ms;
+        let expected: Vec<i64> = ((lower.div_euclid(step) - 1) * step..=last_eval - fold)
+            .step_by(step as usize)
+            .filter(|point| *point > lower && point.rem_euclid(step) == 0)
+            .collect();
+        let actual = subquery_grid(spec, window, step)
+            .unwrap()
+            .map(|grid| EvalGrid::try_new(grid).unwrap().timestamps().to_vec())
+            .unwrap_or_default();
+        assert_eq!(actual, expected, "seed {seed}");
+    }
+}
+
+#[test]
+fn rejects_input_of_the_other_kind() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let evaluated = SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid(0, 10, 4)),
+    };
+    let mut evaluator =
+        RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, RangeFunction::Rate).unwrap();
+    execution_error(evaluator.push(&chunk(&[(1, vec![Some(1.0)])], 1, 0, true)));
+
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(evaluated)).unwrap();
+    builder.push(0, &[Some(1.0)]).unwrap();
+    let series = builder.finish(metric(0)).unwrap().unwrap();
+    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
 }
 
 /// Range functions evaluated by the Prometheus v3.15.0 engine over random single series; see
@@ -679,6 +870,7 @@ fn range_functions_match_prometheus() {
         let window = RangeWindow {
             range_ms,
             offset_ms,
+            anchor_ms: None,
         };
         let mut expected = vec![vec![None]; points as usize];
         for (timestamp, value) in &expected_points {
@@ -715,6 +907,7 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     for (smoothing, trend) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.5)] {
         let evaluator = || {
@@ -759,6 +952,7 @@ fn range_functions_drop_metadata_labels() {
     let window = RangeWindow {
         range_ms: 10_000,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let rows: Vec<Row> = vec![(1_000, vec![Some(1.0)]), (2_000, vec![Some(2.0)])];
     for (function, expected) in [
@@ -785,6 +979,7 @@ fn waiting_for_a_point_drops_samples_behind_its_window() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 100_000, 2), window);
     for chunk_index in 0..900 {
@@ -810,6 +1005,7 @@ fn quantile_keeps_the_window_order_of_signed_zeros() {
     let window = RangeWindow {
         range_ms: 3_000,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let rows: Vec<Row> = [(0, 0.0), (1_000, -0.0), (2_000, -0.0)]
         .map(|(ts, value)| (ts, vec![Some(value)]))
@@ -835,6 +1031,7 @@ fn samples_after_the_last_window_are_validated_but_not_retained() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 10, 2), window);
     for chunk_index in 0..900 {
@@ -848,6 +1045,7 @@ fn samples_after_the_last_window_are_validated_but_not_retained() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 10,
+        anchor_ms: None,
     };
     let late = i64::MAX - 5;
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
@@ -862,5 +1060,56 @@ fn samples_after_the_last_window_are_validated_but_not_retained() {
     assert!(matches!(
         evaluator.push(&chunk(&[(late, vec![Some(1.0)])], 1, 0, true)),
         Err(DataFusionError::Execution(_))
+    ));
+}
+
+/// An anchored `predict_linear` regresses the one anchored window around each grid point, as
+/// Prometheus does with `enh.Ts`; over `y = t` that predicts `T` whatever the offset.
+#[test]
+fn anchored_predict_linear_regresses_around_each_point() {
+    let rows: Vec<Row> = (0..=60)
+        .step_by(5)
+        .map(|ts| (ts, vec![Some(ts as f64)]))
+        .collect();
+    for offset_ms in [0, 10] {
+        let window = RangeWindow {
+            range_ms: 30,
+            offset_ms,
+            anchor_ms: Some(50),
+        };
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(100, 10, 3),
+            window,
+            RangeFunction::PredictLinear(0.0),
+        )
+        .unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let values: Vec<_> = (0..3)
+            .map(|index| match series.fields.as_slice()[0].sample(index) {
+                SampleRef::Float(value) => value,
+                _ => panic!("expected a float"),
+            })
+            .collect();
+        for (value, expected) in values.into_iter().zip([100.0, 110.0, 120.0]) {
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "offset {offset_ms}: {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_a_subquery_grid_longer_than_u64() {
+    let outer = GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap();
+    let window = RangeWindow {
+        range_ms: 7,
+        offset_ms: -6,
+        anchor_ms: None,
+    };
+    assert!(matches!(
+        subquery_grid(outer, window, 1),
+        Err(DataFusionError::Plan(_))
     ));
 }
