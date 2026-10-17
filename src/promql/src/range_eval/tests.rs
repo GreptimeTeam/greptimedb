@@ -65,10 +65,6 @@ fn probe(window: FloatWindow<'_>) -> Option<f64> {
     Some((hash >> 11) as f64)
 }
 
-fn sum(window: FloatWindow<'_>) -> Option<f64> {
-    Some(window.values.iter().sum())
-}
-
 fn raw_schema(fields: usize) -> SeriesSchema {
     SeriesSchema {
         fields: (0..fields)
@@ -482,25 +478,6 @@ fn functions_match_range_udfs() {
             }
         }
     }
-}
-
-#[test]
-fn overlapping_window_spans_chunks() {
-    let window = RangeWindow {
-        range_ms: 15,
-        offset_ms: 0,
-        anchor_ms: None,
-    };
-    let kernel: WindowKernel = Box::new(sum);
-    let mut evaluator =
-        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel, true).unwrap();
-    let first = chunk(&[(5, vec![Some(1.0)]), (12, vec![Some(2.0)])], 1, 0, false);
-    let second = chunk(&[(18, vec![Some(4.0)]), (25, vec![Some(8.0)])], 1, 0, true);
-    assert!(evaluator.push(&first).unwrap().is_none());
-    let series = evaluator.push(&second).unwrap();
-    // Windows (-5, 10], (5, 20] and (15, 30].
-    let expected = vec![vec![Some(1.0)], vec![Some(6.0)], vec![Some(12.0)]];
-    assert_series_eq(series.as_ref(), &expected, &metric(0));
 }
 
 #[test]

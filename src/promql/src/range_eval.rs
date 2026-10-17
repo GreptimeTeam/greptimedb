@@ -268,11 +268,6 @@ impl RangeEvaluator {
     fn finish_series(&mut self) -> Result<Option<Series>> {
         self.evaluate(None)?;
         let mut state = self.series.take().expect("set by the caller");
-        for field in &mut self.fields {
-            field.timestamps.clear();
-            field.values.clear();
-            field.head = 0;
-        }
         if self.drops_metric_name {
             state.metric.remove_all(&METADATA_LABELS);
         }
