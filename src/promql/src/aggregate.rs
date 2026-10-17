@@ -24,11 +24,11 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
+use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
 use crate::grid_series::GridSeriesBuilder;
-use crate::map::drop_empty_labels;
+use crate::map::{drop_empty_labels, validate_float_series};
 
 /// Basic float aggregations.
 #[derive(Clone, Copy, Debug)]
@@ -97,34 +97,7 @@ fn validate_input(schema: &SeriesSchema, input: &[Series], grouping: Grouping<'_
     }
     grouping.validate(schema)?;
     for series in input {
-        validate_series(schema, series)?;
-    }
-    Ok(())
-}
-
-fn validate_series(schema: &SeriesSchema, series: &Series) -> Result<()> {
-    Series::try_new(
-        schema,
-        series.metric.clone(),
-        series.time.clone(),
-        series.fields.clone(),
-    )
-    .map_err(series_error)?;
-    if !matches!(series.time, TimeAxis::Grid(_)) {
-        return Err(DataFusionError::Execution(
-            "Aggregate requires an evaluated grid".into(),
-        ));
-    }
-    for field in series.fields.iter() {
-        if field
-            .segments()
-            .iter()
-            .any(|segment| !matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
-        {
-            return Err(DataFusionError::NotImplemented(
-                "Aggregate supports only float samples".into(),
-            ));
-        }
+        validate_float_series(schema, series)?;
     }
     Ok(())
 }
@@ -293,8 +266,4 @@ fn kahan_inc(inc: f64, sum: f64, compensation: f64) -> (f64, f64) {
         compensation + ((inc - t) + sum)
     };
     (t, compensation)
-}
-
-fn series_error(error: datatypes::error::Error) -> DataFusionError {
-    DataFusionError::External(Box::new(error))
 }

@@ -184,11 +184,7 @@ fn map_float_fields(
     series: &Series,
     map: impl Fn(&Float64Array) -> Float64Array,
 ) -> Result<Series> {
-    if !matches!(series.time, TimeAxis::Grid(_)) {
-        return Err(DataFusionError::Execution(
-            "Map requires an evaluated grid time axis".into(),
-        ));
-    }
+    validate_float_series(schema, series)?;
     let fields = series
         .fields
         .iter()
@@ -344,7 +340,8 @@ fn map_float_segment(
 ) -> Result<Samples> {
     let Some(DenseSamplesRef::Float(floats)) = segment.dense() else {
         return Err(DataFusionError::NotImplemented(
-            "Map supports only float samples; histogram/mixed samples are not supported".into(),
+            "Series operators support only float samples; histogram/mixed samples are not supported"
+                .into(),
         ));
     };
     Ok(Samples::from_float(map(floats)))
@@ -355,10 +352,13 @@ fn series_error(error: datatypes::error::Error) -> DataFusionError {
 }
 
 /// Checks an evaluated float series up front, so no segment of another type yields a result.
-fn validate_float_series<'a>(schema: &SeriesSchema, series: &'a Series) -> Result<&'a GridRange> {
+pub(crate) fn validate_float_series<'a>(
+    schema: &SeriesSchema,
+    series: &'a Series,
+) -> Result<&'a GridRange> {
     let TimeAxis::Grid(range) = &series.time else {
         return Err(DataFusionError::Execution(
-            "Map requires an evaluated grid time axis".into(),
+            "Series operators require an evaluated grid time axis".into(),
         ));
     };
     Series::try_new(
@@ -375,7 +375,8 @@ fn validate_float_series<'a>(schema: &SeriesSchema, series: &'a Series) -> Resul
             .any(|segment| !matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
         {
             return Err(DataFusionError::NotImplemented(
-                "Map supports only float samples; histogram/mixed samples are not supported".into(),
+                "Series operators support only float samples; histogram/mixed samples are not supported"
+                    .into(),
             ));
         }
     }

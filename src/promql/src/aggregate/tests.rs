@@ -402,6 +402,22 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
     }
     let mut invalid = source.clone();
     invalid.fields = SeriesFields::one(source.fields.get(0).unwrap().clone());
+    // Wrong in two ways at once, the series fails as it does in Map.
+    let mut raw_invalid = invalid.clone();
+    raw_invalid.time = TimeAxis::try_new(vec![1750].into()).unwrap();
+    assert_eq!(
+        aggregate_float(
+            &schema,
+            &[raw_invalid.clone()],
+            AggregateOp::Sum,
+            Grouping::By(&[])
+        )
+        .unwrap_err()
+        .to_string(),
+        crate::map::map_math(&schema, &raw_invalid, crate::map::MathOp::Abs)
+            .unwrap_err()
+            .to_string()
+    );
     assert!(aggregate_float(&schema, &[invalid], AggregateOp::Sum, Grouping::By(&[])).is_err());
     let mut raw = source.clone();
     raw.time = TimeAxis::try_new(vec![1750].into()).unwrap();
