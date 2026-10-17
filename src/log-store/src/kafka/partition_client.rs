@@ -137,7 +137,7 @@ impl RotatingPartitionClient {
         };
         if budget.consume(records) {
             let inner = self.inner.clone();
-            tokio::spawn(async move { inner.rotate().await });
+            common_runtime::spawn_global(async move { inner.rotate().await });
         }
     }
 
