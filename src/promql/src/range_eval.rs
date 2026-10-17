@@ -70,7 +70,11 @@ pub struct RangeEvaluator {
     series: Option<SeriesState>,
     fields: Vec<FieldSamples>,
     row: Vec<Option<f64>>,
+    drops_metric_name: bool,
 }
+
+/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
+const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 struct SeriesState {
     primary_key: Buffer,
@@ -119,7 +123,10 @@ impl RangeEvaluator {
                 }
             }
         }
-        Self::with_kernel(input, grid, window, function.kernel(window.offset_ms))
+        let mut evaluator =
+            Self::with_kernel(input, grid, window, function.kernel(window.offset_ms))?;
+        evaluator.drops_metric_name = function.drops_metric_name();
+        Ok(evaluator)
     }
 
     pub(crate) fn with_kernel(
@@ -156,6 +163,7 @@ impl RangeEvaluator {
                 .map(|_| FieldSamples::default())
                 .collect(),
             row: Vec::with_capacity(input.fields.len()),
+            drops_metric_name: false,
         })
     }
 
@@ -182,11 +190,14 @@ impl RangeEvaluator {
             return Ok(None);
         }
         self.evaluate(None)?;
-        let state = self.series.take().expect("checked by check_chunk");
+        let mut state = self.series.take().expect("checked by check_chunk");
         for field in &mut self.fields {
             field.timestamps.clear();
             field.values.clear();
             field.head = 0;
+        }
+        if self.drops_metric_name {
+            state.metric.remove_all(&METADATA_LABELS);
         }
         self.output.finish(state.metric)
     }
