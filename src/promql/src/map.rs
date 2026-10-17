@@ -77,9 +77,19 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Se
 }
 
 /// Prometheus `DropReserved(schema.IsMetadataLabel)` drops the type and unit labels with the
-/// name.
+/// name. Empty values are dropped too: Prometheus has no empty labels, and keeping them would
+/// hide a same-labelset collision from the caller.
 pub(crate) fn drop_metric_name(metric: &mut MetricName) {
     metric.remove_all(&["__name__", "__type__", "__unit__"]);
+    let empty: Vec<_> = metric
+        .tags()
+        .iter()
+        .filter(|label| label.value.is_empty())
+        .map(|label| label.name.clone())
+        .collect();
+    for name in empty {
+        metric.remove(&name);
+    }
 }
 
 impl MathOp {

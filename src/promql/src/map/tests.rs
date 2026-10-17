@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use datafusion::functions::math;
-use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
 use datatypes::arrow::array::{AsArray, UInt32Array};
@@ -220,7 +219,7 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
     assert_eq!(output.time.timestamp(2), Some(5500));
     // Prometheus drops the name; main keeps it because its HTTP adapter follows Call arguments.
     assert_eq!(output.metric.name(), None);
-    assert_eq!(output.metric.tags(), input.metric.tags());
+    assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
     assert_eq!(input.metric.name(), Some("requests"));
     assert_floats(
         input.fields.get(0).unwrap(),
@@ -397,16 +396,13 @@ fn ordinary_math(op: MathOp, input: Float64Array) -> Float64Array {
     // Calibration against main's UDFs, whose values agree with Prometheus for these functions;
     // the Prometheus engine's own results are checked in `prometheus`.
     let number_rows = input.len();
-    let mut args = vec![ColumnarValue::Array(Arc::new(input))];
+    let args = vec![ColumnarValue::Array(Arc::new(input))];
     let udf = match op {
         MathOp::Abs => math::abs(),
         MathOp::Ceil => math::ceil(),
         MathOp::Floor => math::floor(),
         MathOp::Sqrt => Arc::new(IeeeSqrt::scalar_udf()),
-        MathOp::Round { nearest } => {
-            args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(nearest))));
-            Arc::new(Round::scalar_udf())
-        }
+        MathOp::Round { .. } => unreachable!("round is checked against Prometheus fixtures"),
     };
     let arg_fields = args
         .iter()
@@ -453,7 +449,7 @@ fn float_boundary_samples() -> Float64Array {
 }
 
 #[test]
-fn math_matches_main_udfs_across_float_and_round_boundaries() {
+fn math_matches_main_udfs_across_float_boundaries() {
     let input = float_boundary_samples();
     let mut schema = schema(&["dense", "chunked"]);
     let grid_len = u64::try_from(input.len() + 6).unwrap();
@@ -472,27 +468,8 @@ fn math_matches_main_udfs_across_float_and_round_boundaries() {
             Samples::try_from_chunks(chunks).unwrap(),
         ],
     );
-    let cases = [MathOp::Abs, MathOp::Ceil, MathOp::Floor, MathOp::Sqrt]
-        .into_iter()
-        .chain(
-            [
-                1.0,
-                0.0,
-                -0.0,
-                0.001,
-                0.1,
-                105.0,
-                -0.5,
-                f64::MIN_POSITIVE,
-                f64::from_bits(1),
-                f64::MAX,
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-                f64::NAN,
-            ]
-            .into_iter()
-            .map(|nearest| MathOp::Round { nearest }),
-        );
+    // Round shares its calculation with the UDF; the Prometheus fixtures check it instead.
+    let cases = [MathOp::Abs, MathOp::Ceil, MathOp::Floor, MathOp::Sqrt];
     for op in cases {
         let output = map_math(&schema, &series, op).unwrap();
         let expected = ordinary_math(op, input.clone()).iter().collect::<Vec<_>>();
@@ -500,7 +477,7 @@ fn math_matches_main_udfs_across_float_and_round_boundaries() {
             assert_floats(field, &expected);
         }
         assert_eq!(output.metric.name(), None);
-        assert_eq!(output.metric.tags(), series.metric.tags());
+        assert_eq!(output.metric.tags(), &series.metric.tags()[1..]);
         let TimeAxis::Grid(range) = output.time else {
             panic!("lost grid axis")
         };
@@ -509,7 +486,7 @@ fn math_matches_main_udfs_across_float_and_round_boundaries() {
 }
 
 #[test]
-fn math_drops_reserved_metadata_labels_with_the_name() {
+fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
     let schema = schema(&["value"]);
     let mut input = series(&schema, 0, vec![floats(&[Some(-1.0)])]);
     for label in ["__type__", "__unit__", "__other__"] {
@@ -523,5 +500,5 @@ fn math_drops_reserved_metadata_labels_with_the_name() {
         .map(|label| label.name.as_ref())
         .collect::<Vec<_>>();
     assert_eq!(output.metric.name(), None);
-    assert_eq!(names, ["__other__", "empty", "host"]);
+    assert_eq!(names, ["__other__", "host"]);
 }
