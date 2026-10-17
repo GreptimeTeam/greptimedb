@@ -66,7 +66,7 @@ impl Round {
                     let null_array = Float64Array::new_null(value_array.len());
                     return Ok(ColumnarValue::Array(Arc::new(null_array)));
                 };
-                let op = |a: f64| round_to_nearest(a, nearest);
+                let op = |a: f64| Self::round_to_nearest(a, nearest);
                 let result: PrimitiveArray<Float64Type> =
                     value_array.as_primitive::<Float64Type>().unary(op);
                 Ok(ColumnarValue::Array(Arc::new(result) as _))
@@ -83,23 +83,25 @@ impl Round {
                     )),
                 )?;
 
-                let result: PrimitiveArray<Float64Type> =
-                    datatypes::arrow::compute::binary(value_array, nearest_array, round_to_nearest)
-                        .map_err(|err: ArrowError| {
-                            DataFusionError::ArrowError(Box::new(err), None)
-                        })?;
+                let result: PrimitiveArray<Float64Type> = datatypes::arrow::compute::binary(
+                    value_array,
+                    nearest_array,
+                    Self::round_to_nearest,
+                )
+                .map_err(|err: ArrowError| DataFusionError::ArrowError(Box::new(err), None))?;
 
                 Ok(ColumnarValue::Array(Arc::new(result) as _))
             }
         }
     }
-}
 
-/// Rounds like Prometheus: ties round up (towards +Inf), and multiplying by the inverse
-/// of `nearest` follows its float behavior, including NaN for `nearest == 0`.
-fn round_to_nearest(value: f64, nearest: f64) -> f64 {
-    let inverse = 1.0 / nearest;
-    (value * inverse + 0.5).floor() / inverse
+    /// Follows Prometheus `funcRound`: multiplying by the inverse of `nearest` and dividing by it
+    /// again (not `/ nearest` then `* nearest`) can move a `floor` result by a whole step.
+    /// `nearest == 0` gives NaN; with a positive `nearest`, ties round towards +Inf.
+    pub(crate) fn round_to_nearest(value: f64, nearest: f64) -> f64 {
+        let inverse = 1.0 / nearest;
+        (value * inverse + 0.5).floor() / inverse
+    }
 }
 
 #[cfg(test)]

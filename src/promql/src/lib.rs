@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod aggregate;
 pub mod error;
 pub mod extension_plan;
 pub mod functions;
 mod go_sort;
+#[cfg(test)]
+mod golden;
 pub mod grid_series;
 pub mod histogram_eval;
+pub mod map;
 pub mod map_label;
 pub mod map_time;
 mod metrics;
