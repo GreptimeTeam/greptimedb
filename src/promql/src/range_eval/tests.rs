@@ -910,14 +910,23 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
         anchor_ms: None,
     };
     for (smoothing, trend) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.5)] {
-        assert!(matches!(
+        let evaluator = || {
             RangeEvaluator::try_new(
                 &raw_schema(1),
                 grid(0, 10, 4),
                 window,
-                RangeFunction::DoubleExponentialSmoothing { smoothing, trend }
-            ),
-            Err(DataFusionError::Plan(_))
+                RangeFunction::DoubleExponentialSmoothing { smoothing, trend },
+            )
+            .unwrap()
+        };
+        // Like Prometheus, only a window holding a sample checks the factors.
+        let outside = chunk(&[(100, vec![Some(1.0)])], 1, 0, true);
+        assert!(evaluator().push(&outside).unwrap().is_none());
+        evaluator().finish().unwrap();
+        let inside = chunk(&[(5, vec![Some(1.0)])], 1, 0, true);
+        assert!(matches!(
+            evaluator().push(&inside),
+            Err(DataFusionError::Execution(_))
         ));
     }
 }
@@ -1013,4 +1022,43 @@ fn quantile_keeps_the_window_order_of_signed_zeros() {
         panic!("expected a float");
     };
     assert_eq!(1.0 / value, f64::NEG_INFINITY);
+}
+
+/// Chunks after the last grid point are only validated, so nothing accumulates and the outcome
+/// does not depend on where the series is split.
+#[test]
+fn samples_after_the_last_window_are_validated_but_not_retained() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 2), window);
+    for chunk_index in 0..900 {
+        let rows: Vec<Row> = (0..100)
+            .map(|row| (1 + chunk_index * 100 + row, vec![Some(1.0)]))
+            .collect();
+        evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
+        assert!(evaluator.fields[0].timestamps.len() <= 100);
+    }
+
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 10,
+        anchor_ms: None,
+    };
+    let late = i64::MAX - 5;
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
+    evaluator
+        .push(&chunk(
+            &[(15, vec![Some(1.0)]), (20, vec![Some(1.0)])],
+            1,
+            0,
+            false,
+        ))
+        .unwrap();
+    assert!(matches!(
+        evaluator.push(&chunk(&[(late, vec![Some(1.0)])], 1, 0, true)),
+        Err(DataFusionError::Execution(_))
+    ));
 }

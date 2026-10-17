@@ -80,6 +80,8 @@ pub struct RangeEvaluator {
     fields: Vec<FieldSamples>,
     row: Vec<Option<f64>>,
     drops_metric_name: bool,
+    /// Raised by the first non-empty window, where Prometheus validates function arguments.
+    window_error: Option<String>,
 }
 
 /// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
@@ -124,15 +126,15 @@ impl RangeEvaluator {
         window: RangeWindow,
         function: RangeFunction,
     ) -> Result<Self> {
+        let mut window_error = None;
         if let RangeFunction::DoubleExponentialSmoothing { smoothing, trend } = function {
-            for (name, factor) in [("smoothing", smoothing), ("trend", trend)] {
-                // Prometheus rejects factors outside (0, 1); NaN passes its check.
-                if factor <= 0.0 || factor >= 1.0 {
-                    return Err(DataFusionError::Plan(format!(
-                        "invalid {name} factor. Expected: 0 < factor < 1, got: {factor}"
-                    )));
-                }
-            }
+            // Prometheus rejects factors outside (0, 1); NaN passes its check.
+            window_error = [("smoothing", smoothing), ("trend", trend)]
+                .into_iter()
+                .find(|(_, factor)| *factor <= 0.0 || *factor >= 1.0)
+                .map(|(name, factor)| {
+                    format!("invalid {name} factor. Expected: 0 < factor < 1, got: {factor}")
+                });
         }
         let fold_offset = fold_offset(grid.spec(), window)?;
         let step_invariant = !matches!(function, RangeFunction::PredictLinear(_));
@@ -156,6 +158,7 @@ impl RangeEvaluator {
             step_invariant,
         )?;
         evaluator.drops_metric_name = function.drops_metric_name();
+        evaluator.window_error = window_error;
         Ok(evaluator)
     }
 
@@ -199,6 +202,7 @@ impl RangeEvaluator {
                 .collect(),
             row: Vec::with_capacity(input.fields.len()),
             drops_metric_name: false,
+            window_error: None,
         })
     }
 
@@ -344,11 +348,6 @@ impl RangeEvaluator {
         fields: &SeriesFields,
         drop_stale: bool,
     ) -> Result<()> {
-        let state = self.series.as_ref().expect("set by the caller");
-        if state.cursor >= self.points_read() {
-            // Every window that reads samples has been evaluated.
-            return Ok(());
-        }
         let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();
         for &timestamp in timestamps {
             self.row.clear();
@@ -424,6 +423,9 @@ impl RangeEvaluator {
                 state.cursor = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
                 continue;
             }
+            if let Some(error) = &self.window_error {
+                return Err(DataFusionError::Execution(error.clone()));
+            }
 
             match self.replay {
                 Replay::PerPoint => {
@@ -467,6 +469,11 @@ impl RangeEvaluator {
             state.cursor += 1;
         }
         for field in &mut self.fields {
+            // After the last window, samples are still ingested so that the overflow and
+            // histogram checks do not depend on how the series is chunked, but none are kept.
+            if state.cursor == points_read {
+                field.head = field.timestamps.len();
+            }
             field.timestamps.drain(..field.head);
             field.values.drain(..field.head);
             field.head = 0;
