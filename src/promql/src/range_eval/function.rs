@@ -21,6 +21,7 @@
 use crate::functions::{
     EdgeKind, add_counter_resets, count_edges, extremum, instant_delta, kahan_inc,
 };
+use crate::go_sort;
 use crate::range_eval::{FloatWindow, WindowKernel};
 
 /// A PromQL range-vector function over float samples.
@@ -206,15 +207,9 @@ fn quantile(q: f64, values: &[f64], sorted: &mut Vec<f64>) -> f64 {
     }
     sorted.clear();
     sorted.extend_from_slice(values);
-    // Go's `vectorByValueHeap` puts NaN first and treats +0 and -0 as equal; Go sorts short
-    // inputs by insertion, which keeps equal values in window order, and which zero is picked
-    // decides the sign of the result.
-    sorted.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        (false, false) => a.partial_cmp(b).expect("neither is NaN"),
-    });
+    // `sort.Sort` with `vectorByValueHeap.Less`: NaN first, +0 and -0 tie, and which zero
+    // lands at the rank decides the sign of the result.
+    go_sort::sort_by(sorted, |a, b| a.is_nan() || a < b);
     let n = sorted.len() as f64;
     let rank = q * (n - 1.0);
     let lower = rank.floor().max(0.0);

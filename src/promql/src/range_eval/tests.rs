@@ -44,6 +44,7 @@ use crate::grid_series::reference::{
     Dense, assert_series_eq, assert_series_eq_any_nan, random_dense, special_value,
 };
 use crate::range_array::RangeArray;
+use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
 type Row = (i64, Vec<Option<f64>>);
@@ -1044,30 +1045,59 @@ fn ts_of_last_over_time_reports_zero_for_negative_timestamps() {
     }
 }
 
-/// Equal values keep window order in `quantile_over_time`, so the zero a quantile lands on is
-/// the one Prometheus picks: `1 / quantile_over_time(1, m[3s])` over +0, -0, -0 is -Inf.
+/// `quantile_over_time` sorts the window as Go's `sort.Sort` does, so the zero a rank lands on,
+/// and the sign of the result, match Prometheus over windows longer than its insertion sort.
 #[test]
-fn quantile_keeps_the_window_order_of_signed_zeros() {
+fn quantile_picks_the_signed_zero_go_picks() {
     let window = RangeWindow {
-        range_ms: 3_000,
+        range_ms: 20_000,
         offset_ms: 0,
         anchor_ms: None,
     };
-    let rows: Vec<Row> = [(0, 0.0), (1_000, -0.0), (2_000, -0.0)]
-        .map(|(ts, value)| (ts, vec![Some(value)]))
-        .to_vec();
-    let mut evaluator = RangeEvaluator::try_new(
-        &raw_schema(1),
-        grid(2_000, 1_000, 1),
-        window,
-        RangeFunction::QuantileOverTime(1.0),
-    )
-    .unwrap();
-    let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
-    let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
-        panic!("expected a float");
-    };
-    assert_eq!(1.0 / value, f64::NEG_INFINITY);
+    let (z, n) = (0.0, -0.0);
+    let values = [
+        z,
+        n,
+        n,
+        z,
+        1.0,
+        n,
+        z,
+        z,
+        n,
+        f64::NAN,
+        n,
+        z,
+        -1.0,
+        z,
+        n,
+        n,
+        z,
+        2.0,
+        n,
+        z,
+    ];
+    let rows: Vec<Row> = values
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| (i as i64 * 1_000, vec![Some(value)]))
+        .collect();
+    // Go's `sort.Sort` on amd64 gives a negative quantile for q = k / 19 only at these k.
+    let go_negative = |k: i32| matches!(k, 1 | 8 | 14);
+    for k in 1..=19 {
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(19_000, 1_000, 1),
+            window,
+            RangeFunction::QuantileOverTime(f64::from(k) / 19.0),
+        )
+        .unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
+            panic!("expected a float");
+        };
+        assert_eq!(value.is_sign_negative(), go_negative(k), "k = {k}: {value}");
+    }
 }
 
 /// Chunks after the last grid point are only validated, so nothing accumulates and the outcome
@@ -1177,4 +1207,104 @@ fn anchored_window_before_the_series_retains_nothing() {
         evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
         assert!(evaluator.fields[0].timestamps.len() <= 100);
     }
+}
+
+/// `absent_over_time(v[r])` is `absent` over the series of `present_over_time(v[r])`, with the
+/// labels derived from the selector's matchers. Checked against 120 cases from the Prometheus
+/// v3.15.0 engine (`absent_over_time_cases.txt`, promql-compat `cmd/narthex-golden-vector
+/// -absent-over-time`); samples sit on grid points.
+#[test]
+fn absent_over_time_is_absent_over_present_over_time() {
+    let text = include_str!("absent_over_time_cases.txt");
+    let mut checked = 0;
+    for case in text.split("end\n").filter(|case| case.contains("case ")) {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let spec: Vec<&str> = lines[0].split_whitespace().collect();
+        let range_ms: i64 = spec[2].parse().unwrap();
+        let matchers: Vec<LabelMatcher> = spec[3]
+            .split(',')
+            .filter(|matcher| *matcher != "-")
+            .map(|matcher| {
+                let (name, op, value) = match matcher.split_once("!=") {
+                    Some((name, value)) => (name, MatchOp::NotEqual, value),
+                    None => {
+                        let (name, value) = matcher.split_once('=').unwrap();
+                        (name, MatchOp::Equal, value)
+                    }
+                };
+                let value = value.trim_matches('"');
+                LabelMatcher {
+                    name: Arc::from(name),
+                    op,
+                    value: Arc::from(value),
+                    matches_empty: (op == MatchOp::Equal) == value.is_empty(),
+                }
+            })
+            .collect();
+        let grid_spec: Vec<i64> = lines[1]
+            .split_whitespace()
+            .skip(1)
+            .map(|field| field.parse().unwrap())
+            .collect();
+        let grid = grid(grid_spec[0], grid_spec[1], grid_spec[2] as u64);
+        let window = RangeWindow {
+            range_ms,
+            offset_ms: 0,
+            anchor_ms: None,
+        };
+        let mut present = Vec::new();
+        let mut expected = None;
+        for (host, line) in lines[2..].iter().enumerate() {
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (labels, points) = rest.split_once(" ;").unwrap();
+            let points: Vec<(i64, f64)> = points
+                .split_whitespace()
+                .map(|point| {
+                    let (index, bits) = point.split_once(':').unwrap();
+                    let ts = grid_spec[0] + index.parse::<i64>().unwrap() * grid_spec[1];
+                    (ts, f64::from_bits(u64::from_str_radix(bits, 16).unwrap()))
+                })
+                .collect();
+            if kind == "result" {
+                let mut dense = vec![vec![None]; grid_spec[2] as usize];
+                for (ts, value) in points {
+                    dense[((ts - grid_spec[0]) / grid_spec[1]) as usize][0] = Some(value);
+                }
+                expected = Some(dense);
+                continue;
+            }
+            let selected = matchers.iter().all(|matcher| {
+                let value = labels
+                    .split(',')
+                    .find_map(|pair| pair.strip_prefix(&format!("{}=", matcher.name)))
+                    .unwrap_or("");
+                (value == &*matcher.value) == (matcher.op == MatchOp::Equal)
+            });
+            if !selected || points.is_empty() {
+                continue;
+            }
+            let rows: Vec<Row> = points
+                .into_iter()
+                .map(|(ts, value)| (ts, vec![Some(value)]))
+                .collect();
+            let mut evaluator = RangeEvaluator::try_new(
+                &raw_schema(1),
+                grid.clone(),
+                window,
+                RangeFunction::PresentOverTime,
+            )
+            .unwrap();
+            present.extend(evaluator.push(&chunk(&rows, 1, host as u64, true)).unwrap());
+        }
+        let schema = SeriesSchema {
+            fields: raw_schema(1).fields,
+            eval_grid: Some(grid.clone()),
+        };
+        let labels = absent_labels(&matchers).unwrap();
+        let actual = absent(&schema, &present, labels.clone()).unwrap();
+        let expected = expected.unwrap_or_else(|| vec![vec![None]; grid_spec[2] as usize]);
+        assert_series_eq(actual.as_ref(), &expected, &labels);
+        checked += 1;
+    }
+    assert_eq!(checked, 120);
 }

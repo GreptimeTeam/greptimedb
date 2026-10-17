@@ -17,7 +17,7 @@
 //!
 //! Semantics follow Prometheus (`aggregationK`, `funcScalar`, `funcAbsent`,
 //! `createLabelsForAbsentFunction`, `funcSort*`). A scalar is a grid series without labels that
-//! has a value at every point.
+//! has a value at every point, so `vector(s)` is `s` itself and has no kernel.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -163,6 +163,9 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
 }
 
 /// `absent(v)`: 1 with `labels` at every point where no series is present.
+///
+/// `absent_over_time(v[r])` is this over the result of `present_over_time(v[r])`, with `labels`
+/// from the matchers of `v`, as Prometheus derives them for both.
 pub fn absent(
     schema: &SeriesSchema,
     series: &[Series],
