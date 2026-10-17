@@ -21,3 +21,4 @@ mod metrics;
 pub mod range_array;
 pub mod range_eval;
 pub mod select;
+pub mod vector_match;
