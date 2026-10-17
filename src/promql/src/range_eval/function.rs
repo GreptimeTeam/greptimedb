@@ -20,7 +20,8 @@ use datafusion::arrow::compute;
 
 use super::{FloatWindow, WindowKernel};
 use crate::functions::{
-    add_counter_resets, extrapolate, extremum, instant_delta, stddev, stdvar, window_quantile,
+    EdgeKind, add_counter_resets, count_edges, double_exponential_smoothing_impl, extrapolate,
+    extremum, instant_delta, linear_regression_samples, stddev, stdvar, window_quantile,
 };
 
 /// A PromQL range-vector function over float samples.
@@ -42,6 +43,16 @@ pub enum RangeFunction {
     StdvarOverTime,
     /// `quantile_over_time` with a constant quantile.
     QuantileOverTime(f64),
+    Resets,
+    Changes,
+    Deriv,
+    /// `predict_linear` with a constant horizon in whole seconds, as the planner casts it.
+    PredictLinear(i64),
+    /// `double_exponential_smoothing` (`holt_winters`) with constant factors.
+    DoubleExponentialSmoothing {
+        smoothing: f64,
+        trend: f64,
+    },
 }
 
 impl RangeFunction {
@@ -74,8 +85,33 @@ impl RangeFunction {
                 let mut scratch = Vec::new();
                 Box::new(move |window| window_quantile(window.values, quantile, &mut scratch))
             }
+            Self::Resets => {
+                Box::new(|window| Some(count_edges(window.values, EdgeKind::Resets) as f64))
+            }
+            Self::Changes => {
+                Box::new(|window| Some(count_edges(window.values, EdgeKind::Changes) as f64))
+            }
+            Self::Deriv => Box::new(|window| regression(&window, window.timestamps[0]).0),
+            Self::PredictLinear(horizon) => Box::new(move |window| {
+                let (slope, intercept) = regression(&window, window.eval_ts);
+                Some(slope? * horizon as f64 + intercept?)
+            }),
+            Self::DoubleExponentialSmoothing { smoothing, trend } => Box::new(move |window| {
+                double_exponential_smoothing_impl(window.values, smoothing, trend)
+            }),
         }
     }
+}
+
+fn regression(window: &FloatWindow<'_>, intercept_time: i64) -> (Option<f64>, Option<f64>) {
+    linear_regression_samples(
+        window
+            .timestamps
+            .iter()
+            .copied()
+            .zip(window.values.iter().copied()),
+        intercept_time,
+    )
 }
 
 /// Sums like the `sum_over_time` UDF: Arrow's lane-wise `sum` over the window's samples.

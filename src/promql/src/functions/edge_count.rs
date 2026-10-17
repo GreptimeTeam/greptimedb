@@ -25,8 +25,9 @@ use datatypes::arrow::datatypes::DataType;
 use crate::functions::extract_range_array;
 use crate::range_array::RangeArray;
 
-#[derive(Clone, Copy)]
-pub(super) enum EdgeKind {
+/// The transitions `changes` and `resets` count between consecutive samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EdgeKind {
     Changes,
     Resets,
 }
@@ -96,7 +97,7 @@ fn calc(
             0 => None,
             _ if has_nulls => count_edges_skipping_nulls(values, offset, end, kind),
             1 => Some(0),
-            _ if direct => Some(count_edges(raw_values.as_ref(), offset, end, kind)),
+            _ if direct => Some(count_edges(&raw_values[offset..end], kind)),
             _ => {
                 let prefix = prefix.as_ref().unwrap();
                 Some(prefix[end - 1] - prefix[offset])
@@ -169,9 +170,10 @@ fn build_prefix(values: &[f64], kind: EdgeKind) -> Vec<u64> {
     prefix
 }
 
-fn count_edges(values: &[f64], offset: usize, end: usize, kind: EdgeKind) -> u64 {
+/// Counts `kind` edges between consecutive `values`.
+pub(crate) fn count_edges(values: &[f64], kind: EdgeKind) -> u64 {
     let mut count = 0;
-    for index in offset + 1..end {
+    for index in 1..values.len() {
         count += u64::from(is_edge(values[index - 1], values[index], kind));
     }
     count

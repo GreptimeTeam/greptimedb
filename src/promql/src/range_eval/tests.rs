@@ -38,8 +38,9 @@ use rand::{Rng, SeedableRng};
 
 use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel};
 use crate::functions::{
-    AvgOverTime, CountOverTime, Delta, IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime,
-    PresentOverTime, QuantileOverTime, Rate, StddevOverTime, StdvarOverTime, SumOverTime,
+    AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing, IDelta,
+    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use crate::grid_series::reference::{Dense, assert_series_eq, special_value};
 use crate::range_array::RangeArray;
@@ -261,8 +262,11 @@ fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) 
 /// Evaluates every reference window with the ordinary range UDF, on the row layout
 /// `RangeManipulate` produces: shifted timestamps and nullable values per field.
 ///
-/// `sum_over_time` and `avg_over_time` get only the field's valid rows: Arrow's lane-wise sum
-/// depends on where null slots sit, which the evaluator does not keep.
+/// Some UDFs depend on where null slots sit, which the evaluator does not keep, so they get only
+/// the field's valid rows: Arrow's lane-wise sum in `sum_over_time` and `avg_over_time`, the
+/// first slot's timestamp in `deriv`, and the slot payloads `double_exponential_smoothing` reads.
+/// `double_exponential_smoothing` also returns NaN for an empty window, where the evaluator
+/// follows Prometheus and leaves the point missing.
 fn udf_reference(
     function: RangeFunction,
     rows: &[Row],
@@ -275,7 +279,10 @@ fn udf_reference(
     for field in 0..fields {
         let rows: Vec<_> = if matches!(
             function,
-            RangeFunction::SumOverTime | RangeFunction::AvgOverTime
+            RangeFunction::SumOverTime
+                | RangeFunction::AvgOverTime
+                | RangeFunction::Deriv
+                | RangeFunction::DoubleExponentialSmoothing { .. }
         ) {
             kept.iter()
                 .filter(|(_, values)| values[field].is_some())
@@ -322,6 +329,13 @@ fn udf_reference(
             RangeFunction::StddevOverTime => StddevOverTime::scalar_udf(),
             RangeFunction::StdvarOverTime => StdvarOverTime::scalar_udf(),
             RangeFunction::QuantileOverTime(_) => QuantileOverTime::scalar_udf(),
+            RangeFunction::Resets => Resets::scalar_udf(),
+            RangeFunction::Changes => Changes::scalar_udf(),
+            RangeFunction::Deriv => Deriv::scalar_udf(),
+            RangeFunction::PredictLinear(_) => PredictLinear::scalar_udf(),
+            RangeFunction::DoubleExponentialSmoothing { .. } => {
+                DoubleExponentialSmoothing::scalar_udf()
+            }
         };
         match function {
             RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta => {
@@ -334,6 +348,16 @@ fn udf_reference(
             }
             RangeFunction::QuantileOverTime(quantile) => {
                 args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(quantile))));
+            }
+            RangeFunction::PredictLinear(horizon) => {
+                args.push(ColumnarValue::Scalar(ScalarValue::Int64(Some(horizon))));
+                args.push(ColumnarValue::Array(Arc::new(
+                    TimestampMillisecondArray::new(grid.timestamps().clone(), None),
+                )));
+            }
+            RangeFunction::DoubleExponentialSmoothing { smoothing, trend } => {
+                args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(smoothing))));
+                args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(trend))));
             }
             _ => {}
         }
@@ -354,8 +378,8 @@ fn udf_reference(
             .into_array(ranges.len())
             .unwrap();
         let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
-        for (row, value) in dense.iter_mut().zip(output.iter()) {
-            row[field] = value;
+        for ((row, value), (_, len)) in dense.iter_mut().zip(output.iter()).zip(&ranges) {
+            row[field] = value.filter(|_| *len > 0);
         }
     }
     dense
@@ -437,6 +461,32 @@ fn functions_match_range_udfs() {
         RangeFunction::QuantileOverTime(1.0),
         RangeFunction::QuantileOverTime(1.5),
         RangeFunction::QuantileOverTime(f64::NAN),
+        RangeFunction::Resets,
+        RangeFunction::Changes,
+        RangeFunction::Deriv,
+        RangeFunction::PredictLinear(-600),
+        RangeFunction::PredictLinear(0),
+        RangeFunction::PredictLinear(3_600),
+        RangeFunction::DoubleExponentialSmoothing {
+            smoothing: 0.5,
+            trend: 0.1,
+        },
+        RangeFunction::DoubleExponentialSmoothing {
+            smoothing: 0.9,
+            trend: 0.6,
+        },
+        RangeFunction::DoubleExponentialSmoothing {
+            smoothing: 1.5,
+            trend: 0.1,
+        },
+        RangeFunction::DoubleExponentialSmoothing {
+            smoothing: 0.5,
+            trend: -0.1,
+        },
+        RangeFunction::DoubleExponentialSmoothing {
+            smoothing: f64::NAN,
+            trend: 0.1,
+        },
     ] {
         for seed in 0..300 {
             let mut rng = StdRng::seed_from_u64(seed);
