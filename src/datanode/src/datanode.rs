@@ -1733,7 +1733,7 @@ mod tests {
         rows
     }
 
-    /// Returns the SST files under `dir`.
+    /// Returns the Parquet files under `dir` and its subdirectories.
     fn sst_files(dir: &Path) -> Vec<String> {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -1837,13 +1837,15 @@ mod tests {
     /// With a healthy WAL whose seal interval is longer than any test, the
     /// close-time flush of a region that holds writes that skipped the WAL
     /// commits: the WAL's stop seals and uploads its open batch before the
-    /// region closes, so the flush finds its entries durable.
+    /// region closes, so the flush finds its entries durable, and every row
+    /// survives a restart.
     #[tokio::test]
     async fn test_shutdown_flushes_a_region_while_the_wal_is_healthy() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-healthy-flush");
+        let data_home = data_home.path().to_str().unwrap();
         let (mut datanode, log_store) = datanode_with_object_store_wal(
-            data_home.path().to_str().unwrap(),
+            data_home,
             Duration::from_secs(3600),
             0,
             WalUploads::Succeed,
@@ -1856,8 +1858,11 @@ mod tests {
             .await
             .expect("the shutdown must finish")
             .unwrap();
-        assert_eq!(1, sst_files(data_home.path()).len());
+        assert_eq!(1, sst_files(Path::new(data_home)).len());
         assert!(is_stopped(&log_store).await);
+        drop(datanode);
+
+        assert_eq!(5, rows_after_restart(data_home).await);
     }
 
     /// A create that never answers holds the WAL's stop, and with it the
@@ -1883,6 +1888,14 @@ mod tests {
             .unwrap();
 
         let shutdown = tokio::spawn(async move { datanode.shutdown().await });
+        // The shutdown reached the WAL's stop, which waits for the create.
+        tokio::time::timeout(WAIT, async {
+            while !is_stopped(&log_store).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the shutdown must stop the WAL");
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!shutdown.is_finished());
 
