@@ -107,7 +107,8 @@ pub enum ScalarOperand {
     Right(f64),
 }
 
-/// Applies float math to every field of one evaluated series, preserving its labels.
+/// Applies float math to every field of one evaluated series and drops the metric name, like
+/// Prometheus' `simpleFloatFunc`.
 ///
 /// The explicit schema and actual grid range are preserved. Fields are processed in their own
 /// chunk boundaries, without expanding to the full grid or densifying chunked samples. Missing
@@ -118,10 +119,14 @@ pub enum ScalarOperand {
 /// Raw time axes and histogram/mixed segments are rejected. Unsupported query types must be
 /// admitted to the ordinary path before execution; this function neither falls back nor returns
 /// partial results.
+///
+/// Distinct inputs can share a label set once the name is dropped. Merging them, or failing
+/// when both have a value at one step, is left to the caller (Prometheus
+/// `mergeSeriesWithSameLabelset`).
 pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Series> {
-    // Ordinary math calls preserve the metric name (unlike binary arithmetic): the HTTP
-    // adapter's collect_metric_names follows Call arguments. Keep that compatibility here.
-    map_float_fields(schema, series, |floats| op.apply(floats))
+    let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
+    drop_metric_name(&mut output.metric);
+    Ok(output)
 }
 
 /// Negates every float field and removes the metric name, like the ordinary unary path.
@@ -189,6 +194,12 @@ fn map_float_fields(
     let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
     Series::try_new(schema, series.metric.clone(), series.time.clone(), fields)
         .map_err(series_error)
+}
+
+/// Prometheus `DropReserved(schema.IsMetadataLabel)` drops the type and unit labels with the
+/// name.
+pub(crate) fn drop_metric_name(metric: &mut MetricName) {
+    metric.remove_all(&["__name__", "__type__", "__unit__"]);
 }
 
 impl MathOp {
