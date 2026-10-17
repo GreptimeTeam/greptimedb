@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::readable_size::ReadableSize;
@@ -56,7 +56,6 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::flush::STOP_DURABILITY_GRACE;
 use crate::region::MitoRegionRef;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
@@ -1964,8 +1963,6 @@ enum WalOutage {
     Refused,
     /// Creates fail with a transient error and are repeated.
     Unreachable,
-    /// A create never answers.
-    Stalled,
 }
 
 impl WalOutage {
@@ -1975,39 +1972,16 @@ impl WalOutage {
         match self {
             WalOutage::Refused => denied.store(true, Ordering::SeqCst),
             WalOutage::Unreachable => store.fail_creates(),
-            WalOutage::Stalled => store.hold_creates(),
         }
     }
 
     /// Waits until a create of the sealed backlog met the outage: the store
-    /// is failing, handled a failed create, or has a create parked.
+    /// is failing, or handled a failed create.
     async fn wait_until_met(self, store: &ObjectStoreLogStore) {
         match self {
             WalOutage::Refused => wait_for(store.wait_until_failing()).await,
             WalOutage::Unreachable => wait_for(store.wait_for_failed_creates(1)).await,
-            WalOutage::Stalled => wait_for(store.wait_for_parked_creates(1)).await,
         }
-    }
-
-    /// Whether the log store's stop uploads the backlog: a stalled create
-    /// completes once it is released, while the others keep failing and the
-    /// stop drops the backlog.
-    fn backlog_survives_stop(self) -> bool {
-        self == WalOutage::Stalled
-    }
-
-    /// Prepares the log store's stop, which waits for the creates in flight:
-    /// a stalled create is released. Afterwards the object store accepts
-    /// writes again, for the restart.
-    async fn stop_store(self, store: &ObjectStoreLogStore, denied: &AtomicBool) -> bool {
-        if self == WalOutage::Stalled {
-            store.release_creates();
-        }
-        let stopped = tokio::time::timeout(WAIT, store.stop())
-            .await
-            .expect("the log store must stop");
-        denied.store(false, Ordering::SeqCst);
-        stopped.is_ok()
     }
 }
 
@@ -2056,18 +2030,32 @@ async fn reopen(
     (engine, state)
 }
 
-/// A flush that waits for the WAL to become durable no longer holds up the
-/// stop of the engine, whether the WAL's object store refuses its creates,
-/// fails them or never answers. The flush is cancelled: it records nothing
-/// in the manifest and deletes its SST. After a restart the rows that were
-/// durable before the stop replay once, and the backlog does as well when the
-/// log store's stop uploaded it; otherwise that stop reports the loss.
+/// Stops the WAL as a datanode does before its regions close, and returns
+/// whether the stop uploaded the backlog.
+async fn stop_wal(store: &ObjectStoreLogStore) -> bool {
+    tokio::time::timeout(WAIT, store.stop())
+        .await
+        .expect("the log store must stop")
+        .is_ok()
+}
+
+fn assert_wal_stopped(error: &BoxedError) {
+    assert!(
+        format!("{error:?}").contains("Object store WAL log store is stopped"),
+        "{error:?}"
+    );
+}
+
+/// A flush that waits for WAL uploads that keep failing ends once the WAL
+/// stops, which a datanode does before its regions close: the stop drops the
+/// backlog and the flush fails with the stopped error before it writes its
+/// manifest edit, deleting its SST. The engine then stops at once, and after a
+/// restart the rows that were durable before the stop replay once.
 #[rstest]
 #[case(WalOutage::Refused)]
 #[case(WalOutage::Unreachable)]
-#[case(WalOutage::Stalled)]
 #[tokio::test]
-async fn test_engine_stop_cancels_a_flush_waiting_for_the_wal(#[case] outage: WalOutage) {
+async fn test_flush_waiting_for_the_wal_fails_once_the_wal_stops(#[case] outage: WalOutage) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("object-store-wal-stop-flush").await;
     let denied = Arc::new(AtomicBool::new(false));
@@ -2087,43 +2075,35 @@ async fn test_engine_stop_cancels_a_flush_waiting_for_the_wal(#[case] outage: Wa
     wait_for(store.wait_for_durability_waits(1)).await;
     assert!(!flush.is_finished());
 
-    // The region server closes the region, which does not flush it, then
-    // stops the engine, before the log store stops.
+    assert!(!stop_wal(&store).await);
+    let error = tokio::time::timeout(WAIT, flush)
+        .await
+        .expect("the flush must end once the WAL stops")
+        .unwrap()
+        .unwrap_err();
+    assert_wal_stopped(&BoxedError::new(error));
+    assert!(seal.await.unwrap().is_err());
     close_region(&engine, REGION_A).await;
     tokio::time::timeout(WAIT, engine.stop())
         .await
         .expect("the engine must stop")
         .unwrap();
-    let error = tokio::time::timeout(WAIT, flush)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(StatusCode::Cancelled, error.status_code(), "{error:?}");
     assert_eq!(Vec::<String>::new(), sst_files(&env, &table_dir).await);
-
-    let survives = outage.backlog_survives_stop();
-    assert_eq!(survives, outage.stop_store(&store, &denied).await);
-    assert_eq!(survives, seal.await.unwrap().is_ok());
+    denied.store(false, Ordering::SeqCst);
     drop(engine);
     drop(store);
 
     let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
-    let replayed = if survives { 5 } else { 3 };
     assert_eq!(0, state.manifest_flushed_entry_id);
-    assert_eq!(replayed, state.memtable_rows);
+    assert_eq!(3, state.memtable_rows);
     // Three lines of header and one of footer frame the rows.
-    assert_eq!(
-        replayed as usize + 4,
-        scan_rows(&engine, REGION_A).await.lines().count()
-    );
-    assert_eq!(Vec::<String>::new(), sst_files(&env, &table_dir).await);
+    assert_eq!(7, scan_rows(&engine, REGION_A).await.lines().count());
 }
 
-/// A flush queued behind one that waits for the WAL runs when the engine
-/// stops, and gives up at its own wait instead of holding the stop up.
+/// A flush queued behind one that waits for the WAL runs once that one fails
+/// at the WAL's stop, and fails at its own wait instead of waiting.
 #[tokio::test]
-async fn test_engine_stop_runs_a_queued_flush_without_waiting_for_the_wal() {
+async fn test_queued_flush_fails_once_the_wal_stops() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("object-store-wal-stop-queued-flush").await;
     let object_store = memory_store();
@@ -2140,11 +2120,11 @@ async fn test_engine_stop_runs_a_queued_flush_without_waiting_for_the_wal() {
     let (table_dir_a, schema_a) = create_region(&engine, REGION_A, &[]).await;
     let (table_dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
 
-    store.hold_creates();
+    store.fail_creates();
     put_rows(&engine, REGION_A, rows(&schema_a, 0, 3)).await;
     put_rows(&engine, REGION_B, rows(&schema_b, 0, 2)).await;
-    let seal = spawn_seal(&store);
-    wait_for(store.wait_for_parked_creates(1)).await;
+    let _seal = spawn_seal(&store);
+    wait_for(store.wait_for_failed_creates(1)).await;
     let flush_a = spawn_flush(&engine, REGION_A);
     wait_for(store.wait_for_durability_waits(1)).await;
     // Scheduling the flush of B freezes its memtable.
@@ -2167,50 +2147,67 @@ async fn test_engine_stop_runs_a_queued_flush_without_waiting_for_the_wal() {
     assert!(!flush_a.is_finished());
     assert!(!flush_b.is_finished());
 
+    assert!(!stop_wal(&store).await);
     tokio::time::timeout(WAIT, engine.stop())
         .await
         .expect("the engine must stop")
         .unwrap();
     for flush in [flush_a, flush_b] {
-        let error = flush.await.unwrap().unwrap_err();
-        assert_eq!(StatusCode::Cancelled, error.status_code(), "{error:?}");
+        assert_wal_stopped(&BoxedError::new(flush.await.unwrap().unwrap_err()));
     }
     assert_eq!(Vec::<String>::new(), sst_files(&env, &table_dir_a).await);
     assert_eq!(Vec::<String>::new(), sst_files(&env, &table_dir_b).await);
-
-    store.release_creates();
-    tokio::time::timeout(WAIT, store.stop())
-        .await
-        .unwrap()
-        .unwrap();
-    seal.await.unwrap().unwrap();
-    drop(engine);
-    drop(region_b);
-    drop(store);
-
-    let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir_a).await;
-    assert_eq!(0, state.manifest_flushed_entry_id);
-    assert_eq!(3, state.memtable_rows);
-    open_region(&engine, REGION_B, &table_dir_b, &[])
-        .await
-        .unwrap();
-    let state = region_recovery_state(&engine, REGION_B).await;
-    assert_eq!(0, state.manifest_flushed_entry_id);
-    assert_eq!(2, state.memtable_rows);
 }
 
-/// A stopping region server tells the engine first, then closes every
-/// region. Closing a region that holds writes that skipped the WAL flushes
-/// it, and that flush gives up its wait for the WAL instead of holding the
-/// close up: at once while the WAL fails to upload, and after the grace
-/// period of the stop when a create never answers. The close fails and the
-/// writes that skipped the WAL are lost.
+/// A region that holds writes that skipped the WAL is flushed when it closes.
+/// After the WAL's stop uploaded its open batch, however long the seal
+/// interval, that flush finds the region's entries durable and commits, and
+/// every row survives a restart.
+#[tokio::test]
+async fn test_close_after_the_wal_uploaded_its_backlog_keeps_every_row() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("object-store-wal-stop-healthy-flush").await;
+    let object_store = memory_store();
+    // The store never seals a batch on its own.
+    let store = open_store(&object_store, AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
+    assert_eq!(0, latest(&store, REGION_A));
+
+    assert!(stop_wal(&store).await);
+    tokio::time::timeout(
+        WAIT,
+        engine.handle_request(
+            REGION_A,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        ),
+    )
+    .await
+    .expect("the close must not wait for the WAL")
+    .unwrap();
+    engine.stop().await.unwrap();
+    assert_eq!(1, sst_files(&env, &table_dir).await.len());
+    drop(engine);
+    drop(store);
+
+    let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
+    assert_eq!(entry_id(1, 1), state.manifest_flushed_entry_id);
+    assert_eq!(0, state.memtable_rows);
+    assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+/// After the WAL's stop dropped a backlog that its object store refused, the
+/// flush of a region that closes with writes that skipped the WAL fails at
+/// once with the stopped error: the close fails, leaves no SST, and those
+/// writes are lost, as are the WAL writes of the dropped backlog.
 #[rstest]
 #[case(WalOutage::Refused)]
 #[case(WalOutage::Unreachable)]
-#[case(WalOutage::Stalled)]
 #[tokio::test]
-async fn test_close_of_a_stopping_engine_gives_up_on_the_wal(#[case] outage: WalOutage) {
+async fn test_close_after_the_wal_dropped_its_backlog_fails(#[case] outage: WalOutage) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("object-store-wal-stop-closing-flush").await;
     let denied = Arc::new(AtomicBool::new(false));
@@ -2221,12 +2218,11 @@ async fn test_close_of_a_stopping_engine_gives_up_on_the_wal(#[case] outage: Wal
 
     outage.start(&store, &denied);
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
-    let seal = spawn_seal(&store);
+    let _seal = spawn_seal(&store);
     outage.wait_until_met(&store).await;
     put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
 
-    let began = Instant::now();
-    engine.begin_stop();
+    assert!(!stop_wal(&store).await);
     let error = tokio::time::timeout(
         WAIT,
         engine.handle_request(
@@ -2237,42 +2233,29 @@ async fn test_close_of_a_stopping_engine_gives_up_on_the_wal(#[case] outage: Wal
     .await
     .expect("the close must not wait for the WAL")
     .unwrap_err();
-    assert_eq!(StatusCode::Cancelled, error.status_code(), "{error:?}");
-    // A failing WAL is given up at once, a create that never answers after
-    // the grace period.
-    assert_eq!(
-        outage == WalOutage::Stalled,
-        began.elapsed() >= STOP_DURABILITY_GRACE,
-        "{:?}",
-        began.elapsed()
-    );
+    assert_wal_stopped(&BoxedError::new(error));
     tokio::time::timeout(WAIT, engine.stop())
         .await
         .expect("the engine must stop")
         .unwrap();
     assert_eq!(Vec::<String>::new(), sst_files(&env, &table_dir).await);
-
-    let survives = outage.backlog_survives_stop();
-    assert_eq!(survives, outage.stop_store(&store, &denied).await);
-    assert_eq!(survives, seal.await.unwrap().is_ok());
+    denied.store(false, Ordering::SeqCst);
     drop(engine);
     drop(store);
 
-    // Only the write that went through the WAL can come back.
-    let (_engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
+    let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
     assert_eq!(0, state.manifest_flushed_entry_id);
-    assert_eq!(if survives { 3 } else { 0 }, state.memtable_rows);
+    assert_eq!(0, state.memtable_rows);
+    assert_eq!(0, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
 
-/// Once the engine begins to stop, a flush whose wait for the WAL is already
-/// satisfied still commits: closing a region flushes the writes that skipped
-/// the WAL as before, both for a region whose WAL entries are durable and
-/// for a region that skips the WAL.
+/// A flush whose WAL entries were durable before the WAL stopped commits,
+/// both for a region that writes to the WAL and for one that skips it.
 #[rstest]
 #[case::durable_entries(false)]
 #[case::region_skips_wal(true)]
 #[tokio::test]
-async fn test_close_of_a_stopping_engine_flushes_a_region_whose_wal_is_durable(
+async fn test_close_after_the_wal_stopped_flushes_a_region_whose_wal_is_durable(
     #[case] region_skips_wal: bool,
 ) {
     let mut env = TestEnv::with_prefix("object-store-wal-stop-durable-flush").await;
@@ -2291,20 +2274,16 @@ async fn test_close_of_a_stopping_engine_flushes_a_region_whose_wal_is_durable(
     put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
     let flushed_entry_id = if region_skips_wal { 0 } else { entry_id(1, 1) };
 
-    engine.begin_stop();
-    tokio::time::timeout(
-        WAIT,
-        engine.handle_request(
+    assert!(stop_wal(&store).await);
+    engine
+        .handle_request(
             REGION_A,
             RegionRequest::Close(RegionCloseRequest::default()),
-        ),
-    )
-    .await
-    .expect("the close must not wait")
-    .unwrap();
+        )
+        .await
+        .unwrap();
     engine.stop().await.unwrap();
     assert_eq!(1, sst_files(&env, &table_dir).await.len());
-    store.stop().await.unwrap();
     drop(engine);
     drop(store);
 
@@ -2319,116 +2298,32 @@ async fn test_close_of_a_stopping_engine_flushes_a_region_whose_wal_is_durable(
     assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
 
-/// With a healthy WAL, the close-time flush of a stopping engine waits for
-/// the upload of the region's last WAL entry, which was still in the open
-/// batch when the stop began: the WAL drains once the engine begins to stop,
-/// so the entry is sealed then, however long the seal interval is, and the
-/// flush commits once its create completes, within the grace period. No row
-/// is lost.
+/// Once the WAL stopped, a write through it fails and is not applied, while
+/// a write that skips it is taken and flushed when the region closes.
 #[tokio::test]
-async fn test_close_of_a_stopping_engine_waits_for_a_healthy_wal() {
+async fn test_writes_after_the_wal_stopped() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("object-store-wal-stop-healthy-flush").await;
+    let mut env = TestEnv::with_prefix("object-store-wal-stop-late-writes").await;
     let object_store = memory_store();
     let store = open_store(&object_store, AckMode::Enqueued).await;
     let engine = new_engine(&mut env, store.clone()).await;
     let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
-
-    store.hold_creates();
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
-    put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
 
-    let began = Instant::now();
-    engine.begin_stop();
-    // The store never seals a batch on its own.
-    wait_for(store.wait_for_parked_creates(1)).await;
-    let close = {
-        let engine = engine.clone();
-        tokio::spawn(async move {
-            engine
-                .handle_request(
-                    REGION_A,
-                    RegionRequest::Close(RegionCloseRequest::default()),
-                )
-                .await
-        })
-    };
-    wait_for(store.wait_for_durability_waits(1)).await;
-    assert!(!close.is_finished());
-    store.release_creates();
-    tokio::time::timeout(WAIT, close)
-        .await
-        .expect("the close must finish once the WAL is durable")
-        .unwrap()
-        .unwrap();
-    assert!(
-        began.elapsed() < STOP_DURABILITY_GRACE,
-        "{:?}",
-        began.elapsed()
-    );
-    engine.stop().await.unwrap();
-    assert_eq!(1, sst_files(&env, &table_dir).await.len());
-    store.stop().await.unwrap();
-    drop(engine);
-    drop(store);
-
-    let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
-    assert_eq!(entry_id(1, 1), state.manifest_flushed_entry_id);
-    assert_eq!(0, state.memtable_rows);
-    assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
-}
-
-/// Once the engine begins to stop, its WAL takes no more entries and makes
-/// those it holds durable while the regions are still open, so a close-time
-/// flush that reaches its wait for the WAL only after the grace period of the
-/// stop, as a close behind slow flushes would, still commits. A WAL write
-/// after the stop began fails and is not applied; a write that skips the WAL
-/// is kept.
-#[tokio::test]
-async fn test_close_of_a_stopping_engine_after_the_grace_period_keeps_writes() {
-    common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("object-store-wal-stop-late-close").await;
-    let object_store = memory_store();
-    let store = open_store(&object_store, AckMode::Enqueued).await;
-    let engine = new_engine(&mut env, store.clone()).await;
-    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
-
-    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
-    assert_eq!(0, latest(&store, REGION_A));
-
-    let began = Instant::now();
-    engine.begin_stop();
-    // The store never seals a batch on its own.
-    wait_for(store.wait_durable(&provider(REGION_A), entry_id(1, 1))).await;
-    let error = engine
-        .handle_request(
-            REGION_A,
-            RegionRequest::Put(RegionPutRequest {
-                skip_wal: false,
-                rows: rows(&schema, 3, 5),
-                hint: None,
-                partition_expr_version: None,
-            }),
-        )
+    assert!(stop_wal(&store).await);
+    let error = try_put(&engine, REGION_A, rows(&schema, 3, 5))
         .await
         .unwrap_err();
-    assert!(format!("{error:?}").contains("is stopped"), "{error:?}");
+    assert_wal_stopped(&BoxedError::new(error));
     put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 5, 7)).await;
-
-    tokio::time::sleep_until((began + STOP_DURABILITY_GRACE).into()).await;
-    tokio::time::timeout(
-        WAIT,
-        engine.handle_request(
+    engine
+        .handle_request(
             REGION_A,
             RegionRequest::Close(RegionCloseRequest::default()),
-        ),
-    )
-    .await
-    .expect("the close must not wait for the WAL")
-    .unwrap();
+        )
+        .await
+        .unwrap();
     engine.stop().await.unwrap();
-    assert_eq!(1, sst_files(&env, &table_dir).await.len());
-    store.stop().await.unwrap();
     drop(engine);
     drop(store);
 
@@ -2436,41 +2331,4 @@ async fn test_close_of_a_stopping_engine_after_the_grace_period_keeps_writes() {
     assert_eq!(entry_id(1, 1), state.manifest_flushed_entry_id);
     assert_eq!(0, state.memtable_rows);
     assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
-}
-
-/// A flush of a stopping engine whose WAL already stopped, so that its wait
-/// fails at once, fails as cancelled like a wait that gives up, and leaves no
-/// SST behind; the WAL write was never uploaded, so no row comes back.
-#[tokio::test]
-async fn test_close_of_a_stopping_engine_cancels_a_flush_on_a_stopped_wal() {
-    let mut env = TestEnv::with_prefix("object-store-wal-stop-stopped-wal").await;
-    let object_store = memory_store();
-    let store = open_store(&object_store, AckMode::Enqueued).await;
-    let engine = new_engine(&mut env, store.clone()).await;
-    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
-
-    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
-    put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
-    store.crash().await;
-
-    engine.begin_stop();
-    let error = tokio::time::timeout(
-        WAIT,
-        engine.handle_request(
-            REGION_A,
-            RegionRequest::Close(RegionCloseRequest::default()),
-        ),
-    )
-    .await
-    .expect("the close must not wait for the WAL")
-    .unwrap_err();
-    assert_eq!(StatusCode::Cancelled, error.status_code(), "{error:?}");
-    engine.stop().await.unwrap();
-    assert_eq!(Vec::<String>::new(), sst_files(&env, &table_dir).await);
-    drop(engine);
-    drop(store);
-
-    let (_engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
-    assert_eq!(0, state.manifest_flushed_entry_id);
-    assert_eq!(0, state.memtable_rows);
 }

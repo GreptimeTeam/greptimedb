@@ -1986,11 +1986,6 @@ impl RegionServerInner {
             .collect::<Vec<_>>();
         let num_regions = regions.len();
 
-        // A close can flush the region, and that flush can wait for a log
-        // store that stops only after the engines.
-        for engine in self.engines.read().unwrap().values() {
-            engine.begin_stop();
-        }
         let mut first_error = None;
         for (region_id, engine) in regions {
             let closed = engine
@@ -2550,6 +2545,47 @@ mod tests {
 
         let status = mock_region_server.inner.region_map.get(&region_id);
         assert!(status.is_some());
+    }
+
+    /// A region that fails to close is reported in the result of the stop,
+    /// which still closes the other regions.
+    #[tokio::test]
+    async fn test_stop_reports_a_region_that_failed_to_close() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let failing = RegionId::new(1, 1);
+        let closing = RegionId::new(1, 2);
+        let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(MITO_ENGINE_NAME, {
+            let closed = closed.clone();
+            Box::new(move |region_id, request| {
+                if matches!(request, RegionRequest::Close(_)) {
+                    closed.lock().unwrap().push(region_id);
+                    if region_id == failing {
+                        return error::UnexpectedSnafu {
+                            violated: "close failed".to_string(),
+                        }
+                        .fail();
+                    }
+                }
+                Ok(0)
+            })
+        });
+        mock_region_server.register_engine(engine.clone());
+        for region_id in [failing, closing] {
+            mock_region_server
+                .inner
+                .region_map
+                .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
+        }
+
+        let err = mock_region_server.stop().await.unwrap_err();
+
+        assert_matches!(err, error::Error::HandleRegionRequest { region_id, .. } if region_id == failing);
+        let mut closed = closed.lock().unwrap().clone();
+        closed.sort();
+        assert_eq!(vec![failing, closing], closed);
     }
 
     #[tokio::test]

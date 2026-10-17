@@ -35,7 +35,7 @@ use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::{ObjectStoreProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -131,9 +131,7 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// Appends are admitted into an open batch. A background actor seals the batch
 /// when it reaches the size limit or the flush interval elapses and creates
 /// the object under the next sequence while it keeps admitting entries into
-/// the next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time. Once
-/// a caller asks the store to drain, it seals the open batch at once and
-/// refuses later appends.
+/// the next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time.
 /// Objects are indexed in the catalog in sequence order. In the `durable`
 /// acknowledgement mode an append returns once its object is durable and
 /// indexed, so an acknowledged entry never has a missing predecessor; in the
@@ -170,11 +168,6 @@ pub struct ObjectStoreLogStore {
     read_prefetch_budget: Arc<Semaphore>,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
-    /// Whether the last create of the backlog failed, see
-    /// [`is_failing`](LogStore::is_failing).
-    last_create_failed: Arc<AtomicBool>,
-    /// Notified by [`begin_drain`](LogStore::begin_drain).
-    drain_requested: Arc<Notify>,
     command_tx: mpsc::Sender<Command>,
     append_tx: mpsc::Sender<QueuedAppend>,
     #[cfg(any(test, feature = "testing"))]
@@ -405,8 +398,6 @@ impl ObjectStoreLogStore {
         let deleting = Arc::new(DeletingObjects::default());
         let terminal_error = TerminalError::default();
         let stopped = Arc::new(AtomicBool::new(false));
-        let last_create_failed = Arc::new(AtomicBool::new(false));
-        let drain_requested = Arc::new(Notify::new());
         let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
         let (append_tx, append_rx) = mpsc::channel(APPEND_BUFFER);
         #[cfg(any(test, feature = "testing"))]
@@ -436,8 +427,6 @@ impl ObjectStoreLogStore {
             wal_holes: wal_holes.clone(),
             terminal_error: terminal_error.clone(),
             stopped: stopped.clone(),
-            last_create_failed: last_create_failed.clone(),
-            drain_requested: drain_requested.clone(),
             command_rx,
             append_rx,
             ack_mode: config.ack_mode,
@@ -451,7 +440,6 @@ impl ObjectStoreLogStore {
             stalled: None,
             failing: None,
             durable_waiters: Vec::new(),
-            draining: false,
             stop: Vec::new(),
             stop_error: None,
             next_object_seq: start
@@ -510,8 +498,6 @@ impl ObjectStoreLogStore {
             read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error,
             stopped,
-            last_create_failed,
-            drain_requested,
             command_tx,
             append_tx,
             #[cfg(any(test, feature = "testing"))]
@@ -1238,22 +1224,6 @@ impl LogStore for ObjectStoreLogStore {
         response_rx.await.ok().context(ObjectStoreWalStoppedSnafu)?
     }
 
-    /// True while the last create of a batch the store keeps failed, which
-    /// includes the store being failing, see [`Failing`], and once the store
-    /// recorded a terminal error or stopped. A create that succeeds clears it.
-    fn is_failing(&self) -> bool {
-        self.last_create_failed.load(Ordering::Acquire)
-            || terminal(&self.terminal_error).is_some()
-            || self.stopped.load(Ordering::Acquire)
-    }
-
-    /// Seals the open batch now instead of on the next tick of
-    /// `flush_interval`, and refuses every later append, also one held back,
-    /// with the stopped error.
-    fn begin_drain(&self) {
-        self.drain_requested.notify_one();
-    }
-
     /// Fails with [`Error::MissingWalHistory`] when the prefix cannot hold
     /// the history of the provider's region through `entry_id`, unless
     /// `accept_missing_history` is set: then the region's writes that were
@@ -1519,9 +1489,6 @@ struct Actor {
     wal_holes: WalHoles,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
-    /// Set when a create of the backlog fails, cleared when one succeeds.
-    last_create_failed: Arc<AtomicBool>,
-    drain_requested: Arc<Notify>,
     command_rx: mpsc::Receiver<Command>,
     append_rx: mpsc::Receiver<QueuedAppend>,
     ack_mode: AckMode,
@@ -1546,8 +1513,6 @@ struct Actor {
     /// error that requires intervention.
     failing: Option<Failing>,
     durable_waiters: Vec<DurableWaiter>,
-    /// Set by `begin_drain`: no append is admitted any more.
-    draining: bool,
     /// Callers of `stop`, answered once nothing is in flight.
     stop: Vec<oneshot::Sender<Result<()>>>,
     /// The failure `stop` reports in the `enqueued` mode once an
@@ -1605,7 +1570,6 @@ impl Actor {
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // The first tick completes immediately.
         interval.tick().await;
-        let drain_requested = self.drain_requested.clone();
 
         loop {
             let probe_at = self.failing.as_ref().and_then(|failing| failing.probe_at);
@@ -1616,9 +1580,6 @@ impl Actor {
                     if !self.is_stopped() {
                         self.flush_open_batch();
                     }
-                }
-                _ = drain_requested.notified(), if !self.draining => {
-                    self.handle_drain();
                 }
                 Some((object_seq, result)) = self.creates.next(), if !self.creates.is_empty() => {
                     self.on_create_completed(object_seq, result);
@@ -1670,9 +1631,9 @@ impl Actor {
     }
 
     fn handle_append(&mut self, entries: Vec<Entry>, response: AppendResponse) {
-        // The append was queued before `stop` set the flag or the store began
-        // to drain; nothing that is not durable yet gets admitted after that.
-        if self.is_stopped() || self.draining {
+        // The append was queued before `stop` set the flag; nothing that is
+        // not durable yet gets admitted once it is set.
+        if self.is_stopped() {
             let _ = response.send(Err(ObjectStoreWalStoppedSnafu.build()));
             return;
         }
@@ -1790,7 +1751,7 @@ impl Actor {
         if self.stalled.is_none() {
             return;
         }
-        if self.is_stopped() || self.draining {
+        if self.is_stopped() {
             if let Some((_, response)) = self.take_stalled() {
                 let _ = response.send(Err(ObjectStoreWalStoppedSnafu.build()));
             }
@@ -2056,8 +2017,6 @@ impl Actor {
             self.start_deletes();
             return;
         };
-        self.last_create_failed
-            .store(result.is_err(), Ordering::Release);
         match result {
             Ok(_) => {
                 self.sealed[index].state = CreateState::Created;
@@ -2410,17 +2369,6 @@ impl Actor {
         });
         #[cfg(any(test, feature = "testing"))]
         self.durability_waits.send_modify(|count| *count += 1);
-    }
-
-    /// Starts draining: the open batch is sealed now, unless stop began,
-    /// which sealed the `enqueued` backlog, and the held-back append and every
-    /// later one are refused.
-    fn handle_drain(&mut self) {
-        self.draining = true;
-        if !self.is_stopped() {
-            self.flush_open_batch();
-        }
-        self.release_stalled();
     }
 
     /// Gives up the start object while it is the only object this store
@@ -5134,8 +5082,6 @@ mod tests {
             read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
-            last_create_failed: Arc::new(AtomicBool::new(false)),
-            drain_requested: Arc::default(),
             command_tx,
             append_tx,
             admitted_appends: watch::channel(0).1,
@@ -7863,25 +7809,6 @@ mod tests {
         timeout(WAIT, response_rx).await.unwrap().unwrap().unwrap();
     }
 
-    /// Once a caller asks the store to drain, the open batch is sealed at
-    /// once rather than on the next tick, and every later append is refused.
-    #[tokio::test]
-    async fn test_store_drain_seals_the_open_batch_and_refuses_later_appends() {
-        let _serialized = SERIALIZED.lock().await;
-        let store = open(memory_store(), &enqueued(manual())).await;
-        let region_id = region(1);
-
-        append(&store, region_id, "a1").await.unwrap();
-        assert_eq!(0, store.durable_entry_id(&provider(region_id)).unwrap());
-        store.begin_drain();
-        timeout(WAIT, store.wait_durable(&provider(region_id), id(1, 1)))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_stopped(&append(&store, region_id, "a2").await.unwrap_err());
-        assert_eq!(id(1, 1), latest(&store, region_id));
-    }
-
     #[tokio::test]
     async fn test_store_enqueued_obsolete_never_passes_the_durable_id() {
         let _serialized = SERIALIZED.lock().await;
@@ -8043,32 +7970,6 @@ mod tests {
         timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
         assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
         assert!(parked.try_recv().is_err());
-    }
-
-    /// A drain refuses the append held back behind the backlog and every
-    /// later one with the stopped error, and the backlog still uploads.
-    #[tokio::test]
-    async fn test_store_enqueued_drain_refuses_a_stalled_append_and_uploads_the_backlog() {
-        let _serialized = SERIALIZED.lock().await;
-        let config = ObjectStoreWalConfig {
-            max_unpersisted_bytes: ReadableSize(1),
-            ..enqueued(manual())
-        };
-        let (store, _, _parked, stalled, release) = stall_second_append(config).await;
-        let region_id = region(1);
-
-        store.begin_drain();
-        assert_stopped(&timeout(WAIT, stalled).await.unwrap().unwrap().unwrap_err());
-        assert_stopped(&append(&store, region_id, "a3").await.unwrap_err());
-        release.send(true).unwrap();
-        timeout(WAIT, store.wait_durable(&provider(region_id), id(1, 1)))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            expected_entries(region_id, &[(id(1, 1), "a1")]),
-            read_entries(&store, region_id, 1).await
-        );
     }
 
     #[tokio::test]

@@ -1020,13 +1020,6 @@ pub trait RegionEngine: Send + Sync {
     /// Retrieves region's statistic.
     fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic>;
 
-    /// Tells the engine that it is about to stop, before its regions are
-    /// closed and [`stop`](Self::stop) is called. From then on the engine may
-    /// give up work that waits for a component stopped only after it, such as
-    /// the log store, so that closing its regions and stopping it finish in
-    /// bounded time. Does nothing by default.
-    fn begin_stop(&self) {}
-
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;
 

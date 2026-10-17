@@ -65,7 +65,7 @@ use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
-use crate::flush::{FlushScheduler, StopSignal, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -163,12 +163,6 @@ pub(crate) struct WorkerGroup {
     intermediate_manager: IntermediateManager,
     /// Schema metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
-    /// Raised once the group begins to stop and kept raised: a flush that
-    /// waits for the WAL to become durable gives up after a grace period, see
-    /// [crate::flush::wait_for_durable_wal].
-    stopping: StopSignal,
-    /// Asks the log store to drain, see [LogStore::begin_drain].
-    drain_wal: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl WorkerGroup {
@@ -247,11 +241,6 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
-        let stopping = StopSignal::default();
-        let drain_wal = {
-            let log_store = log_store.clone();
-            Arc::new(move || log_store.begin_drain())
-        };
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -280,7 +269,6 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
-                    stopping: stopping.clone(),
                 }
                 .start()
             })
@@ -299,28 +287,12 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
-            stopping,
-            drain_wal,
         })
-    }
-
-    /// Tells the group that it is about to stop: the log store drains, so it
-    /// takes no more entries and makes those it holds durable, and from now on
-    /// a flush that waits for the WAL to become durable gives up once the log
-    /// store fails or a grace period passed, so that closing regions and
-    /// stopping the group do not wait for long for a log store stopped after
-    /// them.
-    pub(crate) fn begin_stop(&self) {
-        (self.drain_wal)();
-        self.stopping.raise();
     }
 
     /// Stops the worker group.
     pub(crate) async fn stop(&self) -> Result<()> {
         info!("Stop region worker group");
-        // Before any scheduler stops: stopping the flush scheduler waits for
-        // its running flushes and runs its queued ones.
-        self.begin_stop();
 
         // TODO(yingwen): Do we need to stop gracefully?
         // Stops the scheduler gracefully.
@@ -485,11 +457,6 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
-        let stopping = StopSignal::default();
-        let drain_wal = {
-            let log_store = log_store.clone();
-            Arc::new(move || log_store.begin_drain())
-        };
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -517,7 +484,6 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
-                    stopping: stopping.clone(),
                 }
                 .start()
             })
@@ -536,8 +502,6 @@ impl WorkerGroup {
             puffin_manager_factory,
             intermediate_manager,
             schema_metadata_manager,
-            stopping,
-            drain_wal,
         })
     }
 
@@ -630,7 +594,6 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
-    stopping: StopSignal,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -730,7 +693,6 @@ impl<S: LogStore> WorkerStarter<S> {
             file_ref_manager: self.file_ref_manager.clone(),
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
-            stopping: self.stopping,
             plugins: self.plugins,
         };
         let handle = common_runtime::spawn_global(async move {
@@ -1043,8 +1005,6 @@ struct RegionWorkerLoop<S> {
     partition_expr_fetcher: PartitionExprFetcherRef,
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
-    /// Raised once the worker group begins to stop.
-    stopping: StopSignal,
     /// Plugins for flush hooks.
     plugins: Plugins,
 }

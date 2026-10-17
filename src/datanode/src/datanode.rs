@@ -167,7 +167,10 @@ impl Datanode {
                     .context(ShutdownInstanceSnafu),
             );
         }
-        record_shutdown_error(&mut first_error, self.region_server.stop().await);
+        // The object store WAL stops before the regions close: its stop
+        // uploads the backlog or drops it, and answers every wait for its
+        // entries, so a flush that waits for the WAL, queued or run by the
+        // close of a region, cannot hold up the shutdown.
         if let Some(log_store) = &self.object_store_log_store {
             record_shutdown_error(
                 &mut first_error,
@@ -178,6 +181,7 @@ impl Datanode {
                     .context(ShutdownInstanceSnafu),
             );
         }
+        record_shutdown_error(&mut first_error, self.region_server.stop().await);
         first_error.map_or(Ok(()), Err)
     }
 
@@ -1055,12 +1059,13 @@ mod tests {
     use std::assert_matches;
     use std::collections::{BTreeMap, HashMap};
     use std::io::Write;
+    use std::ops::Range;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use api::v1::Rows;
+    use api::v1::{ColumnSchema, Rows};
     use cache::build_datanode_layered_cache_registry;
     use common_base::Plugins;
     use common_base::readable_size::ReadableSize;
@@ -1086,7 +1091,8 @@ mod tests {
     use partition::manager::PartitionRuleManagerRef;
     use query::region_query::{RegionQueryHandlerFactory, RegionQueryHandlerFactoryRef};
     use store_api::logstore::LogStore;
-    use store_api::region_request::{RegionPutRequest, RegionRequest};
+    use store_api::logstore::provider::Provider;
+    use store_api::region_request::{PathType, RegionOpenRequest, RegionPutRequest, RegionRequest};
     use store_api::storage::RegionId;
 
     use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -1096,6 +1102,7 @@ mod tests {
     };
     use crate::error::{self, Error};
     use crate::region_query::DatanodeRegionQueryHandler;
+    use crate::region_server::RegionServer;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     const WAIT: Duration = Duration::from_secs(30);
@@ -1584,80 +1591,186 @@ mod tests {
         assert!(is_stopped(log_store).await);
     }
 
-    /// Builds a datanode on an `enqueued` object store WAL, whose creates fail
-    /// from now on if `failing`, and creates a region on it with `rows`
-    /// written through the WAL and `skipped_rows` written past it. Returns the
-    /// datanode, its log store and the region.
+    /// The state of the WAL's object store while a test writes to the region.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WalUploads {
+        Succeed,
+        /// Every create fails with a transient error.
+        Fail,
+        /// Every create is parked until the test releases it.
+        Stall,
+    }
+
+    const REGION: RegionId = RegionId::new(1024, 1);
+
+    fn enqueued_wal_config(flush_interval: Duration) -> ObjectStoreWalConfig {
+        ObjectStoreWalConfig {
+            ack_mode: AckMode::Enqueued,
+            flush_interval,
+            ..Default::default()
+        }
+    }
+
+    /// The options that put a region on the WAL of a datanode with `config`.
+    fn region_wal_options(config: &ObjectStoreWalConfig) -> HashMap<String, String> {
+        let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let wal_options =
+            serde_json::to_string(&WalOptions::ObjectStore(ObjectStoreWalOptions::new(prefix)))
+                .unwrap();
+        HashMap::from([(WAL_OPTIONS_KEY.to_string(), wal_options)])
+    }
+
+    async fn put_rows(
+        region_server: &RegionServer,
+        schema: &[ColumnSchema],
+        rows: Range<usize>,
+        skip_wal: bool,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        region_server
+            .handle_request(
+                REGION,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: schema.to_vec(),
+                        rows: build_rows(rows.start, rows.end),
+                    },
+                    skip_wal,
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Builds a datanode on an `enqueued` object store WAL with
+    /// `flush_interval` and creates [`REGION`] on it with `durable_rows`
+    /// written through the WAL and uploaded. Then makes the WAL's creates
+    /// behave as `uploads` and writes `rows` through the WAL and
+    /// `skipped_rows` past it. Returns the datanode and its log store.
     async fn datanode_with_object_store_wal(
         data_home: &str,
+        flush_interval: Duration,
+        durable_rows: usize,
+        uploads: WalUploads,
         rows: usize,
         skipped_rows: usize,
-        failing: bool,
-    ) -> (Datanode, Arc<ObjectStoreLogStore>, RegionId) {
-        let config = ObjectStoreWalConfig {
-            ack_mode: AckMode::Enqueued,
-            ..Default::default()
-        };
+    ) -> (Datanode, Arc<ObjectStoreLogStore>) {
+        let config = enqueued_wal_config(flush_interval);
         let prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        let mut request = CreateRequestBuilder::new().build();
+        request.options.extend(region_wal_options(&config));
         let datanode = object_store_wal_builder(data_home, config)
             .build()
             .await
             .unwrap();
         let log_store = datanode.object_store_log_store.clone().unwrap();
         let region_server = datanode.region_server();
-        let region_id = RegionId::new(1024, 1);
-        let wal_options =
-            serde_json::to_string(&WalOptions::ObjectStore(ObjectStoreWalOptions::new(prefix)))
-                .unwrap();
-        let request = CreateRequestBuilder::new()
-            .insert_option(WAL_OPTIONS_KEY, &wal_options)
-            .build();
         let schema = rows_schema(&request);
         region_server
-            .handle_request(region_id, RegionRequest::Create(request))
+            .handle_request(REGION, RegionRequest::Create(request))
             .await
             .unwrap();
 
-        if failing {
-            log_store.fail_creates();
+        put_rows(&region_server, &schema, 0..durable_rows, false).await;
+        if durable_rows > 0 {
+            let provider = Provider::object_store_provider(REGION, prefix);
+            tokio::time::timeout(WAIT, async {
+                while log_store.latest_entry_id(&provider).unwrap() == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the rows must become durable");
         }
-        for (skip_wal, range) in [(false, 0..rows), (true, rows..rows + skipped_rows)] {
-            if range.is_empty() {
-                continue;
+        match uploads {
+            WalUploads::Succeed => {}
+            WalUploads::Fail => log_store.fail_creates(),
+            WalUploads::Stall => log_store.hold_creates(),
+        }
+        let skipped = durable_rows + rows;
+        put_rows(&region_server, &schema, durable_rows..skipped, false).await;
+        put_rows(
+            &region_server,
+            &schema,
+            skipped..skipped + skipped_rows,
+            true,
+        )
+        .await;
+        (datanode, log_store)
+    }
+
+    /// Restarts a datanode on the files of `data_home`, opens [`REGION`] and
+    /// returns the number of rows it holds after replaying the WAL.
+    async fn rows_after_restart(data_home: &str) -> u64 {
+        let config = enqueued_wal_config(ObjectStoreWalConfig::default().flush_interval);
+        let options = region_wal_options(&config);
+        let mut datanode = object_store_wal_builder(data_home, config)
+            .build()
+            .await
+            .unwrap();
+        let region_server = datanode.region_server();
+        region_server
+            .handle_request(
+                REGION,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: MITO_ENGINE_NAME.to_string(),
+                    table_dir: CreateRequestBuilder::new().build().table_dir,
+                    path_type: PathType::Bare,
+                    options,
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let rows = region_server.region_statistic(REGION).unwrap().num_rows;
+        datanode.shutdown().await.unwrap();
+        rows
+    }
+
+    /// Returns the SST files under `dir`.
+    fn sst_files(dir: &Path) -> Vec<String> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(sst_files(&path));
+            } else if path.extension().is_some_and(|ext| ext == "parquet") {
+                files.push(path.display().to_string());
             }
-            region_server
-                .handle_request(
-                    region_id,
-                    RegionRequest::Put(RegionPutRequest {
-                        rows: Rows {
-                            schema: schema.clone(),
-                            rows: build_rows(range.start, range.end),
-                        },
-                        skip_wal,
-                        hint: None,
-                        partition_expr_version: None,
-                    }),
-                )
-                .await
-                .unwrap();
         }
-        (datanode, log_store, region_id)
+        files
     }
 
     /// A flush that waits for WAL uploads that keep failing does not hold up
-    /// the shutdown: the flush is cancelled, the log store drops its backlog
-    /// and the shutdown reports that.
+    /// the shutdown: the WAL stops first and drops its backlog, which fails
+    /// the flush with the stopped error before it writes its manifest edit,
+    /// and the shutdown reports the dropped backlog. After a restart the rows
+    /// that were durable before the outage replay once.
     #[tokio::test]
     async fn test_shutdown_while_a_flush_waits_for_failing_wal_uploads() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-flush");
-        let (mut datanode, log_store, region_id) =
-            datanode_with_object_store_wal(data_home.path().to_str().unwrap(), 3, 0, true).await;
+        let data_home = data_home.path().to_str().unwrap();
+        let (mut datanode, log_store) = datanode_with_object_store_wal(
+            data_home,
+            ObjectStoreWalConfig::default().flush_interval,
+            3,
+            WalUploads::Fail,
+            2,
+            0,
+        )
+        .await;
         let flush = {
             let region_server = datanode.region_server();
             tokio::spawn(async move {
                 region_server
-                    .handle_request(region_id, RegionRequest::Flush(Default::default()))
+                    .handle_request(REGION, RegionRequest::Flush(Default::default()))
                     .await
             })
         };
@@ -1677,46 +1790,109 @@ mod tests {
             "{err:?}"
         );
         let flush_err = flush.await.unwrap().unwrap_err();
-        assert_eq!(StatusCode::Cancelled, flush_err.status_code());
+        assert!(
+            format!("{flush_err:?}").contains("Object store WAL log store is stopped"),
+            "{flush_err:?}"
+        );
+        assert_eq!(Vec::<String>::new(), sst_files(Path::new(data_home)));
         assert!(is_stopped(&log_store).await);
+        drop(datanode);
+
+        assert_eq!(3, rows_after_restart(data_home).await);
     }
 
-    /// A stopping region server closes a region that holds writes that
-    /// skipped the WAL with a flush, which can no longer wait for WAL uploads
-    /// that keep failing: the close fails, the writes that skipped the WAL
-    /// are lost and the shutdown reports the failed close.
+    /// A region that holds writes that skipped the WAL is flushed when it
+    /// closes. When the WAL's uploads keep failing, the WAL stops first and
+    /// drops its backlog, so that flush fails at once instead of waiting: the
+    /// close fails, the writes that skipped the WAL are lost, and the shutdown
+    /// returns the dropped backlog.
     #[tokio::test]
-    async fn test_shutdown_reports_a_close_that_could_not_flush() {
+    async fn test_shutdown_closes_a_region_after_the_wal_dropped_its_backlog() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-closing-flush");
-        let (mut datanode, log_store, region_id) =
-            datanode_with_object_store_wal(data_home.path().to_str().unwrap(), 3, 2, true).await;
+        let (mut datanode, log_store) = datanode_with_object_store_wal(
+            data_home.path().to_str().unwrap(),
+            ObjectStoreWalConfig::default().flush_interval,
+            0,
+            WalUploads::Fail,
+            3,
+            2,
+        )
+        .await;
 
         let err = tokio::time::timeout(WAIT, datanode.shutdown())
             .await
             .expect("the shutdown must finish")
             .unwrap_err();
 
-        assert_matches!(err, Error::HandleRegionRequest { region_id: id, .. } if id == region_id);
-        assert_eq!(StatusCode::Cancelled, err.status_code());
+        assert_matches!(err, Error::ShutdownInstance { .. });
+        assert!(
+            format!("{err:?}").contains("injected create failure"),
+            "{err:?}"
+        );
+        assert_eq!(Vec::<String>::new(), sst_files(data_home.path()));
         assert!(is_stopped(&log_store).await);
     }
 
-    /// With a healthy WAL, the close-time flush of a region that holds writes
-    /// that skipped the WAL waits for the last WAL entries to become durable
-    /// within the grace period of the stop: the close flushes the region and
-    /// the shutdown succeeds.
+    /// With a healthy WAL whose seal interval is longer than any test, the
+    /// close-time flush of a region that holds writes that skipped the WAL
+    /// commits: the WAL's stop seals and uploads its open batch before the
+    /// region closes, so the flush finds its entries durable.
     #[tokio::test]
     async fn test_shutdown_flushes_a_region_while_the_wal_is_healthy() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-healthy-flush");
-        let (mut datanode, log_store, _) =
-            datanode_with_object_store_wal(data_home.path().to_str().unwrap(), 3, 2, false).await;
+        let (mut datanode, log_store) = datanode_with_object_store_wal(
+            data_home.path().to_str().unwrap(),
+            Duration::from_secs(3600),
+            0,
+            WalUploads::Succeed,
+            3,
+            2,
+        )
+        .await;
 
         tokio::time::timeout(WAIT, datanode.shutdown())
             .await
             .expect("the shutdown must finish")
             .unwrap();
+        assert_eq!(1, sst_files(data_home.path()).len());
+        assert!(is_stopped(&log_store).await);
+    }
+
+    /// A create that never answers holds the WAL's stop, and with it the
+    /// shutdown, until it completes; the shutdown bounds it only by the
+    /// object store client's own timeouts and retries. Once the create
+    /// completes, the WAL stops and the regions close as with a healthy WAL.
+    #[tokio::test]
+    async fn test_shutdown_waits_for_a_stalled_wal_create() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal-shutdown-stalled");
+        let (mut datanode, log_store) = datanode_with_object_store_wal(
+            data_home.path().to_str().unwrap(),
+            ObjectStoreWalConfig::default().flush_interval,
+            0,
+            WalUploads::Stall,
+            3,
+            2,
+        )
+        .await;
+        tokio::time::timeout(WAIT, log_store.wait_for_parked_creates(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let shutdown = tokio::spawn(async move { datanode.shutdown().await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!shutdown.is_finished());
+
+        log_store.release_creates();
+        tokio::time::timeout(WAIT, shutdown)
+            .await
+            .expect("the shutdown must finish once the create completes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(1, sst_files(data_home.path()).len());
         assert!(is_stopped(&log_store).await);
     }
 
