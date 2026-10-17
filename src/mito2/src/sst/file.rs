@@ -484,15 +484,26 @@ impl FileMeta {
             if !expects_inverted && !expects_fulltext && !expects_skipping {
                 continue;
             }
+            let missing_index = |index_type: IndexType| {
+                debug!(
+                    "File index is missing, region_id: {}, file_id: {}, column_id: {}, index_type: {:?}",
+                    self.region_id, self.file_id, column.column_id, index_type
+                );
+                false
+            };
             let Some(index) = id_to_indexes.get(&column.column_id) else {
+                debug!(
+                    "File has no index for column, region_id: {}, file_id: {}, column_id: {}",
+                    self.region_id, self.file_id, column.column_id
+                );
                 return false;
             };
             let indexes = &index.created_indexes;
             if expects_inverted && !indexes.contains(&IndexType::InvertedIndex) {
-                return false;
+                return missing_index(IndexType::InvertedIndex);
             }
             if expects_fulltext && !indexes.contains(&IndexType::FulltextIndex) {
-                return false;
+                return missing_index(IndexType::FulltextIndex);
             }
             if schema
                 .fulltext_options()
@@ -512,7 +523,7 @@ impl FileMeta {
                 return false;
             }
             if expects_skipping && !indexes.contains(&IndexType::BloomFilterIndex) {
-                return false;
+                return missing_index(IndexType::BloomFilterIndex);
             }
         }
         true

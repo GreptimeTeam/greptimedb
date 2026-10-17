@@ -750,7 +750,12 @@ impl IndexBuildTask {
             self.index_build(version_control).await
         };
         match result {
-            Ok(Some(outcome)) => self.on_success(outcome).await,
+            Ok(Some(outcome)) => {
+                if let IndexBuildOutcome::Aborted(reason) = &outcome {
+                    debug!("Index build aborted: {}", reason);
+                }
+                self.on_success(outcome).await
+            }
             // The worker or a retry task reports the result.
             Ok(None) => {}
             Err(e) => {
