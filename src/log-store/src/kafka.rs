@@ -15,6 +15,7 @@
 pub(crate) mod client_manager;
 pub(crate) mod consumer;
 pub mod log_store;
+pub(crate) mod partition_client;
 mod periodic_offset_fetcher;
 pub(crate) mod producer;
 #[cfg(test)]
