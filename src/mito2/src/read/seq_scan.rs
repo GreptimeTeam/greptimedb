@@ -161,7 +161,8 @@ impl SeqScan {
         pruner: Arc<Pruner>,
     ) -> Result<BoxedRecordBatchStream> {
         pruner.add_partition_ranges(partition_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, partition_ranges));
+        let partition_pruner =
+            Arc::new(PartitionPruner::new(pruner, partition_ranges).with_readahead());
 
         let mut sources = Vec::new();
         for part_range in partition_ranges {
@@ -397,7 +398,8 @@ impl SeqScan {
         // then the ref count won't be decremented.
         // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&partition_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &partition_ranges));
+        let partition_pruner =
+            Arc::new(PartitionPruner::new(pruner, &partition_ranges).with_readahead());
 
         let stream = try_stream! {
             part_metrics.on_first_poll();

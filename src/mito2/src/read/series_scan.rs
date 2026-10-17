@@ -716,12 +716,12 @@ impl SeriesDistributor {
             self.pruner.add_partition_ranges(partition_ranges);
         }
 
-        // Create PartitionPruner covering all partitions
+        // Create PartitionPruner covering all partitions. Ranges are built by concurrent
+        // tasks below, so read ahead only within files.
         let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
-        let partition_pruner = Arc::new(PartitionPruner::new(
-            self.pruner.clone(),
-            &all_partition_ranges,
-        ));
+        let partition_pruner = Arc::new(
+            PartitionPruner::new(self.pruner.clone(), &all_partition_ranges).with_file_readahead(),
+        );
 
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
