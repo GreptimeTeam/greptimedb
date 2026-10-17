@@ -30,7 +30,7 @@ use datatypes::series::MetricName;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, TimeAxis};
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
 
 #[cfg(test)]
 mod tests;
@@ -131,8 +131,8 @@ pub fn binary_output_schema(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Ar
 
 /// Applies `matching` to every pair of matched series at every grid point.
 ///
-/// Fields are paired by position. Arithmetic and `bool` comparisons drop `__name__`;
-/// comparisons without `bool` keep the left value where they hold.
+/// Fields are paired by position. Arithmetic and `bool` comparisons drop `__name__`, `__type__`
+/// and `__unit__`; comparisons without `bool` keep the left value where they hold.
 pub fn binary_vectors(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -234,7 +234,6 @@ fn binary_field(
                 } else if matching.return_bool {
                     Some(if holds { 1.0 } else { 0.0 })
                 } else {
-                    // A filtered comparison still counts as a match.
                     holds.then_some(result)
                 };
                 results.insert(&metric, group_id, point, value);
@@ -529,9 +528,6 @@ fn overlap(
     Ok(None)
 }
 
-/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
-const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
-
 fn result_metric(
     many: &MetricName,
     one: &MetricName,
@@ -661,7 +657,7 @@ fn float_at(values: &Float64Array, row: usize) -> Option<f64> {
     values.is_valid(row).then(|| values.value(row))
 }
 
-/// Result rows by result label set, assembled into trimmed grid series.
+/// The result rows of one field by result label set.
 #[derive(Default)]
 struct Results {
     series: HashMap<GroupKey, ResultRows>,

@@ -25,7 +25,7 @@ use datatypes::series::samples::{
 };
 use datatypes::series::time::{GridRange, TimeAxis};
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS, external};
 
 #[cfg(test)]
 mod tests;
@@ -145,9 +145,6 @@ fn go_int64(value: f64) -> i64 {
     }
 }
 
-/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
-const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
-
 const SECONDS_PER_DAY: u64 = 86_400;
 const MARCH_THRU_DECEMBER: u32 = 306;
 const ABSOLUTE_YEARS: u64 = 292_277_022_400;
@@ -212,8 +209,4 @@ fn civil(days: u64) -> Civil {
         year_day: ayday as i64 + (1 + 31 + 28) + i64::from(leap && jan_feb == 0)
             - 365 * jan_feb as i64,
     }
-}
-
-fn external(error: datatypes::error::Error) -> DataFusionError {
-    DataFusionError::External(Box::new(error))
 }
