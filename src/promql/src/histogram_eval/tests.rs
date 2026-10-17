@@ -186,7 +186,30 @@ fn assert_outcome(
                     (labels.clone(), points)
                 })
                 .collect();
-            assert_eq!(actual, expected, "case {:?}", case.spec);
+            let keys = |series: &BTreeMap<Labels, Points>| {
+                series
+                    .iter()
+                    .map(|(labels, points)| (labels.clone(), points.keys().copied().collect()))
+                    .collect::<Vec<(Labels, Vec<usize>)>>()
+            };
+            assert_eq!(keys(&actual), keys(&expected), "case {:?}", case.spec);
+            // promql-compat's tolerance for ill-conditioned evaluation covers the variance.
+            let epsilon = if case.spec[0].contains("stddev") || case.spec[0].contains("stdvar") {
+                1e-6
+            } else {
+                1e-10
+            };
+            for (labels, points) in &actual {
+                for (point, &bits) in points {
+                    let got = f64::from_bits(bits);
+                    let want = f64::from_bits(expected[labels][point]);
+                    assert!(
+                        close(got, want, epsilon),
+                        "case {:?}: {labels:?} at {point}: {got} vs {want}",
+                        case.spec
+                    );
+                }
+            }
             false
         }
         (Err(actual), Err(expected)) => {
@@ -534,4 +557,22 @@ fn histogram_functions_drop_metadata_labels() {
     let mut expected = labels(&[]);
     expected.remove("__name__");
     assert_eq!(labels_of(&count.metric), expected);
+}
+
+/// Prometheus `almost.Equal`, treating results below 1e-10 as equal and any NaN as equal to NaN,
+/// as promql-compat compares engines.
+fn close(a: f64, b: f64, epsilon: f64) -> bool {
+    if a.is_nan() || b.is_nan() {
+        return a.is_nan() && b.is_nan();
+    }
+    if a == b {
+        return true;
+    }
+    let (diff, sum) = ((a - b).abs(), a.abs() + b.abs());
+    let equal = if a == 0.0 || b == 0.0 || sum < f64::MIN_POSITIVE {
+        diff < epsilon * f64::MIN_POSITIVE
+    } else {
+        diff / sum.min(f64::MAX) < epsilon
+    };
+    equal || (a.abs() < 1e-10 && b.abs() < 1e-10)
 }
