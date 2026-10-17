@@ -12,21 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_function::aggrs::extremum::Extremum;
-use datafusion::execution::context::{SessionConfig, SessionContext};
-use datafusion::functions_aggregate::{average::avg, count::count, min_max::max, sum::sum};
-use datafusion_expr::{Expr, ExprSchemable, col, lit};
-use datatypes::arrow::array::{
-    Array, ArrayRef, AsArray, Float64Array, StringArray, UInt32Array, UInt64Array,
-};
-use datatypes::arrow::datatypes::{DataType, Field, Float64Type, Schema, UInt64Type};
-use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::Label;
 use datatypes::series::histogram::HistogramBatchBuilder;
-use datatypes::series::samples::FieldSpec;
-use datatypes::series::time::GridSpec;
+use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec};
 
 use super::*;
+use crate::golden::{assert_result, cases};
+
+const CASES: &str = include_str!("prometheus_cases.txt");
 
 const OPS: [AggregateOp; 6] = [
     AggregateOp::Sum,
@@ -36,44 +31,47 @@ const OPS: [AggregateOp; 6] = [
     AggregateOp::Max,
     AggregateOp::Group,
 ];
-type Rows = BTreeMap<(Vec<(String, String)>, usize), Vec<Option<f64>>>;
 
-fn schema() -> SeriesSchema {
-    SeriesSchema {
-        fields: vec![
-            FieldSpec { name: "a".into() },
-            FieldSpec { name: "b".into() },
-        ]
-        .into(),
+fn schema(fields: &[&str]) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: fields
+            .iter()
+            .map(|name| FieldSpec {
+                name: (*name).into(),
+            })
+            .collect(),
         eval_grid: Some(Arc::new(
             EvalGrid::try_new(GridSpec::try_new(-1000, 250, 128).unwrap()).unwrap(),
         )),
-    }
+    })
 }
 
+fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
+    MetricName::try_new(
+        Some(name.into()),
+        labels
+            .iter()
+            .map(|(name, value)| Label {
+                name: (*name).into(),
+                value: (*value).into(),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// Each field is split at a different offset into chunks with nonzero Arrow offsets.
 fn input(
     schema: &SeriesSchema,
-    host: Option<&str>,
-    instance: &str,
+    metric: MetricName,
     start: usize,
-    fields: [Vec<Option<f64>>; 2],
+    fields: &[Vec<Option<f64>>],
 ) -> Series {
-    let mut tags = vec![Label {
-        name: "instance".into(),
-        value: instance.into(),
-    }];
-    if let Some(host) = host {
-        tags.push(Label {
-            name: "host".into(),
-            value: host.into(),
-        });
-    }
     let len = fields[0].len();
     let fields = fields
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(index, samples)| {
-            // Different boundaries and nonzero Arrow offsets per field.
             let mut padded = vec![Some(999.0)];
             padded.extend(samples);
             padded.push(Some(999.0));
@@ -88,331 +86,295 @@ fn input(
         .collect();
     Series::try_new(
         schema,
-        MetricName::try_new(Some("requests".into()), tags).unwrap(),
+        metric,
         TimeAxis::Grid(GridRange::try_new(schema.eval_grid.clone().unwrap(), start, len).unwrap()),
         SeriesFields::try_from_vec(fields).unwrap(),
     )
     .unwrap()
 }
 
-fn nullable_float(samples: &Samples, index: usize) -> Option<f64> {
-    match samples.sample(index) {
-        SampleRef::Float(v) => Some(v),
-        SampleRef::Missing => None,
-        _ => panic!("unexpected histogram"),
-    }
-}
-
-fn labels(metric: &MetricName) -> Vec<(String, String)> {
-    let mut tags = metric
-        .tags()
+fn values(series: &Series, field: usize) -> (usize, Vec<Option<f64>>) {
+    let TimeAxis::Grid(range) = &series.time else {
+        panic!("lost grid")
+    };
+    let values = series
+        .fields
+        .get(field)
+        .unwrap()
         .iter()
-        .map(|tag| (tag.name.to_string(), tag.value.to_string()))
-        .collect::<Vec<_>>();
-    if let Some(name) = metric.name() {
-        tags.push(("__name__".into(), name.into()));
-    }
-    tags.sort();
-    tags
+        .map(|sample| match sample {
+            SampleRef::Float(value) => Some(value),
+            SampleRef::Missing => None,
+            _ => panic!("unexpected histogram"),
+        })
+        .collect();
+    (range.start(), values)
 }
 
-fn actual_rows(output: &[Series]) -> Rows {
-    let mut rows = BTreeMap::new();
-    for series in output {
-        let TimeAxis::Grid(range) = &series.time else {
-            panic!("lost grid")
+fn grouping<'a>(header: &[String], labels: &'a [&'a str]) -> Grouping<'a> {
+    match header[2].as_str() {
+        "none" | "by" => Grouping::By(labels),
+        "without" => Grouping::Without(labels),
+        other => panic!("unmapped grouping {other}"),
+    }
+}
+
+#[test]
+fn aggregates_match_prometheus() {
+    let mut matched = BTreeMap::<String, usize>::new();
+    for case in cases(CASES) {
+        let h = &case.header;
+        let op = match h[1].as_str() {
+            "sum" => AggregateOp::Sum,
+            "count" => AggregateOp::Count,
+            "avg" => AggregateOp::Avg,
+            "min" => AggregateOp::Min,
+            "max" => AggregateOp::Max,
+            "group" => AggregateOp::Group,
+            other => panic!("unmapped aggregate {other}"),
         };
-        assert!(!range.is_empty());
-        for endpoint in [0, range.len() - 1] {
-            assert!(
-                series
-                    .fields
-                    .iter()
-                    .any(|field| nullable_float(field, endpoint).is_some())
-            );
-        }
-        for offset in 0..range.len() {
-            let fields = series
-                .fields
-                .iter()
-                .map(|field| nullable_float(field, offset))
-                .collect::<Vec<_>>();
-            if fields.iter().any(Option::is_some) {
-                assert!(
-                    rows.insert((labels(&series.metric), range.start() + offset), fields)
-                        .is_none()
-                );
-            }
+        let labels = h[3]
+            .split(',')
+            .filter(|label| *label != "-")
+            .collect::<Vec<_>>();
+        let output = aggregate_float(&case.schema, &case.series, op, grouping(h, &labels)).unwrap();
+        assert_result(&case, output);
+        *matched.entry(format!("{} {}", h[1], h[2])).or_default() += 1;
+    }
+    for op in ["sum", "count", "avg", "min", "max", "group"] {
+        for grouping in ["none", "by", "without"] {
+            let count = matched
+                .get(&format!("{op} {grouping}"))
+                .copied()
+                .unwrap_or_default();
+            assert!(count >= 8, "{op} {grouping}: {count}");
         }
     }
-    rows
 }
 
-fn reference_batch(schema: &SeriesSchema, input: &[Series]) -> RecordBatch {
-    let mut points = Vec::new();
-    let mut hosts = Vec::new();
-    let mut instances = Vec::new();
-    let mut values = [Vec::new(), Vec::new()];
-    // Brute-force absolute grid expansion is deliberately confined to the oracle.
-    for point in 0..schema.eval_grid.as_ref().unwrap().spec().len as usize {
-        for series in input {
-            let TimeAxis::Grid(range) = &series.time else {
-                panic!("raw input")
-            };
-            let Some(offset) = point.checked_sub(range.start()) else {
-                continue;
-            };
-            let row = series
-                .fields
-                .iter()
-                .map(|field| nullable_float(field, offset))
-                .collect::<Vec<_>>();
-            if row.iter().all(Option::is_none) {
-                continue;
-            }
-            points.push(point as u64);
-            hosts.push(series.metric.get("host"));
-            instances.push(series.metric.get("instance"));
-            for (values, sample) in values.iter_mut().zip(row) {
-                values.push(sample);
-            }
-        }
-    }
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt64Array::from(points)),
-        Arc::new(StringArray::from(hosts)),
-        Arc::new(StringArray::from(instances)),
-        Arc::new(Float64Array::from(values[0].clone())),
-        Arc::new(Float64Array::from(values[1].clone())),
-    ];
-    let fields = vec![
-        Field::new("point", DataType::UInt64, false),
-        Field::new("host", DataType::Utf8, true),
-        Field::new("instance", DataType::Utf8, true),
-        Field::new("a", DataType::Float64, true),
-        Field::new("b", DataType::Float64, true),
-    ];
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
-}
-
-async fn reference_rows(batch: RecordBatch, op: AggregateOp, grouping: Grouping<'_>) -> Rows {
-    let keys: Vec<&str> = match grouping {
-        Grouping::All => vec![],
-        Grouping::By(names) => ["host", "instance"]
-            .into_iter()
-            .filter(|n| names.contains(n))
-            .collect(),
-        Grouping::Without(names) => ["host", "instance"]
-            .into_iter()
-            .filter(|n| !names.contains(n))
-            .collect(),
-    };
-    let name = match grouping {
-        Grouping::By(names) => names.contains(&"__name__"),
-        Grouping::Without(names) => !names.contains(&"__name__"),
-        Grouping::All => true,
-    };
-    let aggregates = ["a", "b"]
+#[test]
+fn compensated_sum_and_overflowing_avg_follow_prometheus() {
+    let schema = schema(&["value"]);
+    let series = [1e16, 1.0, -1e16]
         .into_iter()
-        .map(|field| {
-            let expr: Expr = match op {
-                AggregateOp::Sum => sum(col(field)),
-                AggregateOp::Avg => avg(col(field)),
-                AggregateOp::Count => count(col(field))
-                    .cast_to(
-                        &DataType::Float64,
-                        &datafusion_common::DFSchema::try_from(batch.schema()).unwrap(),
-                    )
-                    .unwrap(),
-                AggregateOp::Min => Extremum::min_udaf().call(vec![col(field)]),
-                AggregateOp::Max => Extremum::max_udaf().call(vec![col(field)]),
-                AggregateOp::Group => max(lit(1.0_f64)),
-            };
-            expr.alias(field)
+        .enumerate()
+        .map(|(i, value)| {
+            input(
+                &schema,
+                metric("m", &[("i", &i.to_string())]),
+                3,
+                &[vec![Some(value)]],
+            )
         })
         .collect::<Vec<_>>();
-    let mut groups = vec![col("point")];
-    groups.extend(keys.iter().map(|key| col(*key)));
-    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
-    let batches = context
-        .read_batch(batch)
-        .unwrap()
-        .aggregate(groups, aggregates)
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    let mut rows = BTreeMap::new();
-    for batch in batches {
-        for row in 0..batch.num_rows() {
-            let mut labels = vec![];
-            if name {
-                labels.push(("__name__".to_string(), "requests".to_string()));
-            }
-            for key in &keys {
-                let column = batch.column_by_name(key).unwrap().as_string::<i32>();
-                if column.is_valid(row) {
-                    labels.push((key.to_string(), column.value(row).to_string()));
-                }
-            }
-            labels.sort();
-            let point = batch
-                .column_by_name("point")
-                .unwrap()
-                .as_primitive::<UInt64Type>()
-                .value(row) as usize;
-            let values = ["a", "b"]
-                .iter()
-                .map(|field| {
-                    let column = batch
-                        .column_by_name(field)
-                        .unwrap()
-                        .as_primitive::<Float64Type>();
-                    column.is_valid(row).then(|| column.value(row))
-                })
-                .collect();
-            assert!(rows.insert((labels, point), values).is_none());
-        }
-    }
-    rows
-}
+    // A plain left fold loses the 1.
+    let sum = aggregate_float(&schema, &series, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    assert_eq!(values(&sum[0], 0), (3, vec![Some(1.0)]));
+    let avg = aggregate_float(&schema, &series, AggregateOp::Avg, Grouping::By(&[])).unwrap();
+    assert_eq!(values(&avg[0], 0), (3, vec![Some(1.0 / 3.0)]));
 
-fn assert_rows(actual: Rows, expected: Rows) {
-    assert_eq!(
-        actual.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>()
+    let series = [f64::MAX, f64::MAX, f64::MAX / 2.0]
+        .into_iter()
+        .enumerate()
+        .map(|(i, value)| {
+            input(
+                &schema,
+                metric("m", &[("i", &i.to_string())]),
+                3,
+                &[vec![Some(value)]],
+            )
+        })
+        .collect::<Vec<_>>();
+    // The direct sum overflows, so the mean switches to the incremental form.
+    let avg = aggregate_float(&schema, &series, AggregateOp::Avg, Grouping::By(&[])).unwrap();
+    let (_, avg) = values(&avg[0], 0);
+    let avg = avg[0].unwrap();
+    assert!(
+        (avg / (f64::MAX / 6.0 * 5.0) - 1.0).abs() < 1e-15,
+        "{avg:e}"
     );
-    for (key, expected) in expected {
-        for (actual, expected) in actual[&key].iter().zip(expected) {
-            match (actual, expected) {
-                (None, None) => {}
-                (Some(a), Some(b)) if b.is_nan() => assert!(a.is_nan()),
-                (Some(a), Some(b)) => assert_eq!(a.to_bits(), b.to_bits(), "{key:?}"),
-                _ => panic!("validity differs at {key:?}: {actual:?} vs {expected:?}"),
-            }
-        }
-    }
+    let sum = aggregate_float(&schema, &series, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    assert_eq!(values(&sum[0], 0), (3, vec![Some(f64::INFINITY)]));
 }
 
-#[tokio::test]
-async fn grouped_aggregates_match_main_on_shifted_sparse_multifield_inputs() {
-    // Boundaries: staggered starts/ends, holes, disjoint ranges, empty/missing labels,
-    // unequal field chunks/slices, null-only fields, NaNs, infinities and signed zero.
-    let schema = schema();
+#[test]
+fn fields_are_aggregated_independently() {
+    // A field without input values at a row is null there, even for count and group; the row
+    // exists because another field has a value. Single-field projections are the oracle.
+    let multi = schema(&["a", "b"]);
+    let single = schema(&["value"]);
     let samples = [
         None,
         Some(-0.0),
         Some(0.0),
         Some(-5.0),
-        Some(7.0),
+        Some(7.5),
         Some(f64::NAN),
-        Some(f64::from_bits(
-            common_query::prometheus::PROMETHEUS_STALE_NAN_BITS,
-        )),
         Some(f64::INFINITY),
         Some(f64::NEG_INFINITY),
+        Some(1e16),
     ];
     let mut seed = 17_u64;
     let mut next = || {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        seed >> 32
+        (seed >> 33) as usize
     };
-    let mut input_series = Vec::new();
-    for series in 0..20 {
-        let start = next() as usize % 80;
-        let len = next() as usize % 20;
-        let fields = std::array::from_fn(|_| {
-            (0..len)
-                .map(|_| samples[next() as usize % samples.len()])
-                .collect()
-        });
-        input_series.push(input(
-            &schema,
-            [None, Some(""), Some("a"), Some("b")][series % 4],
-            &format!("i{}", series % 3),
+    let mut series = Vec::new();
+    for i in 0..24 {
+        let (start, len) = (next() % 80, 1 + next() % 20);
+        let fields = [0, 1].map(|_| (0..len).map(|_| samples[next() % samples.len()]).collect());
+        let host = ["h1", "h2", ""][i % 3];
+        series.push(input(
+            &multi,
+            metric(["a", "b"][i % 2], &[("host", host), ("i", &i.to_string())]),
             start,
-            fields,
+            &fields,
         ));
     }
-    let batch = reference_batch(&schema, &input_series);
+    let project = |field: usize| -> Vec<Series> {
+        series
+            .iter()
+            .filter_map(|s| {
+                let (start, values) = values(s, field);
+                let first = values.iter().position(Option::is_some)?;
+                let last = values.iter().rposition(Option::is_some)?;
+                Some(input(
+                    &single,
+                    s.metric.clone(),
+                    start + first,
+                    &[values[first..=last].to_vec()],
+                ))
+            })
+            .collect()
+    };
     for grouping in [
-        Grouping::All,
         Grouping::By(&[]),
         Grouping::By(&["host"]),
-        Grouping::By(&["__name__", "host", "unknown"]),
-        Grouping::Without(&["instance"]),
-        Grouping::Without(&["host", "__name__"]),
+        Grouping::Without(&["i"]),
     ] {
         for op in OPS {
-            let output = aggregate_float(&schema, &input_series, op, grouping).unwrap();
-            assert_rows(
-                actual_rows(&output),
-                reference_rows(batch.clone(), op, grouping).await,
-            );
+            let output = aggregate_float(&multi, &series, op, grouping).unwrap();
+            for field in [0, 1] {
+                let expected = aggregate_float(&single, &project(field), op, grouping).unwrap();
+                let expected = expected
+                    .iter()
+                    .map(|s| (s.metric.clone(), values(s, 0)))
+                    .collect::<Vec<_>>();
+                for actual in &output {
+                    let (start, actual_values) = values(actual, field);
+                    let present = actual_values
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| v.map(|v| (start + i, v.to_bits())))
+                        .collect::<Vec<_>>();
+                    let reference = expected
+                        .iter()
+                        .find(|(metric, _)| metric == &actual.metric)
+                        .map_or_else(Vec::new, |(_, (start, v))| {
+                            v.iter()
+                                .enumerate()
+                                .filter_map(|(i, v)| v.map(|v| (start + i, v.to_bits())))
+                                .collect()
+                        });
+                    assert_eq!(present, reference, "{op:?} {grouping:?} field {field}");
+                }
+                assert!(
+                    expected
+                        .iter()
+                        .all(|(m, _)| output.iter().any(|s| &s.metric == m))
+                );
+            }
         }
     }
 }
 
 #[test]
-fn count_zero_and_group_one_differ_from_an_absent_point() {
-    let schema = schema();
-    let source = input(
-        &schema,
-        Some("a"),
-        "i",
-        11,
-        [
-            vec![None, None, None, None],
-            vec![None, Some(2.0), None, Some(4.0)],
-        ],
-    );
-    for (op, expected) in [
-        (AggregateOp::Count, vec![Some(0.0), None, Some(0.0)]),
-        (AggregateOp::Group, vec![Some(1.0), None, Some(1.0)]),
-        (AggregateOp::Sum, vec![None; 3]),
-    ] {
-        let output =
-            aggregate_float(&schema, std::slice::from_ref(&source), op, Grouping::All).unwrap();
-        assert_eq!(output.len(), 1);
-        assert!(
-            matches!(&output[0].time, TimeAxis::Grid(range) if range.start() == 12 && range.len() == 3)
-        );
-        let actual = output[0]
-            .fields
-            .get(0)
+fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
+    let schema = schema(&["value"]);
+    let series = [
+        input(
+            &schema,
+            metric("a", &[("host", ""), ("job", "x")]),
+            0,
+            &[vec![Some(1.0)]],
+        ),
+        input(&schema, metric("b", &[("job", "x")]), 0, &[vec![Some(2.0)]]),
+    ];
+    let labels = |grouping| {
+        aggregate_float(&schema, &series, AggregateOp::Sum, grouping)
             .unwrap()
-            .iter()
-            .map(|v| match v {
-                SampleRef::Float(v) => Some(v),
-                _ => None,
+            .into_iter()
+            .map(|s| {
+                let values = values(&s, 0).1;
+                (s.metric, values)
             })
-            .collect::<Vec<_>>();
-        assert_eq!(actual, expected);
-    }
-    let empty = input(&schema, Some("a"), "i", 127, [vec![None], vec![None]]);
+            .collect::<Vec<_>>()
+    };
+    let job = MetricName::try_new(None, metric("m", &[("job", "x")]).tags().to_vec()).unwrap();
+    assert_eq!(
+        labels(Grouping::By(&["host", "job"])),
+        [(job.clone(), vec![Some(3.0)])]
+    );
+    // `without` always drops the name; only `by (__name__)` keeps it.
+    assert_eq!(
+        labels(Grouping::Without(&["host"])),
+        [(job, vec![Some(3.0)])]
+    );
+    let by_name = labels(Grouping::By(&["__name__"]));
+    assert_eq!(by_name.len(), 2);
+    assert_eq!(
+        by_name[0].0,
+        MetricName::try_new(Some("a".into()), vec![]).unwrap()
+    );
+    let unnamed = [
+        input(&schema, metric("", &[]), 0, &[vec![Some(1.0)]]),
+        input(
+            &schema,
+            MetricName::try_new(None, vec![]).unwrap(),
+            0,
+            &[vec![Some(2.0)]],
+        ),
+    ];
+    let by_name = aggregate_float(
+        &schema,
+        &unnamed,
+        AggregateOp::Sum,
+        Grouping::By(&["__name__"]),
+    )
+    .unwrap();
+    assert_eq!(by_name.len(), 1);
+    assert_eq!(by_name[0].metric.name(), None);
+    let none = labels(Grouping::By(&[]));
+    assert_eq!(
+        none,
+        [(MetricName::try_new(None, vec![]).unwrap(), vec![Some(3.0)])]
+    );
+}
+
+#[test]
+fn empty_inputs_produce_no_groups() {
+    let schema = schema(&["a", "b"]);
+    let empty = input(&schema, metric("m", &[]), 127, &[vec![None], vec![None]]);
     for op in OPS {
         assert!(
-            aggregate_float(&schema, &[], op, Grouping::All)
+            aggregate_float(&schema, &[], op, Grouping::By(&[]))
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            aggregate_float(&schema, std::slice::from_ref(&empty), op, Grouping::All)
-                .unwrap()
-                .is_empty()
-        );
+        let output =
+            aggregate_float(&schema, std::slice::from_ref(&empty), op, Grouping::By(&[])).unwrap();
+        assert!(output.is_empty());
     }
 }
 
 #[test]
 fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
-    let schema = schema();
+    let schema = schema(&["a", "b"]);
     let source = input(
         &schema,
-        Some("a"),
-        "i",
+        metric("m", &[]),
         11,
-        [vec![Some(1.0)], vec![Some(2.0)]],
+        &[vec![Some(1.0)], vec![Some(2.0)]],
     );
     assert!(matches!(
         aggregate_float(
@@ -420,17 +382,6 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
             std::slice::from_ref(&source),
             AggregateOp::Sum,
             Grouping::By(&["a"])
-        ),
-        Err(DataFusionError::NotImplemented(_))
-    ));
-    let mut other = source.clone();
-    other.metric.set("__name__", "other".into()).unwrap();
-    assert!(matches!(
-        aggregate_float(
-            &schema,
-            &[source.clone(), other],
-            AggregateOp::Sum,
-            Grouping::All
         ),
         Err(DataFusionError::NotImplemented(_))
     ));
@@ -447,30 +398,25 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
                 &schema,
                 &[source.clone(), histogram.clone()],
                 op,
-                Grouping::All
+                Grouping::By(&[])
             ),
             Err(DataFusionError::NotImplemented(_))
         ));
     }
     let mut invalid = source.clone();
     invalid.fields = SeriesFields::one(source.fields.get(0).unwrap().clone());
-    assert!(aggregate_float(&schema, &[invalid], AggregateOp::Sum, Grouping::All).is_err());
-    let mut raw = source;
+    assert!(aggregate_float(&schema, &[invalid], AggregateOp::Sum, Grouping::By(&[])).is_err());
+    let mut raw = source.clone();
     raw.time = TimeAxis::try_new(vec![1750].into()).unwrap();
-    assert!(aggregate_float(&schema, &[raw], AggregateOp::Sum, Grouping::All).is_err());
-    let mut other_grid = schema.clone();
+    assert!(aggregate_float(&schema, &[raw], AggregateOp::Sum, Grouping::By(&[])).is_err());
+    let mut other_grid = schema.as_ref().clone();
     other_grid.eval_grid = Some(Arc::new(
         EvalGrid::try_new(GridSpec::try_new(0, 250, 128).unwrap()).unwrap(),
     ));
-    let source = input(
-        &schema,
-        Some("a"),
-        "i",
-        11,
-        [vec![Some(1.0)], vec![Some(2.0)]],
-    );
-    assert!(aggregate_float(&other_grid, &[source], AggregateOp::Sum, Grouping::All).is_err());
-    let mut raw_schema = schema;
+    let other_grid = Arc::new(other_grid);
+    assert!(aggregate_float(&other_grid, &[source], AggregateOp::Sum, Grouping::By(&[])).is_err());
+    let mut raw_schema = schema.as_ref().clone();
     raw_schema.eval_grid = None;
-    assert!(aggregate_float(&raw_schema, &[], AggregateOp::Sum, Grouping::All).is_err());
+    let raw_schema = Arc::new(raw_schema);
+    assert!(aggregate_float(&raw_schema, &[], AggregateOp::Sum, Grouping::By(&[])).is_err());
 }

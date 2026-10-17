@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Local float aggregation over evaluated series. State is keyed by absolute grid index,
-//! never by local row number; sparse state and trimmed output do not expand the full grid.
+//! Local float aggregation over evaluated series, following Prometheus' `aggregation`. State
+//! is keyed by absolute grid index, never by local row number; sparse state and trimmed output
+//! do not expand the full grid.
 
 #[cfg(test)]
 mod tests;
@@ -22,14 +23,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::arrow::array::Float64Builder;
 use datatypes::series::MetricName;
-use datatypes::series::samples::{
-    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
-};
-use datatypes::series::time::{EvalGrid, GridRange, TimeAxis};
+use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
+use datatypes::series::time::TimeAxis;
 
-/// Basic float aggregations, with ordinary-path null and NaN semantics.
+use crate::grid_series::GridSeriesBuilder;
+
+/// Basic float aggregations.
 #[derive(Clone, Copy, Debug)]
 pub enum AggregateOp {
     Sum,
@@ -40,31 +40,30 @@ pub enum AggregateOp {
     Group,
 }
 
-/// Grouping by static series labels. `All` is the absence of a modifier, not `by()`.
+/// Grouping by series labels. No modifier is `By(&[])`, as in Prometheus.
 #[derive(Clone, Copy, Debug)]
 pub enum Grouping<'a> {
-    All,
     By(&'a [&'a str]),
     Without(&'a [&'a str]),
 }
 
-/// Aggregates each field at each absolute evaluation instant, retaining interior missing points.
+/// Aggregates each field at each absolute evaluation instant.
 ///
-/// Empty/all-missing groups are omitted. A point exists if any input field is present: `count`
-/// then produces zero for an all-null field, and `group` produces one. Other aggregates leave
-/// that field null. Ordinary NaNs count as values, never as missing/stale markers.
+/// Each field is aggregated independently; an output row exists where any field has a value,
+/// and a field without input values at that row is null. Ordinary NaNs count as values.
+///
+/// Inputs are folded in slice order. Prometheus folds them in storage postings order, and the
+/// compensated `sum`/`avg` depend on that order in the last bits, so callers must keep it.
 ///
 /// Only float evaluated inputs on the shared schema/grid are admitted. `by` on a value field
-/// needs per-point labels and an output schema adapter, and is explicitly rejected. Inputs with
-/// different metric names are also rejected: main's name fallback is expression-wide, not a
-/// grouping key. Admission must keep these cases on the ordinary path; there is no fallback here.
+/// needs per-point labels and an output schema adapter, and is rejected. There is no fallback.
 pub fn aggregate_float(
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     input: &[Series],
     op: AggregateOp,
     grouping: Grouping<'_>,
 ) -> Result<Vec<Series>> {
-    let grid = validate_input(schema, input, grouping)?;
+    validate_input(schema, input, grouping)?;
     let mut groups = BTreeMap::new();
     for series in input {
         let metric = grouping.apply(&series.metric);
@@ -74,35 +73,32 @@ pub fn aggregate_float(
         });
         group.accumulate(series, op)?;
     }
-    groups
-        .into_values()
-        .filter_map(|group| group.finish(schema, &grid, op).transpose())
-        .collect()
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    let mut output = Vec::with_capacity(groups.len());
+    let mut row = Vec::with_capacity(schema.fields.len());
+    for group in groups.into_values() {
+        for (&index, states) in &group.points {
+            row.clear();
+            row.extend(states.iter().map(|state| state.finish(op)));
+            builder.push(index, &row)?;
+        }
+        output.extend(builder.finish(group.metric)?);
+    }
+    Ok(output)
 }
 
 /// Schema validation is repeated because Series exposes its fields publicly.
-fn validate_input(
-    schema: &SeriesSchema,
-    input: &[Series],
-    grouping: Grouping<'_>,
-) -> Result<Arc<EvalGrid>> {
-    let grid = schema
-        .eval_grid
-        .clone()
-        .ok_or_else(|| DataFusionError::Execution("Aggregate requires an evaluated grid".into()))?;
+fn validate_input(schema: &SeriesSchema, input: &[Series], grouping: Grouping<'_>) -> Result<()> {
+    if schema.eval_grid.is_none() {
+        return Err(DataFusionError::Execution(
+            "Aggregate requires an evaluated grid".into(),
+        ));
+    }
     grouping.validate(schema)?;
     for series in input {
         validate_series(schema, series)?;
     }
-    if input
-        .windows(2)
-        .any(|pair| pair[0].metric.name() != pair[1].metric.name())
-    {
-        return Err(DataFusionError::NotImplemented(
-            "aggregate over different metric names requires expression-level name handling".into(),
-        ));
-    }
-    Ok(grid)
+    Ok(())
 }
 
 fn validate_series(schema: &SeriesSchema, series: &Series) -> Result<()> {
@@ -113,10 +109,11 @@ fn validate_series(schema: &SeriesSchema, series: &Series) -> Result<()> {
         series.fields.clone(),
     )
     .map_err(series_error)?;
-    validate_float_fields(series)
-}
-
-fn validate_float_fields(series: &Series) -> Result<()> {
+    if !matches!(series.time, TimeAxis::Grid(_)) {
+        return Err(DataFusionError::Execution(
+            "Aggregate requires an evaluated grid".into(),
+        ));
+    }
     for field in series.fields.iter() {
         if field
             .segments()
@@ -146,14 +143,27 @@ impl Grouping<'_> {
         Ok(())
     }
 
+    /// Prometheus `generateGroupingLabels`; empty values are dropped as absent labels.
     fn apply(self, input: &MetricName) -> MetricName {
         let mut metric = input.clone();
         match self {
-            // Main preserves the single input metric name for a modifier-free aggregate and
-            // `without` unless explicitly removed. `by()` differs from no modifier.
-            Self::All => metric.keep_only(&["__name__"]),
             Self::By(labels) => metric.keep_only(labels),
-            Self::Without(labels) => metric.remove_all(labels),
+            Self::Without(labels) => {
+                metric.remove_all(labels);
+                metric.remove("__name__");
+            }
+        }
+        if metric.name() == Some("") {
+            metric.remove("__name__");
+        }
+        let empty: Vec<_> = metric
+            .tags()
+            .iter()
+            .filter(|label| label.value.is_empty())
+            .map(|label| label.name.clone())
+            .collect();
+        for name in empty {
+            metric.remove(&name);
         }
         metric
     }
@@ -188,105 +198,108 @@ impl Group {
         for (field_index, field) in series.fields.iter().enumerate() {
             for (offset, sample) in field.iter().enumerate() {
                 if let SampleRef::Float(sample) = sample {
-                    // Allocating a point on the first present field tracks row existence
-                    // separately from the validity/count of each other field.
                     let states = self
                         .points
                         .entry(range.start() + offset)
-                        .or_insert_with(|| vec![FloatState::new(op); series.fields.len()]);
+                        .or_insert_with(|| vec![FloatState::default(); series.fields.len()]);
                     states[field_index].update(op, sample);
                 }
             }
         }
         Ok(())
     }
-
-    fn finish(
-        self,
-        schema: &SeriesSchema,
-        grid: &Arc<EvalGrid>,
-        op: AggregateOp,
-    ) -> Result<Option<Series>> {
-        let Some(((&start, _), (&last, _))) = self
-            .points
-            .first_key_value()
-            .zip(self.points.last_key_value())
-        else {
-            return Ok(None);
-        };
-        let end = last + 1;
-        let fields = (0..schema.fields.len())
-            .map(|field| self.finish_field(field, start..end, op))
-            .collect();
-        let range = GridRange::try_new(grid.clone(), start, end - start).map_err(series_error)?;
-        Series::try_new(
-            schema,
-            self.metric,
-            TimeAxis::Grid(range),
-            SeriesFields::try_from_vec(fields).map_err(series_error)?,
-        )
-        .map(Some)
-        .map_err(series_error)
-    }
-
-    fn finish_field(
-        &self,
-        field: usize,
-        range: std::ops::Range<usize>,
-        op: AggregateOp,
-    ) -> Samples {
-        let mut builder = Float64Builder::with_capacity(range.len());
-        let mut next = range.start;
-        for (&point, states) in &self.points {
-            builder.append_nulls(point - next);
-            builder.append_option(states[field].finish(op));
-            next = point + 1;
-        }
-        Samples::from_float(builder.finish())
-    }
 }
 
-#[derive(Clone, Copy)]
+/// The float part of Prometheus' `groupedAggregation`.
+#[derive(Clone, Copy, Default)]
 struct FloatState {
-    count: u64,
-    aggregate: f64,
+    seen: bool,
+    value: f64,
+    mean: f64,
+    compensation: f64,
+    count: f64,
+    incremental_mean: bool,
 }
 
 impl FloatState {
-    fn new(op: AggregateOp) -> Self {
-        Self {
-            count: 0,
-            aggregate: if matches!(op, AggregateOp::Min | AggregateOp::Max) {
-                f64::NAN
-            } else {
-                0.0
-            },
+    fn update(&mut self, op: AggregateOp, sample: f64) {
+        if !self.seen {
+            *self = Self {
+                seen: true,
+                value: if matches!(op, AggregateOp::Group) {
+                    1.0
+                } else {
+                    sample
+                },
+                mean: sample,
+                count: 1.0,
+                ..Self::default()
+            };
+            return;
+        }
+        match op {
+            AggregateOp::Sum => {
+                (self.value, self.compensation) = kahan_inc(sample, self.value, self.compensation);
+            }
+            AggregateOp::Avg => self.update_avg(sample),
+            AggregateOp::Count => self.count += 1.0,
+            AggregateOp::Max => {
+                if self.value < sample || self.value.is_nan() {
+                    self.value = sample;
+                }
+            }
+            AggregateOp::Min => {
+                if self.value > sample || self.value.is_nan() {
+                    self.value = sample;
+                }
+            }
+            AggregateOp::Group => {}
         }
     }
 
-    fn update(&mut self, op: AggregateOp, sample: f64) {
-        self.count += 1;
-        match op {
-            AggregateOp::Sum | AggregateOp::Avg => self.aggregate += sample,
-            AggregateOp::Min if self.aggregate.is_nan() || sample < self.aggregate => {
-                self.aggregate = sample
+    /// Sums directly until the running sum would overflow, then switches to an incremental mean.
+    fn update_avg(&mut self, sample: f64) {
+        self.count += 1.0;
+        if !self.incremental_mean {
+            let (value, compensation) = kahan_inc(sample, self.value, self.compensation);
+            if !value.is_infinite() {
+                (self.value, self.compensation) = (value, compensation);
+                return;
             }
-            AggregateOp::Max if self.aggregate.is_nan() || sample > self.aggregate => {
-                self.aggregate = sample
-            }
-            _ => {}
+            self.incremental_mean = true;
+            self.mean = self.value / (self.count - 1.0);
+            self.compensation /= self.count - 1.0;
         }
+        let q = (self.count - 1.0) / self.count;
+        (self.mean, self.compensation) =
+            kahan_inc(sample / self.count, q * self.mean, q * self.compensation);
     }
 
     fn finish(self, op: AggregateOp) -> Option<f64> {
-        match op {
-            AggregateOp::Count => Some(self.count as f64),
-            AggregateOp::Group => Some(1.0),
-            _ if self.count == 0 => None,
-            AggregateOp::Avg => Some(self.aggregate / self.count as f64),
-            _ => Some(self.aggregate),
+        if !self.seen {
+            return None;
         }
+        Some(match op {
+            AggregateOp::Sum => self.value + self.compensation,
+            AggregateOp::Avg if self.incremental_mean => self.mean + self.compensation,
+            AggregateOp::Avg => self.value / self.count + self.compensation / self.count,
+            AggregateOp::Count => self.count,
+            AggregateOp::Min | AggregateOp::Max | AggregateOp::Group => self.value,
+        })
     }
+}
+
+/// Prometheus `kahansum.Inc`, with the Neumaier swap.
+fn kahan_inc(inc: f64, sum: f64, compensation: f64) -> (f64, f64) {
+    let t = sum + inc;
+    let compensation = if t.is_infinite() {
+        0.0
+    } else if sum.abs() >= inc.abs() {
+        compensation + ((sum - t) + inc)
+    } else {
+        compensation + ((inc - t) + sum)
+    };
+    (t, compensation)
 }
 
 fn series_error(error: datatypes::error::Error) -> DataFusionError {

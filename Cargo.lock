@@ -11356,7 +11356,6 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "common-error",
- "common-function",
  "common-macro",
  "common-query",
  "common-recordbatch",
