@@ -20,8 +20,15 @@
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
+
 use datafusion::error::{DataFusionError, Result};
-use datatypes::arrow::array::Float64Array;
+use datafusion::functions::math;
+use datafusion_common::ScalarValue;
+use datafusion_common::config::ConfigOptions;
+use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
+use datatypes::arrow::array::{AsArray, Float64Array};
+use datatypes::arrow::datatypes::{DataType, Field, Float64Type};
 use datatypes::series::samples::{DenseSamplesRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
@@ -42,6 +49,25 @@ pub enum MathOp {
     Round { nearest: f64 },
 }
 
+/// Float arithmetic against a constant scalar, with ordinary-path semantics.
+#[derive(Clone, Copy, Debug)]
+pub enum ArithmeticOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Power,
+    Atan2,
+}
+
+/// The scalar's position in a binary expression; noncommutative operators retain this order.
+#[derive(Clone, Copy, Debug)]
+pub enum ScalarOperand {
+    Left(f64),
+    Right(f64),
+}
+
 /// Applies float math to every field of one evaluated series, preserving its labels.
 ///
 /// The explicit schema and actual grid range are preserved. Fields are processed in their own
@@ -54,19 +80,52 @@ pub enum MathOp {
 /// admitted to the ordinary path before execution; this function neither falls back nor returns
 /// partial results.
 pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Series> {
+    // Ordinary math calls preserve the metric name (unlike binary arithmetic): the HTTP
+    // adapter's collect_metric_names follows Call arguments. Keep that compatibility here.
+    map_float_fields(schema, series, |floats| Ok(op.apply(floats)))
+}
+
+/// Negates every float field and removes the metric name, like the ordinary unary path.
+///
+/// Shares the evaluated-grid, missingness and unsupported-type contract of [`map_math`].
+pub fn map_negate(schema: &SeriesSchema, series: &Series) -> Result<Series> {
+    let mut output = map_float_fields(schema, series, |floats| Ok(floats.unary(|v| -v)))?;
+    output.metric.remove("__name__");
+    Ok(output)
+}
+
+/// Applies arithmetic against a constant scalar to every field, removing the metric name.
+///
+/// Shares the evaluated-grid, missingness and unsupported-type contract of [`map_math`].
+/// Division and remainder use IEEE float semantics, but power retains the ordinary UDF's
+/// error for a zero base raised to a negative exponent. Any error fails the whole series.
+pub fn map_arithmetic(
+    schema: &SeriesSchema,
+    series: &Series,
+    op: ArithmeticOp,
+    scalar: ScalarOperand,
+) -> Result<Series> {
+    let mut output = map_float_fields(schema, series, |floats| op.apply(floats, scalar))?;
+    output.metric.remove("__name__");
+    Ok(output)
+}
+
+fn map_float_fields(
+    schema: &SeriesSchema,
+    series: &Series,
+    map: impl Fn(&Float64Array) -> Result<Float64Array>,
+) -> Result<Series> {
     if !matches!(series.time, TimeAxis::Grid(_)) {
         return Err(DataFusionError::Execution(
-            "Map math requires an evaluated grid time axis".into(),
+            "Map requires an evaluated grid time axis".into(),
         ));
     }
     let fields = series
         .fields
         .iter()
-        .map(|samples| map_samples(samples, op))
+        .map(|samples| map_samples(samples, &map))
         .collect::<Result<Vec<_>>>()?;
     let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
-    // Ordinary math calls preserve the metric name (unlike binary arithmetic): the HTTP
-    // adapter's collect_metric_names follows Call arguments. Keep that compatibility here.
     Series::try_new(schema, series.metric.clone(), series.time.clone(), fields)
         .map_err(series_error)
 }
@@ -85,23 +144,76 @@ impl MathOp {
     }
 }
 
-fn map_samples(samples: &Samples, op: MathOp) -> Result<Samples> {
+impl ArithmeticOp {
+    fn apply(self, floats: &Float64Array, scalar: ScalarOperand) -> Result<Float64Array> {
+        Ok(match self {
+            Self::Add => map_binary(floats, scalar, |left, right| left + right),
+            Self::Subtract => map_binary(floats, scalar, |left, right| left - right),
+            Self::Multiply => map_binary(floats, scalar, |left, right| left * right),
+            Self::Divide => map_binary(floats, scalar, |left, right| left / right),
+            Self::Modulo => map_binary(floats, scalar, |left, right| left % right),
+            Self::Atan2 => map_binary(floats, scalar, f64::atan2),
+            Self::Power => return map_power(floats, scalar),
+        })
+    }
+}
+
+fn map_binary(
+    floats: &Float64Array,
+    scalar: ScalarOperand,
+    calculate: impl Fn(f64, f64) -> f64,
+) -> Float64Array {
+    match scalar {
+        ScalarOperand::Left(scalar) => floats.unary(|sample| calculate(scalar, sample)),
+        ScalarOperand::Right(scalar) => floats.unary(|sample| calculate(sample, scalar)),
+    }
+}
+
+fn map_power(floats: &Float64Array, scalar: ScalarOperand) -> Result<Float64Array> {
+    let samples = ColumnarValue::Array(Arc::new(floats.clone()));
+    let literal = |scalar| ColumnarValue::Scalar(ScalarValue::Float64(Some(scalar)));
+    let args = match scalar {
+        ScalarOperand::Left(scalar) => vec![literal(scalar), samples],
+        ScalarOperand::Right(scalar) => vec![samples, literal(scalar)],
+    };
+    // The existing UDF owns power's domain checks and null handling. A direct powf map would
+    // incorrectly accept 0 ^ negative.
+    let operand_field = Arc::new(Field::new("operand", DataType::Float64, true));
+    let output = math::power().invoke_with_args(ScalarFunctionArgs {
+        arg_fields: vec![operand_field; 2],
+        args,
+        number_rows: floats.len(),
+        return_field: Arc::new(Field::new("power", DataType::Float64, true)),
+        config_options: Arc::new(ConfigOptions::default()),
+    })?;
+    Ok(output
+        .into_array(floats.len())?
+        .as_primitive::<Float64Type>()
+        .clone())
+}
+
+fn map_samples(
+    samples: &Samples,
+    map: &impl Fn(&Float64Array) -> Result<Float64Array>,
+) -> Result<Samples> {
     let chunks = samples
         .segments()
         .iter()
-        .map(|segment| map_float_segment(segment, op))
+        .map(|segment| map_float_segment(segment, map))
         .collect::<Result<Vec<_>>>()?;
     Samples::try_from_chunks(chunks).map_err(series_error)
 }
 
-fn map_float_segment(segment: &Samples, op: MathOp) -> Result<Samples> {
+fn map_float_segment(
+    segment: &Samples,
+    map: &impl Fn(&Float64Array) -> Result<Float64Array>,
+) -> Result<Samples> {
     let Some(DenseSamplesRef::Float(floats)) = segment.dense() else {
         return Err(DataFusionError::NotImplemented(
-            "Map math supports only float samples; histogram/mixed samples are not supported"
-                .into(),
+            "Map supports only float samples; histogram/mixed samples are not supported".into(),
         ));
     };
-    Ok(Samples::from_float(op.apply(floats)))
+    Ok(Samples::from_float(map(floats)?))
 }
 
 fn series_error(error: datatypes::error::Error) -> DataFusionError {
