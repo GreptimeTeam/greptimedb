@@ -15,6 +15,7 @@
 pub mod error;
 pub mod extension_plan;
 pub mod functions;
+mod go_sort;
 pub mod grid_series;
 mod metrics;
 pub mod range_array;

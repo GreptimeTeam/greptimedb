@@ -28,6 +28,7 @@ use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 use datatypes::series::{Label, MetricName};
 
+use crate::go_sort;
 use crate::grid_series::GridSeriesBuilder;
 
 #[cfg(test)]
@@ -78,7 +79,8 @@ pub fn topk(
     if k.is_nan() {
         return Err(DataFusionError::Execution("Parameter value is NaN".into()));
     }
-    if k >= i64::MAX as f64 {
+    // Prometheus' `maxInt64`, the largest float64 below 2^63.
+    if k >= 9_223_372_036_854_774_784.0 {
         return Err(DataFusionError::Execution(format!(
             "Scalar value {k} overflows int64"
         )));
@@ -281,18 +283,16 @@ pub fn sort_instant(
                 keyed.push((value.unwrap_or(f64::NAN), item));
             }
             let descending = *order == SortOrder::Desc;
-            keyed.sort_by(|(a, _), (b, _)| match (a.is_nan(), b.is_nan()) {
-                (true, true) => Ordering::Equal,
-                (true, false) => Ordering::Greater,
-                (false, true) => Ordering::Less,
-                _ if descending => b.total_cmp(a),
-                _ => a.total_cmp(b),
+            // `sort.Sort(sort.Reverse(h))` with Prometheus' heap `Less`, which holds whenever
+            // its first value is NaN.
+            go_sort::sort_by(&mut keyed, |(a, _), (b, _)| {
+                b.is_nan() || if descending { b < a } else { b > a }
             });
             Ok(keyed.into_iter().map(|(_, item)| item).collect())
         }
         SortOrder::ByLabel(labels) | SortOrder::ByLabelDesc(labels) => {
             let descending = matches!(order, SortOrder::ByLabelDesc(_));
-            series.sort_by(|a, b| {
+            go_sort::sort_by(&mut series, |a, b| {
                 for label in labels {
                     let (a, b) = (
                         a.metric.get(label).unwrap_or(""),
@@ -301,15 +301,14 @@ pub fn sort_instant(
                     if a == b {
                         continue;
                     }
-                    let less = natural_less(a, b);
-                    return if less != descending {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    };
+                    return natural_less(a, b) != descending;
                 }
                 let order = compare_labels(&a.metric, &b.metric);
-                if descending { order.reverse() } else { order }
+                if descending {
+                    order == Ordering::Greater
+                } else {
+                    order == Ordering::Less
+                }
             });
             Ok(series)
         }

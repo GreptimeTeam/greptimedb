@@ -231,6 +231,28 @@ fn sorts_instant_results_like_prometheus() {
     let descending = sort_instant(&SortOrder::Desc, &schema, series).unwrap();
     assert_eq!(rendered(&descending), ["host=a", "host=c", "host=b"]);
 
+    // Go compares with `<`, so the zeros tie and keep their order, and `Less` holds for every
+    // NaN on its left, so NaNs come out reversed.
+    let (schema, series) = instant(&[("host=a", Some(0.0)), ("host=b", Some(-0.0))]);
+    let ascending = sort_instant(&SortOrder::Asc, &schema, series).unwrap();
+    assert_eq!(rendered(&ascending), ["host=a", "host=b"]);
+    let (schema, series) = instant(&[
+        ("host=a", Some(f64::NAN)),
+        ("host=b", Some(1.0)),
+        ("host=c", Some(f64::NAN)),
+        ("host=d", Some(0.0)),
+    ]);
+    let ascending = sort_instant(&SortOrder::Asc, &schema, series.clone()).unwrap();
+    assert_eq!(
+        rendered(&ascending),
+        ["host=d", "host=b", "host=c", "host=a"]
+    );
+    let descending = sort_instant(&SortOrder::Desc, &schema, series).unwrap();
+    assert_eq!(
+        rendered(&descending),
+        ["host=b", "host=d", "host=c", "host=a"]
+    );
+
     let (schema, series) = instant(&[
         ("host=x10", Some(1.0)),
         ("host=x9", Some(1.0)),
@@ -247,6 +269,27 @@ fn sorts_instant_results_like_prometheus() {
         rendered(&by_host_desc.unwrap()),
         ["host=x10", "host=x9,job=a", "host=x9", "host=x"]
     );
+}
+
+/// `natsort.Compare` holds both ways for "1" and "01"; sorting many such labels must not panic.
+#[test]
+fn sort_by_label_accepts_inconsistent_natural_order() {
+    // This input makes `slice::sort_by` panic with this comparator on Rust 1.98.
+    let hosts: Vec<String> = (0..100)
+        .map(|i| format!("host={}{}", "0".repeat(i / 3 % 3), i * 7 % 10))
+        .collect();
+    let values: Vec<(&str, Option<f64>)> = hosts
+        .iter()
+        .map(|host| (host.as_str(), Some(1.0)))
+        .collect();
+    let (schema, series) = instant(&values);
+    for order in [
+        SortOrder::ByLabel(names("host")),
+        SortOrder::ByLabelDesc(names("host")),
+    ] {
+        let sorted = sort_instant(&order, &schema, series.clone()).unwrap();
+        assert_eq!(sorted.len(), 100);
+    }
 }
 
 #[test]
@@ -277,7 +320,8 @@ fn rejects_value_operators_over_several_fields() {
 fn topk_validates_k_like_prometheus() {
     let schema = schema(1, 1);
     let series = vec![build(&schema, metric("__name__=a"), &vec![vec![Some(1.0)]]).unwrap()];
-    for k in [f64::NAN, f64::INFINITY, 2f64.powi(63)] {
+    // Prometheus' `maxInt64` is 9223372036854774784, one float step below 2^63.
+    for k in [f64::NAN, f64::INFINITY, 9_223_372_036_854_774_784.0] {
         assert!(
             topk(k, true, &Grouping::By(Vec::new()), &schema, &series).is_err(),
             "{k}"
