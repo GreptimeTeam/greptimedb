@@ -17,8 +17,13 @@
 //! and `resetHistograms`), and `histogram_count`, `histogram_sum`, `histogram_avg`,
 //! `histogram_stddev` and `histogram_stdvar` over native histograms.
 
+mod aggregate;
 mod bounds;
 mod classic;
+// `sub`, `copy_to_schema`, `detect_reset` and `equals` are for the native histogram range
+// functions and binary operators, which build on other branches.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod float_histogram;
 mod native;
 #[cfg(test)]
 mod tests;
@@ -31,6 +36,8 @@ use datatypes::series::MetricName;
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
+
+pub use aggregate::{HistogramAggregate, aggregate_histograms};
 
 use crate::grid_series::{GridSeriesBuilder, LabelSet, label_set, merge_same_labelset};
 

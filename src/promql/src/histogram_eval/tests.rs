@@ -21,12 +21,14 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::samples::{
-    FieldSpec, HistogramSamples, Samples, Series, SeriesFields, SeriesSchema,
+    FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{GridRange, TimeAxis};
 
+use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
-    HistogramFunction, NativeHistogramFunction, evaluate_histograms, map_native_histogram,
+    HistogramAggregate, HistogramFunction, NativeHistogramFunction, aggregate_histograms,
+    evaluate_histograms, map_native_histogram,
 };
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
@@ -226,7 +228,7 @@ fn classic_histograms_match_prometheus() {
 #[test]
 fn native_histograms_match_prometheus() {
     let cases = golden_cases(include_str!("native_cases.txt"));
-    assert_eq!(cases.len(), 420);
+    assert_eq!(cases.len(), 661);
     for case in &cases {
         let schema = schema(case);
         let input: Vec<_> = case
@@ -263,8 +265,214 @@ fn native_histograms_match_prometheus() {
                 &schema,
                 &input,
             ),
-            other => panic!("unknown case {other}"),
+            aggregate => {
+                let (op, by_job) = match aggregate {
+                    "sum" => (HistogramAggregate::Sum, false),
+                    "avg" => (HistogramAggregate::Avg, false),
+                    "sum_by_job" => (HistogramAggregate::Sum, true),
+                    "avg_by_job" => (HistogramAggregate::Avg, true),
+                    other => panic!("unknown case {other}"),
+                };
+                assert_aggregates(case, &schema, &input, op, by_job);
+                continue;
+            }
         };
         assert_outcome(case, actual, &case.outcome);
     }
+}
+
+fn canonical(value: f64) -> u64 {
+    canonical_bits(value)
+}
+
+/// The fields of `h` as bits, NaN as one NaN, with its bucket indices.
+fn fingerprint(h: &FloatHistogram) -> String {
+    let side = |side: &[(i32, f64)]| -> String {
+        side.iter()
+            .map(|&(idx, count)| format!("{idx}:{:x}", canonical(count)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        "{} {:?} zt={:x} zc={:x} count={:x} sum={:x} +[{}] -[{}] custom={:?}",
+        h.schema,
+        h.reset_hint,
+        canonical(h.zero_threshold),
+        canonical(h.zero_count),
+        canonical(h.count),
+        canonical(h.sum),
+        side(&h.positive),
+        side(&h.negative),
+        h.custom_values
+            .iter()
+            .map(|v| canonical(*v))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn histogram(text: &str) -> FloatHistogram {
+    FloatHistogram::try_from_view(&OwnedHistogram::parse(text).view()).unwrap()
+}
+
+#[test]
+fn histogram_arithmetic_matches_prometheus() {
+    let mut checked = 0;
+    for line in include_str!("arithmetic_cases.txt").lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let (inputs, outputs) = line.split_once(" => ").unwrap();
+        let mut inputs = inputs.split(' ');
+        let (op, argument) = (inputs.next().unwrap(), inputs.next().unwrap());
+        let inputs: Vec<FloatHistogram> = inputs.map(histogram).collect();
+        let outputs: Vec<&str> = outputs.split(' ').collect();
+        let flags = |outcome: AddOutcome| {
+            vec![
+                outcome.counter_reset_collision.to_string(),
+                outcome.custom_bounds_reconciled.to_string(),
+            ]
+        };
+        let actual: Result<Vec<String>, _> = match op {
+            "add" | "sub" => {
+                let mut result = inputs[0].clone();
+                let outcome = if op == "add" {
+                    result.add(&inputs[1])
+                } else {
+                    result.sub(&inputs[1])
+                };
+                outcome.map(|outcome| [vec![fingerprint(&result)], flags(outcome)].concat())
+            }
+            "kahan" => {
+                let mut sum = inputs[0].clone();
+                let mut compensation = None;
+                let mut any = AddOutcome::default();
+                let mut result = Ok(());
+                for h in &inputs[1..] {
+                    match sum.kahan_add(h, compensation.take()) {
+                        Ok((c, outcome)) => {
+                            compensation = Some(c);
+                            any.counter_reset_collision |= outcome.counter_reset_collision;
+                            any.custom_bounds_reconciled |= outcome.custom_bounds_reconciled;
+                        }
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    }
+                }
+                result.map(|_| {
+                    let c = compensation.unwrap();
+                    [vec![fingerprint(&sum), fingerprint(&c)], flags(any)].concat()
+                })
+            }
+            "mul" | "div" => {
+                let factor = f64::from_bits(u64::from_str_radix(argument, 16).unwrap());
+                let mut result = inputs[0].clone();
+                if op == "mul" {
+                    result.mul(factor);
+                } else {
+                    result.div(factor);
+                }
+                Ok(vec![fingerprint(&result)])
+            }
+            "compact" => {
+                let mut result = inputs[0].clone();
+                result.compact();
+                Ok(vec![fingerprint(&result)])
+            }
+            "schema" => inputs[0]
+                .copy_to_schema(argument.parse().unwrap())
+                .map(|result| vec![fingerprint(&result)]),
+            "reset" => inputs[0]
+                .detect_reset(&inputs[1])
+                .map(|reset| vec![reset.to_string()]),
+            "equals" => Ok(vec![inputs[0].equals(&inputs[1]).to_string()]),
+            other => panic!("unknown operation {other}"),
+        };
+        let expected: Vec<String> = match op {
+            "add" | "sub" if outputs[0] != "error" => vec![
+                fingerprint(&histogram(outputs[0])),
+                outputs[1].to_string(),
+                outputs[2].to_string(),
+            ],
+            "kahan" if outputs[0] != "error" => vec![
+                fingerprint(&histogram(outputs[0])),
+                fingerprint(&histogram(outputs[1])),
+                outputs[2].to_string(),
+                outputs[3].to_string(),
+            ],
+            "mul" | "div" | "compact" | "schema" => vec![fingerprint(&histogram(outputs[0]))],
+            _ => outputs.iter().map(|output| output.to_string()).collect(),
+        };
+        match actual {
+            Ok(actual) => assert_eq!(actual, expected, "{line}"),
+            Err(error) => assert_eq!(expected, vec!["error".to_string()], "{line}: {error}"),
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 723);
+}
+
+/// Groups the input in its order as `sum`/`avg` with or without `by (job)` do, and compares the
+/// aggregated histograms; float-only points belong to the float aggregation.
+fn assert_aggregates(
+    case: &GoldenCase,
+    schema: &Arc<SeriesSchema>,
+    input: &[Series],
+    op: HistogramAggregate,
+    by_job: bool,
+) {
+    assert!(
+        case.outcome.is_ok(),
+        "case {:?}: {:?}",
+        case.spec,
+        case.outcome
+    );
+    let mut groups: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
+    for series in input {
+        let mut labels = Labels::new();
+        if by_job {
+            labels.insert(
+                "job".to_string(),
+                series.metric.get("job").unwrap().to_string(),
+            );
+        }
+        groups.entry(labels).or_default().push(series.clone());
+    }
+    let mut actual = BTreeMap::new();
+    for (labels, group) in groups {
+        if let Some(series) = aggregate_histograms(op, schema, &group, metric_of(&labels)).unwrap()
+        {
+            actual.insert(labels, histogram_points(&series));
+        }
+    }
+    let expected: BTreeMap<_, _> = case
+        .result_histograms
+        .iter()
+        .map(|(labels, points)| {
+            let points: BTreeMap<_, _> = points
+                .iter()
+                .map(|(&index, text)| (index, fingerprint(&histogram(text))))
+                .collect();
+            (labels.clone(), points)
+        })
+        .collect();
+    assert_eq!(actual, expected, "case {:?}", case.spec);
+}
+
+fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
+    let TimeAxis::Grid(range) = &series.time else {
+        panic!("expected a grid series");
+    };
+    series.fields.as_slice()[0]
+        .iter()
+        .enumerate()
+        .filter_map(|(row, sample)| match sample {
+            SampleRef::Histogram(view) => Some((
+                range.start() + row,
+                fingerprint(&FloatHistogram::try_from_view(&view).unwrap()),
+            )),
+            _ => None,
+        })
+        .collect()
 }

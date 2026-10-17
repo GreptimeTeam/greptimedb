@@ -21,7 +21,7 @@ use datatypes::series::histogram::{BucketSideView, HistogramView};
 
 use super::bounds::EXPONENTIAL_BOUNDS;
 
-const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
+pub(super) const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct NativeBucket {
@@ -118,7 +118,7 @@ fn bucket(h: &HistogramView<'_>, idx: i32, count: f64, positive: bool) -> Result
 }
 
 /// Go `getBound`.
-fn bound(idx: i32, schema: i32, custom_values: &[f64]) -> Result<f64> {
+pub(super) fn bound(idx: i32, schema: i32, custom_values: &[f64]) -> Result<f64> {
     if schema == CUSTOM_BUCKETS_SCHEMA {
         let len = custom_values.len() as i64;
         return match i64::from(idx) {
@@ -363,7 +363,7 @@ pub(super) fn variance(h: &HistogramView<'_>, buckets: &mut Vec<NativeBucket>) -
 }
 
 /// Prometheus `kahansum.Inc`.
-fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
+pub(super) fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
     let t = sum + inc;
     if t.is_infinite() {
         return (t, 0.0);
