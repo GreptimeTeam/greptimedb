@@ -69,6 +69,7 @@ use crate::dist_plan::dyn_filter_bridge::{
     query_context_with_refreshed_initial_dyn_filter_regs,
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
 };
+use crate::dist_plan::planner::CaptureNativeRawRoute;
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
@@ -211,20 +212,41 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
 
 /// Validates the remote schema before positional column handling.
 ///
-/// Field metadata (indexing/encoding/compression hints) is non-semantic at
-/// this boundary and is ignored: two fields are equal when their name, data
-/// type, and nullability match (see [`fields_semantically_equal`]). A
-/// timestamp timezone difference is the only intentional exception, accepted
-/// when the fields share the same timestamp unit, distinct timezones, and
-/// equal name and nullability. Top-level Arrow schema metadata is
-/// non-semantic at this boundary as well. JSON columns are compared
-/// semantically (see [`json_fields_compatible`]) because their wire and
-/// decoded representations use different physical arrow types.
+/// Ordinary SQL schemas retain the lenient comparison below: auxiliary field
+/// metadata and top-level metadata are ignored, timestamps may differ only by
+/// timezone, and JSON wire/decoded types use [`json_fields_compatible`].
+/// Schemas carrying any `greptime.series.*` top-level marker instead use exact
+/// frame identity for all reserved top-level metadata and every field, including
+/// nested field metadata. This compares identity, not frame validity.
 fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
     source: &str,
 ) -> Result<()> {
+    let has_series_frame_metadata = expected
+        .metadata()
+        .keys()
+        .chain(actual.metadata().keys())
+        .any(|key| key.starts_with("greptime.series."));
+    if has_series_frame_metadata {
+        let reserved_metadata_matches = expected
+            .metadata()
+            .iter()
+            .filter(|(key, _)| key.starts_with("greptime.series."))
+            .all(|(key, value)| actual.metadata().get(key) == Some(value))
+            && actual
+                .metadata()
+                .iter()
+                .filter(|(key, _)| key.starts_with("greptime.series."))
+                .all(|(key, value)| expected.metadata().get(key) == Some(value));
+        if !reserved_metadata_matches || expected.fields() != actual.fields() {
+            return Err(remote_schema_mismatch(format!(
+                "MergeScan {source} series frame schema mismatch"
+            )));
+        }
+        return Ok(());
+    }
+
     if expected.fields().len() != actual.fields().len() {
         return Err(remote_schema_mismatch(format!(
             "MergeScan {source} schema field count mismatch: expected {}, actual {}",
@@ -473,6 +495,32 @@ pub struct MergeScanExec {
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
+    /// Optional route provenance captured by the distributed planner from the
+    /// same physical route that selected `regions`. Ordinary execution never
+    /// reads it, so `None` keeps every existing plan unchanged.
+    native_raw_route: Option<CaptureNativeRawRoute>,
+}
+
+/// Borrowed handoff view over the ordinary plan state a native raw consumer
+/// needs to read the captured route.
+///
+/// It borrows the existing [`MergeScanExec`] fields instead of duplicating them;
+/// the output schema is available from the public `ExecutionPlan::schema()` of
+/// the plan this source came from.
+// TODO(narthex): remove this allowance once the remote native PromQL planner
+// (#9670) consumes the captured route; this PR only captures it.
+#[allow(dead_code)]
+pub(crate) struct NativeRawSource<'a> {
+    /// Frozen route provenance in ordinary region order.
+    pub(crate) route: &'a CaptureNativeRawRoute,
+    /// The exact ordinary input logical plan sent to every region.
+    pub(crate) plan: &'a LogicalPlan,
+    /// The table the ordinary plan scans.
+    pub(crate) table: &'a TableName,
+    /// The handler that performs the region reads.
+    pub(crate) region_query_handler: &'a RegionQueryHandlerRef,
+    /// The query context of the ordinary execution.
+    pub(crate) query_ctx: &'a QueryContextRef,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -556,6 +604,43 @@ impl MergeScanExec {
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
             enable_per_region_metrics,
+            native_raw_route: None,
+        })
+    }
+
+    /// Attaches the native raw route captured from the same physical route that
+    /// selected this plan's regions.
+    ///
+    /// The artifact is provenance for a native raw consumer; ordinary execution
+    /// never reads it.
+    pub(crate) fn with_native_raw_route(mut self, native_raw_route: CaptureNativeRawRoute) -> Self {
+        self.native_raw_route = Some(native_raw_route);
+        self
+    }
+
+    /// Returns the frozen region targets captured for this plan together with
+    /// the ordinary execution state a native raw consumer needs to read them.
+    ///
+    /// Returns `None` unless the planner proved the route and ordinary region
+    /// dispatch stays unchanged: a scan that already captured remote dynamic
+    /// filters, or a flow sink scan, keeps its ordinary path, so a consumer must
+    /// fall back as well. An assigned producer id alone is not active intent,
+    /// because the analyzer assigns one to every merge scan.
+    // TODO(narthex): remove this allowance once the remote native PromQL planner
+    // (#9670) consumes the captured route; this PR only captures it.
+    #[allow(dead_code)]
+    pub(crate) fn native_raw_source(&self) -> Option<NativeRawSource<'_>> {
+        if !self.captured_remote_dyn_filters.lock().unwrap().is_empty() || self.is_flow_sink_scan()
+        {
+            return None;
+        }
+        let route = self.native_raw_route.as_ref()?;
+        Some(NativeRawSource {
+            route,
+            plan: &self.plan,
+            table: &self.table,
+            region_query_handler: &self.region_query_handler,
+            query_ctx: &self.query_ctx,
         })
     }
 
@@ -1310,7 +1395,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
-    use arrow::array::{Int64Array, TimestampMillisecondArray};
+    use arrow::array::{Array, Float64Array, Int64Array, TimestampMillisecondArray};
+    use arrow::buffer::{Buffer, ScalarBuffer};
     use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
@@ -1337,10 +1423,15 @@ mod tests {
     };
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::series::frame::{self, RawLabelMode};
+    use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+    use datatypes::series::samples::{
+        DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
+    };
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
     use futures_util::{Stream, TryStreamExt};
     use session::ReadPreference;
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
     use session::query_id::QueryId;
     use snafu::IntoError;
     use table::table::scan::REGION_SCAN_EXEC_NAME;
@@ -1350,7 +1441,7 @@ mod tests {
 
     use super::*;
     use crate::dist_plan::DynFilterRegistryManager;
-    use crate::options::QueryOptions;
+    use crate::options::{FLOW_SINK_TABLE_ID, QueryOptions};
     use crate::query_engine::{QueryEngineContext, QueryEngineState};
     use crate::region_query::RegionQueryHandler;
 
@@ -1517,6 +1608,217 @@ mod tests {
             exec.properties().output_ordering().is_none(),
             "target_partition < region_count means one output partition may concatenate multiple sorted region streams"
         );
+    }
+
+    #[test]
+    fn merge_scan_ordinary_construction_has_no_native_raw_route() {
+        // The artifact is provenance only: an ordinary plan carries none and
+        // executes exactly as before.
+        let exec = merge_scan_exec_with_sorted_input(1, 1);
+
+        assert!(exec.native_raw_source().is_none());
+    }
+
+    #[test]
+    fn merge_scan_keeps_captured_native_raw_route() {
+        let region_id = RegionId::new(1024, 1);
+        let exec =
+            merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(CaptureNativeRawRoute {
+                targets: vec![(region_id, test_target(1))],
+            });
+
+        let source = exec.native_raw_source().unwrap();
+        assert_eq!(vec![(region_id, test_target(1))], source.route.targets);
+        // The bundle borrows the ordinary plan state, not a copy of it.
+        assert_eq!(1, source.plan.schema().fields().len());
+        assert_eq!("table", source.table.table_name);
+        assert_eq!(1, exec.partition_count());
+    }
+
+    #[test]
+    fn merge_scan_declines_native_raw_route_for_captured_dyn_filters() {
+        // An assigned remote dynamic-filter producer id is identity, not intent:
+        // the analyzer assigns one to every merge scan, so a plan that captured no
+        // filters keeps the handoff view.
+        let region_id = RegionId::new(1024, 1);
+        let exec = remote_dyn_filter_test_exec(
+            Arc::new(TestRegionQueryHandler::default()),
+            QueryContext::arc(),
+        )
+        .with_native_raw_route(CaptureNativeRawRoute {
+            targets: vec![(region_id, test_target(1))],
+        });
+
+        assert!(exec.captured_remote_dyn_filters().is_empty());
+        assert!(exec.native_raw_source().is_some());
+
+        // A filter this producer accepted is really captured, and only then does the
+        // plan keep its ordinary dispatch.
+        install_remote_dyn_filter(&exec);
+        assert_eq!(1, exec.captured_remote_dyn_filters().len());
+        assert!(exec.native_raw_source().is_none());
+
+        // A rewrite of the same scan keeps the frozen route and the captured filters,
+        // so the rewritten plan still declines the handoff view.
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(exec);
+        let replaced = plan
+            .replace_children(
+                vec![],
+                datafusion::physical_plan::ReplaceChildrenOptions::new(
+                    datafusion::physical_plan::ChildrenPropertiesMode::Recompute,
+                ),
+            )
+            .unwrap();
+        let exec = replaced.downcast_ref::<MergeScanExec>().unwrap();
+        assert_eq!(
+            vec![(region_id, test_target(1))],
+            exec.native_raw_route.as_ref().unwrap().targets
+        );
+        assert_eq!(1, exec.captured_remote_dyn_filters().len());
+        assert!(exec.native_raw_source().is_none());
+    }
+
+    #[tokio::test]
+    async fn merge_scan_execution_ignores_native_raw_route() {
+        // Attaching the artifact must not change what an ordinary execution
+        // reads: every region is still dispatched through the handler's own
+        // target selection, with the ordinary read preference, and the same
+        // batches come back in the same order.
+        let regions = vec![
+            RegionId::new(1024, 2),
+            RegionId::new(1024, 1),
+            RegionId::new(1024, 3),
+        ];
+        let batch_for = |region_number: u32| {
+            let base = i64::from(region_number) * 10;
+            record_batch(
+                int64_schema(&["a", "b"]),
+                vec![
+                    Arc::new(Int64Vector::from_slice([base + 1])) as _,
+                    Arc::new(Int64Vector::from_slice([base + 2])) as _,
+                ],
+            )
+        };
+        let responses = || -> Vec<(RegionId, RecordBatch)> {
+            regions
+                .iter()
+                .map(|region_id| (*region_id, batch_for(region_id.region_number())))
+                .collect()
+        };
+        // Region striping keeps the selection order, so this is the whole output.
+        let expected = [(21, 22), (11, 12), (31, 32)];
+
+        let baseline_handler = Arc::new(TestRegionQueryHandler::new(responses()));
+        let baseline = collect_merge_scan(merge_scan_exec_with_handler(
+            regions.clone(),
+            expected_int64_schema(),
+            baseline_handler.clone(),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(expected.len(), baseline.len());
+        for (batch, values) in baseline.iter().zip(expected) {
+            assert_int64_batch(batch, values);
+        }
+
+        // Deliberately different peers, and in a deliberately different order:
+        // an execution that read the artifact would dispatch to these.
+        let handler = Arc::new(TestRegionQueryHandler::new(responses()));
+        let with_route = collect_merge_scan(
+            merge_scan_exec_with_handler(
+                regions.clone(),
+                expected_int64_schema(),
+                handler.clone(),
+                1,
+            )
+            .with_native_raw_route(CaptureNativeRawRoute {
+                targets: vec![
+                    (regions[2], test_target(7)),
+                    (regions[0], test_target(8)),
+                    (regions[1], test_target(9)),
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(baseline, with_route);
+        assert_eq!(expected.len(), with_route.len());
+        for (batch, values) in with_route.iter().zip(expected) {
+            assert_int64_batch(batch, values);
+        }
+        for exec_handler in [&baseline_handler, &handler] {
+            assert_eq!(regions.len(), exec_handler.select_target_calls());
+            assert_eq!(
+                vec![ReadPreference::Leader; regions.len()],
+                exec_handler.read_preferences()
+            );
+            // The ordinary plan dispatches to the target its handler selected,
+            // never to a peer from the artifact.
+            assert_eq!(vec![1; regions.len()], exec_handler.do_get_targets());
+        }
+    }
+
+    #[test]
+    fn merge_scan_with_new_children_preserves_native_raw_route() {
+        let region_id = RegionId::new(1024, 1);
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(
+            merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(CaptureNativeRawRoute {
+                targets: vec![(region_id, test_target(3))],
+            }),
+        );
+
+        let replaced = plan
+            .replace_children(
+                vec![],
+                datafusion::physical_plan::ReplaceChildrenOptions::new(
+                    datafusion::physical_plan::ChildrenPropertiesMode::Recompute,
+                ),
+            )
+            .unwrap();
+        let exec = replaced.downcast_ref::<MergeScanExec>().unwrap();
+        assert_eq!(
+            vec![(region_id, test_target(3))],
+            exec.native_raw_source().unwrap().route.targets
+        );
+    }
+
+    #[test]
+    fn merge_scan_declines_native_raw_route_for_flow_sink_scan() {
+        // A flow sink read keeps its ordinary dispatch, so the handoff view is
+        // not offered even though the artifact exists for these regions.
+        let region_id = RegionId::new(1024, 1);
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    FLOW_SINK_TABLE_ID.to_string(),
+                    region_id.table_id().to_string(),
+                )
+                .build(),
+        );
+        let plan = LogicalPlanBuilder::empty(true).build().unwrap();
+        let schema = plan.schema().as_arrow().clone();
+
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            vec![region_id],
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler::default()),
+            query_ctx,
+            1,
+            None,
+            false,
+        )
+        .unwrap()
+        .with_native_raw_route(CaptureNativeRawRoute {
+            targets: vec![(region_id, test_target(1))],
+        });
+
+        assert!(exec.is_flow_sink_scan());
+        assert!(exec.native_raw_source().is_none());
     }
 
     #[test]
@@ -2045,6 +2347,9 @@ mod tests {
     #[derive(Default)]
     struct TestRegionQueryHandler {
         responses: HashMap<RegionId, TestRegionResponse>,
+        select_target_calls: AtomicUsize,
+        read_preferences: Mutex<Vec<ReadPreference>>,
+        do_get_targets: Mutex<Vec<u64>>,
     }
 
     impl TestRegionQueryHandler {
@@ -2061,7 +2366,10 @@ mod tests {
                     )
                 })
                 .collect();
-            Self { responses }
+            Self {
+                responses,
+                ..Default::default()
+            }
         }
 
         fn with_responses(
@@ -2085,7 +2393,22 @@ mod tests {
                     )
                 })
                 .collect();
-            Self { responses }
+            Self {
+                responses,
+                ..Default::default()
+            }
+        }
+
+        fn select_target_calls(&self) -> usize {
+            self.select_target_calls.load(Ordering::SeqCst)
+        }
+
+        fn read_preferences(&self) -> Vec<ReadPreference> {
+            self.read_preferences.lock().unwrap().clone()
+        }
+
+        fn do_get_targets(&self) -> Vec<u64> {
+            self.do_get_targets.lock().unwrap().clone()
         }
     }
 
@@ -2469,17 +2792,20 @@ mod tests {
     impl RegionQueryHandler for TestRegionQueryHandler {
         async fn select_target(
             &self,
-            _read_preference: ReadPreference,
+            read_preference: ReadPreference,
             _region_id: RegionId,
         ) -> crate::error::Result<crate::region_query::RegionQueryTarget> {
+            self.select_target_calls.fetch_add(1, Ordering::SeqCst);
+            self.read_preferences.lock().unwrap().push(read_preference);
             Ok(test_target(1))
         }
 
         async fn do_get(
             &self,
-            _target: &crate::region_query::RegionQueryTarget,
+            target: &crate::region_query::RegionQueryTarget,
             request: common_query::request::QueryRequest,
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            self.do_get_targets.lock().unwrap().push(target.peer().id);
             let response = self
                 .responses
                 .get(&request.region_id)
@@ -3029,6 +3355,301 @@ mod tests {
         let errors_before = merge_scan_schema_error_count_for_test();
         assert!(collect_merge_scan(exec).await.is_err());
         assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_empty_raw_frame_metadata_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let frame = frame::raw_series_frame_schema(&raw, RawLabelMode::Key).unwrap();
+        let metadata = frame.metadata().clone();
+        let mut cases = Vec::new();
+        for (key, value) in [
+            ("greptime.series.layout", "v0"),
+            ("greptime.series.content", "other"),
+            ("greptime.series.labels", "explicit"),
+            ("greptime.series.time", "other"),
+        ] {
+            let mut changed = metadata.clone();
+            changed.insert(key.to_string(), value.to_string());
+            cases.push((metadata.clone(), changed));
+        }
+        let mut extra = metadata.clone();
+        extra.insert("greptime.series.grid.future".to_string(), "v1".to_string());
+        cases.push((metadata.clone(), extra));
+        let mut removed = metadata.clone();
+        removed.remove("greptime.series.layout");
+        cases.push((metadata.clone(), removed));
+        cases.push((metadata.clone(), StdHashMap::new()));
+        let mut actual_only = StdHashMap::new();
+        actual_only.insert("greptime.series.content".to_string(), "raw".to_string());
+        cases.push((StdHashMap::new(), actual_only));
+        let mut expected_unknown = metadata.clone();
+        expected_unknown.insert("greptime.series.future".to_string(), "v1".to_string());
+        cases.push((expected_unknown, metadata.clone()));
+
+        for (case_index, (expected_metadata, actual_metadata)) in cases.into_iter().enumerate() {
+            let expected =
+                ArrowSchema::new_with_metadata(frame.fields().clone(), expected_metadata);
+            let advertised = Arc::new(
+                Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                    frame.fields().clone(),
+                    actual_metadata,
+                )))
+                .unwrap(),
+            );
+            let errors_before = merge_scan_schema_error_count_for_test();
+            let result = collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected,
+                Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                    region_id,
+                    advertised,
+                    vec![],
+                )])),
+                1,
+            ))
+            .await;
+            assert!(result.is_err(), "metadata case {case_index} must fail");
+            assert_eq!(
+                merge_scan_schema_error_count_for_test(),
+                errors_before + 1,
+                "metadata case {case_index}"
+            );
+        }
+    }
+
+    fn raw_test_series_schema() -> SeriesSchema {
+        SeriesSchema {
+            fields: vec![
+                FieldSpec {
+                    name: Arc::from("value"),
+                },
+                FieldSpec {
+                    name: Arc::from("other"),
+                },
+            ]
+            .into(),
+            eval_grid: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_later_raw_frame_inner_metadata_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let mode = RawLabelMode::Key;
+        let frame = frame::raw_series_frame_schema(&raw, mode).unwrap();
+        let mut changed_metadata = frame.metadata().clone();
+        changed_metadata.insert("greptime.series.marker".to_string(), "changed".to_string());
+        let changed_schema = Arc::new(ArrowSchema::new_with_metadata(
+            frame.fields().clone(),
+            changed_metadata,
+        ));
+        let chunk = |values: [f64; 2], times: [i64; 2], last| {
+            RawSeriesChunk::try_new(
+                &raw,
+                Buffer::from(vec![1u8, 2, 3]),
+                None,
+                RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).unwrap(),
+                SeriesFields::try_from_vec(vec![
+                    Samples::from_float(Float64Array::from(values.to_vec())),
+                    Samples::from_float(Float64Array::from(vec![4.0, 5.0])),
+                ])
+                .unwrap(),
+                last,
+            )
+            .unwrap()
+        };
+        let first = frame::pack_raw_series_chunk(&raw, mode, &chunk([1.0, 2.0], [10, 20], false))
+            .unwrap()
+            .remove(0);
+        let mut second =
+            frame::pack_raw_series_chunk(&raw, mode, &chunk([3.0, 4.0], [30, 40], true))
+                .unwrap()
+                .remove(0);
+        second = DfRecordBatch::try_new(changed_schema, second.columns().to_vec()).unwrap();
+        let advertised = Arc::new(Schema::try_from(frame.clone()).unwrap());
+        let first = RecordBatch::from_df_record_batch(advertised.clone(), first);
+        let second = RecordBatch::from_df_record_batch(advertised.clone(), second);
+        let errors_before = merge_scan_schema_error_count_for_test();
+        let exec = merge_scan_exec_with_handler(
+            vec![region_id],
+            frame.as_ref().clone(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                advertised,
+                vec![Ok(first), Ok(second)],
+            )])),
+            1,
+        );
+        let mut stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
+        let emitted = stream.next().await.unwrap().unwrap();
+        let decoded = frame::unpack_raw_series_frame(&raw, mode, &emitted).unwrap();
+        assert_eq!(decoded[0].time.timestamp(0), Some(10));
+        assert!(matches!(
+            decoded[0].fields.get(0).unwrap().sample(0),
+            SampleRef::Float(1.0)
+        ));
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(stream.next().await.is_none());
+        assert_eq!(merge_scan_schema_error_count_for_test(), errors_before + 1);
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_rejects_raw_frame_field_metadata_mismatch() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let expected = frame::raw_series_frame_schema(&raw, RawLabelMode::Key).unwrap();
+        let frame_metadata = expected.metadata().clone();
+        let fields = expected.fields().to_vec();
+        let mut field_cases = Vec::new();
+        let mut direct_metadata = fields.clone();
+        direct_metadata[0] = Arc::new(fields[0].as_ref().clone().with_metadata(StdHashMap::from(
+            [("semantic".to_string(), "changed".to_string())],
+        )));
+        field_cases.push(direct_metadata);
+
+        let mut nested_metadata = fields.clone();
+        let TestArrowDataType::Struct(children) = fields[2].data_type() else {
+            panic!("raw frame time field must be a struct");
+        };
+        let mut children = children.to_vec();
+        children[0] = children[0]
+            .as_ref()
+            .clone()
+            .with_metadata(StdHashMap::from([(
+                "semantic".to_string(),
+                "changed".to_string(),
+            )]))
+            .into();
+        nested_metadata[2] = fields[2]
+            .as_ref()
+            .clone()
+            .with_data_type(TestArrowDataType::Struct(children.into()))
+            .into();
+        field_cases.push(nested_metadata);
+
+        let mut changed_name = fields.clone();
+        changed_name[0] = fields[0]
+            .as_ref()
+            .clone()
+            .with_name("other".to_string())
+            .into();
+        field_cases.push(changed_name);
+        let mut changed_type = fields.clone();
+        changed_type[0] = fields[0]
+            .as_ref()
+            .clone()
+            .with_data_type(TestArrowDataType::LargeBinary)
+            .into();
+        field_cases.push(changed_type);
+        let mut changed_nullability = fields;
+        changed_nullability[0] = changed_nullability[0]
+            .as_ref()
+            .clone()
+            .with_nullable(true)
+            .into();
+        field_cases.push(changed_nullability);
+
+        for (case_index, actual_fields) in field_cases.into_iter().enumerate() {
+            let advertised = Arc::new(
+                Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                    actual_fields,
+                    frame_metadata.clone(),
+                )))
+                .unwrap(),
+            );
+            let errors_before = merge_scan_schema_error_count_for_test();
+            let result = collect_merge_scan(merge_scan_exec_with_handler(
+                vec![region_id],
+                expected.as_ref().clone(),
+                Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                    region_id,
+                    advertised,
+                    vec![],
+                )])),
+                1,
+            ))
+            .await;
+            assert!(result.is_err(), "field schema case {case_index} must fail");
+            assert_eq!(
+                merge_scan_schema_error_count_for_test(),
+                errors_before + 1,
+                "field schema case {case_index}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_preserves_valid_raw_frame_payload() {
+        let region_id = RegionId::new(1024, 1);
+        let raw = raw_test_series_schema();
+        let expected_frame = frame::raw_series_frame_schema(&raw, RawLabelMode::Key).unwrap();
+        let mut expected_metadata = expected_frame.metadata().clone();
+        expected_metadata.insert("application.note".to_string(), "expected".to_string());
+        let expected = Arc::new(ArrowSchema::new_with_metadata(
+            expected_frame.fields().clone(),
+            expected_metadata,
+        ));
+        let remote_schema = Arc::new(Schema::try_from(expected_frame.clone()).unwrap());
+        let chunk = RawSeriesChunk::try_new(
+            &raw,
+            Buffer::from(vec![1u8, 2, 3]),
+            None,
+            RawTimestamps::try_new(ScalarBuffer::from(vec![10, 20])).unwrap(),
+            SeriesFields::try_from_vec(vec![
+                Samples::from_float(Float64Array::from(vec![Some(-0.0), None])),
+                Samples::from_float(Float64Array::from(vec![
+                    Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+                    Some(3.5),
+                ])),
+            ])
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        let packed = frame::pack_raw_series_chunk(&raw, RawLabelMode::Key, &chunk).unwrap();
+        let inner = packed.into_iter().next().unwrap();
+        let original_columns = inner.columns().to_vec();
+        let batch = RecordBatch::from_df_record_batch(remote_schema.clone(), inner);
+        let result = collect_merge_scan(merge_scan_exec_with_handler(
+            vec![region_id],
+            expected.as_ref().clone(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                remote_schema,
+                vec![Ok(batch)],
+            )])),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        for (original, returned) in original_columns.iter().zip(result[0].columns()) {
+            assert!(Arc::ptr_eq(original, returned));
+        }
+        let decoded = frame::unpack_raw_series_frame(&raw, RawLabelMode::Key, &result[0]);
+        let decoded = decoded.unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].primary_key.as_slice(), &[1, 2, 3]);
+        assert!(decoded[0].is_last);
+        assert_eq!(decoded[0].time.timestamp(0), Some(10));
+        assert_eq!(decoded[0].time.timestamp(1), Some(20));
+        match decoded[0].fields.get(0).unwrap().dense().unwrap() {
+            DenseSamplesRef::Float(values) => {
+                assert_eq!(values.value(0).to_bits(), (-0.0f64).to_bits());
+                assert!(values.is_null(1));
+            }
+            _ => panic!("expected float samples"),
+        }
+        match decoded[0].fields.get(1).unwrap().dense().unwrap() {
+            DenseSamplesRef::Float(values) => {
+                assert_eq!(values.value(0).to_bits(), 0x7ff8_0000_0000_0042);
+                assert_eq!(values.value(1), 3.5);
+            }
+            _ => panic!("expected float samples"),
+        }
     }
 
     #[tokio::test]
