@@ -30,6 +30,7 @@ pub(crate) mod store;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
@@ -653,6 +654,15 @@ pub enum IndexBuildOutcome {
     Aborted(String),
 }
 
+/// How an index build task reports its result.
+enum IndexBuildReport {
+    /// The task sends the outcome to its waiters.
+    Done(IndexBuildOutcome),
+    /// The worker or a retry task owns the waiters, so the task must not
+    /// report to them.
+    Deferred,
+}
+
 /// Mpsc output result sender.
 pub type ResultMpscSender = Sender<Result<IndexBuildOutcome>>;
 
@@ -730,10 +740,7 @@ impl IndexBuildTask {
 
     async fn do_index_build(&mut self, version_control: VersionControlRef) {
         self.listener
-            .on_index_build_begin(RegionFileId::new(
-                self.source.file_meta.region_id,
-                self.source.file_meta.file_id,
-            ))
+            .on_index_build_begin(self.region_file_id())
             .await;
         let result = if self.reason == IndexBuildType::Compact {
             let mut task = self.clone();
@@ -750,14 +757,13 @@ impl IndexBuildTask {
             self.index_build(version_control).await
         };
         match result {
-            Ok(Some(outcome)) => {
+            Ok(IndexBuildReport::Done(outcome)) => {
                 if let IndexBuildOutcome::Aborted(reason) = &outcome {
                     debug!("Index build aborted: {}", reason);
                 }
                 self.on_success(outcome).await
             }
-            // The worker or a retry task reports the result.
-            Ok(None) => {}
+            Ok(IndexBuildReport::Deferred) => {}
             Err(e) => {
                 warn!(
                     e; "Index build task failed, region: {}, file_id: {}",
@@ -766,16 +772,44 @@ impl IndexBuildTask {
                 self.on_failure(e.into()).await
             }
         }
+        self.notify_worker(BackgroundNotify::IndexBuildStopped(IndexBuildStopped {
+            file_id: self.source.file_meta.file_id,
+        }))
+        .await;
+    }
+
+    fn region_file_id(&self) -> RegionFileId {
+        RegionFileId::new(
+            self.source.file_meta.region_id,
+            self.source.file_meta.file_id,
+        )
+    }
+
+    async fn notify_worker(&self, notify: BackgroundNotify) {
         let worker_request = WorkerRequest::Background {
             region_id: self.region_id,
-            notify: BackgroundNotify::IndexBuildStopped(IndexBuildStopped {
-                file_id: self.source.file_meta.file_id,
-            }),
+            notify,
         };
         let _ = self
             .request_sender
             .send(WorkerRequestWithTime::new(worker_request))
             .await;
+    }
+
+    fn aborted(&self, reason: &str) -> IndexBuildReport {
+        IndexBuildReport::Done(IndexBuildOutcome::Aborted(format!(
+            "{reason}, region: {}, file_id: {}",
+            self.region_id, self.source.file_meta.file_id
+        )))
+    }
+
+    async fn abort_and_notify(
+        &self,
+        region_file_id: RegionFileId,
+        reason: &str,
+    ) -> IndexBuildReport {
+        self.listener.on_index_build_abort(region_file_id).await;
+        self.aborted(reason)
     }
 
     // Checks if the SST file still exists in object store and version to avoid conflict with compaction.
@@ -810,26 +844,53 @@ impl IndexBuildTask {
         }
     }
 
-    /// Builds the index of the SST.
-    ///
-    /// Returns `None` when the result is reported elsewhere: by the worker after it
-    /// applies the published edit, or by the retry task of a stale build.
     async fn index_build(
         &mut self,
         version_control: VersionControlRef,
-    ) -> Result<Option<IndexBuildOutcome>> {
-        let region_file_id = RegionFileId::new(
-            self.source.file_meta.region_id,
-            self.source.file_meta.file_id,
-        );
+    ) -> Result<IndexBuildReport> {
+        let region_file_id = self.region_file_id();
+        if let ControlFlow::Break(report) =
+            self.prepare_source(region_file_id, &version_control).await
+        {
+            return Ok(report);
+        }
+        let new_index_version = self
+            .source
+            .file_meta
+            .index_version()
+            .map_or(0, |version| version + 1);
+        let (mut indexer, index_output) =
+            match self.create_index(region_file_id, new_index_version).await? {
+                ControlFlow::Continue(created) => created,
+                ControlFlow::Break(report) => return Ok(report),
+            };
 
-        // Check SST file existence before building index to avoid failure of parquet reader.
+        // Check SST file existence again after building index.
         if !self.check_sst_file_exists(&version_control).await {
-            self.listener.on_index_build_abort(region_file_id).await;
-            return Ok(Some(IndexBuildOutcome::Aborted(format!(
-                "SST file not found during index build, region: {}, file_id: {}",
-                self.region_id, self.source.file_meta.file_id
-            ))));
+            // Calls abort to clean up index files.
+            indexer.abort().await;
+            return Ok(self
+                .abort_and_notify(region_file_id, "SST file not found during index build")
+                .await);
+        }
+
+        self.publish(region_file_id, index_output, new_index_version)
+            .await
+    }
+
+    /// Checks that the SST still exists and moves the build source to the
+    /// file's current manifest state.
+    async fn prepare_source(
+        &mut self,
+        region_file_id: RegionFileId,
+        version_control: &VersionControlRef,
+    ) -> ControlFlow<IndexBuildReport> {
+        // Check SST file existence before building index to avoid failure of parquet reader.
+        if !self.check_sst_file_exists(version_control).await {
+            return ControlFlow::Break(
+                self.abort_and_notify(region_file_id, "SST file not found during index build")
+                    .await,
+            );
         }
 
         // A task may have waited behind another build of the same SST. Build on
@@ -842,11 +903,13 @@ impl IndexBuildTask {
             .get(&self.source.file_meta.file_id)
             .cloned();
         let Some(current_file_meta) = current_file_meta else {
-            self.listener.on_index_build_abort(region_file_id).await;
-            return Ok(Some(IndexBuildOutcome::Aborted(format!(
-                "SST file not found in manifest during index build, region: {}, file_id: {}",
-                self.region_id, self.source.file_meta.file_id
-            ))));
+            return ControlFlow::Break(
+                self.abort_and_notify(
+                    region_file_id,
+                    "SST file not found in manifest during index build",
+                )
+                .await,
+            );
         };
         if self.reason == IndexBuildType::Manual
             && current_file_meta.is_index_consistent_with_region(
@@ -854,20 +917,21 @@ impl IndexBuildTask {
                 &self.index_options,
             )
         {
-            self.listener.on_index_build_abort(region_file_id).await;
-            return Ok(Some(IndexBuildOutcome::Aborted(format!(
-                "Index is already up to date, region: {}, file_id: {}",
-                self.region_id, self.source.file_meta.file_id
-            ))));
+            return ControlFlow::Break(
+                self.abort_and_notify(region_file_id, "Index is already up to date")
+                    .await,
+            );
         }
         self.source.file_meta = current_file_meta;
+        ControlFlow::Continue(())
+    }
 
-        let new_index_version = self
-            .source
-            .file_meta
-            .index_version()
-            .map_or(0, |version| version + 1);
-
+    /// Reads the SST and creates the index files.
+    async fn create_index(
+        &self,
+        region_file_id: RegionFileId,
+        new_index_version: u64,
+    ) -> Result<ControlFlow<IndexBuildReport, (Indexer, IndexOutput)>> {
         let mut parquet_reader = self
             .access_layer
             .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
@@ -884,17 +948,12 @@ impl IndexBuildTask {
                 .filter(|size| *size > 0)
         });
 
-        // Use the same file_id but with new version for index file.
-        let index_file_id = region_file_id.file_id();
         let mut indexer = self
             .indexer_builder
             .build(region_file_id, new_index_version, row_group_size)
             .await;
         if indexer.is_empty() {
-            return Ok(Some(IndexBuildOutcome::Aborted(format!(
-                "No index to build, region: {}, file_id: {}",
-                self.region_id, self.source.file_meta.file_id
-            ))));
+            return Ok(ControlFlow::Break(self.aborted("No index to build")));
         }
 
         if let Some(mut parquet_reader) = parquet_reader.take() {
@@ -916,26 +975,25 @@ impl IndexBuildTask {
 
         if index_output.file_size == 0 {
             // The indexer logs and drops index creation failures.
-            return Ok(Some(IndexBuildOutcome::Aborted(format!(
-                "No index was created, region: {}, file_id: {}",
-                self.region_id, self.source.file_meta.file_id
-            ))));
+            return Ok(ControlFlow::Break(self.aborted("No index was created")));
         }
+        Ok(ControlFlow::Continue((indexer, index_output)))
+    }
 
-        // Check SST file existence again after building index.
-        if !self.check_sst_file_exists(&version_control).await {
-            // Calls abort to clean up index files.
-            indexer.abort().await;
-            self.listener.on_index_build_abort(region_file_id).await;
-            return Ok(Some(IndexBuildOutcome::Aborted(format!(
-                "SST file not found during index build, region: {}, file_id: {}",
-                self.region_id, self.source.file_meta.file_id
-            ))));
-        }
-
-        // Upload index file if write cache is enabled.
-        self.maybe_upload_index_file(index_output.clone(), index_file_id, new_index_version)
-            .await?;
+    /// Uploads the index files and commits them to the manifest.
+    async fn publish(
+        &self,
+        region_file_id: RegionFileId,
+        index_output: IndexOutput,
+        new_index_version: u64,
+    ) -> Result<IndexBuildReport> {
+        // Use the same file_id but with new version for index file.
+        self.maybe_upload_index_file(
+            index_output.clone(),
+            region_file_id.file_id(),
+            new_index_version,
+        )
+        .await?;
 
         self.listener
             .on_index_build_before_manifest_commit(region_file_id)
@@ -954,63 +1012,61 @@ impl IndexBuildTask {
                 self.listener
                     .on_index_build_manifest_committed(region_file_id)
                     .await;
-                let worker_request = WorkerRequest::Background {
-                    region_id: self.region_id,
-                    notify: BackgroundNotify::IndexBuildFinished(IndexBuildFinished {
-                        manifest_version,
-                        file_meta,
-                        result_senders: self.result_senders.clone(),
-                    }),
-                };
-                let _ = self
-                    .request_sender
-                    .send(WorkerRequestWithTime::new(worker_request))
-                    .await;
-                Ok(None)
+                self.notify_worker(BackgroundNotify::IndexBuildFinished(IndexBuildFinished {
+                    manifest_version,
+                    file_meta,
+                    result_senders: self.result_senders.clone(),
+                }))
+                .await;
+                Ok(IndexBuildReport::Deferred)
             }
-            IndexPublication::Stale(stale) => {
-                INDEX_PUBLICATION_STALE_TOTAL
-                    .with_label_values(&["manifest_commit"])
-                    .inc();
-                let index_id = RegionIndexId::new(region_file_id, new_index_version);
-                // If no successor publishes the same version, GC collects the
-                // remote artifact. Repartition requires GC, while local mode
-                // accepts this narrow orphan window when GC is disabled.
-                cleanup_stale_index_caches(
-                    index_id,
-                    &self.access_layer,
-                    self.cache_manager.as_ref(),
-                    self.write_cache.as_ref(),
+            IndexPublication::Stale(stale) => Ok(self
+                .handle_stale_publication(region_file_id, stale, new_index_version)
+                .await),
+        }
+    }
+
+    async fn handle_stale_publication(
+        &self,
+        region_file_id: RegionFileId,
+        stale: IndexPublicationStale,
+        new_index_version: u64,
+    ) -> IndexBuildReport {
+        INDEX_PUBLICATION_STALE_TOTAL
+            .with_label_values(&["manifest_commit"])
+            .inc();
+        // If no successor publishes the same version, GC collects the
+        // remote artifact. Repartition requires GC, while local mode
+        // accepts this narrow orphan window when GC is disabled.
+        cleanup_stale_index_caches(
+            RegionIndexId::new(region_file_id, new_index_version),
+            &self.access_layer,
+            self.cache_manager.as_ref(),
+            self.write_cache.as_ref(),
+        )
+        .await;
+        if stale != IndexPublicationStale::SchemaChanged {
+            return self
+                .abort_and_notify(
+                    region_file_id,
+                    "Index build source changed before publication",
                 )
                 .await;
-                self.listener.on_index_build_abort(region_file_id).await;
-                if stale == IndexPublicationStale::SchemaChanged {
-                    // An index-unrelated schema change also invalidates the
-                    // generation fence. Retry to avoid leaving the SST
-                    // unindexed; per-SST coalescing limits this to one active
-                    // and one pending task, so repeated changes cannot storm.
-                    let retry = BuildIndexRequest {
-                        region_id: self.region_id,
-                        build_type: IndexBuildType::SchemaChange,
-                        file_metas: vec![self.source.file_meta.clone()],
-                        result_senders: self.result_senders.clone(),
-                    };
-                    let worker_request = WorkerRequest::Background {
-                        region_id: self.region_id,
-                        notify: BackgroundNotify::IndexBuildRetry(retry),
-                    };
-                    let _ = self
-                        .request_sender
-                        .send(WorkerRequestWithTime::new(worker_request))
-                        .await;
-                    return Ok(None);
-                }
-                Ok(Some(IndexBuildOutcome::Aborted(format!(
-                    "Index build source changed before publication, region: {}, file_id: {}",
-                    self.region_id, self.source.file_meta.file_id
-                ))))
-            }
         }
+
+        self.listener.on_index_build_abort(region_file_id).await;
+        // An index-unrelated schema change also invalidates the generation
+        // fence. Retry to avoid leaving the SST unindexed; per-SST coalescing
+        // limits this to one active and one pending task, so repeated changes
+        // cannot storm.
+        self.notify_worker(BackgroundNotify::IndexBuildRetry(BuildIndexRequest {
+            region_id: self.region_id,
+            build_type: IndexBuildType::SchemaChange,
+            file_metas: vec![self.source.file_meta.clone()],
+            result_senders: self.result_senders.clone(),
+        }))
+        .await;
+        IndexBuildReport::Deferred
     }
 
     async fn maybe_upload_index_file(
