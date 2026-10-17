@@ -12,8 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Go `math` functions as Prometheus executes them on amd64. They are not correctly rounded,
-//! so the platform libm differs from them in the last bits.
+//! The Go `math` functions whose results on amd64 differ from Rust's standard library beyond
+//! the comparison tolerance (relative 1e-10), or in whether they overflow or keep their sign.
+//! Everything else uses the standard library. Inputs where the standard library fails, all in
+//! `go_math_cases.txt`:
+//!
+//! - `exp`, `sinh`, `cosh`: +Inf from `exp(709.44)` on, where libm is finite up to 709.78.
+//! - `log`, `log10`: `log_amd64.s` does not normalize subnormals (`log(5e-324)` is -709.09,
+//!   not -744.44).
+//! - `log2`: `log(frac) / ln 2 + exp` cancels near 1 (`log2(1.0000000000882365)`).
+//! - `acos`: `π/2 - asin(x)` cancels near 1 (`acos(0.999999992587986)`).
+//! - `sin`, `cos`, `tan`: `trigReduce` loses precision from 2^29 on (`sin(1.0446683604636763e12)`).
+//! - `pow`: repeated squaring accumulates error (`pow(1.0000006850274261, 9.80019037e8)`), and
+//!   subnormal bases go through `log`.
+//! - `atan2`: `atan(y / x)` underflows to +0 and picks the wrong half-turn
+//!   (`atan2(-1e-300, -1e300)` is +π).
+//!
+//! `asin` and `atan` are kept only as dependencies of `acos` and `atan2`.
 
 #![allow(clippy::excessive_precision)]
 
@@ -32,65 +47,14 @@ const FOUR_OVER_PI: f64 = f64::from_bits(0x3ff45f306dc9c883);
 const THREE_PI_4: f64 = f64::from_bits(0x4002d97c7f3321d2);
 const INV_LN10: f64 = f64::from_bits(0x3fdbcb7b1526e50e);
 const INV_LN2: f64 = f64::from_bits(0x3ff71547652b82fe);
-const LN2: f64 = f64::from_bits(0x3fe62e42fefa39ef);
 
-/// Go `math.Exp`, following `exp_amd64.s`. Go takes its FMA branch on CPUs with AVX and FMA,
-/// which every amd64 server CPU since 2013 has; the older branch differs by at most one ulp.
-/// Unlike libm, it overflows to +Inf once `x * log2(e)` rounds to 1024, from about 709.44.
+/// Go `math.Exp` on amd64 overflows once `x * log2(e)` rounds to 1024, from about 709.44
+/// (`exp_amd64.s`); below that libm is within the tolerance.
 pub(crate) fn exp(x: f64) -> f64 {
-    const LN2U: f64 = 0.69314718055966295651160180568695068359375;
-    const LN2L: f64 = 0.28235290563031577122588448175013436025525412068e-12;
-    const OVERFLOW: f64 = 7.09782712893384e+02;
-    const TAYLOR: [f64; 8] = [
-        2.4801587301587301587e-5,
-        1.9841269841269841270e-4,
-        1.3888888888888888889e-3,
-        8.3333333333333333333e-3,
-        4.1666666666666666667e-2,
-        1.6666666666666666667e-1,
-        0.5,
-        1.0,
-    ];
-    if !x.is_finite() {
-        return if x == f64::NEG_INFINITY { 0.0 } else { x };
-    }
-    if x > OVERFLOW {
-        return f64::INFINITY;
-    }
-    let exponent = cvtsd2si(LOG2_E * x);
-    let k = exponent as f64;
-    let mut r = (-k).mul_add(LN2U, x);
-    r = (-k).mul_add(LN2L, r);
-    r *= 0.0625;
-    let mut p = TAYLOR[0];
-    for c in &TAYLOR[1..] {
-        p = r.mul_add(p, *c);
-    }
-    r *= p;
-    for _ in 0..3 {
-        r *= r + 2.0;
-    }
-    r = (r + 2.0).mul_add(r, 1.0);
-
-    let biased = exponent.wrapping_add(0x3FF);
-    if biased <= 0 {
-        if biased < -52 {
-            return 0.0;
-        }
-        r *= f64::from_bits(((biased + 0x3FE) as u64) << 52);
-        return r * f64::from_bits(1 << 52);
-    }
-    // Go branches to +Inf at biased == 0x7FF; the Inf scale gives the same result.
-    r * f64::from_bits((biased as u64) << 52)
-}
-
-/// x86 `CVTSD2SI` to 32 bits: round half to even, and `i32::MIN` when out of range.
-fn cvtsd2si(x: f64) -> i32 {
-    let rounded = x.round_ties_even();
-    if (i32::MIN as f64..=i32::MAX as f64).contains(&rounded) {
-        rounded as i32
+    if x.is_finite() && (LOG2_E * x).round_ties_even() >= 1024.0 {
+        f64::INFINITY
     } else {
-        i32::MIN
+        x.exp()
     }
 }
 
@@ -296,7 +260,7 @@ pub(crate) fn atan2(y: f64, x: f64) -> f64 {
 }
 
 /// Go `math.Atan`.
-pub(crate) fn atan(x: f64) -> f64 {
+fn atan(x: f64) -> f64 {
     if x == 0.0 {
         return x;
     }
@@ -333,7 +297,7 @@ fn xatan(x: f64) -> f64 {
 }
 
 /// Go `math.Asin`.
-pub(crate) fn asin(x: f64) -> f64 {
+fn asin(x: f64) -> f64 {
     if x == 0.0 {
         return x;
     }
@@ -556,129 +520,22 @@ fn shr(x: u64, n: u32) -> u64 {
     x.checked_shr(n).unwrap_or(0)
 }
 
-/// Go `math.Sinh`.
+/// Go `math.Sinh`, which is `exp(|x|) / 2` above 21 and so overflows with [`exp`].
 pub(crate) fn sinh(x: f64) -> f64 {
-    const P0: f64 = -0.6307673640497716991184787251e+6;
-    const P1: f64 = -0.8991272022039509355398013511e+5;
-    const P2: f64 = -0.2894211355989563807284660366e+4;
-    const P3: f64 = -0.2630563213397497062819489e+2;
-    const Q0: f64 = -0.6307673640497716991212077277e+6;
-    const Q1: f64 = 0.1521517378790019070696485176e+5;
-    const Q2: f64 = -0.173678953558233699533450911e+3;
-    let (x, sign) = if x < 0.0 { (-x, true) } else { (x, false) };
-    let temp = if x > 21.0 {
-        exp(x) * 0.5
-    } else if x > 0.5 {
-        let ex = exp(x);
-        (ex - 1.0 / ex) * 0.5
+    if x.abs() > 21.0 {
+        (exp(x.abs()) * 0.5).copysign(x)
     } else {
-        let sq = x * x;
-        let temp = (((P3 * sq + P2) * sq + P1) * sq + P0) * x;
-        temp / (((sq + Q2) * sq + Q1) * sq + Q0)
-    };
-    if sign { -temp } else { temp }
+        x.sinh()
+    }
 }
 
-/// Go `math.Cosh`.
+/// Go `math.Cosh`, which is `exp(|x|) / 2` above 21 and so overflows with [`exp`].
 pub(crate) fn cosh(x: f64) -> f64 {
-    let x = x.abs();
-    if x > 21.0 {
-        return exp(x) * 0.5;
-    }
-    let ex = exp(x);
-    (ex + 1.0 / ex) * 0.5
-}
-
-/// Go `math.Tanh`.
-pub(crate) fn tanh(x: f64) -> f64 {
-    const P: [f64; 3] = [
-        -9.64399179425052238628e-1,
-        -9.92877231001918586564e1,
-        -1.61468768441708447952e3,
-    ];
-    const Q: [f64; 3] = [
-        1.12811678491632931402e2,
-        2.23548839060100448583e3,
-        4.84406305325125486048e3,
-    ];
-    const MAXLOG: f64 = 8.8029691931113054295988e+01;
-    let z = x.abs();
-    if z > 0.5 * MAXLOG {
-        return if x < 0.0 { -1.0 } else { 1.0 };
-    }
-    if z >= 0.625 {
-        let s = exp(2.0 * z);
-        let z = 1.0 - 2.0 / (s + 1.0);
-        return if x < 0.0 { -z } else { z };
-    }
-    if x == 0.0 {
-        return x;
-    }
-    let s = x * x;
-    x + x * s * ((P[0] * s + P[1]) * s + P[2]) / (((s + Q[0]) * s + Q[1]) * s + Q[2])
-}
-
-/// Go `math.Asinh`.
-pub(crate) fn asinh(x: f64) -> f64 {
-    const NEAR_ZERO: f64 = 1.0 / (1u64 << 28) as f64;
-    const LARGE: f64 = (1u64 << 28) as f64;
-    if x.is_nan() || x.is_infinite() {
-        return x;
-    }
-    let (x, sign) = if x < 0.0 { (-x, true) } else { (x, false) };
-    let temp = if x > LARGE {
-        log(x) + LN2
-    } else if x > 2.0 {
-        log(2.0 * x + 1.0 / ((x * x + 1.0).sqrt() + x))
-    } else if x < NEAR_ZERO {
-        x
+    if x.abs() > 21.0 {
+        exp(x.abs()) * 0.5
     } else {
-        log1p(x + x * x / (1.0 + (1.0 + x * x).sqrt()))
-    };
-    if sign { -temp } else { temp }
-}
-
-/// Go `math.Acosh`.
-pub(crate) fn acosh(x: f64) -> f64 {
-    const LARGE: f64 = (1u64 << 28) as f64;
-    if x < 1.0 || x.is_nan() {
-        return f64::NAN;
+        x.cosh()
     }
-    if x == 1.0 {
-        return 0.0;
-    }
-    if x >= LARGE {
-        return log(x) + LN2;
-    }
-    if x > 2.0 {
-        return log(2.0 * x - 1.0 / (x + (x * x - 1.0).sqrt()));
-    }
-    let t = x - 1.0;
-    log1p(t + (2.0 * t + t * t).sqrt())
-}
-
-/// Go `math.Atanh`.
-pub(crate) fn atanh(x: f64) -> f64 {
-    const NEAR_ZERO: f64 = 1.0 / (1u64 << 28) as f64;
-    if !(-1.0..=1.0).contains(&x) {
-        return f64::NAN;
-    }
-    if x == 1.0 {
-        return f64::INFINITY;
-    }
-    if x == -1.0 {
-        return f64::NEG_INFINITY;
-    }
-    let (x, sign) = if x < 0.0 { (-x, true) } else { (x, false) };
-    let temp = if x < NEAR_ZERO {
-        x
-    } else if x < 0.5 {
-        let temp = x + x;
-        0.5 * log1p(temp + temp * x / (1.0 - x))
-    } else {
-        0.5 * log1p((x + x) / (1.0 - x))
-    };
-    if sign { -temp } else { temp }
 }
 
 const LN2_HI: f64 = 6.93147180369123816490e-01;
@@ -690,89 +547,6 @@ const L4: f64 = 2.222219843214978396e-01;
 const L5: f64 = 1.818357216161805012e-01;
 const L6: f64 = 1.531383769920937332e-01;
 const L7: f64 = 1.479819860511658591e-01;
-
-/// Go `math.Log1p`.
-fn log1p(x: f64) -> f64 {
-    const SQRT2_M1: f64 = 4.142135623730950488017e-01;
-    const SQRT2_HALF_M1: f64 = -2.928932188134524755992e-01;
-    const SMALL: f64 = 1.0 / (1u64 << 29) as f64;
-    const TINY: f64 = 1.0 / (1u64 << 54) as f64;
-    const TWO53: f64 = (1u64 << 53) as f64;
-    if x < -1.0 || x.is_nan() {
-        return f64::NAN;
-    }
-    if x == -1.0 {
-        return f64::NEG_INFINITY;
-    }
-    if x == f64::INFINITY {
-        return f64::INFINITY;
-    }
-    let absx = x.abs();
-    let mut f = 0.0;
-    let mut iu: u64 = 0;
-    let mut k: i64 = 1;
-    if absx < SQRT2_M1 {
-        if absx < SMALL {
-            if absx < TINY {
-                return x;
-            }
-            return x - x * x * 0.5;
-        }
-        if x > SQRT2_HALF_M1 {
-            k = 0;
-            f = x;
-            iu = 1;
-        }
-    }
-    let mut c = 0.0;
-    if k != 0 {
-        let mut u;
-        if absx < TWO53 {
-            u = 1.0 + x;
-            iu = u.to_bits();
-            k = (iu >> 52) as i64 - 1023;
-            c = if k > 0 { 1.0 - (u - x) } else { x - (u - 1.0) };
-            c /= u;
-        } else {
-            u = x;
-            iu = u.to_bits();
-            k = (iu >> 52) as i64 - 1023;
-            c = 0.0;
-        }
-        iu &= 0x000fffffffffffff;
-        if iu < 0x0006a09e667f3bcd {
-            u = f64::from_bits(iu | 0x3ff0000000000000);
-        } else {
-            k += 1;
-            u = f64::from_bits(iu | 0x3fe0000000000000);
-            iu = (0x0010000000000000 - iu) >> 2;
-        }
-        f = u - 1.0;
-    }
-    let hfsq = 0.5 * f * f;
-    let kf = k as f64;
-    if iu == 0 {
-        if f == 0.0 {
-            if k == 0 {
-                return 0.0;
-            }
-            c += kf * LN2_LO;
-            return kf * LN2_HI + c;
-        }
-        let r = hfsq * (1.0 - 0.66666666666666666 * f);
-        if k == 0 {
-            return f - r;
-        }
-        return kf * LN2_HI - ((r - (kf * LN2_LO + c)) - f);
-    }
-    let s = f / (2.0 + f);
-    let z = s * s;
-    let r = z * (L1 + z * (L2 + z * (L3 + z * (L4 + z * (L5 + z * (L6 + z * L7))))));
-    if k == 0 {
-        return f - (hfsq - s * (hfsq + r));
-    }
-    kf * LN2_HI - ((hfsq - (s * (hfsq + r) + (kf * LN2_LO + c))) - f)
-}
 
 /// Go `math.Log`, following `log_amd64.s` operation by operation. Its inline frexp does not
 /// normalize subnormal input, which changes the result there.

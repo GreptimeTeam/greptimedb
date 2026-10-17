@@ -150,7 +150,7 @@ fn grid_series(schema: &SeriesSchema, metric: MetricName, points: &Points) -> Op
     )
 }
 
-/// Compares labels, the trimmed absolute range and value bits; any NaN matches any NaN.
+/// Compares labels and the trimmed absolute range exactly, and values with [`close`].
 pub(crate) fn assert_result(case: &Case, mut actual: Vec<Series>) {
     actual.sort_by_key(|series| label_key(&series.metric));
     let mut expected = case.result.iter().collect::<Vec<_>>();
@@ -182,7 +182,7 @@ pub(crate) fn assert_result(case: &Case, mut actual: Vec<Series>) {
         for (&(index, actual), &(expected_index, expected)) in present.iter().zip(points) {
             assert_eq!(index, expected_index, "{}", context());
             assert!(
-                actual.to_bits() == expected.to_bits() || (actual.is_nan() && expected.is_nan()),
+                close(actual, expected),
                 "{} at {index}: {actual:e} ({:016x}) != {expected:e} ({:016x})",
                 context(),
                 actual.to_bits(),
@@ -190,6 +190,25 @@ pub(crate) fn assert_result(case: &Case, mut actual: Vec<Series>) {
             );
         }
     }
+}
+
+/// Prometheus `almost.Equal` with relative tolerance 1e-10, treating results below 1e-10 as
+/// equal and any NaN as equal to NaN, as promql-compat compares engines.
+pub(crate) fn close(a: f64, b: f64) -> bool {
+    const EPSILON: f64 = 1e-10;
+    if a.is_nan() || b.is_nan() {
+        return a.is_nan() && b.is_nan();
+    }
+    if a == b {
+        return true;
+    }
+    let (diff, sum) = ((a - b).abs(), a.abs() + b.abs());
+    let equal = if a == 0.0 || b == 0.0 || sum < f64::MIN_POSITIVE {
+        diff < EPSILON * f64::MIN_POSITIVE
+    } else {
+        diff / sum.min(f64::MAX) < EPSILON
+    };
+    equal || (a.abs() < EPSILON && b.abs() < EPSILON)
 }
 
 fn label_key(metric: &MetricName) -> Vec<(String, String)> {

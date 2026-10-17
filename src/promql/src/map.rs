@@ -222,28 +222,33 @@ pub(crate) fn drop_empty_labels(metric: &mut MetricName) {
 
 impl MathOp {
     fn apply(self, floats: &Float64Array) -> Float64Array {
+        floats.unary(|sample| self.calculate(sample))
+    }
+
+    /// The function applied to one sample.
+    pub(crate) fn calculate(self, v: f64) -> f64 {
         match self {
-            Self::Exp => floats.unary(go_math::exp),
-            Self::Ln => floats.unary(go_math::log),
-            Self::Log2 => floats.unary(go_math::log2),
-            Self::Log10 => floats.unary(go_math::log10),
-            Self::Sin => floats.unary(go_math::sin),
-            Self::Cos => floats.unary(go_math::cos),
-            Self::Tan => floats.unary(go_math::tan),
-            Self::Asin => floats.unary(go_math::asin),
-            Self::Acos => floats.unary(go_math::acos),
-            Self::Atan => floats.unary(go_math::atan),
-            Self::Sinh => floats.unary(go_math::sinh),
-            Self::Cosh => floats.unary(go_math::cosh),
-            Self::Tanh => floats.unary(go_math::tanh),
-            Self::Asinh => floats.unary(go_math::asinh),
-            Self::Acosh => floats.unary(go_math::acosh),
-            Self::Atanh => floats.unary(go_math::atanh),
+            Self::Exp => go_math::exp(v),
+            Self::Ln => go_math::log(v),
+            Self::Log2 => go_math::log2(v),
+            Self::Log10 => go_math::log10(v),
+            Self::Sin => go_math::sin(v),
+            Self::Cos => go_math::cos(v),
+            Self::Tan => go_math::tan(v),
+            Self::Asin => v.asin(),
+            Self::Acos => go_math::acos(v),
+            Self::Atan => v.atan(),
+            Self::Sinh => go_math::sinh(v),
+            Self::Cosh => go_math::cosh(v),
+            Self::Tanh => v.tanh(),
+            Self::Asinh => v.asinh(),
+            Self::Acosh => v.acosh(),
+            Self::Atanh => v.atanh(),
             // Prometheus' operation order, which rounds differently from to_degrees/to_radians.
-            Self::Deg => floats.unary(|v| v * 180.0 / PI),
-            Self::Rad => floats.unary(|v| v * PI / 180.0),
+            Self::Deg => v * 180.0 / PI,
+            Self::Rad => v * PI / 180.0,
             // Zeros and NaN are returned unchanged, so -0 keeps its sign.
-            Self::Sgn => floats.unary(|v| {
+            Self::Sgn => {
                 if v < 0.0 {
                     -1.0
                 } else if v > 0.0 {
@@ -251,17 +256,15 @@ impl MathOp {
                 } else {
                     v
                 }
-            }),
-            Self::Clamp { min, max } => clamp(floats, min, max),
-            Self::ClampMin { min } => clamp(floats, min, f64::INFINITY),
-            Self::ClampMax { max } => clamp(floats, f64::NEG_INFINITY, max),
-            Self::Abs => floats.unary(f64::abs),
-            Self::Ceil => floats.unary(f64::ceil),
-            Self::Floor => floats.unary(f64::floor),
-            Self::Sqrt => floats.unary(f64::sqrt),
-            Self::Round { nearest } => {
-                floats.unary(|sample| Round::round_to_nearest(sample, nearest))
             }
+            Self::Clamp { min, max } => go_max(min, go_min(max, v)),
+            Self::ClampMin { min } => go_max(min, v),
+            Self::ClampMax { max } => go_min(max, v),
+            Self::Abs => v.abs(),
+            Self::Ceil => v.ceil(),
+            Self::Floor => v.floor(),
+            Self::Sqrt => v.sqrt(),
+            Self::Round { nearest } => Round::round_to_nearest(v, nearest),
         }
     }
 
@@ -272,10 +275,6 @@ impl MathOp {
             _ => false,
         }
     }
-}
-
-fn clamp(floats: &Float64Array, min: f64, max: f64) -> Float64Array {
-    floats.unary(|sample| go_max(min, go_min(max, sample)))
 }
 
 /// Go `math.Max`: +Inf wins over NaN, and +0 over -0.
