@@ -20,8 +20,8 @@ use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::GridSeriesBuilder;
-use super::reference::{assert_series_eq, random_dense};
+use super::reference::{Labels, Points, assert_series_eq, points_of, random_dense, series_of};
+use super::{GridSeriesBuilder, merge_same_labelset};
 
 fn grid_schema(fields: usize, grid_len: u64) -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
@@ -82,4 +82,33 @@ fn builder_rejects_invalid_rows() {
     let mut schema = grid_schema(1, 4).as_ref().clone();
     schema.eval_grid = None;
     assert!(GridSeriesBuilder::try_new(Arc::new(schema)).is_err());
+}
+
+/// Label sets compare without empty values, which Prometheus does not have: a series with
+/// `host=""` and one without `host` merge.
+#[test]
+fn merge_treats_empty_label_values_as_absent() {
+    let schema = grid_schema(1, 2);
+    let labels = |host: Option<&str>| {
+        let mut labels = Labels::from([("job".to_string(), "x".to_string())]);
+        if let Some(host) = host {
+            labels.insert("host".to_string(), host.to_string());
+        }
+        labels
+    };
+    let series = vec![
+        series_of(
+            &schema,
+            &labels(Some("")),
+            &Points::from([(0, 1f64.to_bits())]),
+        )
+        .unwrap(),
+        series_of(&schema, &labels(None), &Points::from([(1, 2f64.to_bits())])).unwrap(),
+    ];
+    let merged = merge_same_labelset(&schema, series).unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        points_of(&merged[0]),
+        Points::from([(0, 1f64.to_bits()), (1, 2f64.to_bits())])
+    );
 }
