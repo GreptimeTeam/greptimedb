@@ -796,6 +796,9 @@ impl IndexBuildTask {
             .await;
     }
 
+    /// Builds an aborted outcome without a listener event. Builds that create
+    /// no index stop here, and the listener observes them as neither finished
+    /// nor aborted.
     fn aborted(&self, reason: &str) -> IndexBuildReport {
         IndexBuildReport::Done(IndexBuildOutcome::Aborted(format!(
             "{reason}, region: {}, file_id: {}",
@@ -848,6 +851,8 @@ impl IndexBuildTask {
         &mut self,
         version_control: VersionControlRef,
     ) -> Result<IndexBuildReport> {
+        // Taken before `prepare_source` replaces the source, and used for the
+        // index files and listener events of this build.
         let region_file_id = self.region_file_id();
         if let ControlFlow::Break(report) =
             self.prepare_source(region_file_id, &version_control).await
