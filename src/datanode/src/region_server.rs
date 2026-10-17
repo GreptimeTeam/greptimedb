@@ -27,7 +27,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
@@ -727,7 +727,8 @@ impl RegionServer {
     }
 
     /// Puts into several ready mito regions together, so that each mito worker gets the puts of
-    /// the request to its regions at once and writes them in one batch.
+    /// the request to its regions at once and writes them in one batch. As on the per-region path,
+    /// every region's put is awaited and accounted on its own ingest task.
     ///
     /// Returns Either::Right(original_requests) unless
     /// [`mito_engine_for_batch_puts`](Self::mito_engine_for_batch_puts) accepts the requests.
@@ -739,9 +740,7 @@ impl RegionServer {
             return Ok(Either::Right(requests));
         };
 
-        let first_region_id = requests[0].0;
         let request_type = requests[0].1.request_type();
-        let num_requests = requests.len();
         let puts = requests
             .into_iter()
             .map(|(region_id, request)| match request {
@@ -749,41 +748,51 @@ impl RegionServer {
                 _ => unreachable!("Already checked all are Put"),
             })
             .collect();
-        let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-            .with_label_values(&[request_type])
-            .start_timer();
-        let result =
-            common_runtime::spawn_ingest(async move { mito.put_regions_batch(puts).await })
-                .await
-                .context(RuntimeJoinSnafu { request_type })?
-                .map_err(BoxedError::new)
-                .context(HandleRegionRequestSnafu {
-                    region_id: first_region_id,
-                });
-
-        match result {
-            Ok(affected_rows) => {
-                crate::metrics::REGION_CHANGED_ROW_COUNT
+        let started = Instant::now();
+        let results = common_runtime::spawn_ingest(async move { mito.put_regions_batch(puts) })
+            .await
+            .context(RuntimeJoinSnafu { request_type })?;
+        let tasks = results.into_iter().map(|(region_id, result)| {
+            common_runtime::spawn_ingest(async move {
+                let result = result
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(HandleRegionRequestSnafu { region_id });
+                crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
                     .with_label_values(&[request_type])
-                    .inc_by(affected_rows as u64);
-                Ok(Either::Left(RegionResponse::new(affected_rows)))
-            }
-            Err(err) => {
-                crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                    .with_label_values(&[request_type, err.status_code().as_ref()])
-                    .inc_by(num_requests as u64);
-                Err(err)
-            }
-        }
+                    .observe(started.elapsed().as_secs_f64());
+                match &result {
+                    Ok(affected_rows) => crate::metrics::REGION_CHANGED_ROW_COUNT
+                        .with_label_values(&[request_type])
+                        .inc_by(*affected_rows as u64),
+                    Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                        .with_label_values(&[request_type, err.status_code().as_ref()])
+                        .inc(),
+                }
+                result
+            })
+        });
+        let affected_rows = try_join_all(
+            tasks.map(|task| async move { task.await.context(RuntimeJoinSnafu { request_type })? }),
+        )
+        .await?
+        .into_iter()
+        .sum();
+
+        Ok(Either::Left(RegionResponse::new(affected_rows)))
     }
 
-    /// Returns the mito engine when there are several requests, every one a put into a ready mito
+    /// Returns the mito engine when the requests put into several regions, every one a ready mito
     /// region.
     fn mito_engine_for_batch_puts(
         &self,
         requests: &[(RegionId, RegionRequest)],
     ) -> Option<MitoEngine> {
-        if requests.len() < 2 {
+        let first_region_id = requests.first()?.0;
+        if requests
+            .iter()
+            .all(|(region_id, _)| *region_id == first_region_id)
+        {
             return None;
         }
         let all_puts_to_ready_mito_regions = requests.iter().all(|(region_id, request)| {
@@ -796,7 +805,7 @@ impl RegionServer {
         if !all_puts_to_ready_mito_regions {
             return None;
         }
-        match self.inner.region_map.get(&requests[0].0).as_deref() {
+        match self.inner.region_map.get(&first_region_id).as_deref() {
             Some(RegionEngineWithStatus::Ready(engine)) => {
                 engine.as_any().downcast_ref::<MitoEngine>().cloned()
             }
@@ -3149,11 +3158,12 @@ mod tests {
             .unwrap_err();
     }
 
-    #[tokio::test]
-    async fn test_mito_puts_of_one_request_share_a_wal_append() {
-        // One worker that takes one message at a time, so that only puts that
-        // arrive in one message share a WAL append.
-        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts").await;
+    /// Returns a region server with a Mito engine on a durable object store WAL, the WAL, and the
+    /// WAL options of a region on it.
+    async fn region_server_on_object_store_wal(
+        env: &mut TestEnv,
+        config: MitoConfig,
+    ) -> (RegionServer, Arc<ObjectStoreLogStore>, String) {
         let wal_config = ObjectStoreWalConfig::default();
         let log_store = ObjectStoreLogStore::try_new(
             ObjectStore::new(Memory::default()).unwrap(),
@@ -3163,11 +3173,6 @@ mod tests {
         )
         .await
         .unwrap();
-        let config = MitoConfig {
-            num_workers: 1,
-            worker_request_batch_size: 1,
-            ..Default::default()
-        };
         let engine = env
             .create_engine_with_log_store(config, log_store.clone())
             .await;
@@ -3177,28 +3182,52 @@ mod tests {
             ObjectStoreWalOptions::new(wal_config.node_prefix(0, STANDALONE_GENERATION)),
         ))
         .unwrap();
+        (region_server, log_store, wal_options)
+    }
 
+    /// Creates a region with `wal_options` and returns an insert of three rows into it.
+    async fn create_region(
+        region_server: &RegionServer,
+        region_id: RegionId,
+        wal_options: &str,
+    ) -> InsertRequest {
+        let request = CreateRequestBuilder::new()
+            .insert_option(WAL_OPTIONS_KEY, wal_options)
+            .build();
+        let rows = Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        };
+        region_server
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        InsertRequest {
+            region_id: region_id.as_u64(),
+            rows: Some(rows),
+            partition_expr_version: None,
+            skip_wal: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mito_puts_of_one_request_share_a_wal_append() {
+        // One worker that takes one message at a time, so that only puts that
+        // arrive in one message share a WAL append.
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts").await;
+        let config = MitoConfig {
+            num_workers: 1,
+            worker_request_batch_size: 1,
+            ..Default::default()
+        };
+        let (region_server, log_store, wal_options) =
+            region_server_on_object_store_wal(&mut env, config).await;
         let mut requests = Vec::new();
         for region_number in 1..=2 {
             let region_id = RegionId::new(1, region_number);
-            let request = CreateRequestBuilder::new()
-                .insert_option(WAL_OPTIONS_KEY, &wal_options)
-                .build();
-            let rows = Rows {
-                schema: rows_schema(&request),
-                rows: build_rows(0, 3),
-            };
-            region_server
-                .handle_request(region_id, RegionRequest::Create(request))
-                .await
-                .unwrap();
-            requests.push(InsertRequest {
-                region_id: region_id.as_u64(),
-                rows: Some(rows),
-                partition_expr_version: None,
-                skip_wal: false,
-            });
+            requests.push(create_region(&region_server, region_id, &wal_options).await);
         }
+
         let response = region_server
             .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests { requests }))
             .await
@@ -3212,6 +3241,52 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_mito_batch_puts_fail_without_waiting_for_other_regions() {
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-error").await;
+        let config = MitoConfig {
+            num_workers: 2,
+            ..Default::default()
+        };
+        let (region_server, log_store, wal_options) =
+            region_server_on_object_store_wal(&mut env, config).await;
+        // Regions 1 and 2 of table 1 belong to different workers. The put to region 1 waits for a
+        // WAL object whose create is held; Mito does not know region 2, so its put fails at once.
+        let held = RegionId::new(1, 1);
+        let unknown = RegionId::new(1, 2);
+        let held_insert = create_region(&region_server, held, &wal_options).await;
+        let unknown_insert = InsertRequest {
+            region_id: unknown.as_u64(),
+            ..held_insert.clone()
+        };
+        let mito = region_server
+            .inner
+            .region_map
+            .get(&held)
+            .unwrap()
+            .clone()
+            .into_engine();
+        region_server
+            .inner
+            .region_map
+            .insert(unknown, RegionEngineWithStatus::Ready(mito));
+        log_store.hold_creates();
+
+        let requests = vec![held_insert, unknown_insert];
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            region_server.handle_requests_in_parallel(region_request::Body::Inserts(
+                InsertRequests { requests },
+            )),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(StatusCode::RegionNotFound, err.status_code());
+        log_store.release_creates();
     }
 
     #[tokio::test]
@@ -3255,6 +3330,7 @@ mod tests {
         );
         for requests in [
             vec![put(mito_a)],
+            vec![put(mito_a), put(mito_a)],
             vec![put(mito_a), delete(mito_b)],
             vec![put(mito_a), put(registering)],
             vec![put(mito_a), put(other_region)],
