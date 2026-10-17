@@ -24,8 +24,9 @@ use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridRange, TimeAxis};
 
-use super::float_histogram::FloatHistogram;
-use super::grid_range;
+use crate::grid_series::external;
+use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::histogram_eval::grid_range;
 
 /// A native histogram aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,8 +199,4 @@ fn aggregate_point<'a>(
     }
     value.compact();
     Ok(Some(value))
-}
-
-fn external(error: datatypes::error::Error) -> DataFusionError {
-    DataFusionError::External(Box::new(error))
 }

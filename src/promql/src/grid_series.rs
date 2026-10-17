@@ -142,6 +142,9 @@ impl GridSeriesBuilder {
     }
 }
 
+/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
+pub(crate) const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
+
 pub(crate) type LabelSet = Vec<(Arc<str>, Arc<str>)>;
 
 /// The label set Prometheus compares, which has no empty values.
@@ -260,6 +263,6 @@ fn read_row(series: &Series, row: usize, values: &mut [Option<f64>]) -> Result<b
     Ok(present)
 }
 
-fn external(error: datatypes::error::Error) -> DataFusionError {
+pub(crate) fn external(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
 }

@@ -18,8 +18,10 @@
 //! operation order. Arithmetic that GreptimeDB's range UDFs compute the same way is shared with
 //! them.
 
-use super::{FloatWindow, WindowKernel};
-use crate::functions::{EdgeKind, add_counter_resets, count_edges, extremum, instant_delta};
+use crate::functions::{
+    EdgeKind, add_counter_resets, count_edges, extremum, instant_delta, kahan_inc,
+};
+use crate::range_eval::{FloatWindow, WindowKernel};
 
 /// A PromQL range-vector function over float samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,20 +141,6 @@ impl RangeFunction {
             }),
         }
     }
-}
-
-/// Prometheus `kahansum.Inc`: Kahan–Neumaier summation that drops the compensation once the
-/// sum is infinite.
-fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
-    let t = sum + inc;
-    let c = if t.is_infinite() {
-        0.0
-    } else if sum.abs() >= inc.abs() {
-        c + ((sum - t) + inc)
-    } else {
-        c + ((inc - t) + sum)
-    };
-    (t, c)
 }
 
 /// Prometheus `funcSumOverTime`.
@@ -331,8 +319,7 @@ fn linear_regression(window: &FloatWindow<'_>, intercept_time: i64) -> (f64, f64
     (slope, intercept)
 }
 
-/// Prometheus `funcDoubleExponentialSmoothing`; the factors are checked by
-/// `RangeEvaluator::try_new`.
+/// Prometheus `funcDoubleExponentialSmoothing`; `RangeEvaluator` checks the factors.
 fn double_exponential_smoothing(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
     if values.len() < 2 {
         return None;

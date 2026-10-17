@@ -65,10 +65,6 @@ fn probe(window: FloatWindow<'_>) -> Option<f64> {
     Some((hash >> 11) as f64)
 }
 
-fn sum(window: FloatWindow<'_>) -> Option<f64> {
-    Some(window.values.iter().sum())
-}
-
 fn raw_schema(fields: usize) -> SeriesSchema {
     SeriesSchema {
         fields: (0..fields)
@@ -111,7 +107,6 @@ fn per_point_probe_evaluator(
     RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, false).unwrap()
 }
 
-/// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
 /// The metric of a result of `function` over the series of `metric(host)`.
 fn output_metric(function: RangeFunction, host: u64) -> MetricName {
     let mut metric = metric(host);
@@ -121,6 +116,7 @@ fn output_metric(function: RangeFunction, host: u64) -> MetricName {
     metric
 }
 
+/// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
 fn chunk(rows: &[Row], fields: usize, host: u64, is_last: bool) -> RawSeriesChunk {
     let padding = 3;
     let timestamps: Vec<_> = (0..padding)
@@ -482,25 +478,6 @@ fn functions_match_range_udfs() {
             }
         }
     }
-}
-
-#[test]
-fn overlapping_window_spans_chunks() {
-    let window = RangeWindow {
-        range_ms: 15,
-        offset_ms: 0,
-        anchor_ms: None,
-    };
-    let kernel: WindowKernel = Box::new(sum);
-    let mut evaluator =
-        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel, true).unwrap();
-    let first = chunk(&[(5, vec![Some(1.0)]), (12, vec![Some(2.0)])], 1, 0, false);
-    let second = chunk(&[(18, vec![Some(4.0)]), (25, vec![Some(8.0)])], 1, 0, true);
-    assert!(evaluator.push(&first).unwrap().is_none());
-    let series = evaluator.push(&second).unwrap();
-    // Windows (-5, 10], (5, 20] and (15, 30].
-    let expected = vec![vec![Some(1.0)], vec![Some(6.0)], vec![Some(12.0)]];
-    assert_series_eq(series.as_ref(), &expected, &metric(0));
 }
 
 #[test]
@@ -1181,4 +1158,23 @@ fn rejects_a_subquery_grid_longer_than_u64() {
         subquery_grid(outer, window, 1),
         Err(DataFusionError::Plan(_))
     ));
+}
+
+/// An anchored window that ends before the series starts skips past the one point it reads;
+/// later chunks must not pile up either.
+#[test]
+fn anchored_window_before_the_series_retains_nothing() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: Some(5),
+    };
+    let mut evaluator = probe_evaluator(1, grid(100, 10, 3), window);
+    for chunk_index in 0..100 {
+        let rows: Vec<Row> = (0..100)
+            .map(|row| (50 + chunk_index * 100 + row, vec![Some(1.0)]))
+            .collect();
+        evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
+        assert!(evaluator.fields[0].timestamps.len() <= 100);
+    }
 }

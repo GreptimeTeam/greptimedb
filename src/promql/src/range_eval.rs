@@ -24,7 +24,7 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
 
 mod function;
 #[cfg(test)]
@@ -84,9 +84,6 @@ pub struct RangeEvaluator {
     window_error: Option<String>,
 }
 
-/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
-const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
-
 struct SeriesState {
     /// `None` for evaluated input, which arrives as one complete series.
     primary_key: Option<Buffer>,
@@ -119,7 +116,7 @@ struct FieldSamples {
 }
 
 impl RangeEvaluator {
-    /// Creates an evaluator of `function` for raw series of `input` onto `grid`.
+    /// Creates an evaluator of `function` for the series of `input` onto `grid`.
     pub fn try_new(
         input: &SeriesSchema,
         grid: Arc<EvalGrid>,
@@ -271,11 +268,6 @@ impl RangeEvaluator {
     fn finish_series(&mut self) -> Result<Option<Series>> {
         self.evaluate(None)?;
         let mut state = self.series.take().expect("set by the caller");
-        for field in &mut self.fields {
-            field.timestamps.clear();
-            field.values.clear();
-            field.head = 0;
-        }
         if self.drops_metric_name {
             state.metric.remove_all(&METADATA_LABELS);
         }
@@ -471,7 +463,8 @@ impl RangeEvaluator {
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.
-            if state.cursor == points_read {
+            // An anchored selector can skip past the one point it reads.
+            if state.cursor >= points_read {
                 field.head = field.timestamps.len();
             }
             field.timestamps.drain(..field.head);
