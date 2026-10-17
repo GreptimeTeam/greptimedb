@@ -110,6 +110,9 @@ pub struct QueryOptions {
     /// - `fair`: Fair divides memory available after unspillable reservations
     ///   evenly among spillable reservations and may trigger earlier spills.
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
+    /// Enables the experimental native PromQL execution path for compatible
+    /// instant queries over shared Metric raw series. Default: `false`.
+    pub experimental_native_promql: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -125,6 +128,7 @@ impl Default for QueryOptions {
             experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
+            experimental_native_promql: false,
         }
     }
 }
