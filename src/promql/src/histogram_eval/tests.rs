@@ -401,3 +401,67 @@ fn classic_bounds_keep_the_first_signed_zero() {
     let points = points_of(&result[0]);
     assert_eq!(1.0 / f64::from_bits(points[&0]), f64::INFINITY);
 }
+
+/// Classic histograms over `le` values in input order, at one point.
+fn classic_result(function: HistogramFunction, buckets: &[(&str, f64)]) -> f64 {
+    let grid = Arc::new(
+        datatypes::series::time::EvalGrid::try_new(
+            datatypes::series::time::GridSpec::try_new(0, 1_000, 1).unwrap(),
+        )
+        .unwrap(),
+    );
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let series: Vec<_> = buckets
+        .iter()
+        .map(|(le, count)| {
+            let labels = Labels::from([
+                ("__name__".to_string(), "h".to_string()),
+                ("le".to_string(), le.to_string()),
+            ]);
+            let points = BTreeMap::from([(0, f64::to_bits(*count))]);
+            mixed_series(&schema, &labels, &points, &BTreeMap::new()).unwrap()
+        })
+        .collect();
+    let result = evaluate_histograms(function, &schema, &series).unwrap();
+    f64::from_bits(points_of(&result[0])[&0])
+}
+
+/// Go's insertion sort cannot move a bucket across a NaN bound, so a NaN bucket stays where it
+/// is and `+Inf` can still end the list. Values are from Prometheus v3.15.0.
+#[test]
+fn nan_bounds_stay_in_place() {
+    let buckets = [("1", 10.0), ("NaN", 20.0), ("inf", 30.0)];
+    let quantile = classic_result(HistogramFunction::Quantile(0.1), &buckets);
+    assert!((quantile - 0.3).abs() < 1e-12, "{quantile}");
+    let fraction = classic_result(
+        HistogramFunction::Fraction {
+            lower: 0.0,
+            upper: 0.5,
+        },
+        &buckets,
+    );
+    assert!((fraction - 1.0 / 6.0).abs() < 1e-12, "{fraction}");
+}
+
+/// `le` parses like Go's `strconv.ParseFloat`: a signed NaN is not a bound, and `_` may separate
+/// digits. Values are from Prometheus v3.15.0.
+#[test]
+fn bounds_parse_like_go() {
+    let signed_nan = [("1", 10.0), ("+nan", 20.0), ("+Inf", 30.0)];
+    for (q, expected) in [(0.1, 0.3), (0.5, 1.0)] {
+        let quantile = classic_result(HistogramFunction::Quantile(q), &signed_nan);
+        assert!((quantile - expected).abs() < 1e-12, "{q}: {quantile}");
+    }
+    let underscore = [("1", 10.0), ("1_000", 20.0), ("+Inf", 30.0)];
+    let quantile = classic_result(HistogramFunction::Quantile(0.5), &underscore);
+    assert!((quantile - 500.5).abs() < 1e-9, "{quantile}");
+    for rejected in ["-nan", "_1", "1__0", "1_", "1_.5", "1e_5"] {
+        assert_eq!(super::classic::parse_bound(rejected), None, "{rejected}");
+    }
+}
