@@ -15,7 +15,7 @@
 //! `label_replace` and `label_join` over evaluated series, following Prometheus
 //! `evalLabelReplace`, `evalLabelJoin` and `mergeSeriesWithSameLabelset`.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
@@ -59,6 +59,10 @@ pub fn label_replace(
     merge_same_labelset(schema, series)
 }
 
+/// Go `regexp.Expand` reads a group name as Unicode letters (L), decimal digits (Nd) and `_`,
+/// narrower than `char::is_alphanumeric`.
+static GROUP_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[\p{L}\p{Nd}_]*").unwrap());
+
 /// Go `regexp.Expand`, whose template syntax differs from `regex::Captures::expand`: a numeric
 /// reference with a leading zero, like `$01`, or of more than nine digits is a group name.
 fn expand(regex: &Regex, captures: &regex::Captures<'_>, template: &str, out: &mut String) {
@@ -75,9 +79,7 @@ fn expand(regex: &Regex, captures: &regex::Captures<'_>, template: &str, out: &m
             Some(body) => (true, body),
             None => (false, rest),
         };
-        let len = body
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(body.len());
+        let len = GROUP_NAME.find(body).map_or(0, |name| name.end());
         let name = &body[..len];
         let closed = !braced || body[len..].starts_with('}');
         if name.is_empty() || !closed {
