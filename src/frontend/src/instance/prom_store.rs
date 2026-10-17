@@ -35,6 +35,8 @@ use common_query::Output;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::Schema;
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
     build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
@@ -52,7 +54,7 @@ use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::SST_FORMAT_KEY;
 use table::TableRef;
@@ -172,7 +174,7 @@ async fn to_query_result(
     })
 }
 
-fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
+fn resolve_value_column_name(table_name: &str, table: &TableRef) -> Result<String> {
     let columns = table
         .field_columns()
         .map(|column| column.name)
@@ -196,6 +198,29 @@ fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
         }
         .fail(),
     }
+}
+
+fn validate_labels_types(
+    schema: &Schema,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+) -> ServerResult<()> {
+    for column in schema.column_schemas() {
+        if column.name == timestamp_column_name || column.name == value_column_name {
+            continue;
+        }
+        // All remaining columns are emitted as labels, including non-key columns.
+        ensure!(
+            matches!(column.data_type, ConcreteDataType::String(_)),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "Prometheus remote read only supports string labels: column '{}' has type {:?}",
+                    column.name, column.data_type
+                ),
+            }
+        );
+    }
+    Ok(())
 }
 
 impl Instance {
@@ -232,7 +257,10 @@ impl Instance {
             .name
             .clone();
 
-        let value_column_name = resolve_column_names(table_name, &table)?;
+        let value_column_name = resolve_value_column_name(table_name, &table)?;
+
+        validate_labels_types(&table.schema(), &timestamp_column_name, &value_column_name)
+            .context(PromStoreRemoteQueryPlanSnafu)?;
 
         let dataframe = self
             .query_engine
@@ -820,6 +848,45 @@ mod tests {
     use session::context::QueryContext;
 
     use super::*;
+
+    #[test]
+    fn test_remote_read_label_types() {
+        use datatypes::schema::ColumnSchema;
+
+        for (label_type, supported) in [
+            (ConcreteDataType::string_datatype(), true),
+            (ConcreteDataType::large_string_datatype(), true),
+            (ConcreteDataType::utf8_view_datatype(), true),
+            (ConcreteDataType::binary_datatype(), false),
+            (ConcreteDataType::binary_view_datatype(), false),
+            (ConcreteDataType::json_datatype(), false),
+            (ConcreteDataType::vector_datatype(3), false),
+            (ConcreteDataType::int64_datatype(), false),
+            (ConcreteDataType::boolean_datatype(), false),
+        ] {
+            let schema = Schema::new(vec![
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                ColumnSchema::new("value", label_type.clone(), true),
+                ColumnSchema::new("label", ConcreteDataType::string_datatype(), true),
+            ]);
+            // Value columns are validated separately, regardless of their type.
+            validate_labels_types(&schema, "ts", "value").unwrap();
+
+            let result = validate_labels_types(&schema, "ts", "label");
+            assert_eq!(supported, result.is_ok(), "{label_type:?}");
+            if let Err(err) = result {
+                assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
+                assert!(
+                    err.to_string()
+                        .contains("only supports string labels: column 'value'")
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_auto_create_table_type_for_prom_remote_write_metric_engine() {
