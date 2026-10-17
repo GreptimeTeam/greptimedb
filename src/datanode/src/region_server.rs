@@ -749,31 +749,39 @@ impl RegionServer {
             })
             .collect();
         let started = Instant::now();
-        let results = common_runtime::spawn_ingest(async move { mito.put_regions_batch(puts) })
-            .await
-            .context(RuntimeJoinSnafu { request_type })?;
-        let tasks = results.into_iter().map(|(region_id, result)| {
-            common_runtime::spawn_ingest(async move {
-                let result = result
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(HandleRegionRequestSnafu { region_id });
-                crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-                    .with_label_values(&[request_type])
-                    .observe(started.elapsed().as_secs_f64());
-                match &result {
-                    Ok(affected_rows) => crate::metrics::REGION_CHANGED_ROW_COUNT
-                        .with_label_values(&[request_type])
-                        .inc_by(*affected_rows as u64),
-                    Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                        .with_label_values(&[request_type, err.status_code().as_ref()])
-                        .inc(),
-                }
-                result
-            })
-        });
+        // The accounting tasks are spawned by the batch task, so a caller that goes away does not
+        // lose them.
+        let tasks = common_runtime::spawn_ingest(async move {
+            mito.put_regions_batch(puts)
+                .into_iter()
+                .map(|(region_id, result)| {
+                    common_runtime::spawn_ingest(async move {
+                        let result = result
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(HandleRegionRequestSnafu { region_id });
+                        crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
+                            .with_label_values(&[request_type])
+                            .observe(started.elapsed().as_secs_f64());
+                        match &result {
+                            Ok(affected_rows) => crate::metrics::REGION_CHANGED_ROW_COUNT
+                                .with_label_values(&[request_type])
+                                .inc_by(*affected_rows as u64),
+                            Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                                .with_label_values(&[request_type, err.status_code().as_ref()])
+                                .inc(),
+                        }
+                        result
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .context(RuntimeJoinSnafu { request_type })?;
         let affected_rows = try_join_all(
-            tasks.map(|task| async move { task.await.context(RuntimeJoinSnafu { request_type })? }),
+            tasks
+                .into_iter()
+                .map(|task| async move { task.await.context(RuntimeJoinSnafu { request_type })? }),
         )
         .await?
         .into_iter()
