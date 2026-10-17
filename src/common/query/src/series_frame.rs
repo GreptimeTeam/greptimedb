@@ -29,9 +29,11 @@ use std::task::{Context, Poll};
 use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion_common::DataFusionError;
+use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::frame::{
     RawLabelMode, RawSeriesChunkCursor, RawSeriesFrameBuilder, RawSeriesFrameDecoder,
+    raw_series_frame_schema,
 };
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
@@ -41,6 +43,48 @@ use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSerie
 
 #[cfg(test)]
 mod tests;
+
+const ORDERING_KEY: &str = "greptime.series.ordering";
+
+/// Builds the canonical raw frame schema with the producer's guaranteed ordering.
+///
+/// Ordering records a producer guarantee; it is not inferred from frame contents. `Interleaved`
+/// has no v1 wire representation and is rejected before the schema is assembled.
+pub fn raw_series_frame_schema_with_ordering(
+    schema: &SeriesSchema,
+    mode: RawLabelMode,
+    ordering: SeriesOrdering,
+) -> datafusion_common::Result<ArrowSchemaRef> {
+    let ordering = match ordering {
+        SeriesOrdering::Contiguous => "contiguous",
+        SeriesOrdering::KeyThenTime => "read_key_then_time",
+        SeriesOrdering::Interleaved => {
+            return Err(invalid(
+                "interleaved raw series ordering has no wire representation",
+            ));
+        }
+    };
+    let schema = raw_series_frame_schema(schema, mode).map_err(codec_error)?;
+    let mut metadata = schema.metadata().clone();
+    metadata.insert(ORDERING_KEY.to_string(), ordering.to_string());
+    Ok(Arc::new(ArrowSchema::new_with_metadata(
+        schema.fields().clone(),
+        metadata,
+    )))
+}
+
+/// Reads the declared producer ordering, conservatively treating legacy frames as contiguous.
+///
+/// Only the two orderings representable on the wire can be returned.
+pub fn raw_series_frame_ordering(
+    schema: &ArrowSchema,
+) -> datafusion_common::Result<SeriesOrdering> {
+    match schema.metadata().get(ORDERING_KEY).map(String::as_str) {
+        None | Some("contiguous") => Ok(SeriesOrdering::Contiguous),
+        Some("read_key_then_time") => Ok(SeriesOrdering::KeyThenTime),
+        Some(_) => Err(invalid("unknown raw series ordering")),
+    }
+}
 
 /// Packs a storage raw-series stream into DataFusion record batches incrementally.
 ///
@@ -59,6 +103,9 @@ pub fn pack_raw_series(
     let schema = source.schema().clone();
     let label_source = source.label_source().clone();
     let mode = label_mode(&label_source);
+    // The declared frame schema carries the producer ordering; the shared builder's schema
+    // intentionally omits it, so every ready batch is declared before it is yielded.
+    let frame_schema = raw_series_frame_schema_with_ordering(&schema, mode, ordering)?;
     let builder = RawSeriesFrameBuilder::try_new(
         &schema,
         mode,
@@ -66,7 +113,6 @@ pub fn pack_raw_series(
         RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )
     .map_err(codec_error)?;
-    let frame_schema = builder.schema().clone();
     Ok(Box::pin(PackStream {
         source: Some(source),
         schema,
@@ -265,6 +311,22 @@ impl PackStream {
             None => Ok(None),
         }
     }
+
+    /// Publishes one ready builder batch under the declared frame schema, which is the shared
+    /// builder's schema plus the producer's ordering metadata. A batch whose fields cannot be
+    /// declared releases the stream instead of yielding rows with an undeclared layout.
+    fn declare_batch(
+        &mut self,
+        batch: DfRecordBatch,
+    ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        match batch.with_schema(self.frame_schema.clone()) {
+            Ok(batch) => Poll::Ready(Some(Ok(batch))),
+            Err(error) => {
+                self.finish();
+                Poll::Ready(Some(Err(DataFusionError::from(error))))
+            }
+        }
+    }
 }
 
 impl Stream for PackStream {
@@ -274,7 +336,7 @@ impl Stream for PackStream {
         let this = &mut *self;
         loop {
             match this.advance_cursor() {
-                Ok(Some(batch)) => return Poll::Ready(Some(Ok(batch))),
+                Ok(Some(batch)) => return this.declare_batch(batch),
                 Ok(None) => {}
                 Err(error) => {
                     this.finish();
@@ -289,7 +351,7 @@ impl Stream for PackStream {
                 Poll::Pending => {
                     let flushed = this.flush_buffered();
                     return match flushed {
-                        Ok(Some(batch)) => Poll::Ready(Some(Ok(batch))),
+                        Ok(Some(batch)) => this.declare_batch(batch),
                         Ok(None) => Poll::Pending,
                         Err(error) => {
                             this.finish();
@@ -305,7 +367,7 @@ impl Stream for PackStream {
                     let flushed = this.flush_buffered();
                     this.finish();
                     return match flushed {
-                        Ok(Some(batch)) => Poll::Ready(Some(Ok(batch))),
+                        Ok(Some(batch)) => this.declare_batch(batch),
                         Ok(None) => Poll::Ready(None),
                         Err(error) => Poll::Ready(Some(Err(codec_error(error)))),
                     };
