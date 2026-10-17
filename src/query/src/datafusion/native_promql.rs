@@ -27,6 +27,8 @@ use table::table::scan::RegionScanExec;
 use crate::datafusion::raw_expr_supported;
 use crate::dummy_catalog::DummyTableProvider;
 
+mod remote;
+
 /// Selects native execution for the bounded, unmodified instant-over-divide shape.
 ///
 /// Returns the original plan unchanged for any shape that does not match the local pattern.
