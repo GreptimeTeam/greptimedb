@@ -17,6 +17,7 @@
 pub mod error;
 pub mod index;
 pub mod key_values;
+pub mod labels;
 pub mod primary_key_filter;
 pub mod row_converter;
 
