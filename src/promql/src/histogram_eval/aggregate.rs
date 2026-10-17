@@ -51,48 +51,51 @@ pub fn aggregate_histograms(
     let start = ranges.iter().map(|range| range.0).min().unwrap_or(0);
     let end = ranges.iter().map(|range| range.1).max().unwrap_or(0);
 
-    let mut points: Vec<Vec<Option<FloatHistogram>>> = Vec::with_capacity(schema.fields.len());
-    for field in 0..schema.fields.len() {
-        let mut values = Vec::with_capacity(end - start);
-        for point in start..end {
+    let fields = schema.fields.len();
+    // Written from the first point with a result, so a sparse group allocates no full span.
+    let mut builders: Vec<HistogramBatchBuilder> =
+        (0..fields).map(|_| HistogramBatchBuilder::new()).collect();
+    let mut indices: Vec<Vec<Option<u32>>> = vec![Vec::new(); fields];
+    let mut first = None;
+    let mut row: Vec<Option<FloatHistogram>> = (0..fields).map(|_| None).collect();
+    for point in start..end {
+        for (field, value) in row.iter_mut().enumerate() {
             let samples = group
                 .iter()
                 .zip(&ranges)
                 .filter(|(_, (from, to))| (*from..*to).contains(&point))
                 .map(|(series, &(from, _))| series.fields.as_slice()[field].sample(point - from));
-            values.push(aggregate_point(op, samples)?);
+            *value = aggregate_point(op, samples)?;
         }
-        points.push(values);
-    }
-
-    let Some(first) = (0..end - start).find(|&i| points.iter().any(|field| field[i].is_some()))
-    else {
-        return Ok(None);
-    };
-    let last = (0..end - start)
-        .rfind(|&i| points.iter().any(|field| field[i].is_some()))
-        .unwrap_or(first);
-    let mut fields = Vec::with_capacity(points.len());
-    for values in points {
-        let mut builder = HistogramBatchBuilder::new();
-        let mut indices = Vec::with_capacity(last + 1 - first);
-        for value in &values[first..=last] {
+        if row.iter().all(Option::is_none) {
+            continue;
+        }
+        let first = *first.get_or_insert(point);
+        for ((value, builder), indices) in row.iter().zip(&mut builders).zip(&mut indices) {
+            indices.resize(point - first, None);
             indices.push(match value {
-                Some(h) => Some(h.push_to(&mut builder)?),
+                Some(h) => Some(h.push_to(builder)?),
                 None => None,
             });
         }
+    }
+    let Some(first) = first else {
+        return Ok(None);
+    };
+    let len = indices[0].len();
+    let mut samples = Vec::with_capacity(fields);
+    for (builder, indices) in builders.into_iter().zip(indices) {
         let batch = builder.finish().map_err(external)?;
-        fields.push(
+        samples.push(
             Samples::try_from_histogram(UInt32Array::from(indices), batch).map_err(external)?,
         );
     }
-    let range = GridRange::try_new(grid, start + first, last + 1 - first).map_err(external)?;
+    let range = GridRange::try_new(grid, first, len).map_err(external)?;
     Series::try_new(
         schema,
         metric,
         TimeAxis::Grid(range),
-        SeriesFields::try_from_vec(fields).map_err(external)?,
+        SeriesFields::try_from_vec(samples).map_err(external)?,
     )
     .map(Some)
     .map_err(external)
