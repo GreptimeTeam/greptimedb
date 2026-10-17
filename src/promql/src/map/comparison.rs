@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion::error::{DataFusionError, Result};
-use datatypes::arrow::array::Float64Array;
-use datatypes::series::samples::{Series, SeriesSchema};
-use datatypes::series::time::GridRange;
+use std::sync::Arc;
 
-use crate::map::{ArithmeticOp, ScalarOperand, constant_series, map_arithmetic, map_float_fields};
+use datafusion::error::{DataFusionError, Result};
+use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
+use datatypes::series::time::{GridRange, TimeAxis};
+
+use crate::grid_series::GridSeriesBuilder;
+use crate::map::{ArithmeticOp, ScalarOperand, constant_series, drop_metric_name, map_arithmetic};
 
 /// IEEE comparisons: NaN only satisfies `NotEqual`, and signed zeros compare equal.
 #[derive(Clone, Copy, Debug)]
@@ -30,39 +32,70 @@ pub enum ComparisonOp {
     GreaterEqual,
 }
 
-/// Filter keeps the vector value and name; bool emits 0/1 and removes the metric name.
+/// Filter keeps the vector value and labels; bool emits 0/1 and drops the metric name.
 #[derive(Clone, Copy, Debug)]
 pub enum Comparison {
     Filter(ComparisonOp),
     Bool(ComparisonOp),
 }
 
-/// Compares a vector with a constant scalar without losing its absolute grid positions.
+/// Compares a vector with a constant scalar, like Prometheus `VectorscalarBinop`.
 ///
-/// False filter results become Missing, not compacted rows. Like main, non-bool filtering
-/// rejects ordinary multi-field input; bool compares each field independently. Raw axes and
-/// histogram/mixed inputs share [`crate::map::map_math`]'s rejection contract.
+/// Each field is compared independently; a row is kept where any field passes a filter. The
+/// output is trimmed to its first and last kept rows, and `None` means nothing passed. Raw axes
+/// and histogram/mixed inputs share [`crate::map::map_math`]'s rejection contract.
 pub fn map_compare(
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     series: &Series,
     comparison: Comparison,
     scalar: ScalarOperand,
-) -> Result<Series> {
-    if matches!(comparison, Comparison::Filter(_)) && series.fields.len() != 1 {
-        return Err(DataFusionError::NotImplemented(
-            "filter on multi-value input".into(),
+) -> Result<Option<Series>> {
+    let TimeAxis::Grid(range) = &series.time else {
+        return Err(DataFusionError::Execution(
+            "Map requires an evaluated grid time axis".into(),
         ));
+    };
+    Series::try_new(
+        schema,
+        series.metric.clone(),
+        series.time.clone(),
+        series.fields.clone(),
+    )
+    .map_err(crate::map::series_error)?;
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    let mut fields = series
+        .fields
+        .iter()
+        .map(|field| field.iter())
+        .collect::<Vec<_>>();
+    let mut row = Vec::with_capacity(fields.len());
+    for index in range.start()..range.start() + range.len() {
+        row.clear();
+        for field in &mut fields {
+            let sample = match field.next() {
+                Some(SampleRef::Float(sample)) => Some(sample),
+                Some(SampleRef::Missing) => None,
+                _ => {
+                    return Err(DataFusionError::NotImplemented(
+                        "Map supports only float samples".into(),
+                    ));
+                }
+            };
+            row.push(sample.and_then(|sample| {
+                let (left, right) = match scalar {
+                    ScalarOperand::Left(scalar) => (scalar, sample),
+                    ScalarOperand::Right(scalar) => (sample, scalar),
+                };
+                comparison.apply(left, right, sample)
+            }));
+        }
+        builder.push(index, &row)?;
     }
-    let mut output =
-        map_float_fields(
-            schema,
-            series,
-            |floats| Ok(comparison.apply(floats, scalar)),
-        )?;
+    let mut metric = series.metric.clone();
     if matches!(comparison, Comparison::Bool(_)) {
-        output.metric.remove("__name__");
+        drop_metric_name(&mut metric);
     }
-    Ok(output)
+    builder.finish(metric)
 }
 
 /// Evaluates scalar–scalar arithmetic as an unlabelled, single-field series on `range`.
@@ -83,31 +116,16 @@ pub fn scalar_compare(
     op: ComparisonOp,
     operands: [f64; 2],
 ) -> Result<Series> {
-    let left = constant_series(schema, range, operands[0])?;
-    map_compare(
-        schema,
-        &left,
-        Comparison::Bool(op),
-        ScalarOperand::Right(operands[1]),
-    )
+    constant_series(schema, range, f64::from(op.apply(operands[0], operands[1])))
 }
 
 impl Comparison {
-    fn apply(self, floats: &Float64Array, scalar: ScalarOperand) -> Float64Array {
-        floats
-            .iter()
-            .map(|sample| {
-                let sample = sample?;
-                let (left, right) = match scalar {
-                    ScalarOperand::Left(scalar) => (scalar, sample),
-                    ScalarOperand::Right(scalar) => (sample, scalar),
-                };
-                match self {
-                    Self::Filter(op) => op.apply(left, right).then_some(sample),
-                    Self::Bool(op) => Some(f64::from(op.apply(left, right))),
-                }
-            })
-            .collect()
+    /// The output for one `left op right` pair, where `vector` is the vector operand's value.
+    pub(crate) fn apply(self, left: f64, right: f64, vector: f64) -> Option<f64> {
+        match self {
+            Self::Filter(op) => op.apply(left, right).then_some(vector),
+            Self::Bool(op) => Some(f64::from(op.apply(left, right))),
+        }
     }
 }
 

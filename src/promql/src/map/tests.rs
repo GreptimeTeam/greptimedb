@@ -186,7 +186,7 @@ fn math_preserves_missing_and_uses_ieee_float_semantics() {
         ),
     ];
     for (op, expected) in cases {
-        let output = map_math(&schema, &input, op).unwrap();
+        let output = map_math(&schema, &input, op).unwrap().unwrap();
         let expected = expected
             .into_iter()
             .map(Some)
@@ -211,7 +211,7 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
         .unwrap(),
     ];
     let input = series(&schema, 7, fields);
-    let output = map_math(&schema, &input, MathOp::Floor).unwrap();
+    let output = map_math(&schema, &input, MathOp::Floor).unwrap().unwrap();
     let TimeAxis::Grid(range) = &output.time else {
         panic!("lost grid axis")
     };
@@ -267,7 +267,7 @@ fn empty_and_all_missing_ranges_are_not_expanded() {
             MathOp::Sqrt,
             MathOp::Round { nearest: 0.0 },
         ] {
-            let output = map_math(&schema, &input, op).unwrap();
+            let output = map_math(&schema, &input, op).unwrap().unwrap();
             let TimeAxis::Grid(range) = &output.time else {
                 panic!("lost grid axis")
             };
@@ -290,7 +290,7 @@ fn evaluated_missingness_depends_on_validity_not_nan_payloads() {
             Some(NullBuffer::from(vec![false, true, true])),
         ))],
     );
-    let output = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     assert_floats(
         output.fields.get(0).unwrap(),
         &[None, Some(ordinary_nan), Some(1.0)],
@@ -304,12 +304,12 @@ fn evaluated_missingness_depends_on_validity_not_nan_payloads() {
     // must not reinterpret that computed value as a missing sample or reject the evaluated input.
     let negative_nan = f64::from_bits(PROMETHEUS_STALE_NAN_BITS | (1_u64 << 63));
     let input = series(&schema, 1, vec![floats(&[Some(negative_nan)])]);
-    let absolute = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let absolute = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     let SampleRef::Float(computed_nan) = absolute.fields.get(0).unwrap().sample(0) else {
         panic!("lost computed NaN")
     };
     assert_eq!(computed_nan.to_bits(), PROMETHEUS_STALE_NAN_BITS);
-    let rounded = map_math(&schema, &absolute, MathOp::Ceil).unwrap();
+    let rounded = map_math(&schema, &absolute, MathOp::Ceil).unwrap().unwrap();
     assert_floats(rounded.fields.get(0).unwrap(), &[Some(f64::NAN)]);
 }
 
@@ -403,28 +403,6 @@ fn ordinary_math(op: MathOp, input: Float64Array) -> Float64Array {
     let number_rows = input.len();
     let mut args = vec![ColumnarValue::Array(Arc::new(input))];
     let udf = match op {
-        MathOp::Exp => math::exp(),
-        MathOp::Ln => math::ln(),
-        MathOp::Log2 => math::log2(),
-        MathOp::Log10 => math::log10(),
-        MathOp::Sin => math::sin(),
-        MathOp::Cos => math::cos(),
-        MathOp::Tan => math::tan(),
-        MathOp::Asin => math::asin(),
-        MathOp::Acos => math::acos(),
-        MathOp::Atan => math::atan(),
-        MathOp::Sinh => math::sinh(),
-        MathOp::Cosh => math::cosh(),
-        MathOp::Tanh => math::tanh(),
-        MathOp::Asinh => math::asinh(),
-        MathOp::Acosh => math::acosh(),
-        MathOp::Atanh => math::atanh(),
-        MathOp::Deg => math::degrees(),
-        MathOp::Rad => math::radians(),
-        MathOp::Sgn => math::signum(),
-        MathOp::Clamp { .. } | MathOp::ClampMin { .. } | MathOp::ClampMax { .. } => {
-            unreachable!("clamp has a separate oracle")
-        }
         MathOp::Abs => math::abs(),
         MathOp::Ceil => math::ceil(),
         MathOp::Floor => math::floor(),
@@ -433,6 +411,7 @@ fn ordinary_math(op: MathOp, input: Float64Array) -> Float64Array {
             args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(nearest))));
             Arc::new(Round::scalar_udf())
         }
+        _ => unreachable!("main agrees with Prometheus only for exact functions"),
     };
     let arg_fields = args
         .iter()
@@ -498,53 +477,29 @@ fn math_matches_main_udfs_across_float_and_round_boundaries() {
             Samples::try_from_chunks(chunks).unwrap(),
         ],
     );
-    let cases = [
-        MathOp::Abs,
-        MathOp::Ceil,
-        MathOp::Floor,
-        MathOp::Sqrt,
-        MathOp::Exp,
-        MathOp::Ln,
-        MathOp::Log2,
-        MathOp::Log10,
-        MathOp::Sin,
-        MathOp::Cos,
-        MathOp::Tan,
-        MathOp::Asin,
-        MathOp::Acos,
-        MathOp::Atan,
-        MathOp::Sinh,
-        MathOp::Cosh,
-        MathOp::Tanh,
-        MathOp::Asinh,
-        MathOp::Acosh,
-        MathOp::Atanh,
-        MathOp::Deg,
-        MathOp::Rad,
-        MathOp::Sgn,
-    ]
-    .into_iter()
-    .chain(
-        [
-            1.0,
-            0.0,
-            -0.0,
-            0.001,
-            0.1,
-            105.0,
-            -0.5,
-            f64::MIN_POSITIVE,
-            f64::from_bits(1),
-            f64::MAX,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::NAN,
-        ]
+    let cases = [MathOp::Abs, MathOp::Ceil, MathOp::Floor, MathOp::Sqrt]
         .into_iter()
-        .map(|nearest| MathOp::Round { nearest }),
-    );
+        .chain(
+            [
+                1.0,
+                0.0,
+                -0.0,
+                0.001,
+                0.1,
+                105.0,
+                -0.5,
+                f64::MIN_POSITIVE,
+                f64::from_bits(1),
+                f64::MAX,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+            ]
+            .into_iter()
+            .map(|nearest| MathOp::Round { nearest }),
+        );
     for op in cases {
-        let output = map_math(&schema, &series, op).unwrap();
+        let output = map_math(&schema, &series, op).unwrap().unwrap();
         let expected = ordinary_math(op, input.clone()).iter().collect::<Vec<_>>();
         for field in output.fields.iter() {
             assert_floats(field, &expected);
@@ -565,7 +520,7 @@ fn math_drops_reserved_metadata_labels_with_the_name() {
     for label in ["__type__", "__unit__", "__other__"] {
         input.metric.set(label, "x".into()).unwrap();
     }
-    let output = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     let names = output
         .metric
         .tags()

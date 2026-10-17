@@ -16,6 +16,8 @@ pub mod aggregate;
 pub mod error;
 pub mod extension_plan;
 pub mod functions;
+#[cfg(test)]
+mod golden;
 pub mod grid_series;
 pub mod map;
 mod metrics;

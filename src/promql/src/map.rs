@@ -19,23 +19,17 @@
 
 mod broadcast;
 mod comparison;
+mod go_math;
 #[cfg(test)]
 mod tests;
 
 pub use broadcast::{ScalarSeriesOperand, map_arithmetic_series, map_compare_series};
 pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
 
-use std::sync::Arc;
+use std::f64::consts::PI;
 
-use common_function::function::Function;
-use common_function::scalars::math::ClampFunction;
 use datafusion::error::{DataFusionError, Result};
-use datafusion::functions::math;
-use datafusion_common::ScalarValue;
-use datafusion_common::config::ConfigOptions;
-use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
-use datatypes::arrow::array::{AsArray, Float64Array};
-use datatypes::arrow::datatypes::{DataType, Field, Float64Type};
+use datatypes::arrow::array::Float64Array;
 use datatypes::series::MetricName;
 use datatypes::series::samples::{DenseSamplesRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridRange, TimeAxis};
@@ -88,7 +82,7 @@ pub enum MathOp {
     },
 }
 
-/// Float arithmetic against a constant scalar, with ordinary-path semantics.
+/// Float arithmetic between a vector and a scalar, as in Prometheus.
 #[derive(Clone, Copy, Debug)]
 pub enum ArithmeticOp {
     Add,
@@ -120,29 +114,35 @@ pub enum ScalarOperand {
 /// admitted to the ordinary path before execution; this function neither falls back nor returns
 /// partial results.
 ///
+/// Returns `None` for `clamp` with `max < min`, which yields no series in Prometheus.
+///
 /// Distinct inputs can share a label set once the name is dropped. Merging them, or failing
 /// when both have a value at one step, is left to the caller (Prometheus
 /// `mergeSeriesWithSameLabelset`).
-pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Series> {
+pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Option<Series>> {
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
+    if op.is_empty_clamp() {
+        return Ok(None);
+    }
+    drop_metric_name(&mut output.metric);
+    Ok(Some(output))
+}
+
+/// Negates every float field and drops the metric name, like Prometheus' unary minus.
+///
+/// Shares the evaluated-grid, missingness, unsupported-type and same-labelset contract of
+/// [`map_math`].
+pub fn map_negate(schema: &SeriesSchema, series: &Series) -> Result<Series> {
+    let mut output = map_float_fields(schema, series, |floats| floats.unary(|v| -v))?;
     drop_metric_name(&mut output.metric);
     Ok(output)
 }
 
-/// Negates every float field and removes the metric name, like the ordinary unary path.
+/// Applies arithmetic against a constant scalar to every field and drops the metric name.
 ///
-/// Shares the evaluated-grid, missingness and unsupported-type contract of [`map_math`].
-pub fn map_negate(schema: &SeriesSchema, series: &Series) -> Result<Series> {
-    let mut output = map_float_fields(schema, series, |floats| Ok(floats.unary(|v| -v)))?;
-    output.metric.remove("__name__");
-    Ok(output)
-}
-
-/// Applies arithmetic against a constant scalar to every field, removing the metric name.
-///
-/// Shares the evaluated-grid, missingness and unsupported-type contract of [`map_math`].
-/// Division and remainder use IEEE float semantics, but power retains the ordinary UDF's
-/// error for a zero base raised to a negative exponent. Any error fails the whole series.
+/// Shares the evaluated-grid, missingness, unsupported-type and same-labelset contract of
+/// [`map_math`]. Results follow Prometheus `vectorElemBinop`, including Go's `math.Pow`,
+/// `math.Mod` and `math.Atan2`.
 pub fn map_arithmetic(
     schema: &SeriesSchema,
     series: &Series,
@@ -150,7 +150,7 @@ pub fn map_arithmetic(
     scalar: ScalarOperand,
 ) -> Result<Series> {
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats, scalar))?;
-    output.metric.remove("__name__");
+    drop_metric_name(&mut output.metric);
     Ok(output)
 }
 
@@ -173,13 +173,13 @@ pub fn constant_series(schema: &SeriesSchema, range: GridRange, scalar: f64) -> 
 
 /// Evaluates `pi()` without a vector input, preserving the requested short grid range.
 pub fn map_pi(schema: &SeriesSchema, range: GridRange) -> Result<Series> {
-    constant_series(schema, range, std::f64::consts::PI)
+    constant_series(schema, range, PI)
 }
 
 fn map_float_fields(
     schema: &SeriesSchema,
     series: &Series,
-    map: impl Fn(&Float64Array) -> Result<Float64Array>,
+    map: impl Fn(&Float64Array) -> Float64Array,
 ) -> Result<Series> {
     if !matches!(series.time, TimeAxis::Grid(_)) {
         return Err(DataFusionError::Execution(
@@ -203,30 +203,40 @@ pub(crate) fn drop_metric_name(metric: &mut MetricName) {
 }
 
 impl MathOp {
-    fn apply(self, floats: &Float64Array) -> Result<Float64Array> {
-        Ok(match self {
-            Self::Exp => floats.unary(f64::exp),
-            Self::Ln => floats.unary(f64::ln),
-            Self::Log2 => floats.unary(f64::log2),
-            Self::Log10 => floats.unary(f64::log10),
-            Self::Sin => floats.unary(f64::sin),
-            Self::Cos => floats.unary(f64::cos),
-            Self::Tan => floats.unary(f64::tan),
-            Self::Asin => floats.unary(f64::asin),
-            Self::Acos => floats.unary(f64::acos),
-            Self::Atan => floats.unary(f64::atan),
-            Self::Sinh => floats.unary(f64::sinh),
-            Self::Cosh => floats.unary(f64::cosh),
-            Self::Tanh => floats.unary(f64::tanh),
-            Self::Asinh => floats.unary(f64::asinh),
-            Self::Acosh => floats.unary(f64::acosh),
-            Self::Atanh => floats.unary(f64::atanh),
-            Self::Deg => floats.unary(f64::to_degrees),
-            Self::Rad => floats.unary(f64::to_radians),
-            Self::Sgn => floats.unary(|v| if v == 0.0 { 0.0 } else { v.signum() }),
-            Self::Clamp { min, max } => return map_clamp(floats, min, max),
-            Self::ClampMin { min } => return map_clamp(floats, min, f64::INFINITY),
-            Self::ClampMax { max } => return map_clamp(floats, f64::NEG_INFINITY, max),
+    fn apply(self, floats: &Float64Array) -> Float64Array {
+        match self {
+            Self::Exp => floats.unary(go_math::exp),
+            Self::Ln => floats.unary(go_math::log),
+            Self::Log2 => floats.unary(go_math::log2),
+            Self::Log10 => floats.unary(go_math::log10),
+            Self::Sin => floats.unary(go_math::sin),
+            Self::Cos => floats.unary(go_math::cos),
+            Self::Tan => floats.unary(go_math::tan),
+            Self::Asin => floats.unary(go_math::asin),
+            Self::Acos => floats.unary(go_math::acos),
+            Self::Atan => floats.unary(go_math::atan),
+            Self::Sinh => floats.unary(go_math::sinh),
+            Self::Cosh => floats.unary(go_math::cosh),
+            Self::Tanh => floats.unary(go_math::tanh),
+            Self::Asinh => floats.unary(go_math::asinh),
+            Self::Acosh => floats.unary(go_math::acosh),
+            Self::Atanh => floats.unary(go_math::atanh),
+            // Prometheus' operation order, which rounds differently from to_degrees/to_radians.
+            Self::Deg => floats.unary(|v| v * 180.0 / PI),
+            Self::Rad => floats.unary(|v| v * PI / 180.0),
+            // Zeros and NaN are returned unchanged, so -0 keeps its sign.
+            Self::Sgn => floats.unary(|v| {
+                if v < 0.0 {
+                    -1.0
+                } else if v > 0.0 {
+                    1.0
+                } else {
+                    v
+                }
+            }),
+            Self::Clamp { min, max } => clamp(floats, min, max),
+            Self::ClampMin { min } => clamp(floats, min, f64::INFINITY),
+            Self::ClampMax { max } => clamp(floats, f64::NEG_INFINITY, max),
             Self::Abs => floats.unary(f64::abs),
             Self::Ceil => floats.unary(f64::ceil),
             Self::Floor => floats.unary(f64::floor),
@@ -234,87 +244,75 @@ impl MathOp {
             Self::Round { nearest } => {
                 floats.unary(|sample| Round::round_to_nearest(sample, nearest))
             }
-        })
+        }
+    }
+
+    /// Prometheus returns an empty vector when `max < min`; NaN bounds do not compare.
+    fn is_empty_clamp(self) -> bool {
+        match self {
+            Self::Clamp { min, max } => max < min,
+            _ => false,
+        }
     }
 }
 
-fn map_clamp(floats: &Float64Array, min: f64, max: f64) -> Result<Float64Array> {
-    // Keep the ordinary path's bounds errors, NaN comparisons, and signed-zero behavior.
-    let args = vec![
-        ColumnarValue::Array(Arc::new(floats.clone())),
-        ColumnarValue::Scalar(ScalarValue::Float64(Some(min))),
-        ColumnarValue::Scalar(ScalarValue::Float64(Some(max))),
-    ];
-    let field = Arc::new(Field::new("value", DataType::Float64, true));
-    let output = ClampFunction::default().invoke_with_args(ScalarFunctionArgs {
-        arg_fields: vec![field.clone(); 3],
-        args,
-        number_rows: floats.len(),
-        return_field: field,
-        config_options: Arc::new(ConfigOptions::default()),
-    })?;
-    Ok(output
-        .into_array(floats.len())?
-        .as_primitive::<Float64Type>()
-        .clone())
+fn clamp(floats: &Float64Array, min: f64, max: f64) -> Float64Array {
+    floats.unary(|sample| go_max(min, go_min(max, sample)))
+}
+
+/// Go `math.Max`: +Inf wins over NaN, and +0 over -0.
+fn go_max(x: f64, y: f64) -> f64 {
+    if x == f64::INFINITY || y == f64::INFINITY {
+        f64::INFINITY
+    } else if x.is_nan() || y.is_nan() {
+        f64::NAN
+    } else if x == 0.0 && x == y {
+        if x.is_sign_negative() { y } else { x }
+    } else if x > y {
+        x
+    } else {
+        y
+    }
+}
+
+/// Go `math.Min`: -Inf wins over NaN, and -0 over +0.
+fn go_min(x: f64, y: f64) -> f64 {
+    if x == f64::NEG_INFINITY || y == f64::NEG_INFINITY {
+        f64::NEG_INFINITY
+    } else if x.is_nan() || y.is_nan() {
+        f64::NAN
+    } else if x == 0.0 && x == y {
+        if x.is_sign_negative() { x } else { y }
+    } else if x < y {
+        x
+    } else {
+        y
+    }
 }
 
 impl ArithmeticOp {
-    fn apply(self, floats: &Float64Array, scalar: ScalarOperand) -> Result<Float64Array> {
-        Ok(match self {
-            Self::Add => map_binary(floats, scalar, |left, right| left + right),
-            Self::Subtract => map_binary(floats, scalar, |left, right| left - right),
-            Self::Multiply => map_binary(floats, scalar, |left, right| left * right),
-            Self::Divide => map_binary(floats, scalar, |left, right| left / right),
-            Self::Modulo => map_binary(floats, scalar, |left, right| left % right),
-            Self::Atan2 => map_binary(floats, scalar, f64::atan2),
-            Self::Power => return map_power(floats, scalar),
-        })
+    /// Prometheus `vectorElemBinop` for two floats.
+    pub(crate) fn calculate(self, left: f64, right: f64) -> f64 {
+        match self {
+            Self::Add => left + right,
+            Self::Subtract => left - right,
+            Self::Multiply => left * right,
+            Self::Divide => left / right,
+            Self::Modulo => go_math::fmod(left, right),
+            Self::Power => go_math::pow(left, right),
+            Self::Atan2 => go_math::atan2(left, right),
+        }
+    }
+
+    fn apply(self, floats: &Float64Array, scalar: ScalarOperand) -> Float64Array {
+        match scalar {
+            ScalarOperand::Left(scalar) => floats.unary(|sample| self.calculate(scalar, sample)),
+            ScalarOperand::Right(scalar) => floats.unary(|sample| self.calculate(sample, scalar)),
+        }
     }
 }
 
-fn map_binary(
-    floats: &Float64Array,
-    scalar: ScalarOperand,
-    calculate: impl Fn(f64, f64) -> f64,
-) -> Float64Array {
-    match scalar {
-        ScalarOperand::Left(scalar) => floats.unary(|sample| calculate(scalar, sample)),
-        ScalarOperand::Right(scalar) => floats.unary(|sample| calculate(sample, scalar)),
-    }
-}
-
-fn map_power(floats: &Float64Array, scalar: ScalarOperand) -> Result<Float64Array> {
-    let samples = ColumnarValue::Array(Arc::new(floats.clone()));
-    let literal = |scalar| ColumnarValue::Scalar(ScalarValue::Float64(Some(scalar)));
-    let args = match scalar {
-        ScalarOperand::Left(scalar) => vec![literal(scalar), samples],
-        ScalarOperand::Right(scalar) => vec![samples, literal(scalar)],
-    };
-    apply_power(args, floats.len())
-}
-
-fn apply_power(args: Vec<ColumnarValue>, number_rows: usize) -> Result<Float64Array> {
-    // The existing UDF owns power's domain checks and null handling. A direct powf map would
-    // incorrectly accept 0 ^ negative.
-    let operand_field = Arc::new(Field::new("operand", DataType::Float64, true));
-    let output = math::power().invoke_with_args(ScalarFunctionArgs {
-        arg_fields: vec![operand_field; 2],
-        args,
-        number_rows,
-        return_field: Arc::new(Field::new("power", DataType::Float64, true)),
-        config_options: Arc::new(ConfigOptions::default()),
-    })?;
-    Ok(output
-        .into_array(number_rows)?
-        .as_primitive::<Float64Type>()
-        .clone())
-}
-
-fn map_samples(
-    samples: &Samples,
-    map: &impl Fn(&Float64Array) -> Result<Float64Array>,
-) -> Result<Samples> {
+fn map_samples(samples: &Samples, map: &impl Fn(&Float64Array) -> Float64Array) -> Result<Samples> {
     let chunks = samples
         .segments()
         .iter()
@@ -325,16 +323,16 @@ fn map_samples(
 
 fn map_float_segment(
     segment: &Samples,
-    map: &impl Fn(&Float64Array) -> Result<Float64Array>,
+    map: &impl Fn(&Float64Array) -> Float64Array,
 ) -> Result<Samples> {
     let Some(DenseSamplesRef::Float(floats)) = segment.dense() else {
         return Err(DataFusionError::NotImplemented(
             "Map supports only float samples; histogram/mixed samples are not supported".into(),
         ));
     };
-    Ok(Samples::from_float(map(floats)?))
+    Ok(Samples::from_float(map(floats)))
 }
 
-fn series_error(error: datatypes::error::Error) -> DataFusionError {
+pub(super) fn series_error(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
 }

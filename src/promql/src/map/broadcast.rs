@@ -15,15 +15,14 @@
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datafusion_expr::ColumnarValue;
-use datatypes::arrow::array::Float64Array;
-use datatypes::arrow::compute;
+use datatypes::series::MetricName;
 use datatypes::series::samples::{
-    DenseSamplesRef, FieldSpec, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesSchema,
 };
 use datatypes::series::time::{GridRange, TimeAxis};
 
-use crate::map::{ArithmeticOp, Comparison, apply_power, series_error};
+use crate::grid_series::GridSeriesBuilder;
+use crate::map::{ArithmeticOp, Comparison, drop_metric_name, series_error};
 
 /// A time-varying, unlabelled single-field scalar, with explicit operand direction.
 #[derive(Clone, Copy, Debug)]
@@ -32,99 +31,105 @@ pub enum ScalarSeriesOperand<'a> {
     Right(&'a Series),
 }
 
-/// Broadcasts a time-varying scalar across vector fields, aligned by absolute grid index.
+/// Applies arithmetic between vector fields and a time-varying scalar, aligned by absolute grid
+/// index, and drops the metric name.
 ///
-/// Only the intersection of actual ranges is produced; missing operands stay missing. Each
-/// input retains its own chunk boundaries, and processing splits at either side's boundaries.
-/// The scalar must be unlabelled and single-field on the same grid; histogram/mixed/raw inputs
-/// are rejected even outside the intersection. Two unlabelled single-field inputs also support
-/// scalar–scalar evaluation. No vector matching, full-grid expansion or fallback is performed.
+/// Prometheus scalars exist at every step; a missing scalar point here yields a missing output.
+/// The output is trimmed to its first and last valid rows, and `None` means no valid row. The
+/// scalar must be unlabelled and single-field on the same grid; histogram/mixed/raw inputs are
+/// rejected even outside the overlap. Two unlabelled single-field inputs also evaluate
+/// scalar–scalar operations. Same-labelset merging is left to the caller, as in
+/// [`crate::map::map_math`].
 pub fn map_arithmetic_series(
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     vector: &Series,
     op: ArithmeticOp,
     scalar: ScalarSeriesOperand<'_>,
-) -> Result<Series> {
-    let mut output = map_grid_scalar(schema, vector, scalar, |vector, samples| match scalar {
-        ScalarSeriesOperand::Left(_) => op.apply_arrays(samples, vector),
-        ScalarSeriesOperand::Right(_) => op.apply_arrays(vector, samples),
-    })?;
-    output.metric.remove("__name__");
-    Ok(output)
+) -> Result<Option<Series>> {
+    let mut metric = vector.metric.clone();
+    drop_metric_name(&mut metric);
+    map_grid_scalar(schema, vector, scalar, metric, |left, right, _| {
+        Some(op.calculate(left, right))
+    })
 }
 
-/// Compares against a time-varying scalar. Filter retains vector samples/name; bool drops name.
+/// Compares against a time-varying scalar. Filter keeps vector values and labels; bool emits
+/// 0/1 and drops the metric name.
 ///
-/// Shares [`map_arithmetic_series`]'s alignment contract and the ordinary path's rejection of
-/// non-bool multi-field filters. False filter results are nulls at their original grid positions.
+/// Shares [`map_arithmetic_series`]'s alignment and trimming contract. Each field is compared
+/// independently; a row is kept where any field passes a filter.
 pub fn map_compare_series(
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     vector: &Series,
     comparison: Comparison,
     scalar: ScalarSeriesOperand<'_>,
-) -> Result<Series> {
-    if matches!(comparison, Comparison::Filter(_)) && vector.fields.len() != 1 {
-        return Err(DataFusionError::NotImplemented(
-            "filter on multi-value input".into(),
-        ));
-    }
-    let mut output = map_grid_scalar(schema, vector, scalar, |vector, samples| {
-        Ok(compare_arrays(vector, samples, comparison, scalar))
-    })?;
+) -> Result<Option<Series>> {
+    let mut metric = vector.metric.clone();
     if matches!(comparison, Comparison::Bool(_)) {
-        output.metric.remove("__name__");
+        drop_metric_name(&mut metric);
     }
-    Ok(output)
+    map_grid_scalar(schema, vector, scalar, metric, |left, right, sample| {
+        comparison.apply(left, right, sample)
+    })
 }
 
+/// Calls `calculate(left, right, vector_sample)` at each index where both operands exist.
 fn map_grid_scalar(
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     vector: &Series,
     scalar: ScalarSeriesOperand<'_>,
-    calculate: impl Fn(&Float64Array, &Float64Array) -> Result<Float64Array>,
-) -> Result<Series> {
+    metric: MetricName,
+    calculate: impl Fn(f64, f64, f64) -> Option<f64>,
+) -> Result<Option<Series>> {
     let vector_range = validate_series(schema, vector)?;
-    let scalar = match scalar {
-        ScalarSeriesOperand::Left(s) | ScalarSeriesOperand::Right(s) => s,
+    let (scalar_series, scalar_left) = match scalar {
+        ScalarSeriesOperand::Left(s) => (s, true),
+        ScalarSeriesOperand::Right(s) => (s, false),
     };
-    let scalar_range = validate_scalar(schema, scalar)?;
+    let scalar_range = validate_scalar(schema, scalar_series)?;
     let start = vector_range.start().max(scalar_range.start());
     let end =
         (vector_range.start() + vector_range.len()).min(scalar_range.start() + scalar_range.len());
-    let range = GridRange::try_new(
-        vector_range.grid().clone(),
-        start,
-        end.saturating_sub(start),
-    )
-    .map_err(series_error)?;
-    let fields = if range.is_empty() {
-        vector
-            .fields
-            .iter()
-            .map(|_| Samples::from_float(Float64Array::new_null(0)))
-            .collect()
-    } else {
-        let scalar_samples = scalar.fields.as_slice()[0]
-            .slice(start - scalar_range.start(), range.len())
-            .map_err(series_error)?;
-        vector
-            .fields
-            .iter()
-            .map(|field| {
-                let field = field
-                    .slice(start - vector_range.start(), range.len())
-                    .map_err(series_error)?;
-                map_paired_chunks(&field, &scalar_samples, &calculate)
-            })
-            .collect::<Result<Vec<_>>>()?
-    };
-    Series::try_new(
-        schema,
-        vector.metric.clone(),
-        TimeAxis::Grid(range),
-        SeriesFields::try_from_vec(fields).map_err(series_error)?,
-    )
-    .map_err(series_error)
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    if start >= end {
+        return builder.finish(metric);
+    }
+    let len = end - start;
+    let scalar_samples = scalar_series.fields.as_slice()[0]
+        .slice(start - scalar_range.start(), len)
+        .map_err(series_error)?;
+    let fields = vector
+        .fields
+        .iter()
+        .map(|field| field.slice(start - vector_range.start(), len))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(series_error)?;
+    let mut fields = fields.iter().map(Samples::iter).collect::<Vec<_>>();
+    let mut row = Vec::with_capacity(fields.len());
+    for (offset, scalar) in scalar_samples.iter().enumerate() {
+        let scalar = float_or_missing(scalar)?;
+        row.clear();
+        for field in &mut fields {
+            let sample = float_or_missing(field.next().expect("sliced to the same length"))?;
+            row.push(scalar.zip(sample).and_then(|(scalar, sample)| {
+                if scalar_left {
+                    calculate(scalar, sample, sample)
+                } else {
+                    calculate(sample, scalar, sample)
+                }
+            }));
+        }
+        builder.push(start + offset, &row)?;
+    }
+    builder.finish(metric)
+}
+
+fn float_or_missing(sample: SampleRef<'_>) -> Result<Option<f64>> {
+    match sample {
+        SampleRef::Float(sample) => Ok(Some(sample)),
+        SampleRef::Missing => Ok(None),
+        _ => Err(not_float()),
+    }
 }
 
 fn validate_scalar<'a>(schema: &SeriesSchema, scalar: &'a Series) -> Result<&'a GridRange> {
@@ -157,95 +162,17 @@ fn validate_series<'a>(schema: &SeriesSchema, series: &'a Series) -> Result<&'a 
     )
     .map_err(series_error)?;
     for field in series.fields.iter() {
-        for segment in field.segments() {
-            float_segment(segment)?;
+        if field
+            .segments()
+            .iter()
+            .any(|segment| !matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
+        {
+            return Err(not_float());
         }
     }
     Ok(range)
 }
 
-fn float_segment(samples: &Samples) -> Result<&Float64Array> {
-    match samples.dense() {
-        Some(DenseSamplesRef::Float(floats)) => Ok(floats),
-        _ => Err(DataFusionError::NotImplemented(
-            "Map supports only float samples".into(),
-        )),
-    }
-}
-
-fn map_paired_chunks(
-    vector: &Samples,
-    scalar: &Samples,
-    calculate: &impl Fn(&Float64Array, &Float64Array) -> Result<Float64Array>,
-) -> Result<Samples> {
-    let (mut vector_chunk, mut scalar_chunk, mut vector_offset, mut scalar_offset) = (0, 0, 0, 0);
-    let mut chunks = Vec::new();
-    while let (Some(v), Some(s)) = (
-        vector.segments().get(vector_chunk),
-        scalar.segments().get(scalar_chunk),
-    ) {
-        let (v, s) = (float_segment(v)?, float_segment(s)?);
-        let len = (v.len() - vector_offset).min(s.len() - scalar_offset);
-        chunks.push(Samples::from_float(calculate(
-            &v.slice(vector_offset, len),
-            &s.slice(scalar_offset, len),
-        )?));
-        vector_offset += len;
-        scalar_offset += len;
-        if vector_offset == v.len() {
-            vector_chunk += 1;
-            vector_offset = 0;
-        }
-        if scalar_offset == s.len() {
-            scalar_chunk += 1;
-            scalar_offset = 0;
-        }
-    }
-    Samples::try_from_chunks(chunks).map_err(series_error)
-}
-
-impl ArithmeticOp {
-    fn apply_arrays(self, left: &Float64Array, right: &Float64Array) -> Result<Float64Array> {
-        Ok(match self {
-            Self::Add => compute::binary(left, right, |l, r| l + r)?,
-            Self::Subtract => compute::binary(left, right, |l, r| l - r)?,
-            Self::Multiply => compute::binary(left, right, |l, r| l * r)?,
-            Self::Divide => compute::binary(left, right, |l, r| l / r)?,
-            Self::Modulo => compute::binary(left, right, |l, r| l % r)?,
-            Self::Atan2 => compute::binary(left, right, f64::atan2)?,
-            Self::Power => {
-                return apply_power(
-                    vec![
-                        ColumnarValue::Array(Arc::new(left.clone())),
-                        ColumnarValue::Array(Arc::new(right.clone())),
-                    ],
-                    left.len(),
-                );
-            }
-        })
-    }
-}
-
-fn compare_arrays(
-    vector: &Float64Array,
-    samples: &Float64Array,
-    comparison: Comparison,
-    scalar: ScalarSeriesOperand<'_>,
-) -> Float64Array {
-    vector
-        .iter()
-        .zip(samples)
-        .map(|(vector, sample)| {
-            let vector = vector?;
-            let sample = sample?;
-            let (left, right) = match scalar {
-                ScalarSeriesOperand::Left(_) => (sample, vector),
-                ScalarSeriesOperand::Right(_) => (vector, sample),
-            };
-            match comparison {
-                Comparison::Bool(op) => Some(f64::from(op.apply(left, right))),
-                Comparison::Filter(op) => op.apply(left, right).then_some(vector),
-            }
-        })
-        .collect()
+fn not_float() -> DataFusionError {
+    DataFusionError::NotImplemented("Map supports only float samples".into())
 }
