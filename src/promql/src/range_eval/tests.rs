@@ -966,11 +966,14 @@ fn range_functions_drop_metadata_labels() {
         anchor_ms: None,
     };
     let rows: Vec<Row> = vec![(1_000, vec![Some(1.0)]), (2_000, vec![Some(2.0)])];
+    let nameless = MetricName::try_new(None, labels(&["host"])).unwrap();
     for (function, expected) in [
-        (
-            RangeFunction::Rate,
-            MetricName::try_new(None, labels(&["host"])).unwrap(),
-        ),
+        (RangeFunction::Rate, nameless.clone()),
+        (RangeFunction::MadOverTime, nameless.clone()),
+        (RangeFunction::TsOfMinOverTime, nameless.clone()),
+        (RangeFunction::TsOfMaxOverTime, nameless.clone()),
+        (RangeFunction::TsOfFirstOverTime, nameless.clone()),
+        (RangeFunction::TsOfLastOverTime, nameless),
         (RangeFunction::LastOverTime, input.clone()),
         (RangeFunction::FirstOverTime, input.clone()),
     ] {
