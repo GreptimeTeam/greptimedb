@@ -20,7 +20,10 @@ mod go_sort;
 #[cfg(test)]
 mod golden;
 pub mod grid_series;
+pub mod histogram_eval;
 pub mod map;
+pub mod map_label;
+pub mod map_time;
 mod metrics;
 pub mod range_array;
 pub mod range_eval;
