@@ -22,12 +22,31 @@ timeout_seconds = 600
 visibility_timeout_seconds = 300
 
 # Omit the default encoding from base setup because older binaries do not recognize it.
-# The high shared TWCS trigger avoids compaction changing the three-flush layout.
+# `compaction.twcs.trigger_file_num` is carried over from the earlier revision; nothing in this
+# case depends on its semantics, which differ between builds. Only the shared post_ingest_sql
+# below establishes the measured layout.
 base_setup_sql = [
   "CREATE TABLE sst_float_bss_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'compaction.twcs.trigger_file_num'='100')",
 ]
 candidate_setup_sql = [
   "CREATE TABLE sst_float_bss_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'experimental_sst_float_field_encoding'='byte_stream_split', 'compaction.twcs.trigger_file_num'='100')",
+]
+
+# One shared list for both targets, run after ingestion and its visibility count check and
+# before any measurement. Statement 1 rewrites the physical table into one strict-window file
+# per day (86400 seconds; v1.1.0 rejects start_time/end_time options, so the whole table is
+# compacted) so base and candidate are measured on the same three 2024-01-01..03 daily SSTs,
+# whatever layout the flushes or any automatic compaction produced beforehand.
+# Statement 2 fails closed unless the physical table has exactly three live data SSTs,
+# 1440000 rows each (4320000 total) with the exact daily windows. Statement 3 fails closed
+# unless the logical metric table still returns all 4320000 rows after compaction, so a
+# compaction that changes the row count cannot be measured. Both guards raise a runtime
+# cast error instead of returning a value; the cast inputs are data-derived (aggregates), so
+# the checks cannot be constant-folded away, and an empty result set takes the error branch.
+post_ingest_sql = [
+  "ADMIN compact_table('sst_float_bss_physical', 'strict_window', 'window=86400')",
+  "SELECT CASE WHEN count(*) = 3 AND sum(num_rows) = 4320000 AND min(num_rows) = 1440000 AND max(num_rows) = 1440000 AND count(DISTINCT min_ts) = 3 AND count(CASE WHEN (min_ts = TIMESTAMP '2024-01-01 00:00:00' AND max_ts = TIMESTAMP '2024-01-01 23:59:00') OR (min_ts = TIMESTAMP '2024-01-02 00:00:00' AND max_ts = TIMESTAMP '2024-01-02 23:59:00') OR (min_ts = TIMESTAMP '2024-01-03 00:00:00' AND max_ts = TIMESTAMP '2024-01-03 23:59:00') THEN 1 END) = 3 THEN 0 ELSE CAST(CASE WHEN count(*) = 3 THEN 'sst_float_bss: expected 1440000 rows per live data SST in the 2024-01-01..03 daily windows' ELSE 'sst_float_bss: expected exactly 3 live data SSTs after strict-window compaction' END AS BIGINT) END FROM information_schema.ssts_manifest WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'sst_float_bss_physical') AND region_group = 0 AND visible = true",
+  "SELECT CASE WHEN count(*) = 4320000 THEN 0 ELSE CAST(CASE WHEN count(*) = 4320000 THEN 'ok' ELSE 'sst_float_bss: expected 4320000 logical rows after strict-window compaction' END AS BIGINT) END FROM sst_float_bss",
 ]
 
 [scenario.remote_write.value]
@@ -50,6 +69,11 @@ root_suffix = "data/greptime/public"
 column = "greptime_value"
 min_files = 1
 min_files_with_column = 1
+# The pre-measurement SQL guard checks the three live data SSTs of the physical
+# table. This inspect-time check additionally rejects any obsolete compaction
+# input still on disk when the stopped data directory is inspected, and skips
+# the read-bench instead of benchmarking mixed file generations.
+exact_files = 3
 max_candidate_total_file_size_regression_pct = -5.0
 
 [scenario.remote_write.read_bench]

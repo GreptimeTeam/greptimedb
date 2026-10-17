@@ -193,14 +193,41 @@ before trusting the query measurements. Use
 `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper to
 the outer driver.
 
+A case can also provide one `post_ingest_sql` list, shared by base and candidate.
+Both targets run it in order after ingestion and after the visibility row-count
+check, and before any measurement, storage inspection, or read-bench step. A
+statement that fails aborts that target, so this is where a case pins a physical
+layout that both builds must be measured on: run `ADMIN compact_table(...)` and
+then a fail-closed layout assertion. The `sst_float_bss` case uses it to compact
+the physical metric table with `strict_window`/`window=86400` and to require
+exactly three live data SSTs of 1440000 rows with the three daily windows on both
+sides, plus a separate post-compaction guard that the logical metric table still
+returns all 4320000 rows. Statements must work on every build the case runs
+against: for example
+v1.1.0 rejects `start_time`/`end_time` compaction options, and a `SELECT` cannot
+fail a statement through its value alone, so an assertion must raise an error at
+execution time (the case casts a data-derived string to `BIGINT` on mismatch).
+Inspect the `post_ingest_sql` entries in `prepare-remote.json` for the exact
+statements and their per-target responses.
+
+`storage.exact_files` is the optional inspect-time counterpart to those SQL
+guards: it requires the footer inspector to see exactly that many data files, so
+obsolete compaction inputs that are still on disk after the process stops make
+`finalize-remote` skip the read-bench and fail the target instead of contributing
+to an accepted comparison. It is opt-in and does not change `min_files`
+semantics. Use it only when the case also pins the live file count, since the
+inspector lists whatever is on disk and cannot verify file identity against the
+manifest.
+
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
 time. For each chunk, `prepare-remote` invokes `query_perf_fixture prom-remote-write` with the
 same series cardinality but a shorter `--samples-per-series` and an advanced
 `--start-unix-millis`. `flush_every_sample_chunks` controls periodic
 `ADMIN FLUSH_TABLE('<physical_table>')` calls; with `flush_every_sample_chunks = 1`,
 each time chunk is flushed separately. The final visible SST/file-range layout is
-still determined by the storage engine's normal compaction policy, so cases that
-need multi-window file distribution should span multiple compaction windows. If
+otherwise determined by the storage engine's normal compaction policy, so cases
+that need a specific file distribution should span multiple compaction windows or
+pin the layout with `post_ingest_sql` before measurement. If
 `sample_chunk_size` is omitted, the runner keeps the older single-helper-invocation
 behavior and flushes once at the end.
 
@@ -453,9 +480,20 @@ frontend/cache measurement. The case restricts storage inspection to
 `data/greptime/public`, excluding `greptime_private` SSTs. After the datanodes
 stop, it also runs seven iterations of value-only `parquetbench` for all
 inspected SST files and sequential `scanbench` over the corresponding regions,
-with parallelism one. The three explicit flushes yielded six SSTs in the observed
-mixed runs—three 1,105,920-row files and three 334,080-row files—because storage split each
-flush; this is an observation, not a guaranteed file layout. Their per-run
+with parallelism one. Both targets are compacted before measurement: the shared
+`post_ingest_sql` list runs `ADMIN compact_table('sst_float_bss_physical',
+'strict_window', 'window=86400')` and then fails closed unless that target holds
+exactly three live data SSTs of 1,440,000 rows with the three 2024-01-01..03
+daily windows and the logical metric table still returns all 4,320,000 rows.
+That SQL guard is a pre-measurement check on the manifest and the query path; the
+later footer inspection of the stopped data directory cannot see the manifest, so
+the case also sets `storage.exact_files = 3` and `finalize-remote` skips the
+read-bench and fails the target when the inspected file count differs. So the
+measured layout is pinned before measurement, and the inspected file set is
+checked after the run: a different live layout aborts `prepare-remote` before any
+numbers exist, while leftover files are reported as a failed target with the
+read-bench skipped rather than silently included in an accepted comparison.
+Per-run
 output and aggregate `parquetbench_median_average_ms` and
 `scanbench_median_average_ms` are under
 `targets[].read_bench`; they are quiescent local-file read/scan diagnostics, not
@@ -475,8 +513,12 @@ post-flush and post-compaction measurements separate.
 
 The case's `-5.0` storage target and `25` query-latency guardrail are experimental
 acceptance targets, not observed-benefit claims; do not relax them if a run
-fails. Its three periodic flushes and shared high TWCS trigger avoid the normal
-four-file compaction trigger from confounding the layout. Check footer encodings
+fails. The shared `post_ingest_sql` step compacts both targets into the same
+three daily SSTs and asserts that layout before measurement, which is the only
+guarantee the case makes about layout. The
+`compaction.twcs.trigger_file_num` value in the table options is carried over
+from the earlier revision; its semantics differ between builds and the case does
+not rely on or assert any flush/compaction-trigger behavior. Check footer encodings
 (BSS on candidate and no BSS on base) and data equality from the artifacts rather
 than through a new harness framework.
 
