@@ -16,41 +16,58 @@
 
 mod error;
 mod json_expr_planner;
+pub(crate) mod native_promql;
 mod pg_oid_alias_expr_planner;
 mod planner;
+
+#[cfg(test)]
+#[path = "datafusion/raw_series_admission_tests.rs"]
+mod raw_series_admission_tests;
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_table;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
+use common_query::request::{
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, PreparedNamedRawSeries, RawSeriesRequest,
+};
 use common_query::{Output, OutputData, OutputMeta};
-use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
+use common_recordbatch::adapter::{
+    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::coop::CooperativeExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions};
 use datafusion_common::ResolvedTableReference;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_expr::{
-    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
+    AggregateUDF, DmlStatement, Expr, LogicalPlan as DfLogicalPlan, LogicalPlan, Volatility,
+    WindowUDF, WriteOp,
 };
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
+use datatypes::series::SeriesOrdering;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
+use store_api::metadata::RegionMetadata;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
-use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec};
+use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec, SeriesScanExec};
 use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
@@ -58,10 +75,11 @@ pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
     DistPlannerOptions, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
 };
+use crate::dummy_catalog::DummyTableProvider;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
-    TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
+    TableNotFoundSnafu, TableReadOnlySnafu, UnimplementedSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::metrics::{
@@ -82,15 +100,57 @@ pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
 /// Whether to fallback to the original plan when failed to push down.
 pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
 
+pub(crate) fn raw_expr_supported(expr: &Expr) -> bool {
+    let mut supported = true;
+    let _ = expr.apply(|node| {
+        match node {
+            Expr::Column(_) | Expr::Literal(_, _) => {}
+            Expr::ScalarFunction(function)
+                if function.func.signature().volatility == Volatility::Immutable => {}
+            Expr::BinaryExpr(_)
+            | Expr::Like(_)
+            | Expr::SimilarTo(_)
+            | Expr::Not(_)
+            | Expr::IsNotNull(_)
+            | Expr::IsNull(_)
+            | Expr::IsTrue(_)
+            | Expr::IsFalse(_)
+            | Expr::IsUnknown(_)
+            | Expr::IsNotTrue(_)
+            | Expr::IsNotFalse(_)
+            | Expr::IsNotUnknown(_)
+            | Expr::Negative(_)
+            | Expr::Between(_)
+            | Expr::Case(_)
+            | Expr::Cast(_)
+            | Expr::TryCast(_)
+            | Expr::InList(_) => {}
+            _ => supported = false,
+        }
+        Ok(if supported {
+            TreeNodeRecursion::Continue
+        } else {
+            TreeNodeRecursion::Stop
+        })
+    });
+    supported
+}
+
 fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
     let mut region_id = None;
     let mut stack = vec![plan.clone()];
 
     while let Some(plan) = stack.pop() {
-        if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
-            && let Some(scan_region_id) = scan.query_load_region_id()
-        {
+        let scan_region_id = if plan.name() == REGION_SCAN_EXEC_NAME {
+            plan.downcast_ref::<RegionScanExec>()
+                .and_then(RegionScanExec::query_load_region_id)
+        } else if plan.name() == SERIES_SCAN_EXEC_NAME {
+            plan.downcast_ref::<SeriesScanExec>()
+                .and_then(SeriesScanExec::query_load_region_id)
+        } else {
+            None
+        };
+        if let Some(scan_region_id) = scan_region_id {
             match region_id {
                 Some(region_id) if region_id != scan_region_id => return None,
                 Some(_) => {}
@@ -116,10 +176,16 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     let mut stack = vec![plan.clone()];
 
     while let Some(plan) = stack.pop() {
-        if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
-            && let Some(scan_counters) = scan.query_stat_counters()
-        {
+        let scan_counters = if plan.name() == REGION_SCAN_EXEC_NAME {
+            plan.downcast_ref::<RegionScanExec>()
+                .and_then(RegionScanExec::query_stat_counters)
+        } else if plan.name() == SERIES_SCAN_EXEC_NAME {
+            plan.downcast_ref::<SeriesScanExec>()
+                .and_then(SeriesScanExec::query_stat_counters)
+        } else {
+            None
+        };
+        if let Some(scan_counters) = scan_counters {
             match &counters {
                 Some(counters)
                     if !Arc::ptr_eq(&counters.query_cpu_time, &scan_counters.query_cpu_time)
@@ -145,7 +211,208 @@ pub struct DatafusionQueryEngine {
     plugins: Plugins,
 }
 
+struct PreparedRawSeries {
+    context: QueryEngineContext,
+    plan: Arc<dyn ExecutionPlan>,
+    /// The binding this plan's native leaf was validated against. Bound preparation keeps the
+    /// caller's expectation; named preparation reports the binding derived from the actual scan.
+    binding: RawSeriesRequest,
+    ordering: SeriesOrdering,
+}
+
+/// Derives the authorized logical label and field names of one discovered table scan.
+///
+/// The names come from the scan's own output schema paired with the source metadata it resolved
+/// against, so they describe exactly the authorized output. Internal and reserved columns are not
+/// logical labels or fields. `None` means the output cannot be named, so no mapping is invented.
+fn authorized_logical_names(
+    scan: &datafusion_expr::logical_plan::TableScan,
+    metadata: &RegionMetadata,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let mut logical_tags = Vec::new();
+    let mut field_names = Vec::new();
+    for field in scan.projected_schema.fields() {
+        let column = metadata.column_by_name(field.name())?;
+        if store_api::storage::consts::ReservedColumnId::is_reserved(column.column_id) {
+            continue;
+        }
+        match column.semantic_type {
+            SemanticType::Tag
+                if !store_api::metric_engine_consts::is_metric_engine_internal_column(
+                    field.name(),
+                ) && !store_api::storage::consts::is_internal_column(field.name()) =>
+            {
+                logical_tags.push(field.name().clone());
+            }
+            SemanticType::Field
+                if !store_api::storage::consts::is_internal_column(field.name()) =>
+            {
+                field_names.push(field.name().clone());
+            }
+            SemanticType::Tag | SemanticType::Timestamp | SemanticType::Field => {}
+        }
+    }
+    Some((logical_tags, field_names))
+}
+
 impl DatafusionQueryEngine {
+    /// Prepares a native raw-series leaf for one safely wrapped table scan.
+    ///
+    /// `binding` is the caller's expectation for bound preparation. `None` derives the actual
+    /// binding from the authorized scanner instead. Both modes share this body, so they admit the
+    /// same plan shapes and reject the same residuals.
+    async fn prepare_raw_series_plan(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        binding: Option<RawSeriesRequest>,
+    ) -> Result<Option<PreparedRawSeries>> {
+        // A positive hint describes the caller's own parallelism, which the private context below
+        // reduces to one partition; only hints that cannot be honoured at all decline the plan.
+        if let Some(hint) = query_ctx.extension(QUERY_PARALLELISM_HINT)
+            && !matches!(hint.parse::<usize>(), Ok(partitions) if partitions > 0)
+        {
+            return Ok(None);
+        }
+        if query_ctx
+            .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        // The discovered tree is preserved as a whole: only the captured scan has its source
+        // substituted, and any operator the physical planner keeps above that scan rejects the
+        // plan instead of being unwrapped.
+        let Some(logical_scan) = native_promql::table_scan_through_safe_nodes(&plan) else {
+            return Ok(None);
+        };
+        // A missing projection means the scan reads its entire authorized schema: every visible
+        // tag, timestamp, and field is approved as-is, so no subset is ever selected here.
+        if logical_scan.fetch.is_some()
+            || !logical_scan.statistics_requests.is_empty()
+            || logical_scan.filters.iter().any(|e| !raw_expr_supported(e))
+        {
+            return Ok(None);
+        }
+        let Some(source) = logical_scan.source.downcast_ref::<DefaultTableSource>() else {
+            return Ok(None);
+        };
+        let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() else {
+            return Ok(None);
+        };
+        let Some(provider) = provider.clone_for_raw_series() else {
+            return Ok(None);
+        };
+        // The metric name and the logical names come from this authorized scan: its table name,
+        // its output schema, and the source metadata it resolved against.
+        let metadata = provider.region_metadata();
+        let metric_name = logical_scan.table_name.table().to_string();
+        let authorized_schema = logical_scan.projected_schema.inner().clone();
+        let Some((logical_tags, field_names)) = authorized_logical_names(logical_scan, &metadata)
+        else {
+            return Ok(None);
+        };
+        let new_source = Arc::new(DefaultTableSource::new(Arc::new(provider)));
+        let plan = plan
+            .transform_down(|node| match node {
+                LogicalPlan::TableScan(mut scan) => {
+                    scan.source = new_source.clone();
+                    Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+                }
+                node => Ok(Transformed::no(node)),
+            })?
+            .data;
+
+        let normal_ctx = self.engine_context(query_ctx.clone());
+        let mut state = normal_ctx.state().clone();
+        let config = state.config().clone().with_target_partitions(1);
+        *state.config_mut() = config;
+        let mut ctx = QueryEngineContext::new(state, query_ctx.clone());
+        let physical = self.create_physical_plan(&mut ctx, &plan).await?;
+        let physical = self.optimize_physical_plan(&mut ctx, physical)?;
+        let cooperative = (physical.as_ref() as &dyn Any).downcast_ref::<CooperativeExec>();
+        let scan_candidate = cooperative.map_or(&physical, |plan| plan.input());
+        if scan_candidate.name() != REGION_SCAN_EXEC_NAME {
+            common_telemetry::debug!(
+                "Raw series physical plan rejected: root={}, scan candidate={}",
+                physical.name(),
+                scan_candidate.name(),
+            );
+            return Ok(None);
+        }
+        let Some(scan) = (scan_candidate.as_ref() as &dyn Any).downcast_ref::<RegionScanExec>()
+        else {
+            return Ok(None);
+        };
+        let ranges = scan.get_partition_ranges();
+        let prepared = Arc::new(
+            scan.with_new_partitions(vec![ranges], 1)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?,
+        );
+        // The prepared executor must still produce exactly the authorized output, so that the
+        // binding resolved below describes the plan that will run.
+        let physical_output = prepared.schema();
+        if authorized_schema.fields().len() != physical_output.fields().len()
+            || authorized_schema
+                .fields()
+                .iter()
+                .zip(physical_output.fields())
+                .any(|(authorized, physical)| {
+                    authorized.name() != physical.name()
+                        || authorized.data_type() != physical.data_type()
+                })
+        {
+            return Ok(None);
+        }
+        let (binding, native) = match binding {
+            Some(binding) => {
+                let Some(native) = prepared.clone().try_to_bound_series_scan(&binding)? else {
+                    return Ok(None);
+                };
+                (binding, native)
+            }
+            None => {
+                let Some((binding, native)) = prepared.clone().try_to_named_series_binding(
+                    &metric_name,
+                    &logical_tags,
+                    &field_names,
+                )?
+                else {
+                    return Ok(None);
+                };
+                (binding, native)
+            }
+        };
+        let ordering = native.raw_series_ordering();
+        let native_plan: Arc<dyn ExecutionPlan> = native;
+        let native_plan = if cooperative.is_some() {
+            physical.replace_children(
+                vec![native_plan],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?
+        } else {
+            native_plan
+        };
+        let wrapped = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
+            wrapper.wrap(native_plan.clone(), query_ctx)
+        } else {
+            native_plan.clone()
+        };
+        if !Arc::ptr_eq(&native_plan, &wrapped)
+            || native_plan.schema() != wrapped.schema()
+            || wrapped.properties().output_partitioning().partition_count() != 1
+        {
+            return Ok(None);
+        }
+        Ok(Some(PreparedRawSeries {
+            context: ctx,
+            plan: wrapped,
+            binding,
+            ordering,
+        }))
+    }
+
     pub fn new(state: Arc<QueryEngineState>, plugins: Plugins) -> Self {
         Self { state, plugins }
     }
@@ -435,6 +702,26 @@ impl DatafusionQueryEngine {
             .query_planner()
             .create_physical_plan(&optimized_plan, state)
             .await?;
+        let physical_plan = if self.state.experimental_native_promql() {
+            if let DfLogicalPlan::Analyze(analyze) = &optimized_plan
+                && let Some(exec) = physical_plan.downcast_ref::<AnalyzeExec>()
+            {
+                let selected =
+                    native_promql::try_select(&analyze.input, Arc::clone(exec.input())).await?;
+                if Arc::ptr_eq(&selected, exec.input()) {
+                    physical_plan
+                } else {
+                    physical_plan.replace_children(
+                        vec![selected],
+                        ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                    )?
+                }
+            } else {
+                native_promql::try_select(&optimized_plan, physical_plan).await?
+            }
+        } else {
+            physical_plan
+        };
 
         logger.phy_plan = Some(physical_plan.clone());
         drop(logger);
@@ -521,6 +808,54 @@ impl QueryEngine for DatafusionQueryEngine {
             LogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
             _ => self.exec_query_plan(plan, query_ctx).await,
         }
+    }
+
+    async fn prepare_raw_series(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        binding: RawSeriesRequest,
+    ) -> Result<Option<SeriesOrdering>> {
+        Ok(self
+            .prepare_raw_series_plan(plan, query_ctx, Some(binding))
+            .await?
+            .map(|prepared| prepared.ordering))
+    }
+
+    async fn prepare_named_raw_series(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<PreparedNamedRawSeries>> {
+        Ok(self
+            .prepare_raw_series_plan(plan, query_ctx, None)
+            .await?
+            .map(|prepared| PreparedNamedRawSeries {
+                binding: prepared.binding,
+                ordering: prepared.ordering,
+            }))
+    }
+
+    async fn execute_raw_series(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        binding: RawSeriesRequest,
+    ) -> Result<Output> {
+        let Some(prepared) = self
+            .prepare_raw_series_plan(plan, query_ctx, Some(binding))
+            .await?
+        else {
+            return Err(UnimplementedSnafu {
+                operation: "unsupported native raw-series plan".to_string(),
+            }
+            .build());
+        };
+        let stream = self.execute_stream(&prepared.context, &prepared.plan)?;
+        Ok(Output::new(
+            OutputData::Stream(stream),
+            OutputMeta::new_with_plan(prepared.plan),
+        ))
     }
 
     /// Note in SQL queries, aggregate names are looked up using
@@ -764,6 +1099,7 @@ mod tests {
     use datafusion::prelude::{col, lit};
     use datafusion_common::{JoinType, NullEquality, ScalarValue};
     use datafusion_physical_expr::expressions::Column;
+    use datatypes::arrow::datatypes::{DataType, Field};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaRef};
     use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
@@ -1040,6 +1376,67 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine()
+    }
+
+    #[tokio::test]
+    async fn raw_series_entrypoint_rejects_unsupported_parents_and_invalid_parallel_hints() {
+        let engine = create_test_engine().await;
+        let provider = crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1));
+        let metadata = provider.region_metadata();
+        let source = Arc::new(DefaultTableSource::new(Arc::new(provider)));
+        let scan = datafusion_expr::LogicalPlanBuilder::scan("raw", source, Some(vec![2]))
+            .unwrap()
+            .build()
+            .unwrap();
+        let binding = RawSeriesRequest {
+            version: 1,
+            physical_metadata: metadata.as_ref().clone(),
+            metric_name: "m".to_string(),
+            logical_tags: vec![],
+            field_ids: vec![3],
+        };
+        for hint in ["invalid", "0"] {
+            let ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(QUERY_PARALLELISM_HINT.to_string(), hint.to_string())
+                    .build(),
+            );
+            let error = match engine
+                .execute_raw_series(scan.clone(), ctx, binding.clone())
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("invalid parallelism hint was accepted"),
+            };
+            assert!(matches!(
+                error,
+                crate::error::Error::Unimplemented { operation, .. }
+                    if operation == "unsupported native raw-series plan"
+            ));
+        }
+        assert!(raw_expr_supported(&lit(1_i64).eq(lit(2_i64))));
+        assert!(!raw_expr_supported(&Expr::ScalarVariable(
+            Arc::new(Field::new("v", DataType::Int64, true)),
+            vec!["v".into()],
+        )));
+
+        let parent = datafusion_expr::LogicalPlanBuilder::from(scan.clone())
+            .limit(0, Some(1))
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = match engine
+            .execute_raw_series(parent, QueryContext::arc(), binding)
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an unsupported parent logical plan was accepted"),
+        };
+        assert!(matches!(
+            error,
+            crate::error::Error::Unimplemented { operation, .. }
+                if operation == "unsupported native raw-series plan"
+        ));
     }
 
     #[tokio::test]

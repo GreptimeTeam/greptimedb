@@ -286,6 +286,19 @@ impl DummyTableProvider {
         }
     }
 
+    /// Clones this provider for a trusted raw-series scan, unless it carries a
+    /// row selector which changes the requested rows.
+    pub(crate) fn clone_for_raw_series(&self) -> Option<Self> {
+        let provider = self.clone_for_scan();
+        let mut request = provider.scan_request.lock().unwrap();
+        if request.series_row_selector.is_some() {
+            return None;
+        }
+        request.distribution = Some(TimeSeriesDistribution::PerSeries);
+        drop(request);
+        Some(provider)
+    }
+
     pub fn with_sequence(&self, sequence: u64) {
         self.scan_request.lock().unwrap().memtable_max_sequence = Some(sequence);
     }
@@ -652,6 +665,32 @@ mod tests {
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
         FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
     };
+
+    #[test]
+    fn raw_provider_clone_sets_per_series_without_mutating_shared_request() {
+        let provider = crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1));
+        let original = provider.scan_request();
+        let raw = provider.clone_for_raw_series().unwrap();
+        assert_eq!(
+            raw.scan_request().distribution,
+            Some(TimeSeriesDistribution::PerSeries)
+        );
+        assert_eq!(provider.scan_request(), original);
+    }
+
+    #[test]
+    fn raw_provider_clone_rejects_selector_and_preserves_snapshot_intent() {
+        let provider = crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1));
+        provider
+            .with_time_series_selector_hint(TimeSeriesRowSelector::LastRow { after_merge: false });
+        assert!(provider.clone_for_raw_series().is_none());
+
+        let provider = crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1));
+        provider.with_sequence(42);
+        let raw = provider.clone_for_raw_series().unwrap();
+        assert_eq!(raw.scan_request().memtable_max_sequence, Some(42));
+        assert_eq!(provider.scan_request().distribution, None);
+    }
 
     #[test]
     fn test_nullable_label_filter_pushdown() {
