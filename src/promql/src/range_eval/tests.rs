@@ -452,3 +452,40 @@ fn waiting_for_a_point_drops_samples_behind_its_window() {
     let last = chunk(&[(100_000, vec![Some(1.0)])], 1, 0, true);
     assert!(evaluator.push(&last).unwrap().is_some());
 }
+
+/// Chunks after the last grid point are only validated, so nothing accumulates and the outcome
+/// does not depend on where the series is split.
+#[test]
+fn samples_after_the_last_window_are_validated_but_not_retained() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 2), window);
+    for chunk_index in 0..900 {
+        let rows: Vec<Row> = (0..100)
+            .map(|row| (1 + chunk_index * 100 + row, vec![Some(1.0)]))
+            .collect();
+        evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
+        assert!(evaluator.fields[0].timestamps.len() <= 100);
+    }
+
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 10,
+    };
+    let late = i64::MAX - 5;
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
+    evaluator
+        .push(&chunk(
+            &[(15, vec![Some(1.0)]), (20, vec![Some(1.0)])],
+            1,
+            0,
+            false,
+        ))
+        .unwrap();
+    assert!(matches!(
+        evaluator.push(&chunk(&[(late, vec![Some(1.0)])], 1, 0, true)),
+        Err(DataFusionError::Execution(_))
+    ));
+}
