@@ -98,7 +98,7 @@ fn metric(host: u64) -> MetricName {
 
 fn probe_evaluator(fields: usize, grid: Arc<EvalGrid>, window: RangeWindow) -> RangeEvaluator {
     let kernel: WindowKernel = Box::new(probe);
-    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel).unwrap()
+    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, true).unwrap()
 }
 
 /// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
@@ -210,10 +210,27 @@ fn reference_windows(
                 .flatten()
                 .any(|value| value.to_bits() == PROMETHEUS_STALE_NAN_BITS)
         })
-        .map(|(timestamp, values)| (timestamp + window.offset_ms, values.clone()))
+        .map(|(timestamp, values)| (timestamp + fold_offset(grid, window), values.clone()))
         .collect();
     let windows = windows_of(&kept, grid, window);
     (kept, windows)
+}
+
+/// The offset samples are shifted by: with `@`, Prometheus rewrites the offset so that the
+/// anchored window is the window of the first evaluation point.
+fn fold_offset(grid: &EvalGrid, window: RangeWindow) -> i64 {
+    match window.anchor_ms {
+        Some(anchor) => grid.spec().start_ms - (anchor - window.offset_ms),
+        None => window.offset_ms,
+    }
+}
+
+/// The end of the window each grid point reads, on the evaluation timeline.
+fn window_end(grid: &EvalGrid, window: RangeWindow, eval_ts: i64) -> i64 {
+    match window.anchor_ms {
+        Some(_) => grid.spec().start_ms,
+        None => eval_ts,
+    }
 }
 
 /// Rows of `rows`, already on the evaluation timeline, inside each grid point's window.
@@ -221,8 +238,9 @@ fn windows_of(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Vec<Range<u
     grid.timestamps()
         .iter()
         .map(|&eval_ts| {
+            let end = window_end(grid, window, eval_ts);
             let inside: Vec<_> = (0..rows.len())
-                .filter(|&row| rows[row].0 > eval_ts - window.range_ms && rows[row].0 <= eval_ts)
+                .filter(|&row| rows[row].0 > end - window.range_ms && rows[row].0 <= end)
                 .collect();
             inside
                 .first()
@@ -248,7 +266,7 @@ fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) 
                         probe(FloatWindow {
                             timestamps: &timestamps,
                             values: &values,
-                            eval_ts,
+                            eval_ts: window_end(grid, window, eval_ts),
                             range_ms: window.range_ms,
                         })
                         .unwrap()
@@ -339,8 +357,13 @@ fn udf_reference(
         };
         match function {
             RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta => {
+                // An anchored call is evaluated once, at the start, then replayed.
                 args.push(ColumnarValue::Array(Arc::new(
-                    TimestampMillisecondArray::new(grid.timestamps().clone(), None),
+                    TimestampMillisecondArray::from_iter_values(
+                        grid.timestamps()
+                            .iter()
+                            .map(|&eval_ts| window_end(grid, window, eval_ts)),
+                    ),
                 )));
                 args.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![
                     window.range_ms,
@@ -356,7 +379,7 @@ fn udf_reference(
                     TimestampMillisecondArray::from_iter_values(
                         grid.timestamps()
                             .iter()
-                            .map(|eval_ts| eval_ts + window.offset_ms),
+                            .map(|eval_ts| eval_ts + fold_offset(grid, window)),
                     ),
                 )));
             }
@@ -409,11 +432,15 @@ fn random_window(rng: &mut StdRng) -> (Arc<EvalGrid>, RangeWindow) {
         0 => 0,
         _ => rng.random_range(-20_000..20_000),
     };
+    let anchor_ms = rng
+        .random_bool(0.25)
+        .then(|| rng.random_range(-40_000..60_000));
     (
         grid,
         RangeWindow {
             range_ms,
             offset_ms,
+            anchor_ms,
         },
     )
 }
@@ -518,10 +545,11 @@ fn overlapping_window_spans_chunks() {
     let window = RangeWindow {
         range_ms: 15,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let kernel: WindowKernel = Box::new(sum);
     let mut evaluator =
-        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel).unwrap();
+        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel, true).unwrap();
     let first = chunk(&[(5, vec![Some(1.0)]), (12, vec![Some(2.0)])], 1, 0, false);
     let second = chunk(&[(18, vec![Some(4.0)]), (25, vec![Some(8.0)])], 1, 0, true);
     assert!(evaluator.push(&first).unwrap().is_none());
@@ -536,6 +564,7 @@ fn empty_input_and_series_without_results() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
@@ -552,6 +581,7 @@ fn rejects_invalid_parameters() {
     let zero_range = RangeWindow {
         range_ms: 0,
         offset_ms: 0,
+        anchor_ms: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(
@@ -568,6 +598,7 @@ fn rejects_invalid_parameters() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, RangeFunction::Rate),
@@ -577,6 +608,7 @@ fn rejects_invalid_parameters() {
     let far_offset = RangeWindow {
         range_ms: 10,
         offset_ms: i64::MAX - 20,
+        anchor_ms: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(
@@ -584,6 +616,21 @@ fn rejects_invalid_parameters() {
             grid(0, 10, 4),
             far_offset,
             RangeFunction::PredictLinear(0)
+        ),
+        Err(DataFusionError::Plan(_))
+    ));
+
+    let unrepresentable_anchor = RangeWindow {
+        range_ms: 10,
+        offset_ms: 1,
+        anchor_ms: Some(i64::MIN),
+    };
+    assert!(matches!(
+        RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10, 4),
+            unrepresentable_anchor,
+            RangeFunction::Rate
         ),
         Err(DataFusionError::Plan(_))
     ));
@@ -601,6 +648,7 @@ fn rejects_invalid_chunk_sequences() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let new = || probe_evaluator(1, grid(0, 10, 4), window);
     let row = |timestamp| (timestamp, vec![Some(1.0)]);
@@ -638,6 +686,7 @@ fn offset_overflow_fails_unless_the_sample_is_stale() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 10,
+        anchor_ms: None,
     };
     let late = i64::MAX - 5;
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
@@ -682,6 +731,7 @@ fn rejects_histogram_samples() {
     let window = RangeWindow {
         range_ms: 10,
         offset_ms: 0,
+        anchor_ms: None,
     };
     assert!(matches!(
         probe_evaluator(1, grid(0, 10, 4), window).push(&piece),
@@ -694,6 +744,7 @@ fn retains_only_samples_later_windows_need() {
     let window = RangeWindow {
         range_ms: 50,
         offset_ms: 0,
+        anchor_ms: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 10, 1_000), window);
     let rows: Vec<Row> = (0..10_000).map(|i| (i, vec![Some(1.0)])).collect();

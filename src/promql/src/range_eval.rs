@@ -32,14 +32,17 @@ mod tests;
 
 pub use function::RangeFunction;
 
-/// The samples a range selector reads at evaluation time `T`:
-/// source timestamps in `(T - offset_ms - range_ms, T - offset_ms]`.
+/// The samples a range selector reads at evaluation time `T`: source timestamps in
+/// `(E - range_ms, E]`, where `E` is `T - offset_ms`, or `anchor_ms - offset_ms` with `@`.
 #[derive(Clone, Copy, Debug)]
 pub struct RangeWindow {
     /// Positive window length in milliseconds.
     pub range_ms: i64,
     /// Selector offset in milliseconds; positive reads earlier samples.
     pub offset_ms: i64,
+    /// The resolved `@` timestamp in milliseconds, with `start()` and `end()` already replaced
+    /// by the statement's start and end.
+    pub anchor_ms: Option<i64>,
 }
 
 /// The valid samples of one field inside one window, in source order.
@@ -63,7 +66,9 @@ pub(crate) type WindowKernel = Box<dyn FnMut(FloatWindow<'_>) -> Option<f64> + S
 /// windows can still use are retained.
 pub struct RangeEvaluator {
     grid: Arc<EvalGrid>,
+    /// The window with `offset_ms` replaced by the offset samples are shifted by.
     window: RangeWindow,
+    replay: Replay,
     kernel: WindowKernel,
     output_schema: Arc<SeriesSchema>,
     output: GridSeriesBuilder,
@@ -78,6 +83,20 @@ struct SeriesState {
     last_ts: i64,
     /// Next grid index to evaluate.
     cursor: usize,
+}
+
+/// How the windows of an `@`-anchored selector map to the grid.
+///
+/// Like Prometheus, an anchored selector is read once, as the window of the first grid point
+/// with the offset rewritten to `start - (anchor - offset)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Replay {
+    /// Not anchored: every grid point reads its own window.
+    PerPoint,
+    /// The first point's result is reported at every point (step-invariant functions).
+    Once,
+    /// The first point's window is evaluated at every point (`predict_linear`).
+    EveryPoint,
 }
 
 #[derive(Default)]
@@ -96,27 +115,36 @@ impl RangeEvaluator {
         window: RangeWindow,
         function: RangeFunction,
     ) -> Result<Self> {
-        if let RangeFunction::PredictLinear(_) = function {
+        let fold_offset = fold_offset(&grid, window)?;
+        let step_invariant = !matches!(function, RangeFunction::PredictLinear(_));
+        if !step_invariant {
             let spec = grid.spec();
             let last =
                 i128::from(spec.start_ms) + i128::from(spec.step_ms) * (i128::from(spec.len) - 1);
             for eval_ts in [i128::from(spec.start_ms), last] {
-                if i64::try_from(eval_ts + i128::from(window.offset_ms)).is_err() {
+                if i64::try_from(eval_ts + i128::from(fold_offset)).is_err() {
                     return Err(DataFusionError::Plan(format!(
-                        "predict_linear evaluation time {eval_ts} overflows with offset {} ms",
-                        window.offset_ms
+                        "predict_linear evaluation time {eval_ts} overflows with offset {fold_offset} ms"
                     )));
                 }
             }
         }
-        Self::with_kernel(input, grid, window, function.kernel(window.offset_ms))
+        Self::with_kernel(
+            input,
+            grid,
+            window,
+            function.kernel(fold_offset),
+            step_invariant,
+        )
     }
 
+    /// `step_invariant` tells whether an `@`-anchored result holds at every grid point.
     pub(crate) fn with_kernel(
         input: &SeriesSchema,
         grid: Arc<EvalGrid>,
-        window: RangeWindow,
+        mut window: RangeWindow,
         kernel: WindowKernel,
+        step_invariant: bool,
     ) -> Result<Self> {
         if input.eval_grid.is_some() {
             return Err(DataFusionError::Plan(
@@ -129,6 +157,12 @@ impl RangeEvaluator {
                 window.range_ms
             )));
         }
+        let replay = match (window.anchor_ms, step_invariant) {
+            (None, _) => Replay::PerPoint,
+            (Some(_), true) => Replay::Once,
+            (Some(_), false) => Replay::EveryPoint,
+        };
+        window.offset_ms = fold_offset(&grid, window)?;
         let output_schema = Arc::new(SeriesSchema {
             fields: input.fields.clone(),
             eval_grid: Some(grid.clone()),
@@ -136,6 +170,7 @@ impl RangeEvaluator {
         Ok(Self {
             grid,
             window,
+            replay,
             kernel,
             output: GridSeriesBuilder::try_new(output_schema.clone())?,
             output_schema,
@@ -239,6 +274,11 @@ impl RangeEvaluator {
     }
 
     fn ingest(&mut self, chunk: &RawSeriesChunk) -> Result<()> {
+        let state = self.series.as_ref().expect("checked by check_chunk");
+        if state.cursor >= self.points_read() {
+            // Every window that reads samples has been evaluated.
+            return Ok(());
+        }
         let mut samples: Vec<_> = chunk.fields.iter().map(|field| field.iter()).collect();
         for &timestamp in chunk.time.as_buffer().iter() {
             self.row.clear();
@@ -282,11 +322,12 @@ impl RangeEvaluator {
     /// Evaluates grid points up to `ready` on the evaluation timeline, or all remaining points
     /// when `ready` is `None`.
     fn evaluate(&mut self, ready: Option<i128>) -> Result<()> {
+        let points_read = self.points_read();
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
         let grid = self.grid.timestamps();
         let range = i128::from(self.window.range_ms);
-        while state.cursor < grid.len() {
+        while state.cursor < points_read {
             let eval_ts = grid[state.cursor];
             if ready.is_some_and(|ready| i128::from(eval_ts) > ready) {
                 break;
@@ -312,22 +353,45 @@ impl RangeEvaluator {
                 continue;
             }
 
-            self.row.clear();
-            for field in &self.fields {
-                let timestamps = &field.timestamps[field.head..];
-                let len = timestamps.partition_point(|&timestamp| timestamp <= eval_ts);
-                self.row.push(if len == 0 {
-                    None
-                } else {
-                    (self.kernel)(FloatWindow {
-                        timestamps: &timestamps[..len],
-                        values: &field.values[field.head..field.head + len],
+            match self.replay {
+                Replay::PerPoint => {
+                    evaluate_row(
+                        &self.fields,
+                        &mut self.kernel,
+                        self.window.range_ms,
                         eval_ts,
-                        range_ms: self.window.range_ms,
-                    })
-                });
+                        eval_ts,
+                        &mut self.row,
+                    );
+                    self.output.push(state.cursor, &self.row)?;
+                }
+                Replay::Once => {
+                    evaluate_row(
+                        &self.fields,
+                        &mut self.kernel,
+                        self.window.range_ms,
+                        eval_ts,
+                        eval_ts,
+                        &mut self.row,
+                    );
+                    for index in 0..grid.len() {
+                        self.output.push(index, &self.row)?;
+                    }
+                }
+                Replay::EveryPoint => {
+                    for (index, &point) in grid.iter().enumerate() {
+                        evaluate_row(
+                            &self.fields,
+                            &mut self.kernel,
+                            self.window.range_ms,
+                            eval_ts,
+                            point,
+                            &mut self.row,
+                        );
+                        self.output.push(index, &self.row)?;
+                    }
+                }
             }
-            self.output.push(state.cursor, &self.row)?;
             state.cursor += 1;
         }
         for field in &mut self.fields {
@@ -337,4 +401,57 @@ impl RangeEvaluator {
         }
         Ok(())
     }
+
+    /// The number of leading grid points whose windows are read; an anchored selector reads
+    /// only the first.
+    fn points_read(&self) -> usize {
+        match self.replay {
+            Replay::PerPoint => self.grid.timestamps().len(),
+            Replay::Once | Replay::EveryPoint => 1,
+        }
+    }
+}
+
+/// Fills `row` with the kernel results over each field's window ending at `window_end`,
+/// evaluated at `eval_ts`.
+fn evaluate_row(
+    fields: &[FieldSamples],
+    kernel: &mut WindowKernel,
+    range_ms: i64,
+    window_end: i64,
+    eval_ts: i64,
+    row: &mut Vec<Option<f64>>,
+) {
+    row.clear();
+    for field in fields {
+        let timestamps = &field.timestamps[field.head..];
+        let len = timestamps.partition_point(|&timestamp| timestamp <= window_end);
+        row.push(if len == 0 {
+            None
+        } else {
+            kernel(FloatWindow {
+                timestamps: &timestamps[..len],
+                values: &field.values[field.head..field.head + len],
+                eval_ts,
+                range_ms,
+            })
+        });
+    }
+}
+
+/// The offset samples are shifted by: the selector offset, or for `@` the offset that places
+/// the anchored window at the first grid point.
+fn fold_offset(grid: &EvalGrid, window: RangeWindow) -> Result<i64> {
+    let Some(anchor) = window.anchor_ms else {
+        return Ok(window.offset_ms);
+    };
+    anchor
+        .checked_sub(window.offset_ms)
+        .and_then(|end| grid.spec().start_ms.checked_sub(end))
+        .ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "@ {anchor} ms with offset {} ms is out of range",
+                window.offset_ms
+            ))
+        })
 }
