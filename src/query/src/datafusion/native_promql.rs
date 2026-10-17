@@ -27,6 +27,8 @@ use table::table::scan::RegionScanExec;
 use crate::datafusion::raw_expr_supported;
 use crate::dummy_catalog::DummyTableProvider;
 
+mod remote;
+
 /// Selects native execution for the bounded, unmodified instant-over-divide shape.
 ///
 /// Returns the original plan unchanged for any shape that does not match the local pattern.
@@ -37,7 +39,10 @@ pub(crate) async fn try_select(
     if let Some(local) = try_select_local(logical, &original)? {
         return Ok(local);
     }
-    Ok(original)
+    match remote::try_select_remote(logical, Arc::clone(&original)).await? {
+        Some(native) => Ok(native),
+        None => Ok(original),
+    }
 }
 
 /// Selects native execution only for the bounded, unmodified local instant-over-divide shape.

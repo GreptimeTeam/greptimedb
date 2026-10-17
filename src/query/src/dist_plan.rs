@@ -18,7 +18,7 @@ mod dyn_filter_bridge;
 mod filter_id;
 mod merge_scan;
 mod merge_sort;
-mod planner;
+pub(crate) mod planner;
 mod predicate_extractor;
 mod region_pruner;
 mod remote_dyn_filter_receiver;
