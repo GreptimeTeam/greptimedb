@@ -17,8 +17,11 @@
 //! Expression column naming and omission of missing points belong to the planner/output adapter;
 //! these kernels retain the shared field schema and represent missing grid positions by validity.
 
+mod comparison;
 #[cfg(test)]
 mod tests;
+
+pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
 
 use std::sync::Arc;
 

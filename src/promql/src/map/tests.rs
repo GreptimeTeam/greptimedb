@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod arithmetic;
+mod comparison;
 mod math_functions;
 
 use std::sync::Arc;
