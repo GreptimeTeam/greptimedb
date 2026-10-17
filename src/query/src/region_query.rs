@@ -18,7 +18,7 @@ use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
 use async_trait::async_trait;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
-use common_query::request::QueryRequest;
+use common_query::request::{PreparedNamedRawSeries, QueryRequest};
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use session::ReadPreference;
@@ -67,6 +67,20 @@ pub trait RegionQueryHandler: Send + Sync {
         target: &RegionQueryTarget,
         request: QueryRequest,
     ) -> Result<SendableRecordBatchStream>;
+
+    /// Non-consumingly checks whether a named raw-series preflight is supported.
+    ///
+    /// Returns the approved binding and ordering on support, or `None` when the request is
+    /// explicitly unsupported; failures that are not unsupported preparation are returned as
+    /// errors. This point-in-time check does not reserve a plan, and execution revalidates
+    /// support.
+    async fn prepare_named_raw_series_query(
+        &self,
+        _target: &RegionQueryTarget,
+        _request: QueryRequest,
+    ) -> Result<Option<PreparedNamedRawSeries>> {
+        Ok(None)
+    }
 
     async fn handle_remote_dyn_filter_update(
         &self,
