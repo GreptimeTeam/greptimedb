@@ -12,12 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
-use datafusion::arrow::array::{Float64Array, UInt32Array};
+use datafusion::arrow::array::{
+    ArrayRef, Float64Array, Int64Array, TimestampMillisecondArray, UInt32Array,
+};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
+use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::error::DataFusionError;
+use datafusion::physical_plan::ColumnarValue;
+use datafusion_common::config::ConfigOptions;
+use datafusion_expr::ScalarFunctionArgs;
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
@@ -28,8 +35,10 @@ use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::{FloatWindow, RangeEvaluator, RangeWindow, WindowKernel};
+use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel};
+use crate::functions::{Delta, IDelta, Increase, Rate};
 use crate::grid_series::reference::{Dense, assert_series_eq, special_value};
+use crate::range_array::RangeArray;
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
 type Row = (i64, Vec<Option<f64>>);
@@ -145,7 +154,10 @@ fn random_chunks(rng: &mut StdRng, rows: &[Row], fields: usize, host: u64) -> Ve
 }
 
 fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
+    let missing = if rng.random_bool(0.3) { 0.0 } else { 0.15 };
+    let counter = rng.random_bool(0.5);
     let mut timestamp = rng.random_range(-40_000..20_000);
+    let mut totals = vec![rng.random_range(0.0..100.0); fields];
     (0..rng.random_range(1..60))
         .map(|_| {
             timestamp += if rng.random_bool(0.1) {
@@ -153,12 +165,21 @@ fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
             } else {
                 rng.random_range(1..3_000)
             };
-            let values = (0..fields)
-                .map(|_| {
-                    if rng.random_bool(0.15) {
+            let values = totals
+                .iter_mut()
+                .map(|total| {
+                    if rng.random_bool(missing) {
                         None
                     } else if rng.random_bool(0.05) {
                         Some(stale())
+                    } else if counter {
+                        // A counter that occasionally resets.
+                        *total = if rng.random_bool(0.05) {
+                            rng.random_range(0.0..10.0)
+                        } else {
+                            *total + rng.random_range(0.0..50.0)
+                        };
+                        Some(*total)
                     } else {
                         Some(special_value(rng))
                     }
@@ -169,8 +190,13 @@ fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
         .collect()
 }
 
-/// Evaluates every grid point by scanning all rows, independent of chunking and cursors.
-fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) -> Dense {
+/// Rows without stale markers and, for each grid point, the range of those rows in its window,
+/// found by scanning all rows independently of chunking and cursors.
+fn reference_windows(
+    rows: &[Row],
+    grid: &EvalGrid,
+    window: RangeWindow,
+) -> (Vec<Row>, Vec<Range<usize>>) {
     let kept: Vec<_> = rows
         .iter()
         .filter(|(_, values)| {
@@ -179,19 +205,35 @@ fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) 
                 .flatten()
                 .any(|value| value.to_bits() == PROMETHEUS_STALE_NAN_BITS)
         })
+        .map(|(timestamp, values)| (timestamp + window.offset_ms, values.clone()))
         .collect();
-    grid.timestamps()
+    let windows = grid
+        .timestamps()
         .iter()
         .map(|&eval_ts| {
+            let inside: Vec<_> = (0..kept.len())
+                .filter(|&row| kept[row].0 > eval_ts - window.range_ms && kept[row].0 <= eval_ts)
+                .collect();
+            inside
+                .first()
+                .map_or(0..0, |&first| first..first + inside.len())
+        })
+        .collect();
+    (kept, windows)
+}
+
+/// Applies the probe to the valid samples of every reference window.
+fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) -> Dense {
+    let (kept, windows) = reference_windows(rows, grid, window);
+    grid.timestamps()
+        .iter()
+        .zip(windows)
+        .map(|(&eval_ts, rows)| {
             (0..fields)
                 .map(|field| {
-                    let (timestamps, values): (Vec<_>, Vec<_>) = kept
+                    let (timestamps, values): (Vec<_>, Vec<_>) = kept[rows.clone()]
                         .iter()
-                        .filter_map(|(timestamp, row)| {
-                            let shifted = timestamp + window.offset_ms;
-                            (shifted > eval_ts - window.range_ms && shifted <= eval_ts)
-                                .then_some((shifted, row[field]?))
-                        })
+                        .filter_map(|(timestamp, row)| Some((*timestamp, row[field]?)))
                         .unzip();
                     (!timestamps.is_empty()).then(|| {
                         probe(FloatWindow {
@@ -208,32 +250,116 @@ fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) 
         .collect()
 }
 
+/// Evaluates every reference window with the ordinary range UDF, on the same row layout
+/// `RangeManipulate` produces: shifted timestamps and nullable values per field.
+fn udf_reference(
+    function: RangeFunction,
+    rows: &[Row],
+    grid: &EvalGrid,
+    window: RangeWindow,
+    fields: usize,
+) -> Dense {
+    let (kept, windows) = reference_windows(rows, grid, window);
+    let ranges: Vec<_> = windows
+        .iter()
+        .map(|rows| (rows.start as u32, rows.len() as u32))
+        .collect();
+    let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from_iter_values(
+        kept.iter().map(|(timestamp, _)| *timestamp),
+    ));
+    let mut dense = vec![vec![None; fields]; ranges.len()];
+    for field in 0..fields {
+        let values: ArrayRef = Arc::new(Float64Array::from_iter(
+            kept.iter().map(|(_, values)| values[field]),
+        ));
+        let mut args = vec![
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(timestamps.clone(), ranges.iter().copied())
+                    .unwrap()
+                    .into_dict(),
+            )),
+            ColumnarValue::Array(Arc::new(
+                RangeArray::from_ranges(values, ranges.iter().copied())
+                    .unwrap()
+                    .into_dict(),
+            )),
+        ];
+        let udf = match function {
+            RangeFunction::Rate => Rate::scalar_udf(),
+            RangeFunction::Increase => Increase::scalar_udf(),
+            RangeFunction::Delta => Delta::scalar_udf(),
+            RangeFunction::Irate => IDelta::<true>::scalar_udf(),
+            RangeFunction::Idelta => IDelta::<false>::scalar_udf(),
+        };
+        if matches!(
+            function,
+            RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta
+        ) {
+            args.push(ColumnarValue::Array(Arc::new(
+                TimestampMillisecondArray::new(grid.timestamps().clone(), None),
+            )));
+            args.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![
+                window.range_ms,
+            ]))));
+        }
+        let arg_fields = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| Arc::new(Field::new(format!("a{index}"), arg.data_type(), true)))
+            .collect();
+        let output = udf
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields,
+                number_rows: ranges.len(),
+                return_field: Arc::new(Field::new("r", DataType::Float64, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+            .unwrap()
+            .into_array(ranges.len())
+            .unwrap();
+        let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+        for (row, value) in dense.iter_mut().zip(output.iter()) {
+            row[field] = value;
+        }
+    }
+    dense
+}
+
+/// Random grid, range and offset, with ranges below, at and above the step.
+fn random_window(rng: &mut StdRng) -> (Arc<EvalGrid>, RangeWindow) {
+    let step = rng.random_range(1..5_000);
+    let grid = grid(
+        rng.random_range(-30_000..10_000),
+        step,
+        rng.random_range(1..80),
+    );
+    let range_ms = match rng.random_range(0..5) {
+        0 => 1,
+        1 => step,
+        2 => step + 1,
+        3 => 2 * step + 7,
+        _ => rng.random_range(1..30_000),
+    };
+    let offset_ms = match rng.random_range(0..3) {
+        0 => 0,
+        _ => rng.random_range(-20_000..20_000),
+    };
+    (
+        grid,
+        RangeWindow {
+            range_ms,
+            offset_ms,
+        },
+    )
+}
+
 #[test]
 fn evaluator_matches_brute_force_reference() {
     for seed in 0..500 {
         let mut rng = StdRng::seed_from_u64(seed);
         let fields = rng.random_range(1..=3);
-        let step = rng.random_range(1..5_000);
-        let grid = grid(
-            rng.random_range(-30_000..10_000),
-            step,
-            rng.random_range(1..80),
-        );
-        let range_ms = match rng.random_range(0..5) {
-            0 => 1,
-            1 => step,
-            2 => step + 1,
-            3 => 2 * step + 7,
-            _ => rng.random_range(1..30_000),
-        };
-        let offset_ms = match rng.random_range(0..3) {
-            0 => 0,
-            _ => rng.random_range(-20_000..20_000),
-        };
-        let window = RangeWindow {
-            range_ms,
-            offset_ms,
-        };
+        let (grid, window) = random_window(&mut rng);
         // One evaluator serves several series, so state must not leak between them.
         let mut evaluator = probe_evaluator(fields, grid.clone(), window);
         for host in 0..3 {
@@ -250,6 +376,39 @@ fn evaluator_matches_brute_force_reference() {
             assert_series_eq(result.as_ref(), &expected, &metric(host));
         }
         evaluator.finish().unwrap();
+    }
+}
+
+#[test]
+fn functions_match_range_udfs() {
+    for function in [
+        RangeFunction::Rate,
+        RangeFunction::Increase,
+        RangeFunction::Delta,
+        RangeFunction::Irate,
+        RangeFunction::Idelta,
+    ] {
+        for seed in 0..300 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let fields = rng.random_range(1..=3);
+            let (grid, window) = random_window(&mut rng);
+            let mut evaluator = RangeEvaluator::try_new(
+                &raw_schema(fields),
+                grid.clone(),
+                window,
+                function.kernel(),
+            )
+            .unwrap();
+            for host in 0..3 {
+                let rows = random_rows(&mut rng, fields);
+                let expected = udf_reference(function, &rows, &grid, window, fields);
+                let mut result = None;
+                for piece in random_chunks(&mut rng, &rows, fields, host) {
+                    result = evaluator.push(&piece).unwrap();
+                }
+                assert_series_eq(result.as_ref(), &expected, &metric(host));
+            }
+        }
     }
 }
 

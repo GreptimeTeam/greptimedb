@@ -48,7 +48,9 @@ use datatypes::arrow::datatypes::{DataType, Int64Type};
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
+pub(crate) use extrapolate_rate::{add_counter_resets, extrapolate};
 pub use idelta::IDelta;
+pub(crate) use idelta::instant_delta;
 pub use ieee_float::{IeeeComparison, IeeeSqrt};
 pub use native_histogram::{
     MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,

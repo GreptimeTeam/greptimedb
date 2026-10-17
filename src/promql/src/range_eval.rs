@@ -26,8 +26,11 @@ use datatypes::series::time::EvalGrid;
 
 use crate::grid_series::GridSeriesBuilder;
 
+mod function;
 #[cfg(test)]
 mod tests;
+
+pub use function::RangeFunction;
 
 /// The samples a range selector reads at evaluation time `T`:
 /// source timestamps in `(T - offset_ms - range_ms, T - offset_ms]`.
