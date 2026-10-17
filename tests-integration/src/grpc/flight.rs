@@ -19,14 +19,16 @@ mod test {
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
     use std::time::{Duration, Instant};
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::greptime_request::Request as GreptimeQueryRequest;
     use api::v1::health_check_server::HealthCheckServer;
     use api::v1::query_request::Query;
+    use api::v1::region::RegionRequestHeader;
     use api::v1::{Basic, ColumnDataType, ColumnDef, CreateTableExpr, QueryRequest, SemanticType};
     use arrow_flight::flight_service_server::FlightServiceServer;
     use arrow_flight::{FlightData, FlightDescriptor, Ticket};
@@ -41,17 +43,21 @@ mod test {
     use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
     use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
     use common_meta::peer::Peer;
+    use common_query::request::{QueryRequest as LogicalQueryRequest, RawSeriesRequest};
     use common_query::{Output, OutputData};
     use common_recordbatch::adapter::RegionWatermarkEntry;
     use common_recordbatch::{
         RecordBatch, RecordBatchStreamWrapper, RecordBatches, SendableRecordBatchStream,
     };
     use common_telemetry::tracing_context::TracingContext;
+    use datafusion_expr::LogicalPlan;
     use datatypes::arrow::datatypes::{
         DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit,
     };
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::frame::{RawLabelMode, raw_series_frame_schema};
     use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
     use futures_util::{Stream, StreamExt};
     use hyper_util::rt::TokioIo;
@@ -69,6 +75,7 @@ mod test {
     use session::context::QueryContextRef;
     use session::hints::INSERT_SKIP_WAL_HINT;
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::transport::Server as TonicServer;
     use tonic::{Response, Status};
@@ -87,6 +94,36 @@ mod test {
     struct RetainedFlightCraft;
 
     struct ErrorFlightCraft;
+
+    struct PendingFlightDataStream {
+        first: Option<FlightData>,
+        released: Option<oneshot::Sender<()>>,
+    }
+
+    impl Stream for PendingFlightDataStream {
+        type Item = Result<FlightData, Status>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.first.take() {
+                Some(first) => Poll::Ready(Some(Ok(first))),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    impl Drop for PendingFlightDataStream {
+        fn drop(&mut self) {
+            if let Some(released) = self.released.take() {
+                let _ = released.send(());
+            }
+        }
+    }
+
+    struct PendingRawSeriesFlightCraft {
+        first: FlightData,
+        released: Mutex<Option<oneshot::Sender<()>>>,
+        do_get_count: Arc<AtomicUsize>,
+    }
 
     struct SlowRemoteQueryHandler {
         region_requester: RegionRequester,
@@ -107,6 +144,21 @@ mod test {
         RecordBatches::try_new(schema, vec![recordbatch])
             .unwrap()
             .as_stream()
+    }
+
+    #[async_trait::async_trait]
+    impl FlightCraft for PendingRawSeriesFlightCraft {
+        async fn do_get(
+            &self,
+            _: tonic::Request<Ticket>,
+        ) -> std::result::Result<Response<TonicStream<FlightData>>, tonic::Status> {
+            self.do_get_count.fetch_add(1, Ordering::SeqCst);
+            let stream = PendingFlightDataStream {
+                first: Some(self.first.clone()),
+                released: self.released.lock().unwrap().take(),
+            };
+            Ok(Response::new(Box::pin(stream)))
+        }
     }
 
     #[async_trait::async_trait]
@@ -333,6 +385,78 @@ mod test {
             panic!("Flight test server did not stop after stream release");
         }
         server_result.unwrap().unwrap();
+    }
+
+    #[rstest]
+    #[case::missing_ordering(false)]
+    #[case::unknown_ordering(true)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_raw_series_query_ordering_errors_drop_transport_stream(
+        #[case] unknown_ordering: bool,
+    ) {
+        let binding = RawSeriesRequest::from_extension_value(include_str!(
+            "../../../tests/compatibility/wire/raw_series_request/v1_request.json"
+        ))
+        .unwrap();
+        let (schema, _) = binding
+            .bind(Arc::new(binding.physical_metadata.clone()))
+            .unwrap();
+        let arrow_schema = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
+        let arrow_schema = if unknown_ordering {
+            let mut metadata = arrow_schema.metadata().clone();
+            metadata.insert(
+                "greptime.series.ordering".to_string(),
+                "future_value".to_string(),
+            );
+            ArrowSchema::new_with_metadata(arrow_schema.fields().clone(), metadata)
+        } else {
+            arrow_schema.as_ref().clone()
+        };
+        let first = FlightEncoder::default().encode_schema(&arrow_schema);
+
+        let (released_tx, released_rx) = oneshot::channel();
+        let do_get_count = Arc::new(AtomicUsize::new(0));
+        let client = client_for_flight_craft(
+            "raw-series-ordering",
+            PendingRawSeriesFlightCraft {
+                first,
+                released: Mutex::new(Some(released_tx)),
+                do_get_count: do_get_count.clone(),
+            },
+        );
+        let requester = RegionRequester::new(client.clone(), false, false);
+        let request = LogicalQueryRequest {
+            header: Some(RegionRequestHeader::default()),
+            region_id: binding.physical_metadata.region_id,
+            plan: LogicalPlan::default(),
+        };
+        let result = requester.handle_raw_series_query(request, binding).await;
+
+        if unknown_ordering {
+            let error = result
+                .err()
+                .expect("unknown ordering must reject the raw stream");
+            assert!(
+                error
+                    .root_cause()
+                    .expect("ordering error cause")
+                    .to_string()
+                    .contains("unknown raw series ordering"),
+                "expected unknown-ordering error, got {error:?}"
+            );
+        } else {
+            let raw = result.expect("missing ordering defaults to contiguous");
+            assert_eq!(SeriesOrdering::Contiguous, raw.ordering());
+            drop(raw);
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), released_rx)
+            .await
+            .expect("returned raw-series stream should be dropped")
+            .expect("the stream drop acknowledgement should be sent");
+        assert_eq!(1, do_get_count.load(Ordering::SeqCst));
+        drop(requester);
+        drop(client);
     }
 
     #[tokio::test(flavor = "multi_thread")]
