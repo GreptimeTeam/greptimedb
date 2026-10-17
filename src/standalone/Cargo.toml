@@ -29,6 +29,7 @@ common-time.workspace = true
 common-version.workspace = true
 common-wal.workspace = true
 datanode.workspace = true
+datatypes.workspace = true
 file-engine.workspace = true
 flow.workspace = true
 frontend.workspace = true

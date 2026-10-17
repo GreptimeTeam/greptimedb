@@ -382,8 +382,13 @@ flow_notification_queue_capacity = 17
     fn test_query_options_propagated_to_components() {
         let mut options = StandaloneOptions::default();
         options.query.parallelism = 4;
+        options.query.experimental_native_promql = true;
 
-        assert_eq!(options.frontend_options().query.parallelism, 4);
-        assert_eq!(options.datanode_options().query.parallelism, 4);
+        let frontend_options = options.frontend_options();
+        let datanode_options = options.datanode_options();
+        assert_eq!(frontend_options.query.parallelism, 4);
+        assert!(frontend_options.query.experimental_native_promql);
+        assert_eq!(datanode_options.query.parallelism, 4);
+        assert!(datanode_options.query.experimental_native_promql);
     }
 }

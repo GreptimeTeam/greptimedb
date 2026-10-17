@@ -14368,6 +14368,7 @@ dependencies = [
  "common-version",
  "common-wal",
  "datanode",
+ "datatypes",
  "file-engine",
  "flow",
  "frontend",
