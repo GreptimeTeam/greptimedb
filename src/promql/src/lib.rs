@@ -17,6 +17,8 @@ pub mod extension_plan;
 pub mod functions;
 mod go_sort;
 pub mod grid_series;
+pub mod map_label;
+pub mod map_time;
 mod metrics;
 pub mod range_array;
 pub mod range_eval;

@@ -14,13 +14,15 @@
 
 //! Building evaluated float series that cover only their result range on a shared grid.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::array::builder::NullBufferBuilder;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridRange, TimeAxis};
 
 #[cfg(test)]
@@ -138,6 +140,124 @@ impl GridSeriesBuilder {
             .map(Some)
             .map_err(external)
     }
+}
+
+type LabelSet = Vec<(Arc<str>, Arc<str>)>;
+
+/// The label set Prometheus compares, which has no empty values.
+fn label_set(metric: &MetricName) -> LabelSet {
+    let name = metric
+        .name()
+        .filter(|name| !name.is_empty())
+        .map(|name| (Arc::from("__name__"), Arc::from(name)));
+    name.into_iter()
+        .chain(
+            metric
+                .tags()
+                .iter()
+                .filter(|tag| !tag.value.is_empty())
+                .map(|tag| (tag.name.clone(), tag.value.clone())),
+        )
+        .collect()
+}
+
+/// Merges series that share a label set into one, as Prometheus does after a function that
+/// rewrites labels or drops `__name__`; two of them holding one field at one point fail.
+pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> Result<Vec<Series>> {
+    let mut groups: HashMap<LabelSet, Vec<usize>> = HashMap::with_capacity(series.len());
+    let mut collided = false;
+    for (index, series) in series.iter().enumerate() {
+        match groups.entry(label_set(&series.metric)) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push(index);
+                collided = true;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(vec![index]);
+            }
+        }
+    }
+    if !collided {
+        return Ok(series);
+    }
+
+    let mut series: Vec<Option<Series>> = series.into_iter().map(Some).collect();
+    let mut output = Vec::with_capacity(groups.len());
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    let mut rows = Vec::new();
+    let mut values = vec![None; schema.fields.len()];
+    let mut merged = vec![None; schema.fields.len()];
+    for (labels, members) in groups {
+        if let [member] = members[..] {
+            output.extend(series[member].take());
+            continue;
+        }
+        rows.clear();
+        for &member in &members {
+            let member_series = series[member]
+                .as_ref()
+                .expect("each series is in one group");
+            let TimeAxis::Grid(range) = &member_series.time else {
+                return Err(DataFusionError::Execution(
+                    "merging requires evaluated series".into(),
+                ));
+            };
+            for row in 0..range.len() {
+                if read_row(member_series, row, &mut values)? {
+                    rows.push((range.start() + row, member, row));
+                }
+            }
+        }
+        rows.sort_unstable_by_key(|&(point, _, _)| point);
+        let mut start = 0;
+        while start < rows.len() {
+            let point = rows[start].0;
+            let end = start + rows[start..].partition_point(|&(p, _, _)| p == point);
+            // Rows of one point merge field by field; only a field present twice collides.
+            merged.iter_mut().for_each(|value| *value = None);
+            for &(_, member, row) in &rows[start..end] {
+                read_row(series[member].as_ref().unwrap(), row, &mut values)?;
+                for (slot, value) in merged.iter_mut().zip(&values) {
+                    if value.is_some() {
+                        if slot.is_some() {
+                            let labels: Vec<_> = labels
+                                .iter()
+                                .map(|(name, value)| format!("{name}=\"{value}\""))
+                                .collect();
+                            return Err(DataFusionError::Execution(format!(
+                                "vector cannot contain metrics with the same labelset {{{}}}",
+                                labels.join(", ")
+                            )));
+                        }
+                        *slot = *value;
+                    }
+                }
+            }
+            builder.push(point, &merged)?;
+            start = end;
+        }
+        let metric = series[members[0]].as_ref().unwrap().metric.clone();
+        output.extend(builder.finish(metric)?);
+    }
+    Ok(output)
+}
+
+/// Reads the float fields of `row`; returns whether any is present.
+fn read_row(series: &Series, row: usize, values: &mut [Option<f64>]) -> Result<bool> {
+    let mut present = false;
+    for (value, samples) in values.iter_mut().zip(series.fields.iter()) {
+        *value = match samples.sample(row) {
+            SampleRef::Missing => None,
+            SampleRef::Float(value) => Some(value),
+            SampleRef::Histogram(_) => {
+                return Err(DataFusionError::NotImplemented(
+                    "merging histogram series with the same label set".into(),
+                ));
+            }
+        };
+        present |= value.is_some();
+    }
+    Ok(present)
 }
 
 fn external(error: datatypes::error::Error) -> DataFusionError {
