@@ -26,7 +26,7 @@ use crate::functions::extract_range_array;
 use crate::range_array::RangeArray;
 
 /// The transitions `changes` and `resets` count between consecutive samples.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub(crate) enum EdgeKind {
     Changes,
     Resets,
