@@ -107,7 +107,8 @@ use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
-use futures::future::{join_all, try_join_all};
+use futures::FutureExt;
+use futures::future::{self, BoxFuture, join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
 use region_hook::RegionHookRef;
@@ -490,16 +491,40 @@ impl MitoEngine {
         rx.await.context(RecvSnafu)?
     }
 
-    /// Puts rows into several regions for one request. The puts to regions of the same worker
-    /// reach it in one message, so the worker writes them in one batch and one WAL append.
-    pub async fn put_regions_batch(
+    /// Puts rows into several regions for one request and returns the result of each region's
+    /// put. The puts to regions of the same worker reach it in one message, so the worker writes
+    /// them in one batch and one WAL append. The messages are sent on their own task, so every
+    /// result can be awaited at once.
+    pub fn put_regions_batch(
         &self,
         requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Result<AffectedRows> {
-        let _timer = HANDLE_REQUEST_ELAPSED
-            .with_label_values(&["put"])
-            .start_timer();
-        self.inner.put_regions_batch(requests).await
+    ) -> Vec<(RegionId, BoxFuture<'static, Result<AffectedRows>>)> {
+        let mut writes = Vec::with_capacity(requests.len());
+        let mut results = Vec::with_capacity(requests.len());
+        for (region_id, request) in requests {
+            let request = RegionRequest::Put(request);
+            let timer = HANDLE_REQUEST_ELAPSED
+                .with_label_values(&[request.request_type()])
+                .start_timer();
+            let region_metadata = self.inner.get_metadata(region_id).ok();
+            let result =
+                match WorkerRequest::try_from_region_request(region_id, request, region_metadata) {
+                    Ok((WorkerRequest::Write(write), receiver)) => {
+                        writes.push(write);
+                        async move {
+                            let _timer = timer;
+                            receiver.await.context(RecvSnafu)?
+                        }
+                        .boxed()
+                    }
+                    Ok(_) => unreachable!("a put converts to a write"),
+                    Err(e) => future::ready(Err(e)).boxed(),
+                };
+            results.push((region_id, result));
+        }
+        let inner = self.inner.clone();
+        common_runtime::spawn_global(async move { inner.workers.submit_writes(writes).await });
+        results
     }
 
     /// Handles copy region from request.
@@ -1054,35 +1079,6 @@ impl EngineInner {
         self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)?
-    }
-
-    /// Handles the puts of one request to several regions, see [MitoEngine::put_regions_batch].
-    async fn put_regions_batch(
-        &self,
-        requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Result<AffectedRows> {
-        let mut writes = Vec::with_capacity(requests.len());
-        let mut receivers = Vec::with_capacity(requests.len());
-        for (region_id, request) in requests {
-            let region_metadata = self.get_metadata(region_id).ok();
-            let (request, receiver) = WorkerRequest::try_from_region_request(
-                region_id,
-                RegionRequest::Put(request),
-                region_metadata,
-            )?;
-            let WorkerRequest::Write(write) = request else {
-                unreachable!("a put converts to a write");
-            };
-            writes.push(write);
-            receivers.push(receiver);
-        }
-        self.workers.submit_writes(writes).await?;
-
-        let mut affected_rows = 0;
-        for receiver in receivers {
-            affected_rows += receiver.await.context(RecvSnafu)??;
-        }
-        Ok(affected_rows)
     }
 
     /// Returns the sequence of latest committed data.
