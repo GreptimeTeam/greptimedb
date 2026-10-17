@@ -142,10 +142,10 @@ impl GridSeriesBuilder {
     }
 }
 
-type LabelSet = Vec<(Arc<str>, Arc<str>)>;
+pub(crate) type LabelSet = Vec<(Arc<str>, Arc<str>)>;
 
 /// The label set Prometheus compares, which has no empty values.
-fn label_set(metric: &MetricName) -> LabelSet {
+pub(crate) fn label_set(metric: &MetricName) -> LabelSet {
     let name = metric
         .name()
         .filter(|name| !name.is_empty())
