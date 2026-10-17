@@ -29,6 +29,11 @@ mod tests;
 
 /// `label_replace(v, dst, replacement, src, regex)`: where `regex` matches the whole value of
 /// `src`, `dst` is set to `replacement` with `$1`, `${name}` and `$$` expanded.
+///
+/// `regex` compiles with the `regex` crate, whose dialect differs from Go's RE2 used by
+/// Prometheus: Perl classes (`\d`, `\w`, `\s`, `\b`) are Unicode-aware, `\Q...\E` is rejected,
+/// `(?x)` and repeat counts above 1000 are accepted, and `\<`, `\>` are word boundaries instead
+/// of literal characters.
 pub fn label_replace(
     schema: &Arc<SeriesSchema>,
     mut series: Vec<Series>,
