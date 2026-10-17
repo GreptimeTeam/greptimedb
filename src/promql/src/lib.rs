@@ -17,3 +17,4 @@ pub mod extension_plan;
 pub mod functions;
 mod metrics;
 pub mod range_array;
+pub mod source;
