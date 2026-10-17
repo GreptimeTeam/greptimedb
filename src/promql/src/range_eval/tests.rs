@@ -110,6 +110,15 @@ fn per_point_probe_evaluator(
 }
 
 /// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
+/// The metric of a result of `function` over the series of `metric(host)`.
+fn output_metric(function: RangeFunction, host: u64) -> MetricName {
+    let mut metric = metric(host);
+    if function.drops_metric_name() {
+        metric.remove("__name__");
+    }
+    metric
+}
+
 fn chunk(rows: &[Row], fields: usize, host: u64, is_last: bool) -> RawSeriesChunk {
     let padding = 3;
     let timestamps: Vec<_> = (0..padding)
@@ -467,7 +476,7 @@ fn functions_match_range_udfs() {
                 for piece in random_chunks(&mut rng, &rows, fields, host) {
                     result = evaluator.push(&piece).unwrap();
                 }
-                assert_series_eq(result.as_ref(), &expected, &metric(host));
+                assert_series_eq(result.as_ref(), &expected, &output_metric(function, host));
             }
         }
     }
@@ -744,7 +753,7 @@ fn subquery_series_match_references() {
             assert_series_eq(
                 evaluator.push_series(&series).unwrap().as_ref(),
                 &expected,
-                &metric(seed),
+                &output_metric(function, seed),
             );
         }
     }
@@ -880,7 +889,12 @@ fn range_functions_match_prometheus() {
             .push(&chunk(&rows[split..], 1, 0, true))
             .unwrap()
             .or(result);
-        assert_series_eq_any_nan(result.as_ref(), &expected, &metric(0), line);
+        assert_series_eq_any_nan(
+            result.as_ref(),
+            &expected,
+            &output_metric(function, 0),
+            line,
+        );
         checked += expected_points.len();
     }
     assert!(checked > 1_000, "{checked} points checked");
@@ -903,5 +917,46 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
             ),
             Err(DataFusionError::Plan(_))
         ));
+    }
+}
+
+/// Range functions drop the metric name and the other metadata labels, except
+/// `last_over_time`, as Prometheus does.
+#[test]
+fn range_functions_drop_metadata_labels() {
+    let labels = |names: &[&str]| -> Vec<Label> {
+        names
+            .iter()
+            .map(|name| Label {
+                name: Arc::from(*name),
+                value: Arc::from("v"),
+            })
+            .collect()
+    };
+    let input = MetricName::try_new(
+        Some(Arc::from("m")),
+        labels(&["__type__", "__unit__", "host"]),
+    )
+    .unwrap();
+    let window = RangeWindow {
+        range_ms: 10_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let rows: Vec<Row> = vec![(1_000, vec![Some(1.0)]), (2_000, vec![Some(2.0)])];
+    for (function, expected) in [
+        (
+            RangeFunction::Rate,
+            MetricName::try_new(None, labels(&["host"])).unwrap(),
+        ),
+        (RangeFunction::LastOverTime, input.clone()),
+    ] {
+        let mut chunk = chunk(&rows, 1, 0, true);
+        chunk.metric = Some(input.clone());
+        let mut evaluator =
+            RangeEvaluator::try_new(&raw_schema(1), grid(2_000, 1_000, 1), window, function)
+                .unwrap();
+        let series = evaluator.push(&chunk).unwrap().unwrap();
+        assert_eq!(series.metric, expected, "{function:?}");
     }
 }
