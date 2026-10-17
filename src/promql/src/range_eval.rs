@@ -116,7 +116,7 @@ struct FieldSamples {
 }
 
 impl RangeEvaluator {
-    /// Creates an evaluator of `function` for raw series of `input` onto `grid`.
+    /// Creates an evaluator of `function` for the series of `input` onto `grid`.
     pub fn try_new(
         input: &SeriesSchema,
         grid: Arc<EvalGrid>,

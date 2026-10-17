@@ -111,7 +111,6 @@ fn per_point_probe_evaluator(
     RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, false).unwrap()
 }
 
-/// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
 /// The metric of a result of `function` over the series of `metric(host)`.
 fn output_metric(function: RangeFunction, host: u64) -> MetricName {
     let mut metric = metric(host);
@@ -121,6 +120,7 @@ fn output_metric(function: RangeFunction, host: u64) -> MetricName {
     metric
 }
 
+/// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
 fn chunk(rows: &[Row], fields: usize, host: u64, is_last: bool) -> RawSeriesChunk {
     let padding = 3;
     let timestamps: Vec<_> = (0..padding)

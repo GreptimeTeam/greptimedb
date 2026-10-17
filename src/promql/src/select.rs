@@ -86,9 +86,6 @@ pub fn topk(
         )));
     }
     let k = k.trunc().min(series.len() as f64) as usize;
-    if k == 0 {
-        return Ok(Vec::new());
-    }
 
     let mut order: Vec<usize> = (0..series.len()).collect();
     order.sort_by(|&a, &b| compare_labels(&series[a].metric, &series[b].metric));
@@ -318,7 +315,7 @@ pub fn sort_instant(
 /// Go's `math.NaN()` bit pattern, which Prometheus returns for an undefined scalar.
 const GO_NAN: f64 = f64::from_bits(0x7FF8_0000_0000_0001);
 
-/// `true` when `a` ranks before `b` for `topk` (`top`) or `bottomk`; NaN ranks last for both.
+/// The order of `a` and `b` for `topk` (`top`) or `bottomk`; NaN ranks last for both.
 fn rank(a: f64, b: f64, top: bool) -> Ordering {
     match (a.is_nan(), b.is_nan()) {
         (true, true) => Ordering::Equal,

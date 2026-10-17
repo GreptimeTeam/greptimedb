@@ -319,8 +319,7 @@ fn linear_regression(window: &FloatWindow<'_>, intercept_time: i64) -> (f64, f64
     (slope, intercept)
 }
 
-/// Prometheus `funcDoubleExponentialSmoothing`; the factors are checked by
-/// `RangeEvaluator::try_new`.
+/// Prometheus `funcDoubleExponentialSmoothing`; `RangeEvaluator` checks the factors.
 fn double_exponential_smoothing(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
     if values.len() < 2 {
         return None;
