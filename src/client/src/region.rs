@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod codec;
+#[cfg(test)]
+mod named_raw_series_tests;
 
 use std::borrow::Borrow;
 use std::sync::Arc;
@@ -25,7 +27,7 @@ use api::v1::region::{
     RemoteDynFilterUpdate, region_request, remote_dyn_filter_request,
 };
 use arc_swap::ArcSwapOption;
-use arrow_flight::Ticket;
+use arrow_flight::{Action, Ticket};
 use async_stream::stream;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
@@ -33,7 +35,10 @@ use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::Datanode;
-use common_query::request::QueryRequest;
+use common_query::request::{
+    PREPARE_RAW_SERIES_ACTION, PreparedNamedRawSeries, QueryRequest, RawSeriesRequest,
+    decode_prepare_raw_series_response,
+};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
@@ -43,6 +48,7 @@ use futures_util::Stream;
 use prost::Message;
 use query::query_engine::DefaultSerializer;
 use snafu::{OptionExt, ResultExt, location};
+use store_api::region_engine::SendableRawSeriesStream;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 use tonic::codec::CompressionEncoding;
@@ -91,6 +97,33 @@ impl Datanode for RegionRequester {
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
     }
+
+    /// Non-consumingly checks whether a named raw-series preflight is supported.
+    ///
+    /// The request is forwarded unmodified: the plan travels as the already-encoded
+    /// Substrait plan inside the existing region query wire shape, exactly like
+    /// [`Datanode::handle_query`]. The peer owns the admission policy and answers
+    /// with the approved binding and ordering, or with one of the two frozen
+    /// unsupported shapes.
+    ///
+    /// Only a peer that rejects the action call itself with a bare `Unimplemented`
+    /// status -- no error-code metadata -- is reported as unsupported without
+    /// answering the contract. A peer that implements the action answers with a
+    /// single explicit `null` body and a clean end of stream; that is the
+    /// protocol-level unsupported answer, decoded by
+    /// [`decode_prepare_raw_series_response`].
+    ///
+    /// Every other failure is an error with its status and peer address preserved,
+    /// including an `Unimplemented` status that carries error metadata, a response
+    /// body that does not decode, a response that is not exactly one result, and a
+    /// response that does not end before the preflight budget elapses.
+    async fn prepare_named_raw_series_query(
+        &self,
+        request: QueryRequest,
+    ) -> MetaResult<Option<PreparedNamedRawSeries>> {
+        self.prepare_named_raw_series_query_with_timeout(request, FLIGHT_DO_GET_TIMEOUT)
+            .await
+    }
 }
 
 impl RegionRequester {
@@ -100,6 +133,82 @@ impl RegionRequester {
             send_compression,
             accept_compression,
         }
+    }
+
+    /// Sends the preflight action and reads its single answer under one deadline.
+    ///
+    /// The whole interaction -- the action call, the single-result read, and the read
+    /// that must observe the end of the response -- runs inside one `timeout`. The
+    /// per-request timeout header is kept for the peer, but a gRPC deadline only
+    /// bounds the response headers, so the body reads need their own bound: without
+    /// it a peer could hold the response open forever after its first result.
+    ///
+    /// The deadline is a helper parameter only so tests can exercise it without
+    /// waiting for the production budget; production callers always pass
+    /// [`FLIGHT_DO_GET_TIMEOUT`].
+    async fn prepare_named_raw_series_query_with_timeout(
+        &self,
+        request: QueryRequest,
+        timeout: Duration,
+    ) -> MetaResult<Option<PreparedNamedRawSeries>> {
+        let plan = DFLogicalSubstraitConvertor
+            .encode(&request.plan, DefaultSerializer)
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?
+            .to_vec();
+        let body = api::v1::region::QueryRequest {
+            header: request.header,
+            region_id: request.region_id.as_u64(),
+            plan,
+        }
+        .encode_to_vec()
+        .into();
+
+        let mut flight_client = self
+            .client
+            .make_flight_client(self.send_compression, self.accept_compression)?;
+        let addr = flight_client.addr().to_string();
+        let mut request = tonic::Request::new(Action {
+            r#type: PREPARE_RAW_SERIES_ACTION.to_string(),
+            body,
+        });
+        request.set_timeout(timeout);
+
+        let result = tokio::time::timeout(timeout, async {
+            let response = match flight_client.mut_inner().do_action(request).await {
+                Ok(response) => response,
+                // Only a peer that rejects the action call itself answers as unsupported.
+                Err(status) if is_unsupported_preflight(&status) => return Ok(None),
+                Err(status) => return Err(flight_action_error(&addr, status)),
+            };
+
+            read_prepare_raw_series_response(&addr, response.into_inner()).await
+        })
+        .await
+        // An elapsed deadline is a real error: it must never be read as unsupported.
+        .unwrap_or_else(|_| {
+            Err(flight_action_error(
+                &addr,
+                tonic::Status::deadline_exceeded(format!(
+                    "{} did not answer within {timeout:?}",
+                    PREPARE_RAW_SERIES_ACTION
+                )),
+            ))
+        });
+
+        result.map_err(Into::into)
+    }
+
+    /// Sends an explicit trusted internal raw-series request and decodes its Flight frames.
+    ///
+    /// The binding is an expectation supplied by the already-authorized internal planner; it is
+    /// not evidence of provenance or an independent authorization grant.
+    pub async fn handle_raw_series_query(
+        &self,
+        request: QueryRequest,
+        binding: RawSeriesRequest,
+    ) -> MetaResult<SendableRawSeriesStream> {
+        Datanode::handle_raw_series_query(self, request, binding).await
     }
 
     pub async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
@@ -235,6 +344,76 @@ fn map_region_error(status: tonic::Status, addr: String) -> error::Error {
         code: status.code(),
         source: BoxedError::new(error::Error::from(status)),
         location: location!(),
+    }
+}
+
+/// Returns true only for a bare `Unimplemented` answer to the preflight action.
+///
+/// A peer that does not implement the action rejects the action call itself with a
+/// bare `Unimplemented` status, and that is the only answer reported as unsupported
+/// without a contract body. An `Unimplemented` status that carries error-code
+/// metadata is a real failure of a peer that does implement the action, and so is
+/// any error delivered after the response started, including an error delivered as
+/// the first response stream item. A body that carries `supported: null` is not
+/// classified here: it is the protocol's own unsupported answer and is decoded by
+/// [`decode_prepare_raw_series_response`] after a clean end of stream.
+fn is_unsupported_preflight(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unimplemented
+        && !status
+            .metadata()
+            .contains_key(common_error::GREPTIME_DB_HEADER_ERROR_CODE)
+}
+
+/// Logs a preflight transport failure and maps it with the shared region-server mapping.
+fn flight_action_error(addr: &str, status: tonic::Status) -> error::Error {
+    let tonic_code = status.code();
+    let failure = map_region_error(status, addr.to_string());
+    error!(
+        failure; "Failed to do Flight action {}, addr: {}, code: {}",
+        PREPARE_RAW_SERIES_ACTION, addr, tonic_code
+    );
+    failure
+}
+
+/// Reads the preflight answer, requiring exactly one result and a clean end of stream.
+///
+/// The end of the response is validated before the body is decoded, and at most two
+/// stream items are read, so a missing result, an extra result, a body that does not
+/// decode, or a stream error can never be reported as "unsupported" or "supported".
+/// In particular an explicit `null` body is only the unsupported answer when it is
+/// the single result and the stream then ended cleanly.
+async fn read_prepare_raw_series_response(
+    addr: &str,
+    mut response: tonic::codec::Streaming<arrow_flight::Result>,
+) -> Result<Option<PreparedNamedRawSeries>> {
+    let Some(first) = response.next().await else {
+        return IllegalFlightMessagesSnafu {
+            reason: format!("{} response carries no result", PREPARE_RAW_SERIES_ACTION),
+        }
+        .fail();
+    };
+    let first = first.map_err(|status| flight_action_error(addr, status))?;
+
+    match response.next().await {
+        None => {}
+        Some(Ok(_)) => {
+            return IllegalFlightMessagesSnafu {
+                reason: format!(
+                    "{} response carries more than one result",
+                    PREPARE_RAW_SERIES_ACTION
+                ),
+            }
+            .fail();
+        }
+        Some(Err(status)) => return Err(flight_action_error(addr, status)),
+    }
+
+    match decode_prepare_raw_series_response(&first.body) {
+        Ok(prepared) => Ok(prepared),
+        Err(error) => IllegalFlightMessagesSnafu {
+            reason: format!("{} response is invalid: {error}", PREPARE_RAW_SERIES_ACTION),
+        }
+        .fail(),
     }
 }
 
@@ -422,10 +601,12 @@ mod tests {
     };
     use api::v1::value::ValueData;
     use api::v1::{
-        ColumnDataType, ColumnSchema as PbColumnSchema, Row, Rows, Status as PbStatus, Value,
+        ColumnDataType, ColumnSchema as PbColumnSchema, QueryContext as ApiQueryContext, Row, Rows,
+        Status as PbStatus, Value,
     };
     use common_error::ext::RetryHint;
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+    use common_query::request::RAW_SERIES_REQUEST_EXTENSION_KEY;
     use common_recordbatch::adapter::RecordBatchMetrics;
     use datatypes::arrow::array::Int32Array;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
@@ -440,6 +621,37 @@ mod tests {
 
     use super::*;
     use crate::Error;
+
+    fn raw_series_fixture() -> RawSeriesRequest {
+        RawSeriesRequest::from_extension_value(include_str!(
+            "../../../tests/compatibility/wire/raw_series_request/v1_request.json"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn raw_query_rejects_existing_marker_before_transport() {
+        let requester = RegionRequester::new(Client::new(), false, false);
+        let mut context = ApiQueryContext::default();
+        context.extensions.insert(
+            RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(),
+            "already-set".to_string(),
+        );
+        let request = QueryRequest {
+            header: Some(RegionRequestHeader {
+                query_context: Some(context),
+                ..Default::default()
+            }),
+            region_id: raw_series_fixture().physical_metadata.region_id,
+            plan: Default::default(),
+        };
+        let error = requester
+            .handle_raw_series_query(request, raw_series_fixture())
+            .await
+            .err()
+            .expect("conflicting marker should be rejected before transport");
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+    }
 
     #[derive(Clone, Default)]
     struct RecordingRegionService {
