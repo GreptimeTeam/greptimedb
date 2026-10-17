@@ -56,6 +56,7 @@ meta-srv = { workspace = true, features = ["mock"] }
 mito2.workspace = true
 object-store.workspace = true
 operator.workspace = true
+promql.workspace = true
 prost.workspace = true
 query.workspace = true
 rand.workspace = true
