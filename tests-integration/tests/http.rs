@@ -4150,6 +4150,44 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     assert_remote_write_v2_written_headers_with_histograms(&headers, "1", "2");
     assert!(res.text().await.is_empty());
 
+    // Compare the complete selected histogram with its source, including labels.
+    // Its output timestamp must be the evaluation time, not the source's 3s.
+    let res = client
+        .get("/v1/prometheus/api/v1/query?query=remote_write_v2_latency_seconds&time=3")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let source = res.json::<serde_json::Value>().await;
+    let source = &source["data"]["result"][0];
+    for (query, field) in [
+        (
+            "query?query=first_over_time(remote_write_v2_latency_seconds[2s])&time=4",
+            "histogram",
+        ),
+        (
+            "query_range?query=first_over_time(remote_write_v2_latency_seconds[2s])&start=3&end=4&step=1",
+            "histograms",
+        ),
+    ] {
+        let res = client
+            .get(&format!("/v1/prometheus/api/v1/{query}"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let result = res.json::<serde_json::Value>().await;
+        let series = &result["data"]["result"][0];
+        assert_eq!(series["metric"], source["metric"]);
+        assert!(result["warnings"].is_null());
+        assert!(result["infos"].is_null());
+        let sample = if field == "histograms" {
+            &series[field][1]
+        } else {
+            &series[field]
+        };
+        assert_eq!(sample[0], 4.0);
+        assert_eq!(sample[1], source["histogram"][1]);
+    }
+
     validate_data(
         "prometheus_remote_write_v2_native_histogram_sample_rows",
         &client,

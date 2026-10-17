@@ -70,14 +70,14 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MatchGroupViolation, MaxOverTime,
-    MinOverTime, MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd,
+    FirstOverTime, IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MatchGroupViolation,
+    MaxOverTime, MinOverTime, MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd,
     NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime,
     NativeHistogramChanges, NativeHistogramCount, NativeHistogramCountOverTime,
     NativeHistogramDelta, NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq,
-    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
-    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
-    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramRate,
+    NativeHistogramFirstOverTime, NativeHistogramIDelta, NativeHistogramIRate,
+    NativeHistogramIncrease, NativeHistogramLastOverTime, NativeHistogramMulScalar,
+    NativeHistogramNeg, NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramRate,
     NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
     NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
     PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round,
@@ -3425,6 +3425,7 @@ impl PromPlanner {
                 | "irate"
                 | "avg_over_time"
                 | "sum_over_time"
+                | "first_over_time"
                 | "last_over_time"
         );
         if !returns_histogram
@@ -3707,6 +3708,13 @@ impl PromPlanner {
                     ScalarFunc::Udf(Arc::new(NativeHistogramCountOverTime::scalar_udf()))
                 } else {
                     ScalarFunc::Udf(Arc::new(CountOverTime::scalar_udf()))
+                }
+            }
+            "first_over_time" => {
+                if all_field_columns_are_native_histogram_ranges {
+                    ScalarFunc::Udf(Arc::new(NativeHistogramFirstOverTime::scalar_udf()))
+                } else {
+                    ScalarFunc::Udf(Arc::new(FirstOverTime::scalar_udf()))
                 }
             }
             "last_over_time" => {
