@@ -128,7 +128,7 @@ use store_api::region_engine::{
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
-    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
@@ -488,6 +488,18 @@ impl MitoEngine {
             .submit_to_worker(region_id, request)
             .await?;
         rx.await.context(RecvSnafu)?
+    }
+
+    /// Puts rows into several regions for one request. The puts to regions of the same worker
+    /// reach it in one message, so the worker writes them in one batch and one WAL append.
+    pub async fn put_regions_batch(
+        &self,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&["put"])
+            .start_timer();
+        self.inner.put_regions_batch(requests).await
     }
 
     /// Handles copy region from request.
@@ -1042,6 +1054,35 @@ impl EngineInner {
         self.workers.submit_to_worker(region_id, request).await?;
 
         receiver.await.context(RecvSnafu)?
+    }
+
+    /// Handles the puts of one request to several regions, see [MitoEngine::put_regions_batch].
+    async fn put_regions_batch(
+        &self,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        let mut writes = Vec::with_capacity(requests.len());
+        let mut receivers = Vec::with_capacity(requests.len());
+        for (region_id, request) in requests {
+            let region_metadata = self.get_metadata(region_id).ok();
+            let (request, receiver) = WorkerRequest::try_from_region_request(
+                region_id,
+                RegionRequest::Put(request),
+                region_metadata,
+            )?;
+            let WorkerRequest::Write(write) = request else {
+                unreachable!("a put converts to a write");
+            };
+            writes.push(write);
+            receivers.push(receiver);
+        }
+        self.workers.submit_writes(writes).await?;
+
+        let mut affected_rows = 0;
+        for receiver in receivers {
+            affected_rows += receiver.await.context(RecvSnafu)??;
+        }
+        Ok(affected_rows)
     }
 
     /// Returns the sequence of latest committed data.
