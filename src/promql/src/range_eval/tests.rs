@@ -97,7 +97,7 @@ fn metric(host: u64) -> MetricName {
 
 fn probe_evaluator(fields: usize, grid: Arc<EvalGrid>, window: RangeWindow) -> RangeEvaluator {
     let kernel: WindowKernel = Box::new(probe);
-    RangeEvaluator::try_new(&raw_schema(fields), grid, window, kernel).unwrap()
+    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel).unwrap()
 }
 
 /// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
@@ -442,13 +442,9 @@ fn functions_match_range_udfs() {
             let mut rng = StdRng::seed_from_u64(seed);
             let fields = rng.random_range(1..=3);
             let (grid, window) = random_window(&mut rng);
-            let mut evaluator = RangeEvaluator::try_new(
-                &raw_schema(fields),
-                grid.clone(),
-                window,
-                function.kernel(),
-            )
-            .unwrap();
+            let mut evaluator =
+                RangeEvaluator::try_new(&raw_schema(fields), grid.clone(), window, function)
+                    .unwrap();
             for host in 0..3 {
                 let rows = random_rows(&mut rng, fields);
                 let expected = udf_reference(function, &rows, &grid, window, fields);
@@ -470,7 +466,7 @@ fn overlapping_window_spans_chunks() {
     };
     let kernel: WindowKernel = Box::new(sum);
     let mut evaluator =
-        RangeEvaluator::try_new(&raw_schema(1), grid(10, 10, 3), window, kernel).unwrap();
+        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel).unwrap();
     let first = chunk(&[(5, vec![Some(1.0)]), (12, vec![Some(2.0)])], 1, 0, false);
     let second = chunk(&[(18, vec![Some(4.0)]), (25, vec![Some(8.0)])], 1, 0, true);
     assert!(evaluator.push(&first).unwrap().is_none());
@@ -498,13 +494,17 @@ fn empty_input_and_series_without_results() {
 
 #[test]
 fn rejects_invalid_parameters() {
-    let kernel = || -> WindowKernel { Box::new(probe) };
     let zero_range = RangeWindow {
         range_ms: 0,
         offset_ms: 0,
     };
     assert!(matches!(
-        RangeEvaluator::try_new(&raw_schema(1), grid(0, 10, 4), zero_range, kernel()),
+        RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10, 4),
+            zero_range,
+            RangeFunction::Rate
+        ),
         Err(DataFusionError::Plan(_))
     ));
 
@@ -515,7 +515,7 @@ fn rejects_invalid_parameters() {
         offset_ms: 0,
     };
     assert!(matches!(
-        RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, kernel()),
+        RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, RangeFunction::Rate),
         Err(DataFusionError::Plan(_))
     ));
 }

@@ -43,7 +43,7 @@ pub struct RangeWindow {
 }
 
 /// The valid samples of one field inside one window, in source order.
-pub struct FloatWindow<'a> {
+pub(crate) struct FloatWindow<'a> {
     /// Sample timestamps shifted by the offset onto the evaluation timeline; non-empty.
     pub timestamps: &'a [i64],
     pub values: &'a [f64],
@@ -53,7 +53,7 @@ pub struct FloatWindow<'a> {
 }
 
 /// Computes one window result; `None` means the window has no result.
-pub type WindowKernel = Box<dyn FnMut(FloatWindow<'_>) -> Option<f64> + Send>;
+pub(crate) type WindowKernel = Box<dyn FnMut(FloatWindow<'_>) -> Option<f64> + Send>;
 
 /// Evaluates range windows over raw float series, one series at a time.
 ///
@@ -89,8 +89,17 @@ struct FieldSamples {
 }
 
 impl RangeEvaluator {
-    /// Creates an evaluator for raw series of `input` onto `grid`.
+    /// Creates an evaluator of `function` for raw series of `input` onto `grid`.
     pub fn try_new(
+        input: &SeriesSchema,
+        grid: Arc<EvalGrid>,
+        window: RangeWindow,
+        function: RangeFunction,
+    ) -> Result<Self> {
+        Self::with_kernel(input, grid, window, function.kernel())
+    }
+
+    pub(crate) fn with_kernel(
         input: &SeriesSchema,
         grid: Arc<EvalGrid>,
         window: RangeWindow,
