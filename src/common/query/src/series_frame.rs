@@ -39,6 +39,10 @@ use datatypes::series::{MetricName, SeriesOrdering};
 use futures_util::Stream;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
+mod record_batches;
+
+pub use record_batches::{InputMapping, record_batches_to_raw_series};
+
 #[cfg(test)]
 mod tests;
 
