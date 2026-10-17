@@ -604,6 +604,29 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
+    /// Checks whether this scanner can provide a raw-series scan for the given labels.
+    ///
+    /// This is a non-consuming preflight: it must not start a scan or otherwise consume
+    /// scanner state. It checks immutable label binding, schema, and typed residual-predicate
+    /// eligibility. Returning `Some` requires overriding `scan_series_partition` and
+    /// promises that it can execute with this label source. `None` means the raw path is
+    /// unsupported and an ordinary scan remains available. Execution must revalidate and
+    /// return errors rather than falling back if the binding or schema changed since preflight.
+    fn raw_series_schema(
+        &self,
+        _label_source: &RawLabelSource,
+    ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+        Ok(None)
+    }
+
+    /// Returns the guarantee for subsequent raw scans without consuming scanner state.
+    ///
+    /// Legacy raw sources have no ordering declaration, so `Contiguous` is the conservative
+    /// default; `Interleaved` is not representable on the raw frame wire.
+    fn raw_series_ordering(&self) -> SeriesOrdering {
+        SeriesOrdering::Contiguous
+    }
+
     /// Scans a partition as raw series when this source supports that path.
     ///
     /// `None` means raw capability is absent before execution and permits a legacy scan instead.
@@ -946,12 +969,21 @@ mod tests {
         let ctx = QueryScanContext::default();
         let metrics = ExecutionPlanMetricsSet::new();
 
+        // The default raw-scan preflight declines without consuming the legacy scan, and the
+        // prepared-series entrypoint reports unsupported before consumption as well.
+        assert!(
+            scanner
+                .raw_series_schema(&RawLabelSource::Explicit)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             scanner
                 .prepare_series_partition(&ctx, &metrics, 0)
                 .unwrap()
                 .is_none()
         );
+        assert_eq!(scanner.raw_series_ordering(), SeriesOrdering::Contiguous);
 
         // SinglePartitionScanner uses the default raw-scan implementation, which panics.
         let raw_scan = catch_unwind(AssertUnwindSafe(|| {
