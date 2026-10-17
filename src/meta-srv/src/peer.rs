@@ -29,6 +29,7 @@ pub struct MetasrvPeerAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
     max_items: Option<u32>,
+    exclude_draining_datanodes: bool,
 }
 
 impl MetasrvPeerAllocator {
@@ -38,15 +39,18 @@ impl MetasrvPeerAllocator {
             ctx,
             selector,
             max_items: None,
+            exclude_draining_datanodes: false,
         }
     }
 
-    pub fn with_max_items(self, max_items: u32) -> Self {
-        Self {
-            ctx: self.ctx,
-            selector: self.selector,
-            max_items: Some(max_items),
-        }
+    pub fn with_max_items(mut self, max_items: u32) -> Self {
+        self.max_items = Some(max_items);
+        self
+    }
+
+    pub fn exclude_draining_datanodes(mut self) -> Self {
+        self.exclude_draining_datanodes = true;
+        self
     }
 
     /// Allocates a specified number (by `regions`) of [`Peer`] instances based on the number of
@@ -67,11 +71,16 @@ impl MetasrvPeerAllocator {
             );
         }
 
+        let exclude_peer_ids = if self.exclude_draining_datanodes {
+            self.ctx.drain_node_status_manager.excluded_ids().await?
+        } else {
+            HashSet::new()
+        };
         let options = SelectorOptions {
             affinity: alloc_context.affinity.as_ref(),
             min_required_items,
             allow_duplication: true,
-            exclude_peer_ids: HashSet::new(),
+            exclude_peer_ids,
             workload_filter: Some(accept_ingest_workload),
         };
         let peers = self.selector.select(&self.ctx, options).await?;
@@ -246,6 +255,11 @@ mod tests {
                     affinity_fallback: fallback,
                     peer_discovery: discovery.clone(),
                     affinity,
+                    drain_node_status_manager: Arc::new(
+                        crate::procedure::drain_node::status::DrainNodeStatusManager::new(
+                            Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new()),
+                        ),
+                    ),
                 },
                 selector.clone(),
             );

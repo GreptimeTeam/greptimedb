@@ -109,6 +109,7 @@ mod tests {
     use crate::cluster::MetaPeerClientBuilder;
     use crate::discovery::utils::accept_ingest_workload;
     use crate::metasrv::{SelectTarget, SelectorContext, SelectorRef};
+    use crate::procedure::drain_node::status::{DrainNodeStatusManager, DrainNodeStatusManagerRef};
     use crate::selector::common::{choose_items, filter_out_excluded_peers};
     use crate::selector::lease_based::LeaseBasedSelector;
     use crate::selector::load_based::LoadBasedSelector;
@@ -116,6 +117,12 @@ mod tests {
     use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
     use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
     use crate::selector::{Selector, SelectorOptions};
+
+    fn test_drain_node_status_manager() -> DrainNodeStatusManagerRef {
+        Arc::new(DrainNodeStatusManager::new(
+            Arc::new(MemoryKvBackend::new()),
+        ))
+    }
 
     #[test]
     fn test_choose_peers() {
@@ -331,6 +338,7 @@ mod tests {
                     Arc::new(RoundRobinSelector::new(SelectTarget::Datanode))
                 };
                 let ctx = SelectorContext {
+                    drain_node_status_manager: test_drain_node_status_manager(),
                     affinity_fallback: AffinityFallback::Error,
                     affinity: if use_exact_affinity {
                         Arc::new(ExactAffinity)
@@ -396,6 +404,7 @@ mod tests {
                 fail: false,
             });
             let ctx = SelectorContext {
+                drain_node_status_manager: test_drain_node_status_manager(),
                 affinity_fallback: AffinityFallback::Error,
                 peer_discovery: discovery.clone(),
                 affinity: Arc::new(ExactAffinity),
@@ -420,6 +429,7 @@ mod tests {
         let affinity_requirements = requirements();
         for target in [SelectTarget::Datanode, SelectTarget::Flownode] {
             let ctx = SelectorContext {
+                drain_node_status_manager: test_drain_node_status_manager(),
                 affinity_fallback: AffinityFallback::Error,
                 peer_discovery: Arc::new(Discovery {
                     snapshots: vec![vec![node(1, Some("a"), true), node(2, Some("a"), true)]],
@@ -488,6 +498,7 @@ mod tests {
                             fail: false,
                         });
                         let ctx = SelectorContext {
+                            drain_node_status_manager: test_drain_node_status_manager(),
                             peer_discovery: discovery.clone(),
                             affinity: Arc::new(ExactAffinity),
                             affinity_fallback: fallback,
@@ -549,6 +560,7 @@ mod tests {
                 fail: true,
             });
             let ctx = SelectorContext {
+                drain_node_status_manager: test_drain_node_status_manager(),
                 peer_discovery: discovery.clone(),
                 affinity: Arc::new(ExactAffinity),
                 affinity_fallback: AffinityFallback::Unconstrained,
@@ -691,6 +703,7 @@ mod tests {
                 fail: false,
             });
             let ctx = SelectorContext {
+                drain_node_status_manager: test_drain_node_status_manager(),
                 peer_discovery: discovery.clone(),
                 affinity: Arc::new(ExactAffinity),
                 affinity_fallback: fallback,

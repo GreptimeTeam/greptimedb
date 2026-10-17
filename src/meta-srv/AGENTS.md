@@ -23,7 +23,7 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
 | `state` | `src/meta-srv/src/state.rs` | Leader/Follower state machine and transitions |
 | `handler` | `src/meta-srv/src/handler/` | Heartbeat handler chain (`HeartbeatHandler`): leader check, region lease, stats, mailbox |
 | `service` | `src/meta-srv/src/service/` | gRPC services (`heartbeat`, `procedure`, `cluster`, `store`) and HTTP admin |
-| `procedure` | `src/meta-srv/src/procedure/` | Distributed procedures: `region_migration/`, `repartition.rs`, `wal_prune/` |
+| `procedure` | `src/meta-srv/src/procedure/` | Distributed procedures: `drain_node/`, `region_migration/`, `repartition.rs`, `wal_prune/` |
 | `region` | `src/meta-srv/src/region/` | Region supervisor, lease keeper, failover triggers |
 | `discovery` | `src/meta-srv/src/discovery/` | Node discovery and lease-backed node info |
 | `pubsub` | `src/meta-srv/src/pubsub/` | Heartbeat topic publish/subscribe support |
@@ -47,6 +47,9 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   `common-meta`'s `DdlManager`, executed via `common-procedure`.
 - **Region migration**: `procedure/region_migration/manager.rs` plus per-step
   files; triggered by failover or an explicit command.
+- **Drain node**: `procedure/drain_node.rs` scans and migrates leader regions in
+  batches; `procedure/drain_node/status.rs` persists placement exclusion. Target
+  selection resolves source affinity when a resolver is configured.
 - **Leader election**: via `common-meta`'s election; transitions in `state.rs`.
 
 ## Public surface

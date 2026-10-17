@@ -34,6 +34,7 @@ use table::table_name::TableName;
 
 use crate::error::{self, Result};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
+use crate::procedure::drain_node::status::DrainNodeStatusManagerRef;
 use crate::procedure::region_migration::utils::{
     RegionMigrationAnalysis, RegionMigrationTaskBatch, analyze_region_migration_task,
 };
@@ -48,6 +49,7 @@ pub struct RegionMigrationManager {
     procedure_manager: ProcedureManagerRef,
     context_factory: DefaultContextFactory,
     tracker: RegionMigrationProcedureTracker,
+    drain_node_status_manager: Option<DrainNodeStatusManagerRef>,
 }
 
 #[derive(Default, Clone)]
@@ -189,7 +191,26 @@ impl RegionMigrationManager {
             procedure_manager,
             context_factory,
             tracker: RegionMigrationProcedureTracker::default(),
+            drain_node_status_manager: None,
         }
+    }
+
+    pub(crate) fn with_drain_node_status_manager(
+        mut self,
+        manager: DrainNodeStatusManagerRef,
+    ) -> Self {
+        self.drain_node_status_manager = Some(manager);
+        self
+    }
+
+    async fn ensure_target_available(&self, peer_id: u64) -> Result<()> {
+        if let Some(manager) = &self.drain_node_status_manager {
+            ensure!(
+                !manager.excluded_ids().await?.contains(&peer_id),
+                error::PeerUnavailableSnafu { peer_id }
+            );
+        }
+        Ok(())
     }
 
     /// Returns the [`RegionMigrationProcedureTracker`].
@@ -395,6 +416,7 @@ impl RegionMigrationManager {
         &self,
         mut task: RegionMigrationTaskBatch,
     ) -> Result<SubmitRegionMigrationTaskResult> {
+        self.ensure_target_available(task.to_peer.id).await?;
         let (migrating_region_ids, procedure_guards) = self.extract_running_regions(&mut task);
         let RegionMigrationAnalysis {
             migrated,
@@ -543,6 +565,7 @@ impl RegionMigrationManager {
         procedure_context: ProcedureContext,
         mut task: RegionMigrationProcedureTask,
     ) -> Result<Option<ProcedureId>> {
+        self.ensure_target_available(task.to_peer.id).await?;
         if let Some(event_context) = procedure_context.event_context.as_ref() {
             task.trigger_reason =
                 RegionMigrationTriggerReason::from_trigger_reason(event_context.reason);

@@ -65,6 +65,9 @@
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}
 //!
+//! 14. Drain-node status key `__drain_node_status/{datanode_id}`
+//!     - A present key prevents new region routes from assigning the datanode.
+//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -191,6 +194,12 @@ pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
 pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
 pub const TOPIC_REGION_PREFIX: &str = "__topic_region";
+/// A present key excludes the datanode from new table and region placements.
+pub const DRAIN_NODE_STATUS_PREFIX: &str = "__drain_node_status/";
+
+pub fn drain_node_status_key(datanode_id: DatanodeId) -> Vec<u8> {
+    format!("{DRAIN_NODE_STATUS_PREFIX}{datanode_id}").into_bytes()
+}
 
 /// The election key.
 pub const ELECTION_KEY: &str = "__metasrv_election";
@@ -1924,6 +1933,7 @@ mod tests {
     use crate::key::{
         DeserializedValueWithBytes, DroppedTableMetadata, MetadataValue, RegionDistribution,
         RegionRoleSet, TOPIC_REGION_PREFIX, TableMetadataManager, ViewInfoValue,
+        drain_node_status_key,
     };
     use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -2240,6 +2250,102 @@ mod tests {
             assert_eq!(regions.len(), 8);
             assert!(regions.contains(&region_id));
         }
+    }
+
+    #[tokio::test]
+    async fn test_drain_marker_fences_preselected_table_route() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let manager = TableMetadataManager::new(mem_kv.clone());
+        let table_info = new_test_table_info();
+        let table_id = table_info.ident.table_id;
+        // The route was selected before the drain marker was written.
+        let route = new_region_route(1, 2);
+        mem_kv
+            .put(
+                PutRequest::new()
+                    .with_key(drain_node_status_key(2))
+                    .with_value(b"draining".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            create_physical_table_metadata(&manager, table_info, vec![route], HashMap::new())
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .table_route_manager()
+                .table_route_storage()
+                .get(table_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drain_marker_fences_region_migration_route_update() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let manager = TableMetadataManager::new(mem_kv.clone());
+        let table_info = new_test_table_info();
+        let table_id = table_info.ident.table_id;
+        let original_route = new_region_route(1, 2);
+        create_physical_table_metadata(
+            &manager,
+            table_info.clone(),
+            vec![original_route.clone()],
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let current = manager
+            .table_route_manager()
+            .table_route_storage()
+            .get_with_raw_bytes(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let new_route = new_region_route(1, 3);
+        mem_kv
+            .put(
+                PutRequest::new()
+                    .with_key(drain_node_status_key(3))
+                    .with_value(b"draining".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            manager
+                .update_table_route(
+                    table_id,
+                    RegionInfo {
+                        engine: table_info.meta.engine,
+                        region_storage_path: region_storage_path(
+                            &table_info.catalog_name,
+                            &table_info.schema_name,
+                        ),
+                        region_options: HashMap::new(),
+                        region_wal_options: HashMap::new(),
+                    },
+                    &current,
+                    vec![new_route],
+                    &HashMap::new(),
+                    &HashMap::new(),
+                )
+                .await
+                .is_err()
+        );
+        let stored = manager
+            .table_route_manager()
+            .table_route_storage()
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.region_routes().unwrap(), &vec![original_route]);
     }
 
     #[tokio::test]

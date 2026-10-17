@@ -50,8 +50,8 @@ use common_meta::stats::topic::TopicStatsRegistryRef;
 use common_meta::wal_provider::WalProviderRef;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
-use common_procedure::ProcedureManagerRef;
 use common_procedure::options::ProcedureConfig;
+use common_procedure::{ProcedureId, ProcedureManagerRef};
 use common_stat::ResourceStatRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{error, info, warn};
@@ -75,6 +75,8 @@ use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
+use crate::procedure::drain_node::DrainNodeManagerRef;
+use crate::procedure::drain_node::status::DrainNodeStatusManagerRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
@@ -491,6 +493,7 @@ pub struct SelectorContext {
     pub affinity: AffinityRef,
     /// Whether selection may retry without affinity when candidates are insufficient.
     pub affinity_fallback: AffinityFallback,
+    pub drain_node_status_manager: DrainNodeStatusManagerRef,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
@@ -600,6 +603,7 @@ pub struct Metasrv {
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
+    drain_node_manager: DrainNodeManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
@@ -902,6 +906,20 @@ impl Metasrv {
 
     pub fn region_migration_manager(&self) -> &RegionMigrationManagerRef {
         &self.region_migration_manager
+    }
+
+    /// Submits a metasrv-internal procedure to start draining a datanode.
+    pub async fn submit_drain_node(
+        &self,
+        datanode_id: common_meta::DatanodeId,
+    ) -> Result<ProcedureId> {
+        snafu::ensure!(
+            self.state.read().unwrap().is_leader(),
+            error::IsNotLeaderSnafu {
+                node_addr: self.options.grpc.server_addr.clone(),
+            }
+        );
+        self.drain_node_manager.submit(datanode_id).await
     }
 
     pub fn publish(&self) -> Option<PublisherRef> {

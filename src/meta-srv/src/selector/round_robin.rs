@@ -167,6 +167,11 @@ mod test {
             affinity_fallback: Default::default(),
             affinity: Arc::new(NoopAffinity),
             peer_discovery: meta_peer_client.clone(),
+            drain_node_status_manager: Arc::new(
+                crate::procedure::drain_node::status::DrainNodeStatusManager::new(Arc::new(
+                    common_meta::kv_backend::memory::MemoryKvBackend::new(),
+                )),
+            ),
         };
         // add three nodes
         let peer1 = Peer {
@@ -228,6 +233,11 @@ mod test {
             affinity_fallback: Default::default(),
             affinity: Arc::new(NoopAffinity),
             peer_discovery: meta_peer_client.clone(),
+            drain_node_status_manager: Arc::new(
+                crate::procedure::drain_node::status::DrainNodeStatusManager::new(Arc::new(
+                    common_meta::kv_backend::memory::MemoryKvBackend::new(),
+                )),
+            ),
         };
         // add three nodes
         let peer1 = Peer {

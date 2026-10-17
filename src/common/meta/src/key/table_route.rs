@@ -29,10 +29,10 @@ use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
     DeserializedValueWithBytes, MetadataKey, MetadataValue, RegionDistribution,
-    TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX,
+    TABLE_ROUTE_KEY_PATTERN, TABLE_ROUTE_PREFIX, drain_node_status_key,
 };
 use crate::kv_backend::KvBackendRef;
-use crate::kv_backend::txn::Txn;
+use crate::kv_backend::txn::{Compare, CompareOp, Txn};
 use crate::rpc::router::{RegionRoute, region_distribution};
 use crate::rpc::store::BatchGetRequest;
 
@@ -617,6 +617,72 @@ pub struct TableRouteStorage {
     kv_backend: KvBackendRef,
 }
 
+/// Fence newly assigned peers in the same KV transaction that publishes the route.
+/// A drain marker committed first makes the route update fail; a route committed
+/// first is visible to the drain's subsequent metadata scan.
+fn placement_fence(old: Option<&TableRouteValue>, new: &TableRouteValue) -> Txn {
+    let old_peers = old
+        .and_then(|route| route.region_routes().ok())
+        .map(|routes| {
+            routes
+                .iter()
+                .map(|route| {
+                    let followers = route
+                        .follower_peers
+                        .iter()
+                        .map(|peer| peer.id)
+                        .collect::<HashSet<_>>();
+                    (
+                        route.region.id,
+                        (route.leader_peer.as_ref().map(|peer| peer.id), followers),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let new_peers = new
+        .region_routes()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .flat_map(|route| {
+            let old = old_peers.get(&route.region.id);
+
+            let leader = route
+                .leader_peer
+                .iter()
+                .filter(move |peer| old.is_none_or(|(id, _)| *id != Some(peer.id)))
+                .map(|peer| peer.id);
+
+            let followers = route
+                .follower_peers
+                .iter()
+                .filter(move |peer| {
+                    old.is_none_or(|(leader, followers)| {
+                        *leader != Some(peer.id) && !followers.contains(&peer.id)
+                    })
+                })
+                .map(|peer| peer.id);
+
+            leader.chain(followers)
+        })
+        .collect::<HashSet<_>>();
+
+    if new_peers.is_empty() {
+        return Txn::new();
+    }
+
+    Txn::new().when(
+        new_peers
+            .into_iter()
+            .map(|peer_id| {
+                Compare::with_value_not_exists(drain_node_status_key(peer_id), CompareOp::Equal)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 pub type TableRouteValueDecodeResult = Result<Option<DeserializedValueWithBytes<TableRouteValue>>>;
 
 impl TableRouteStorage {
@@ -638,6 +704,7 @@ impl TableRouteStorage {
         let raw_key = key.to_bytes();
 
         let txn = Txn::put_if_not_exists(raw_key.clone(), table_route_value.try_as_raw_value()?);
+        let txn = txn.merge(placement_fence(None, table_route_value));
 
         Ok((
             txn,
@@ -664,6 +731,10 @@ impl TableRouteStorage {
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
 
         let txn = Txn::compare_and_put(raw_key.clone(), raw_value, new_raw_value);
+        let txn = txn.merge(placement_fence(
+            Some(current_table_route_value.get_inner_ref()),
+            new_table_route_value,
+        ));
 
         Ok((
             txn,
