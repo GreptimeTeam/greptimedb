@@ -95,8 +95,9 @@ impl Round {
         }
     }
 
-    /// Matches the ordinary PromQL UDF, including NaN for `nearest == 0`.
-    /// With a positive `nearest`, ties round towards +Inf.
+    /// Follows Prometheus `funcRound`: multiplying by the inverse of `nearest` and dividing by it
+    /// again (not `/ nearest` then `* nearest`) can move a `floor` result by a whole step.
+    /// `nearest == 0` gives NaN; with a positive `nearest`, ties round towards +Inf.
     pub(crate) fn round_to_nearest(value: f64, nearest: f64) -> f64 {
         let inverse = 1.0 / nearest;
         (value * inverse + 0.5).floor() / inverse
