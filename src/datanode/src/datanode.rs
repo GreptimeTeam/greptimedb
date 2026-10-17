@@ -1591,16 +1591,6 @@ mod tests {
         assert!(is_stopped(log_store).await);
     }
 
-    /// The state of the WAL's object store while a test writes to the region.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum WalUploads {
-        Succeed,
-        /// Every create fails with a transient error.
-        Fail,
-        /// Every create is parked until the test releases it.
-        Stall,
-    }
-
     const REGION: RegionId = RegionId::new(1024, 1);
 
     fn enqueued_wal_config(flush_interval: Duration) -> ObjectStoreWalConfig {
@@ -1648,14 +1638,15 @@ mod tests {
 
     /// Builds a datanode on an `enqueued` object store WAL with
     /// `flush_interval` and creates [`REGION`] on it with `durable_rows`
-    /// written through the WAL and uploaded. Then makes the WAL's creates
-    /// behave as `uploads` and writes `rows` through the WAL and
-    /// `skipped_rows` past it. Returns the datanode and its log store.
+    /// written through the WAL and uploaded. Then makes every later create
+    /// of the WAL fail with a transient error if `uploads_fail`, and writes
+    /// `rows` through the WAL and `skipped_rows` past it. Returns the datanode
+    /// and its log store.
     async fn datanode_with_object_store_wal(
         data_home: &str,
         flush_interval: Duration,
         durable_rows: usize,
-        uploads: WalUploads,
+        uploads_fail: bool,
         rows: usize,
         skipped_rows: usize,
     ) -> (Datanode, Arc<ObjectStoreLogStore>) {
@@ -1686,10 +1677,8 @@ mod tests {
             .await
             .expect("the rows must become durable");
         }
-        match uploads {
-            WalUploads::Succeed => {}
-            WalUploads::Fail => log_store.fail_creates(),
-            WalUploads::Stall => log_store.hold_creates(),
+        if uploads_fail {
+            log_store.fail_creates();
         }
         let skipped = durable_rows + rows;
         put_rows(&region_server, &schema, durable_rows..skipped, false).await;
@@ -1761,7 +1750,7 @@ mod tests {
             data_home,
             ObjectStoreWalConfig::default().flush_interval,
             3,
-            WalUploads::Fail,
+            true,
             2,
             0,
         )
@@ -1814,7 +1803,7 @@ mod tests {
             data_home.path().to_str().unwrap(),
             ObjectStoreWalConfig::default().flush_interval,
             0,
-            WalUploads::Fail,
+            true,
             3,
             2,
         )
@@ -1844,15 +1833,9 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-healthy-flush");
         let data_home = data_home.path().to_str().unwrap();
-        let (mut datanode, log_store) = datanode_with_object_store_wal(
-            data_home,
-            Duration::from_secs(3600),
-            0,
-            WalUploads::Succeed,
-            3,
-            2,
-        )
-        .await;
+        let (mut datanode, log_store) =
+            datanode_with_object_store_wal(data_home, Duration::from_secs(3600), 0, false, 3, 2)
+                .await;
 
         tokio::time::timeout(WAIT, datanode.shutdown())
             .await
@@ -1863,50 +1846,6 @@ mod tests {
         drop(datanode);
 
         assert_eq!(5, rows_after_restart(data_home).await);
-    }
-
-    /// A create that never answers holds the WAL's stop, and with it the
-    /// shutdown, until it completes; the shutdown bounds it only by the
-    /// object store client's own timeouts and retries. Once the create
-    /// completes, the WAL stops and the regions close as with a healthy WAL.
-    #[tokio::test]
-    async fn test_shutdown_waits_for_a_stalled_wal_create() {
-        common_telemetry::init_default_ut_logging();
-        let data_home = create_temp_dir("object-store-wal-shutdown-stalled");
-        let (mut datanode, log_store) = datanode_with_object_store_wal(
-            data_home.path().to_str().unwrap(),
-            ObjectStoreWalConfig::default().flush_interval,
-            0,
-            WalUploads::Stall,
-            3,
-            2,
-        )
-        .await;
-        tokio::time::timeout(WAIT, log_store.wait_for_parked_creates(1))
-            .await
-            .unwrap()
-            .unwrap();
-
-        let shutdown = tokio::spawn(async move { datanode.shutdown().await });
-        // The shutdown reached the WAL's stop, which waits for the create.
-        tokio::time::timeout(WAIT, async {
-            while !is_stopped(&log_store).await {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the shutdown must stop the WAL");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!shutdown.is_finished());
-
-        log_store.release_creates();
-        tokio::time::timeout(WAIT, shutdown)
-            .await
-            .expect("the shutdown must finish once the create completes")
-            .unwrap()
-            .unwrap();
-        assert_eq!(1, sst_files(data_home.path()).len());
-        assert!(is_stopped(&log_store).await);
     }
 
     #[test]

@@ -182,10 +182,6 @@ pub struct ObjectStoreLogStore {
     parked_creates: watch::Receiver<usize>,
     #[cfg(any(test, feature = "testing"))]
     durability_waits: watch::Receiver<usize>,
-    #[cfg(any(test, feature = "testing"))]
-    failed_creates: watch::Receiver<usize>,
-    #[cfg(any(test, feature = "testing"))]
-    failing_state: watch::Receiver<bool>,
 }
 
 type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
@@ -412,10 +408,6 @@ impl ObjectStoreLogStore {
         let (parked_creates_tx, parked_creates_rx) = watch::channel(0);
         #[cfg(any(test, feature = "testing"))]
         let (durability_waits_tx, durability_waits_rx) = watch::channel(0);
-        #[cfg(any(test, feature = "testing"))]
-        let (failed_creates_tx, failed_creates_rx) = watch::channel(0);
-        #[cfg(any(test, feature = "testing"))]
-        let (failing_tx, failing_rx) = watch::channel(false);
 
         let started_regions = StartedRegions::default();
         let actor = Actor {
@@ -469,10 +461,6 @@ impl ObjectStoreLogStore {
             parked_creates: Arc::new(parked_creates_tx),
             #[cfg(any(test, feature = "testing"))]
             durability_waits: durability_waits_tx,
-            #[cfg(any(test, feature = "testing"))]
-            failed_creates: failed_creates_tx,
-            #[cfg(any(test, feature = "testing"))]
-            failing_state: failing_tx,
         };
         #[cfg(test)]
         LIVE_ACTORS.fetch_add(1, Ordering::SeqCst);
@@ -512,10 +500,6 @@ impl ObjectStoreLogStore {
             parked_creates: parked_creates_rx,
             #[cfg(any(test, feature = "testing"))]
             durability_waits: durability_waits_rx,
-            #[cfg(any(test, feature = "testing"))]
-            failed_creates: failed_creates_rx,
-            #[cfg(any(test, feature = "testing"))]
-            failing_state: failing_rx,
         }))
     }
 
@@ -808,29 +792,6 @@ impl ObjectStoreLogStore {
         self.parked_creates
             .clone()
             .wait_for(|count| *count >= expected)
-            .await
-            .ok()
-            .map(|_| ())
-            .context(ObjectStoreWalStoppedSnafu)
-    }
-
-    /// Waits until the actor has handled at least `expected` creates that the
-    /// object store did not confirm since the store was built.
-    pub async fn wait_for_failed_creates(&self, expected: usize) -> Result<()> {
-        self.failed_creates
-            .clone()
-            .wait_for(|count| *count >= expected)
-            .await
-            .ok()
-            .map(|_| ())
-            .context(ObjectStoreWalStoppedSnafu)
-    }
-
-    /// Waits until the store is failing, see [`Failing`].
-    pub async fn wait_until_failing(&self) -> Result<()> {
-        self.failing_state
-            .clone()
-            .wait_for(|failing| *failing)
             .await
             .ok()
             .map(|_| ())
@@ -1558,10 +1519,6 @@ struct Actor {
     parked_creates: Arc<watch::Sender<usize>>,
     #[cfg(any(test, feature = "testing"))]
     durability_waits: watch::Sender<usize>,
-    #[cfg(any(test, feature = "testing"))]
-    failed_creates: watch::Sender<usize>,
-    #[cfg(any(test, feature = "testing"))]
-    failing_state: watch::Sender<bool>,
 }
 
 impl Actor {
@@ -2001,10 +1958,6 @@ impl Actor {
 
     fn on_create_completed(&mut self, object_seq: u64, result: Result<PutResult>) {
         self.creating.remove(&object_seq);
-        #[cfg(any(test, feature = "testing"))]
-        if matches!(result, Err(Error::WalObjectStore { .. })) {
-            self.failed_creates.send_modify(|count| *count += 1);
-        }
         // A batch that already failed, or that the store gave up on when it
         // poisoned itself: the object may exist, but it is off the chain, and
         // collection may delete it now.
@@ -2083,8 +2036,6 @@ impl Actor {
             self.sealed.len()
         );
         METRIC_OBJECT_STORE_WAL_FAILING.inc();
-        #[cfg(any(test, feature = "testing"))]
-        self.failing_state.send_replace(true);
         // The append held back would wait for an upload that is not coming.
         let stalled = self.take_stalled();
         let now = Instant::now();
@@ -2114,8 +2065,6 @@ impl Actor {
         let Some(failing) = self.failing.take() else {
             return;
         };
-        #[cfg(any(test, feature = "testing"))]
-        self.failing_state.send_replace(false);
         METRIC_OBJECT_STORE_WAL_FAILING.dec();
         info!(
             "Object store WAL is no longer failing, {reason}, after {:?}: {} creates failed, {} appends rejected",
@@ -5090,8 +5039,6 @@ mod tests {
             next_create_fails_after_write: Arc::default(),
             parked_creates: watch::channel(0).1,
             durability_waits: watch::channel(0).1,
-            failed_creates: watch::channel(0).1,
-            failing_state: watch::channel(false).1,
         };
         (store, command_rx)
     }
