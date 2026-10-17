@@ -11371,6 +11371,7 @@ dependencies = [
  "prometheus 0.14.0",
  "prost 0.14.1",
  "rand 0.9.4",
+ "regex",
  "snafu 0.8.6",
  "tokio",
 ]
