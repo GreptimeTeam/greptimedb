@@ -112,7 +112,7 @@ impl Comparison {
 }
 
 impl ComparisonOp {
-    fn apply(self, left: f64, right: f64) -> bool {
+    pub(crate) fn apply(self, left: f64, right: f64) -> bool {
         match self {
             Self::Equal => left == right,
             Self::NotEqual => left != right,

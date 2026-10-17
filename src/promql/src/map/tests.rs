@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod arithmetic;
+mod broadcast;
 mod comparison;
 mod math_functions;
 

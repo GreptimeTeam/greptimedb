@@ -17,10 +17,12 @@
 //! Expression column naming and omission of missing points belong to the planner/output adapter;
 //! these kernels retain the shared field schema and represent missing grid positions by validity.
 
+mod broadcast;
 mod comparison;
 #[cfg(test)]
 mod tests;
 
+pub use broadcast::{ScalarSeriesOperand, map_arithmetic_series, map_compare_series};
 pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
 
 use std::sync::Arc;
@@ -278,18 +280,22 @@ fn map_power(floats: &Float64Array, scalar: ScalarOperand) -> Result<Float64Arra
         ScalarOperand::Left(scalar) => vec![literal(scalar), samples],
         ScalarOperand::Right(scalar) => vec![samples, literal(scalar)],
     };
+    apply_power(args, floats.len())
+}
+
+fn apply_power(args: Vec<ColumnarValue>, number_rows: usize) -> Result<Float64Array> {
     // The existing UDF owns power's domain checks and null handling. A direct powf map would
     // incorrectly accept 0 ^ negative.
     let operand_field = Arc::new(Field::new("operand", DataType::Float64, true));
     let output = math::power().invoke_with_args(ScalarFunctionArgs {
         arg_fields: vec![operand_field; 2],
         args,
-        number_rows: floats.len(),
+        number_rows,
         return_field: Arc::new(Field::new("power", DataType::Float64, true)),
         config_options: Arc::new(ConfigOptions::default()),
     })?;
     Ok(output
-        .into_array(floats.len())?
+        .into_array(number_rows)?
         .as_primitive::<Float64Type>()
         .clone())
 }
