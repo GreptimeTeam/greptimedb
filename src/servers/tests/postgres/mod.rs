@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use auth::{
-    BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider, UserProviderRef,
-    format_pg_scram_sha256_password_verifier, user_provider_from_option,
+    BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
+    UserProvider, UserProviderRef, format_pg_scram_sha256_password_verifier,
+    user_provider_from_option,
 };
+use common_base::secrets::ExposeSecret;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
@@ -86,6 +90,95 @@ impl UserProvider for BearerProvider {
         assert_eq!("alice", user_info.username());
         self.authorizations.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+const MIXED_AUTH_SCRAM_USER: &str = "scram_user";
+const MIXED_AUTH_SCRAM_PASSWORD: &[u8] = b"scram-password";
+const MIXED_AUTH_CLEARTEXT_USER: &str = "clear_user";
+const MIXED_AUTH_CLEARTEXT_PASSWORD: &str = "clear-password";
+
+/// Selects SCRAM-SHA-256 for [`MIXED_AUTH_SCRAM_USER`] and cleartext for
+/// everyone else, so one endpoint serves both mechanisms.
+struct MixedAuthProvider {
+    scram_verifier: PgScramSha256Verifier,
+    selections: Mutex<HashMap<String, &'static str>>,
+}
+
+#[async_trait]
+impl UserProvider for MixedAuthProvider {
+    fn name(&self) -> &str {
+        "mixed-auth-test"
+    }
+
+    async fn authenticate(
+        &self,
+        id: Identity<'_>,
+        password: Password<'_>,
+    ) -> auth::error::Result<UserInfoRef> {
+        let Identity::UserId(username, _) = id;
+        let Password::PlainText(password) = password else {
+            return auth::error::UnsupportedPasswordTypeSnafu {
+                password_type: "plain_text",
+            }
+            .fail();
+        };
+
+        let verified = if username == MIXED_AUTH_SCRAM_USER {
+            self.scram_verifier
+                .verify_plain_password(password.expose_secret().as_bytes())?
+        } else if username == MIXED_AUTH_CLEARTEXT_USER {
+            password.expose_secret() == MIXED_AUTH_CLEARTEXT_PASSWORD
+        } else {
+            return auth::error::UserNotFoundSnafu {
+                username: username.to_string(),
+            }
+            .fail();
+        };
+
+        if verified {
+            Ok(auth::userinfo_by_name(Some(username.to_string())))
+        } else {
+            auth::error::UserPasswordMismatchSnafu {
+                username: username.to_string(),
+            }
+            .fail()
+        }
+    }
+
+    async fn authorize(
+        &self,
+        _catalog: &str,
+        _schema: &str,
+        _user_info: &UserInfoRef,
+    ) -> auth::error::Result<()> {
+        Ok(())
+    }
+
+    async fn postgres_auth_info(
+        &self,
+        id: Identity<'_>,
+        _catalog: &str,
+    ) -> auth::error::Result<PgAuthInfo> {
+        let Identity::UserId(username, _) = id;
+        let method = if username == MIXED_AUTH_SCRAM_USER {
+            "scram"
+        } else {
+            "cleartext"
+        };
+        self.selections
+            .lock()
+            .unwrap()
+            .insert(username.to_string(), method);
+
+        if username == MIXED_AUTH_SCRAM_USER {
+            Ok(PgAuthInfo::ScramSha256 {
+                verifier: self.scram_verifier.clone(),
+                user_info: Some(auth::userinfo_by_name(Some(username.to_string()))),
+            })
+        } else {
+            Ok(PgAuthInfo::Cleartext)
+        }
     }
 }
 
@@ -264,6 +357,79 @@ async fn test_pg_cleartext_auth_fallback() -> Result<()> {
     let wrong_password =
         create_plain_connection_with_credentials(server_port, "greptime", "wrong").await;
     assert!(wrong_password.is_err());
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_mixed_auth_scram_and_cleartext() -> Result<()> {
+    let provider = Arc::new(MixedAuthProvider {
+        scram_verifier: PgScramSha256Verifier::from_password(
+            MIXED_AUTH_SCRAM_PASSWORD,
+            b"mixed-auth-salt",
+            4096,
+        )
+        .unwrap(),
+        selections: Mutex::new(HashMap::new()),
+    });
+    let (postgres_server, server_port) =
+        start_test_server_with_user_provider(provider.clone(), Default::default()).await?;
+
+    // SCRAM-selected user
+    let client = create_plain_connection_with_credentials(
+        server_port,
+        MIXED_AUTH_SCRAM_USER,
+        "scram-password",
+    )
+    .await
+    .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!("0", unwrap_results(&rows)[0]);
+
+    assert!(
+        create_plain_connection_with_credentials(server_port, MIXED_AUTH_SCRAM_USER, "wrong")
+            .await
+            .is_err()
+    );
+
+    // cleartext-selected user
+    let client = create_plain_connection_with_credentials(
+        server_port,
+        MIXED_AUTH_CLEARTEXT_USER,
+        MIXED_AUTH_CLEARTEXT_PASSWORD,
+    )
+    .await
+    .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!("0", unwrap_results(&rows)[0]);
+
+    assert!(
+        create_plain_connection_with_credentials(server_port, MIXED_AUTH_CLEARTEXT_USER, "wrong",)
+            .await
+            .is_err()
+    );
+
+    // unknown user falls back to cleartext and fails authentication
+    assert!(
+        create_plain_connection_with_credentials(server_port, "nobody", "whatever")
+            .await
+            .is_err()
+    );
+
+    // both mechanisms were served by the same endpoint
+    let selections = provider.selections.lock().unwrap().clone();
+    assert_eq!(Some(&"scram"), selections.get(MIXED_AUTH_SCRAM_USER));
+    assert_eq!(
+        Some(&"cleartext"),
+        selections.get(MIXED_AUTH_CLEARTEXT_USER)
+    );
 
     postgres_server.shutdown().await.unwrap();
     Ok(())
