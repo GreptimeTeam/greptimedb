@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
-use datatypes::series::samples::{FieldSpec, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -494,4 +494,264 @@ fn rejects_operands_on_other_grids_and_unpaired_or_fields() {
         ),
         Err(DataFusionError::NotImplemented(_))
     ));
+}
+
+/// Prometheus fails at the first failing step: a grouping violation at the first point wins
+/// over a duplicate on the one side at the second, whichever groups fail later.
+#[test]
+fn reports_the_earliest_failing_point() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(100_000, 10_000, 3).unwrap()).unwrap());
+    let schema = schema(1, &grid);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+    let mut series = |labels: &[(&str, &str)], points: &[usize]| {
+        for &point in points {
+            builder.push(point, &[Some(point as f64)]).unwrap();
+        }
+        let labels = labels
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        builder.finish(metric(&labels)).unwrap().unwrap()
+    };
+    let mut lhs = vec![
+        series(&[("__name__", "a"), ("job", "z")], &[0]),
+        series(&[("__name__", "b"), ("job", "z")], &[0]),
+        series(&[("__name__", "a"), ("job", "w")], &[1]),
+    ];
+    let mut rhs = vec![
+        series(&[("__name__", "c"), ("job", "z")], &[0]),
+        series(&[("__name__", "c"), ("job", "x"), ("host", "h1")], &[1]),
+        series(&[("__name__", "c"), ("job", "x"), ("host", "h2")], &[1]),
+    ];
+    // Many later failures, so a search that stops at the first failing group in hash order
+    // almost never lands on the earliest one.
+    for job in (0..32).map(|job| format!("y{job}")) {
+        lhs.push(series(&[("__name__", "a"), ("job", &job)], &[2]));
+        lhs.push(series(&[("__name__", "b"), ("job", &job)], &[2]));
+        rhs.push(series(&[("__name__", "c"), ("job", &job)], &[2]));
+    }
+    let matching = BinaryMatching {
+        op: BinaryOp::Add,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("job")]),
+        cardinality: Cardinality::ManyToOne(Vec::new()),
+    };
+    let error = binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("at 100000 ms: grouping labels must ensure unique matches"),
+        "{error}"
+    );
+}
+
+/// Values of `series` by grid point, any NaN as the same NaN: Prometheus' NaN payloads depend
+/// on how the Go compiler orders commutative operands.
+fn points_of(series: &Series) -> BTreeMap<usize, u64> {
+    let TimeAxis::Grid(range) = &series.time else {
+        panic!("expected a grid series");
+    };
+    series.fields.as_slice()[0]
+        .iter()
+        .enumerate()
+        .filter_map(|(row, sample)| match sample {
+            SampleRef::Float(value) => Some((range.start() + row, canonical_bits(value))),
+            _ => None,
+        })
+        .collect()
+}
+
+fn canonical_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+/// Binary and set operations evaluated by the Prometheus v3.15.0 engine; see the header of
+/// `prometheus_cases.txt`.
+#[test]
+fn vector_operations_match_prometheus() {
+    let parse_labels = |labels: &str| -> Labels {
+        labels
+            .split(',')
+            .filter(|pair| *pair != "-")
+            .map(|pair| {
+                let (name, value) = pair.split_once('=').unwrap();
+                (name.to_string(), value.to_string())
+            })
+            .collect()
+    };
+    let names = |list: &str| -> Vec<Arc<str>> {
+        list.split(',')
+            .filter(|name| *name != "-")
+            .map(Arc::from)
+            .collect()
+    };
+    let (mut matched, mut failed) = (0, 0);
+    let text = include_str!("prometheus_cases.txt");
+    for case in text.split("end\n").filter(|case| case.contains("case ")) {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let spec: Vec<&str> = lines[0].split_whitespace().skip(1).collect();
+        let points: u64 = lines[1].split_whitespace().nth(3).unwrap().parse().unwrap();
+        let grid = Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(100_000, 10_000, points).unwrap()).unwrap(),
+        );
+        let schema = schema(1, &grid);
+        let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+        let (mut lhs, mut rhs) = (Vec::new(), Vec::new());
+        let mut expected: BTreeMap<Labels, BTreeMap<usize, u64>> = BTreeMap::new();
+        let mut error = None;
+        for line in &lines[2..] {
+            if let Some(message) = line.strip_prefix("error ") {
+                error = Some(message.to_string());
+                continue;
+            }
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (labels, values) = rest.split_once(" ;").unwrap();
+            let labels = parse_labels(labels);
+            let values: BTreeMap<usize, u64> = values
+                .split_whitespace()
+                .map(|point| {
+                    let (index, bits) = point.split_once(':').unwrap();
+                    (
+                        index.parse().unwrap(),
+                        u64::from_str_radix(bits, 16).unwrap(),
+                    )
+                })
+                .collect();
+            match kind {
+                "series" => {
+                    for point in 0..points as usize {
+                        let value = values.get(&point).map(|bits| f64::from_bits(*bits));
+                        builder.push(point, &[value]).unwrap();
+                    }
+                    let Some(series) = builder.finish(metric(&labels)).unwrap() else {
+                        continue;
+                    };
+                    if labels.get("__name__").map(String::as_str) == Some("a") {
+                        lhs.push(series);
+                    } else {
+                        rhs.push(series);
+                    }
+                }
+                "result" => {
+                    let values = values
+                        .into_iter()
+                        .map(|(point, bits)| (point, canonical_bits(f64::from_bits(bits))))
+                        .collect();
+                    expected.insert(labels, values);
+                }
+                other => panic!("unexpected line {other}"),
+            }
+        }
+        let labels = |kind: &str, list: &str| match kind {
+            "on" => MatchingLabels::On(names(list)),
+            _ => MatchingLabels::Ignoring(names(list)),
+        };
+        let actual = match spec[0] {
+            "binary" => {
+                let op = match spec[1] {
+                    "+" => BinaryOp::Add,
+                    "-" => BinaryOp::Sub,
+                    "*" => BinaryOp::Mul,
+                    "/" => BinaryOp::Div,
+                    "%" => BinaryOp::Mod,
+                    "^" => BinaryOp::Pow,
+                    "atan2" => BinaryOp::Atan2,
+                    "==" => BinaryOp::Eq,
+                    "!=" => BinaryOp::Ne,
+                    ">" => BinaryOp::Gt,
+                    "<" => BinaryOp::Lt,
+                    ">=" => BinaryOp::Ge,
+                    "<=" => BinaryOp::Le,
+                    other => panic!("unknown operator {other}"),
+                };
+                let matching = BinaryMatching {
+                    op,
+                    return_bool: spec[2] == "true",
+                    labels: labels(spec[3], spec[4]),
+                    cardinality: match spec[5] {
+                        "left" => Cardinality::ManyToOne(names(spec[6])),
+                        "right" => Cardinality::OneToMany(names(spec[6])),
+                        _ => Cardinality::OneToOne,
+                    },
+                };
+                binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
+            }
+            "set" => {
+                let op = match spec[1] {
+                    "and" => SetOp::And,
+                    "or" => SetOp::Or,
+                    _ => SetOp::Unless,
+                };
+                set_vectors(op, &labels(spec[2], spec[3]), &schema, &lhs, &schema, &rhs)
+            }
+            other => panic!("unknown case {other}"),
+        };
+        match (actual, error) {
+            (Ok(actual), None) => {
+                let actual: BTreeMap<Labels, BTreeMap<usize, u64>> = actual
+                    .iter()
+                    .map(|series| (labels_of(&series.metric), points_of(series)))
+                    .collect();
+                assert_eq!(actual, expected, "{case}");
+                matched += 1;
+            }
+            (Err(actual), Some(expected)) => {
+                let class = |message: &str| {
+                    [
+                        "found duplicate series for the match group",
+                        "many-to-one matching must be explicit",
+                        "grouping labels must ensure unique matches",
+                    ]
+                    .into_iter()
+                    .find(|class| message.contains(class))
+                };
+                assert_eq!(class(&actual.to_string()), class(&expected), "{case}");
+                failed += 1;
+            }
+            (actual, expected) => panic!("{case}\ngot {actual:?}, expected error {expected:?}"),
+        }
+    }
+    assert!(
+        matched > 100 && failed > 20,
+        "{matched} matched, {failed} failed"
+    );
+}
+
+/// Prometheus' `^` and `atan2` are Go's `math.Pow` and `math.Atan2`. Integer exponents and
+/// `atan2` are exact. A fractional exponent goes through Go's `math.Exp`/`math.Log`, which are
+/// assembly on amd64; the port uses the Rust ones, within 2 ulps.
+#[test]
+fn pow_and_atan2_match_go() {
+    let mut checked = 0;
+    for line in include_str!("go_math_cases.txt").lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(' ').collect();
+        let bits = |field: &str| u64::from_str_radix(field, 16).unwrap();
+        let (a, b) = (
+            f64::from_bits(bits(fields[1])),
+            f64::from_bits(bits(fields[2])),
+        );
+        let expected = bits(fields[3]);
+        let (actual, tolerance) = match fields[0] {
+            "pow" => (
+                BinaryOp::Pow.apply(a, b).0,
+                if b.fract() == 0.0 { 0 } else { 2 },
+            ),
+            "atan2" => (BinaryOp::Atan2.apply(a, b).0, 0),
+            function => panic!("unknown function {function}"),
+        };
+        assert!(
+            (actual.to_bits() as i64 - expected as i64).abs() <= tolerance,
+            "{line}: got {:x}",
+            actual.to_bits()
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 452);
 }

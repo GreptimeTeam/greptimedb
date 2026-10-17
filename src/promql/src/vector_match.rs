@@ -31,6 +31,7 @@ use datatypes::series::time::{EvalGrid, TimeAxis};
 
 use crate::grid_series::GridSeriesBuilder;
 
+mod go_math;
 #[cfg(test)]
 mod tests;
 
@@ -68,8 +69,8 @@ impl BinaryOp {
             Self::Mul => (lhs * rhs, true),
             Self::Div => (lhs / rhs, true),
             Self::Mod => (lhs % rhs, true),
-            Self::Pow => (lhs.powf(rhs), true),
-            Self::Atan2 => (lhs.atan2(rhs), true),
+            Self::Pow => (go_math::pow(lhs, rhs), true),
+            Self::Atan2 => (go_math::atan2(lhs, rhs), true),
             Self::Eq => (lhs, lhs == rhs),
             Self::Ne => (lhs, lhs != rhs),
             Self::Gt => (lhs, lhs > rhs),
@@ -162,16 +163,12 @@ pub fn binary_vectors(
         .collect();
 
     let one_groups = group(one, &matching.labels);
+    let mut one_duplicate: Option<(usize, &GroupKey)> = None;
     for (key, members) in &one_groups {
-        if let Some(point) = overlap(one, members, |point| Ok(both_present[point]))? {
-            let side = if one_is_left { "left" } else { "right" };
-            return Err(DataFusionError::Execution(format!(
-                "found duplicate series for the match group {} on the {side} hand-side of the \
-                 operation at {} ms; many-to-many matching not allowed: matching labels must be \
-                 unique on one side",
-                render(key),
-                grid.timestamps()[point]
-            )));
+        if let Some(point) = overlap(one, members, |point| Ok(both_present[point]))?
+            && one_duplicate.is_none_or(|(first, _)| point < first)
+        {
+            one_duplicate = Some((point, key));
         }
     }
 
@@ -233,6 +230,7 @@ pub fn binary_vectors(
     }
     // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
     // comparison as a match too.
+    let mut implicit_many_to_one: Option<(usize, &GroupKey)> = None;
     for (key, members) in &matched_groups {
         let matched = |point: usize| -> Result<bool> {
             let Some(candidates) = one_groups.get(key) else {
@@ -245,22 +243,45 @@ pub fn binary_vectors(
             }
             Ok(false)
         };
-        if let Some(point) = overlap(many, members, matched)? {
-            return Err(DataFusionError::Execution(format!(
-                "multiple matches for labels {} at {} ms: many-to-one matching must be explicit \
-                 (group_left/group_right)",
-                render(key),
-                grid.timestamps()[point]
-            )));
+        if let Some(point) = overlap(many, members, matched)?
+            && implicit_many_to_one.is_none_or(|(first, _)| point < first)
+        {
+            implicit_many_to_one = Some((point, key));
         }
     }
-    results.finish(output, |key, point| {
-        DataFusionError::Execution(format!(
-            "multiple matches for labels {} at {} ms: grouping labels must ensure unique matches",
+    let grouping_duplicate = results.sort_rows();
+    // Prometheus fails at the first failing step, and checks the one side before matching.
+    let error = match (one_duplicate, implicit_many_to_one, grouping_duplicate) {
+        (Some((point, key)), many_to_one, grouping)
+            if many_to_one.is_none_or(|(first, _)| point <= first)
+                && grouping.as_ref().is_none_or(|(first, _)| point <= *first) =>
+        {
+            let side = if one_is_left { "left" } else { "right" };
+            Some(format!(
+                "found duplicate series for the match group {} on the {side} hand-side of the \
+                 operation at {} ms; many-to-many matching not allowed: matching labels must be \
+                 unique on one side",
+                render(key),
+                grid.timestamps()[point]
+            ))
+        }
+        (_, Some((point, key)), _) => Some(format!(
+            "multiple matches for labels {} at {} ms: many-to-one matching must be explicit \
+             (group_left/group_right)",
             render(key),
             grid.timestamps()[point]
-        ))
-    })
+        )),
+        (_, _, Some((point, key))) => Some(format!(
+            "multiple matches for labels {} at {} ms: grouping labels must ensure unique matches",
+            render(&key),
+            grid.timestamps()[point]
+        )),
+        _ => None,
+    };
+    if let Some(error) = error {
+        return Err(DataFusionError::Execution(error));
+    }
+    results.build(output)
 }
 
 /// Applies a set operator at every grid point. Series keep their labels and values.
@@ -322,13 +343,14 @@ pub fn set_vectors(
             }
         }
     }
-    results.finish(output, |key, point| {
-        DataFusionError::Execution(format!(
+    if let Some((point, key)) = results.sort_rows() {
+        return Err(DataFusionError::Execution(format!(
             "vector cannot contain metrics with the same labelset {} at {} ms",
-            render(key),
+            render(&key),
             grid.timestamps()[point]
-        ))
-    })
+        )));
+    }
+    results.build(output)
 }
 
 fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {
@@ -405,17 +427,21 @@ fn overlap(
     let start = members.iter().map(|&m| operand.start(m)).min().unwrap_or(0);
     let end = members.iter().map(|&m| operand.end(m)).max().unwrap_or(0);
     let mut seen = vec![false; end.saturating_sub(start)];
+    let mut first = None;
     for &member in members {
         for point in operand.range(member) {
+            if first.is_some_and(|first| point >= first) {
+                break;
+            }
             if !operand.present(member, point)? {
                 continue;
             }
             if std::mem::replace(&mut seen[point - start], true) && relevant(point)? {
-                return Ok(Some(point));
+                first = Some(point);
             }
         }
     }
-    Ok(None)
+    Ok(first)
 }
 
 fn result_metric(
@@ -581,32 +607,42 @@ impl Results {
         rows.values.extend_from_slice(values);
     }
 
-    /// Builds the result series; two rows of one label set at the same point fail with
-    /// `duplicate`.
-    fn finish(
-        self,
-        schema: Arc<SeriesSchema>,
-        duplicate: impl Fn(&GroupKey, usize) -> DataFusionError,
-    ) -> Result<Vec<Series>> {
+    /// Sorts the rows of each label set by point and returns the earliest point where a label
+    /// set has two rows. Prometheus evaluates step by step and fails at the first such step.
+    fn sort_rows(&mut self) -> Option<(usize, GroupKey)> {
+        let mut first: Option<(usize, &GroupKey)> = None;
+        for (key, rows) in &mut self.series {
+            if !rows.points.is_sorted() {
+                let fields = rows.values.len() / rows.points.len();
+                let mut order: Vec<usize> = (0..rows.points.len()).collect();
+                order.sort_by_key(|&row| rows.points[row]);
+                rows.points = order.iter().map(|&row| rows.points[row]).collect();
+                rows.values = order
+                    .iter()
+                    .flat_map(|&row| {
+                        rows.values[row * fields..(row + 1) * fields]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+            }
+            if let Some(pair) = rows.points.windows(2).find(|pair| pair[0] == pair[1])
+                && first.is_none_or(|(point, _)| pair[0] < point)
+            {
+                first = Some((pair[0], key));
+            }
+        }
+        first.map(|(point, key)| (point, key.clone()))
+    }
+
+    /// Builds the result series from rows sorted by [`Results::sort_rows`] without duplicates.
+    fn build(self, schema: Arc<SeriesSchema>) -> Result<Vec<Series>> {
         let fields = schema.fields.len();
         let mut builder = GridSeriesBuilder::try_new(schema)?;
         let mut output = Vec::with_capacity(self.series.len());
-        let mut order = Vec::new();
-        for (key, rows) in self.series {
-            order.clear();
-            order.extend(0..rows.points.len());
-            order.sort_unstable_by_key(|&row| rows.points[row]);
-            if let Some(pair) = order
-                .windows(2)
-                .find(|pair| rows.points[pair[0]] == rows.points[pair[1]])
-            {
-                return Err(duplicate(&key, rows.points[pair[0]]));
-            }
-            for &row in &order {
-                builder.push(
-                    rows.points[row],
-                    &rows.values[row * fields..(row + 1) * fields],
-                )?;
+        for rows in self.series.into_values() {
+            for (row, &point) in rows.points.iter().enumerate() {
+                builder.push(point, &rows.values[row * fields..(row + 1) * fields])?;
             }
             if let Some(series) = builder.finish(rows.metric)? {
                 output.push(series);
