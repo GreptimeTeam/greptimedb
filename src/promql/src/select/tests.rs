@@ -271,3 +271,31 @@ fn rejects_value_operators_over_several_fields() {
         Err(DataFusionError::NotImplemented(_))
     ));
 }
+
+/// Prometheus returns nothing for `k` below 1 and rejects NaN and values out of int64.
+#[test]
+fn topk_validates_k_like_prometheus() {
+    let schema = schema(1, 1);
+    let series = vec![build(&schema, metric("__name__=a"), &vec![vec![Some(1.0)]]).unwrap()];
+    for k in [f64::NAN, f64::INFINITY, 2f64.powi(63)] {
+        assert!(
+            topk(k, true, &Grouping::By(Vec::new()), &schema, &series).is_err(),
+            "{k}"
+        );
+    }
+    for k in [0.5, f64::NEG_INFINITY] {
+        let result = topk(k, false, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+        assert!(result.is_empty(), "{k}");
+    }
+}
+
+/// Each field of `absent` is 1 where that field has no sample.
+#[test]
+fn absent_evaluates_fields_independently() {
+    let schema = schema(2, 2);
+    let input = vec![vec![Some(3.0), None], vec![None, Some(4.0)]];
+    let series = vec![build(&schema, metric("__name__=a"), &input).unwrap()];
+    let result = absent(&schema, &series, metric("-")).unwrap();
+    let expected = vec![vec![None, Some(1.0)], vec![Some(1.0), None]];
+    assert_series_eq(result.as_ref(), &expected, &metric("-"));
+}

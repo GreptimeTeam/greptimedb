@@ -70,12 +70,20 @@ pub fn topk(
 ) -> Result<Vec<Series>> {
     single_field(schema, "topk/bottomk")?;
     let points = grid_points(schema, series)?;
-    // Prometheus converts k with int64() and caps it at the number of input series.
-    let k = if k.is_nan() || k < 1.0 {
-        0
-    } else {
-        (k.trunc().min(series.len() as f64)) as usize
-    };
+    // Prometheus returns nothing for k below 1, rejects NaN and values out of int64, then
+    // truncates k and caps it at the number of input series.
+    if k < 1.0 {
+        return Ok(Vec::new());
+    }
+    if k.is_nan() {
+        return Err(DataFusionError::Execution("Parameter value is NaN".into()));
+    }
+    if k >= i64::MAX as f64 {
+        return Err(DataFusionError::Execution(format!(
+            "Scalar value {k} overflows int64"
+        )));
+    }
+    let k = k.trunc().min(series.len() as f64) as usize;
     if k == 0 {
         return Ok(Vec::new());
     }
@@ -162,28 +170,28 @@ pub fn absent(
     labels: MetricName,
 ) -> Result<Option<Series>> {
     let points = grid_points(schema, series)?;
-    let mut present = vec![false; points];
+    let fields = schema.fields.len();
+    // Each field is absent on its own.
+    let mut present = vec![false; points * fields];
     for item in series {
         let TimeAxis::Grid(range) = &item.time else {
             unreachable!("checked by grid_points");
         };
-        let points = &mut present[range.start()..range.start() + range.len()];
-        for (row, present) in points.iter_mut().enumerate() {
-            if item
-                .fields
-                .iter()
-                .any(|field| !matches!(field.sample(row), SampleRef::Missing))
-            {
-                *present = true;
+        for (field, samples) in item.fields.iter().enumerate() {
+            for row in 0..range.len() {
+                if !matches!(samples.sample(row), SampleRef::Missing) {
+                    present[(range.start() + row) * fields + field] = true;
+                }
             }
         }
     }
-    let ones = vec![Some(1.0); schema.fields.len()];
     let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
-    for (point, present) in present.into_iter().enumerate() {
-        if !present {
-            builder.push(point, &ones)?;
+    let mut row = vec![None; fields];
+    for point in 0..points {
+        for (field, value) in row.iter_mut().enumerate() {
+            *value = (!present[point * fields + field]).then_some(1.0);
         }
+        builder.push(point, &row)?;
     }
     builder.finish(labels)
 }
