@@ -13,13 +13,10 @@
 // limitations under the License.
 
 //! Prometheus `HistogramQuantile`, `HistogramFraction` and the `histogramVariance` estimate over
-//! one native histogram, with the bucket iteration of `model/histogram` and the Go `math`
-//! functions they call, so results match Prometheus on amd64 bit for bit.
+//! one native histogram, with the bucket iteration of `model/histogram`.
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::histogram::{BucketSideView, HistogramView};
-
-use super::bounds::EXPONENTIAL_BOUNDS;
 
 const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 
@@ -128,25 +125,17 @@ fn bound(idx: i32, schema: i32, custom_values: &[f64]) -> Result<f64> {
             _ => Err(invalid_layout()),
         };
     }
-    if schema < 0 {
-        if schema < -4 {
-            return Err(invalid_layout());
-        }
-        let exp = i64::from(idx) << -schema;
-        if exp == 1024 {
-            return Ok(f64::MAX);
-        }
-        return Ok(ldexp(1.0, exp));
+    if !(-4..=8).contains(&schema) {
+        return Err(invalid_layout());
     }
-    let bounds = EXPONENTIAL_BOUNDS
-        .get(schema as usize)
-        .ok_or_else(invalid_layout)?;
-    let frac = bounds[(idx & ((1 << schema) - 1)) as usize];
-    let exp = i64::from(idx >> schema) + 1;
-    if frac == 0.5 && exp == 1025 {
+    // The upper bound of bucket `idx` is 2^(idx / 2^schema).
+    let exponent = f64::from(idx) * 2f64.powi(-schema);
+    if exponent == 1024.0 {
+        // The last bucket of finite values; its computed bound would overflow to +Inf, which
+        // Go reserves for the bucket of infinite observations.
         return Ok(f64::MAX);
     }
-    Ok(ldexp(frac, exp))
+    Ok(exponent.exp2())
 }
 
 fn invalid_layout() -> DataFusionError {
@@ -237,14 +226,12 @@ pub(super) fn quantile(
     if custom || (bucket.lower <= 0.0 && bucket.upper >= 0.0) {
         return Ok(bucket.lower + (bucket.upper - bucket.lower) * fraction);
     }
-    let log_lower = log2(bucket.lower.abs());
-    let log_upper = log2(bucket.upper.abs());
+    let log_lower = bucket.lower.abs().log2();
+    let log_upper = bucket.upper.abs().log2();
     if bucket.lower > 0.0 {
-        return Ok(exp2(log_lower + (log_upper - log_lower) * fraction));
+        return Ok((log_lower + (log_upper - log_lower) * fraction).exp2());
     }
-    Ok(-exp2(
-        log_upper + (log_lower - log_upper) * (1.0 - fraction),
-    ))
+    Ok(-(log_upper + (log_lower - log_upper) * (1.0 - fraction)).exp2())
 }
 
 /// Prometheus `HistogramFraction`.
@@ -331,9 +318,9 @@ pub(super) fn fraction(
 
 /// Go `Bucket.FractionBelow` with exponential interpolation.
 fn fraction_below_exponential(b: NativeBucket, v: f64) -> f64 {
-    let log_lower = log2(b.lower.abs());
-    let log_upper = log2(b.upper.abs());
-    let log_v = log2(v.abs());
+    let log_lower = b.lower.abs().log2();
+    let log_upper = b.upper.abs().log2();
+    let log_v = v.abs().log2();
     if v > 0.0 {
         (log_v - log_lower) / (log_upper - log_lower)
     } else {
@@ -376,148 +363,16 @@ fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
     (t, c)
 }
 
-/// Go `math.Ldexp` for a positive normal `frac`.
-fn ldexp(frac: f64, exp: i64) -> f64 {
-    let bits = frac.to_bits();
-    let exp = exp + ((bits >> 52) & 0x7FF) as i64 - 1023;
-    if exp < -1075 {
-        return 0.0;
-    }
-    if exp > 1023 {
-        return f64::INFINITY;
-    }
-    let (exp, scale) = if exp < -1022 {
-        (exp + 53, 1.0 / (1u64 << 53) as f64)
-    } else {
-        (exp, 1.0)
-    };
-    scale * f64::from_bits((bits & !(0x7FF << 52)) | (((exp + 1023) as u64) << 52))
-}
-
-/// Go `math.Frexp`.
-fn frexp(x: f64) -> (f64, i64) {
-    if x == 0.0 || x.is_infinite() || x.is_nan() {
-        return (x, 0);
-    }
-    let (x, mut exp) = if x.abs() < f64::MIN_POSITIVE {
-        (x * (1u64 << 52) as f64, -52)
-    } else {
-        (x, 0)
-    };
-    let bits = x.to_bits();
-    exp += ((bits >> 52) & 0x7FF) as i64 - 1023 + 1;
-    (f64::from_bits((bits & !(0x7FF << 52)) | (1022 << 52)), exp)
-}
-
-/// Go `math.Log`, whose amd64 assembly performs the same operations for normal inputs.
-// Constants are copied verbatim from Go's `math` package.
-#[allow(clippy::excessive_precision)]
-fn log(x: f64) -> f64 {
-    const LN2_HI: f64 = 6.93147180369123816490e-01;
-    const LN2_LO: f64 = 1.90821492927058770002e-10;
-    const L1: f64 = 6.666666666666735130e-01;
-    const L2: f64 = 3.999999999940941908e-01;
-    const L3: f64 = 2.857142874366239149e-01;
-    const L4: f64 = 2.222219843214978396e-01;
-    const L5: f64 = 1.818357216161805012e-01;
-    const L6: f64 = 1.531383769920937332e-01;
-    const L7: f64 = 1.479819860511658591e-01;
-    if x.is_nan() || x == f64::INFINITY {
-        return x;
-    }
-    if x < 0.0 {
-        return f64::NAN;
-    }
-    if x == 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    let (mut f1, mut ki) = frexp(x);
-    if f1 < std::f64::consts::SQRT_2 / 2.0 {
-        f1 *= 2.0;
-        ki -= 1;
-    }
-    let f = f1 - 1.0;
-    let k = ki as f64;
-    let s = f / (2.0 + f);
-    let s2 = s * s;
-    let s4 = s2 * s2;
-    let t1 = s2 * (L1 + s4 * (L3 + s4 * (L5 + s4 * L7)));
-    let t2 = s4 * (L2 + s4 * (L4 + s4 * L6));
-    let r = t1 + t2;
-    let hfsq = 0.5 * f * f;
-    k * LN2_HI - ((hfsq - (s * (hfsq + r) + k * LN2_LO)) - f)
-}
-
-/// Go `math.Log2`.
-fn log2(x: f64) -> f64 {
-    let (frac, exp) = frexp(x);
-    if frac == 0.5 {
-        return (exp - 1) as f64;
-    }
-    log(frac) * std::f64::consts::LOG2_E + exp as f64
-}
-
-/// Go `math.Exp2`, which is not assembly on amd64.
-// Constants are copied verbatim from Go's `math` package.
-#[allow(clippy::excessive_precision)]
-fn exp2(x: f64) -> f64 {
-    const LN2_HI: f64 = 6.93147180369123816490e-01;
-    const LN2_LO: f64 = 1.90821492927058770002e-10;
-    const OVERFLOW: f64 = 1.0239999999999999e+03;
-    const UNDERFLOW: f64 = -1.0740e+03;
-    const P1: f64 = 1.66666666666666657415e-01;
-    const P2: f64 = -2.77777777770155933842e-03;
-    const P3: f64 = 6.61375632143793436117e-05;
-    const P4: f64 = -1.65339022054652515390e-06;
-    const P5: f64 = 4.13813679705723846039e-08;
-    if x.is_nan() || x == f64::INFINITY {
-        return x;
-    }
-    if x == f64::NEG_INFINITY || x < UNDERFLOW {
-        return 0.0;
-    }
-    if x > OVERFLOW {
-        return f64::INFINITY;
-    }
-    let k = if x > 0.0 {
-        (x + 0.5) as i64
-    } else if x < 0.0 {
-        (x - 0.5) as i64
-    } else {
-        0
-    };
-    let t = x - k as f64;
-    let hi = t * LN2_HI;
-    let lo = -t * LN2_LO;
-    let r = hi - lo;
-    let t = r * r;
-    let c = r - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
-    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
-    ldexp(y, k)
-}
-
 #[cfg(test)]
 mod tests {
-    /// The bucket interpolation goes through Go's `math.Log2` and `math.Exp2`, which differ from
-    /// the platform functions in the last bit on some arguments.
+    /// The last bucket of finite values ends at `f64::MAX`; only the next one, which counts
+    /// infinite observations, ends at +Inf.
     #[test]
-    fn log2_and_exp2_match_go() {
-        let mut checked = 0;
-        for line in include_str!("go_math_cases.txt").lines() {
-            if line.starts_with('#') {
-                continue;
-            }
-            let fields: Vec<&str> = line.split(' ').collect();
-            let bits = |field: &str| u64::from_str_radix(field, 16).unwrap();
-            let argument = f64::from_bits(bits(fields[1]));
-            let actual = match fields[0] {
-                "log2" => super::log2(argument),
-                "exp2" => super::exp2(argument),
-                function => panic!("unknown function {function}"),
-            };
-            assert_eq!(actual.to_bits(), bits(fields[2]), "{line}");
-            checked += 1;
+    fn last_finite_bucket_ends_at_max() {
+        for schema in [-4, 0, 3, 8] {
+            let last = 1024i32 << schema.max(0) >> (-schema).max(0);
+            assert_eq!(super::bound(last, schema, &[]).unwrap(), f64::MAX);
+            assert_eq!(super::bound(last + 1, schema, &[]).unwrap(), f64::INFINITY);
         }
-        assert_eq!(checked, 400);
     }
 }

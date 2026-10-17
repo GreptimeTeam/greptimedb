@@ -17,7 +17,6 @@
 //! and `resetHistograms`), and `histogram_count`, `histogram_sum`, `histogram_avg`,
 //! `histogram_stddev` and `histogram_stdvar` over native histograms.
 
-mod bounds;
 mod classic;
 mod native;
 #[cfg(test)]
