@@ -37,6 +37,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::DataType as _;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SampleRef, SeriesSchema};
 use futures::{Stream, StreamExt, stream};
@@ -239,6 +240,7 @@ fn convert_with_source(
     schema: Arc<SeriesSchema>,
     source: RawLabelSource,
     field_type: ConcreteDataType,
+    ordering: SeriesOrdering,
 ) -> SendableRawSeriesStream {
     make_stream(
         inner,
@@ -247,6 +249,7 @@ fn convert_with_source(
         vec![(0, field_type)],
         metrics(),
         vec![],
+        ordering,
     )
 }
 
@@ -267,6 +270,17 @@ fn convert(inner: ScanBatchStream, schema: Arc<SeriesSchema>) -> SendableRawSeri
         schema,
         primary_key_source(metadata()),
         ConcreteDataType::int64_datatype(),
+        SeriesOrdering::Contiguous,
+    )
+}
+
+fn convert_ordered(inner: ScanBatchStream, schema: Arc<SeriesSchema>) -> SendableRawSeriesStream {
+    convert_with_source(
+        inner,
+        schema,
+        primary_key_source(metadata()),
+        ConcreteDataType::int64_datatype(),
+        SeriesOrdering::KeyThenTime,
     )
 }
 
@@ -371,6 +385,59 @@ async fn chunks_preserve_keys_values_times_and_final_flags_for_both_input_shapes
 }
 
 #[tokio::test]
+async fn raw_stream_reports_and_enforces_declared_ordering() {
+    let stream = convert(input(vec![]), schema());
+    assert_eq!(stream.ordering(), SeriesOrdering::Contiguous);
+    drop(stream);
+    let stream = convert_ordered(input(vec![]), schema());
+    assert_eq!(stream.ordering(), SeriesOrdering::KeyThenTime);
+    drop(stream);
+
+    let mut output = convert_ordered(
+        input(vec![
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"z"],
+                &[1],
+                &[Some(1)],
+            ))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[1],
+                &[Some(2)],
+            ))),
+        ]),
+        schema(),
+    );
+    assert!(output.next().await.unwrap().is_err());
+    assert!(output.next().await.is_none());
+
+    let mut output = convert(
+        input(vec![
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"z"],
+                &[1],
+                &[Some(1)],
+            ))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[1],
+                &[Some(2)],
+            ))),
+        ]),
+        schema(),
+    );
+    assert_eq!(
+        output.next().await.unwrap().unwrap().primary_key.as_slice(),
+        b"z"
+    );
+    assert_eq!(
+        output.next().await.unwrap().unwrap().primary_key.as_slice(),
+        b"a"
+    );
+    assert!(output.next().await.is_none());
+}
+
+#[tokio::test]
 async fn typed_predicate_filters_before_numeric_samples_are_cast() {
     let threshold = 1_i64 << 53;
     let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
@@ -395,6 +462,7 @@ async fn typed_predicate_filters_before_numeric_samples_are_cast() {
         vec![(0, ConcreteDataType::int64_datatype())],
         metrics(),
         vec![predicate],
+        SeriesOrdering::Contiguous,
     );
     let chunk = output.next().await.unwrap().unwrap();
     assert!(chunk.is_last);
@@ -424,6 +492,7 @@ async fn predicate_error_is_terminal() {
         vec![(0, ConcreteDataType::int64_datatype())],
         metrics(),
         vec![predicate],
+        SeriesOrdering::Contiguous,
     );
     assert!(output.next().await.unwrap().is_err());
     assert!(output.next().await.is_none());
@@ -515,7 +584,7 @@ async fn legacy_series_requires_increasing_keys_but_record_batches_do_not() {
     let mut batches = smallvec::SmallVec::new();
     batches.push(dictionary_batch(&[b"b"], &[1], &[Some(1)]));
     batches.push(dictionary_batch(&[b"a"], &[2], &[Some(2)]));
-    let mut output = convert(
+    let mut output = convert_ordered(
         input(vec![Ok(ScanBatch::Series(SeriesBatch::Flat(
             FlatSeriesBatch { batches },
         )))]),
@@ -528,7 +597,7 @@ async fn legacy_series_requires_increasing_keys_but_record_batches_do_not() {
     batches.push(dictionary_batch(&[b"a"], &[1], &[Some(1)]));
     batches.push(dictionary_batch(&[b"b"], &[1], &[Some(2)]));
     batches.push(dictionary_batch(&[b"a"], &[2], &[Some(3)]));
-    let mut output = convert(
+    let mut output = convert_ordered(
         input(vec![Ok(ScanBatch::Series(SeriesBatch::Flat(
             FlatSeriesBatch { batches },
         )))]),
@@ -545,7 +614,7 @@ async fn legacy_series_requires_increasing_keys_but_record_batches_do_not() {
     let mut batches = smallvec::SmallVec::new();
     batches.push(dictionary_batch(&[b"a"], &[1], &[Some(1)]));
     batches.push(dictionary_batch(&[b"b"], &[1], &[Some(2)]));
-    let mut output = convert(
+    let mut output = convert_ordered(
         input(vec![Ok(ScanBatch::Series(SeriesBatch::Flat(
             FlatSeriesBatch { batches },
         )))]),
@@ -636,6 +705,7 @@ async fn native_histogram_adapter_preserves_complete_payload() {
             native_histogram_value_type().clone(),
         )),
         native_histogram_value_type().clone(),
+        SeriesOrdering::Contiguous,
     );
     assert!(matches!(
         raw.label_source(),
