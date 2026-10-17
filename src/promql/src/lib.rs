@@ -15,7 +15,6 @@
 pub mod error;
 pub mod extension_plan;
 pub mod functions;
-pub mod instant_eval;
 mod metrics;
 pub mod range_array;
 pub mod source;
