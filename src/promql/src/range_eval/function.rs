@@ -50,6 +50,13 @@ pub enum RangeFunction {
         smoothing: f64,
         trend: f64,
     },
+    // Prometheus marks the following as experimental.
+    FirstOverTime,
+    MadOverTime,
+    TsOfFirstOverTime,
+    TsOfLastOverTime,
+    TsOfMinOverTime,
+    TsOfMaxOverTime,
 }
 
 impl RangeFunction {
@@ -96,6 +103,32 @@ impl RangeFunction {
             }),
             Self::DoubleExponentialSmoothing { smoothing, trend } => Box::new(move |window| {
                 double_exponential_smoothing(window.values, smoothing, trend)
+            }),
+            Self::FirstOverTime => Box::new(|window| window.values.first().copied()),
+            Self::MadOverTime => {
+                let (mut deviations, mut scratch) = (Vec::new(), Vec::new());
+                Box::new(move |window| {
+                    Some(median_absolute_deviation(
+                        window.values,
+                        &mut deviations,
+                        &mut scratch,
+                    ))
+                })
+            }
+            // Window timestamps are shifted by the offset; Prometheus reports the sample's own.
+            Self::TsOfFirstOverTime => {
+                Box::new(move |window| Some(seconds(window.timestamps[0] - offset_ms)))
+            }
+            Self::TsOfLastOverTime => Box::new(move |window| {
+                Some(seconds(
+                    window.timestamps[window.timestamps.len() - 1] - offset_ms,
+                ))
+            }),
+            Self::TsOfMinOverTime => Box::new(move |window| {
+                Some(seconds(timestamp_of_extremum(&window, false) - offset_ms))
+            }),
+            Self::TsOfMaxOverTime => Box::new(move |window| {
+                Some(seconds(timestamp_of_extremum(&window, true) - offset_ms))
             }),
         }
     }
@@ -307,4 +340,37 @@ fn double_exponential_smoothing(values: &[f64], sf: f64, tf: f64) -> Option<f64>
         (s0, s1) = (s1, x + y);
     }
     Some(s1)
+}
+
+fn seconds(timestamp_ms: i64) -> f64 {
+    timestamp_ms as f64 / 1000.0
+}
+
+/// Prometheus `compareOverTime` returning the timestamp: the last sample holding the maximum
+/// (or minimum), where a NaN so far is replaced by any later sample.
+fn timestamp_of_extremum(window: &FloatWindow<'_>, max: bool) -> i64 {
+    let (mut best, mut timestamp) = (window.values[0], window.timestamps[0]);
+    for (&value, &ts) in window.values.iter().zip(window.timestamps) {
+        let replace = if max { value >= best } else { value <= best };
+        if replace || best.is_nan() {
+            (best, timestamp) = (value, ts);
+        }
+    }
+    timestamp
+}
+
+/// Prometheus `funcMadOverTime`: the median of the absolute deviations from the median; NaN
+/// when any sample is NaN.
+fn median_absolute_deviation(
+    values: &[f64],
+    deviations: &mut Vec<f64>,
+    sorted: &mut Vec<f64>,
+) -> f64 {
+    if values.iter().any(|value| value.is_nan()) {
+        return f64::NAN;
+    }
+    let median = quantile(0.5, values, sorted);
+    deviations.clear();
+    deviations.extend(values.iter().map(|value| (value - median).abs()));
+    quantile(0.5, deviations, sorted)
 }

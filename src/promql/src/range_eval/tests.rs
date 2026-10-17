@@ -813,7 +813,11 @@ fn range_functions_match_prometheus() {
             .collect()
     };
     let mut checked = 0;
-    for line in include_str!("prometheus_cases.txt").lines() {
+    let fixtures = [
+        include_str!("prometheus_cases.txt"),
+        include_str!("experimental_cases.txt"),
+    ];
+    for line in fixtures.iter().flat_map(|fixture| fixture.lines()) {
         if line.starts_with('#') {
             continue;
         }
@@ -849,17 +853,24 @@ fn range_functions_match_prometheus() {
                 smoothing: params[0],
                 trend: params[1],
             },
+            "first_over_time" => RangeFunction::FirstOverTime,
+            "mad_over_time" => RangeFunction::MadOverTime,
+            "ts_of_first_over_time" => RangeFunction::TsOfFirstOverTime,
+            "ts_of_last_over_time" => RangeFunction::TsOfLastOverTime,
+            "ts_of_min_over_time" => RangeFunction::TsOfMinOverTime,
+            "ts_of_max_over_time" => RangeFunction::TsOfMaxOverTime,
             other => panic!("unknown function {other}"),
         };
         let numbers: Vec<i64> = header[2..].iter().map(|n| n.parse().unwrap()).collect();
-        let [range_ms, offset_ms, start_ms, step_ms, points] = numbers[..] else {
+        let anchor_ms = numbers.get(5).copied();
+        let [range_ms, offset_ms, start_ms, step_ms, points] = numbers[..5] else {
             panic!("bad header {line}");
         };
         let grid = grid(start_ms, step_ms, points as u64);
         let window = RangeWindow {
             range_ms,
             offset_ms,
-            anchor_ms: None,
+            anchor_ms,
         };
         let mut expected = vec![vec![None]; points as usize];
         for (timestamp, value) in &expected_points {
@@ -883,7 +894,7 @@ fn range_functions_match_prometheus() {
         assert_series_eq_any_nan(result.as_ref(), &expected, &metric(0), line);
         checked += expected_points.len();
     }
-    assert!(checked > 1_000, "{checked} points checked");
+    assert!(checked > 2_000, "{checked} points checked");
 }
 
 #[test]
@@ -903,5 +914,29 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
             ),
             Err(DataFusionError::Plan(_))
         ));
+    }
+}
+
+/// A leading NaN is replaced by the next sample in `ts_of_min/max_over_time`, so the timestamp
+/// moves past it even though no comparison with NaN holds.
+#[test]
+fn ts_of_extremum_moves_past_a_leading_nan() {
+    let window = RangeWindow {
+        range_ms: 10_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let rows: Vec<Row> = [(1_000, f64::NAN), (2_000, 5.0), (3_000, 7.0)]
+        .map(|(ts, value)| (ts, vec![Some(value)]))
+        .to_vec();
+    for (function, expected) in [
+        (RangeFunction::TsOfMinOverTime, 2.0),
+        (RangeFunction::TsOfMaxOverTime, 3.0),
+    ] {
+        let mut evaluator =
+            RangeEvaluator::try_new(&raw_schema(1), grid(3_000, 1_000, 1), window, function)
+                .unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        assert_series_eq(Some(&series), &vec![vec![Some(expected)]], &metric(0));
     }
 }
