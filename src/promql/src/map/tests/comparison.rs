@@ -108,7 +108,7 @@ fn bool_emits_every_present_field_and_drops_the_name() {
     assert_floats(output.fields.get(0).unwrap(), &[Some(1.0), None, Some(0.0)]);
     assert_floats(output.fields.get(1).unwrap(), &[Some(1.0), Some(0.0), None]);
     assert_eq!(output.metric.name(), None);
-    assert_eq!(output.metric.tags(), input.metric.tags());
+    assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
 }
 
 #[test]

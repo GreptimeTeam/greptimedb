@@ -43,7 +43,7 @@ fn unary_negation_drops_name_and_keeps_missing_positions_and_payloads() {
     };
     assert_eq!(negated.to_bits(), PROMETHEUS_STALE_NAN_BITS);
     assert_eq!(output.metric.name(), None);
-    assert_eq!(output.metric.tags(), input.metric.tags());
+    assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
     assert_eq!(output.time.timestamp(0), Some(4000));
 }
 

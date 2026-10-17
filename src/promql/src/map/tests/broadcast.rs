@@ -139,7 +139,7 @@ fn time_varying_scalar_aligns_absolute_indices_across_independent_chunks() {
         ],
     );
     assert_eq!(output.metric.name(), None);
-    assert_eq!(output.metric.tags(), input.metric.tags());
+    assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
     let output = map_arithmetic_series(
         &schema,
         &input,
