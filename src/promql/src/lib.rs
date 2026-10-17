@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod classic_histogram;
 pub mod error;
 pub mod extension_plan;
 pub mod functions;
