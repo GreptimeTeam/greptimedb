@@ -19,7 +19,7 @@ use datatypes::arrow::array::{BooleanArray, Float64Array, Float64Builder, Record
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use datatypes::value::OrderedF64;
 
-use crate::collider::{CHECK_STEP, Collider, NORMALIZE_STEP};
+use crate::collider::{CHECK_STEP, Collider, NORMALIZE_STEP, PartitionDim};
 use crate::error::{
     CheckpointNotCoveredSnafu, CheckpointOverlappedSnafu, DuplicateExprSnafu, Result,
 };
@@ -29,12 +29,26 @@ use crate::multi_dim::MultiDimPartitionRule;
 pub struct PartitionChecker<'a> {
     rule: &'a MultiDimPartitionRule,
     collider: Collider<'a>,
+    /// Dimensions in the matrix. A dimension's field name in the matrix is its
+    /// index here, since a column may be named like a function call.
+    dims: Vec<PartitionDim>,
 }
 
 impl<'a> PartitionChecker<'a> {
     pub fn try_new(rule: &'a MultiDimPartitionRule) -> Result<Self> {
         let collider = Collider::new(rule.exprs())?;
-        Ok(Self { rule, collider })
+        let mut dims = collider
+            .normalized_values
+            .iter()
+            .filter(|(_, values)| !values.is_empty())
+            .map(|(dim, _)| dim.clone())
+            .collect::<Vec<_>>();
+        dims.sort_unstable();
+        Ok(Self {
+            rule,
+            collider,
+            dims,
+        })
     }
 
     pub fn check(&self) -> Result<()> {
@@ -76,19 +90,19 @@ impl<'a> PartitionChecker<'a> {
         // TODO(ruihang): merge atomic exprs to improve checker's performance
 
         // matrix test
+        let field_names = (0..self.dims.len())
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>();
         let mut matrix_foundation = HashMap::new();
-        for (col, values) in self.collider.normalized_values.iter() {
-            if values.is_empty() {
-                continue;
-            }
-
+        for (dim, field_name) in self.dims.iter().zip(&field_names) {
+            let values = &self.collider.normalized_values[dim];
             let mut cornerstones = Vec::with_capacity(values.len() * 2 + 1);
             cornerstones.push(values[0].1 - CHECK_STEP);
             for value in values {
                 cornerstones.push(value.1);
                 cornerstones.push(value.1 + CHECK_STEP);
             }
-            matrix_foundation.insert(col.as_str(), cornerstones);
+            matrix_foundation.insert(field_name.as_str(), cornerstones);
         }
 
         // If there are no values, the rule is empty and valid.
@@ -104,7 +118,12 @@ impl<'a> PartitionChecker<'a> {
             .collider
             .atomic_exprs
             .iter()
-            .map(|expr| expr.to_physical_expr(matrix_generator.schema()))
+            .map(|expr| {
+                expr.to_physical_expr(matrix_generator.schema(), |dim| {
+                    // Every nucleon's dimension has a value, so it is in `dims`.
+                    self.dims.binary_search(dim).unwrap().to_string()
+                })
+            })
             .collect::<Vec<_>>();
         for batch in matrix_generator {
             results.clear();
@@ -158,14 +177,20 @@ impl<'a> PartitionChecker<'a> {
         let mut check_point = String::new();
         let schema = batch.schema();
         for (col_index, normalized_value) in normalized_row.iter().enumerate() {
-            let col_name = schema.field(col_index).name();
+            let dim = schema
+                .field(col_index)
+                .name()
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| self.dims.get(index));
+            let col_name = dim.map(ToString::to_string).unwrap_or_default();
 
             if col_index > 0 {
                 check_point.push_str(", ");
             }
 
             // Check if point is on NORMALIZE_STEP or between steps
-            if let Some(values) = self.collider.normalized_values.get(col_name) {
+            if let Some(values) = dim.and_then(|dim| self.collider.normalized_values.get(dim)) {
                 let normalize_step = NORMALIZE_STEP.0;
 
                 // Check if the normalized value is on a NORMALIZE_STEP boundary
@@ -349,6 +374,26 @@ mod tests {
     use super::*;
     use crate::expr::col;
     use crate::multi_dim::MultiDimPartitionRule;
+
+    #[test]
+    fn test_function_and_same_named_column_are_distinct() {
+        use crate::expr::Operand;
+        use crate::function::PartitionFunction;
+
+        let function = PartitionFunction::IcebergHash("host".to_string());
+        // A column can be named like the function call, but it is another dimension, so these
+        // two rules don't cover each other's complement.
+        let result = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), function.to_string()],
+            vec![1, 2],
+            vec![
+                Operand::Function(function.clone()).lt(Value::Int32(0)),
+                col(function.to_string()).gt_eq(Value::Int32(0)),
+            ],
+            true,
+        );
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_matrix_generator_single_column() {
@@ -582,8 +627,8 @@ mod tests {
         let checker = PartitionChecker::try_new(&rule).unwrap();
 
         let schema = Arc::new(Schema::new(vec![
-            Field::new("host", DataType::Float64, false),
-            Field::new("value", DataType::Float64, false),
+            Field::new("0", DataType::Float64, false),
+            Field::new("1", DataType::Float64, false),
         ]));
         let host_array = Float64Array::from(vec![-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
         let value_array = Float64Array::from(vec![-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);

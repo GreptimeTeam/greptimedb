@@ -29,9 +29,13 @@ use datatypes::value::{
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use sql::statements::value_to_sql_value;
-use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
+use sqlparser::ast::{
+    BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName,
+};
 
 use crate::error;
+use crate::function::PartitionFunction;
 use crate::partition::PartitionBound;
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
@@ -50,6 +54,7 @@ pub enum Operand {
     Column(String),
     Value(Value),
     Expr(PartitionExpr),
+    Function(PartitionFunction),
 }
 
 pub fn col(column_name: impl Into<String>) -> Operand {
@@ -106,6 +111,38 @@ impl Operand {
                 Ok(datafusion_expr::lit(scalar_value))
             }
             Self::Expr(e) => e.try_as_logical_expr(),
+            Self::Function(f) => Ok(f.to_logical_expr()),
+        }
+    }
+
+    /// Whether this operand is a partition dimension that values are compared against.
+    fn is_dimension(&self) -> bool {
+        matches!(self, Self::Column(_) | Self::Function(_))
+    }
+
+    fn to_parser_expr(&self) -> ParserExpr {
+        // Safety: Partition rule won't contains unsupported value type.
+        // Otherwise it will be rejected by the parser.
+        match self {
+            Self::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
+            Self::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
+            Self::Expr(e) => e.to_parser_expr(),
+            Self::Function(f) => ParserExpr::Function(Function {
+                name: ObjectName::from(vec![Ident::new(f.name())]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                        ParserExpr::Identifier(Ident::new(f.column())),
+                    ))],
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }),
         }
     }
 
@@ -140,6 +177,7 @@ impl Display for Operand {
             Self::Column(v) => write!(f, "{v}"),
             Self::Value(v) => write!(f, "{v}"),
             Self::Expr(v) => write!(f, "{v}"),
+            Self::Function(v) => write!(f, "{v}"),
         }
     }
 }
@@ -237,7 +275,7 @@ impl PartitionExpr {
             rhs: Box::new(rhs),
         };
 
-        if matches!(&*expr.lhs, Operand::Value(_)) && matches!(&*expr.rhs, Operand::Column(_)) {
+        if matches!(&*expr.lhs, Operand::Value(_)) && expr.rhs.is_dimension() {
             std::mem::swap(&mut expr.lhs, &mut expr.rhs);
             expr.op = expr.op.invert_for_swap();
         }
@@ -256,24 +294,10 @@ impl PartitionExpr {
     ///
     /// [Expr]: ParserExpr
     pub fn to_parser_expr(&self) -> ParserExpr {
-        // Safety: Partition rule won't contains unsupported value type.
-        // Otherwise it will be rejected by the parser.
-        let lhs = match &*self.lhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
-
-        let rhs = match &*self.rhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
-
         ParserExpr::BinaryOp {
-            left: Box::new(lhs),
+            left: Box::new(self.lhs.to_parser_expr()),
             op: self.op.to_parser_op(),
-            right: Box::new(rhs),
+            right: Box::new(self.rhs.to_parser_expr()),
         }
     }
 
@@ -306,7 +330,7 @@ impl PartitionExpr {
             // Keep filtering semantics aligned with direct PartitionExpr evaluation (null-first ordering).
             // In DataFusion SQL semantics, range comparisons with NULL yield NULL, so we inject
             // `OR col IS NULL` on the null-first side of the comparison.
-            if matches!(self.lhs.as_ref(), Operand::Column(_)) {
+            if self.lhs.is_dimension() {
                 let column_expr = self.lhs.try_as_logical_expr()?;
                 let other_expr = self.rhs.try_as_logical_expr()?;
                 let base = match self.op {
@@ -328,7 +352,7 @@ impl PartitionExpr {
                     _ => unreachable!(),
                 };
                 return Ok(base);
-            } else if matches!(self.rhs.as_ref(), Operand::Column(_)) {
+            } else if self.rhs.is_dimension() {
                 let other_expr = self.lhs.try_as_logical_expr()?;
                 let column_expr = self.rhs.try_as_logical_expr()?;
                 let base = match self.op {
@@ -449,6 +473,9 @@ impl PartitionExpr {
             }
             Operand::Expr(e) => {
                 e.collect_column_names(columns);
+            }
+            Operand::Function(f) => {
+                columns.insert(f.column().to_string());
             }
             Operand::Value(_) => {}
         }
@@ -821,6 +848,25 @@ mod tests {
         let json = r#"{"Value":{"UInt32":10}}"#;
         let expr5 = PartitionExpr::from_json_str(json).unwrap();
         assert!(expr5.is_none());
+    }
+
+    #[test]
+    fn test_serde_function_partition_expr() {
+        let hash = Operand::Function(PartitionFunction::IcebergHash("host".to_string()));
+        let expr = hash.clone().lt(Value::Int32(0));
+        let json = expr.as_json_str().unwrap();
+        assert_eq!(
+            json,
+            r#"{"Expr":{"lhs":{"Function":{"IcebergHash":"host"}},"op":"Lt","rhs":{"Value":{"Int32":0}}}}"#
+        );
+        assert_eq!(PartitionExpr::from_json_str(&json).unwrap().unwrap(), expr);
+
+        let swapped = r#"{"Expr":{"lhs":{"Value":{"Int32":0}},"op":"Gt","rhs":{"Function":{"IcebergHash":"host"}}}}"#;
+        assert_eq!(
+            PartitionExpr::from_json_str(swapped).unwrap().unwrap(),
+            expr
+        );
+        assert_eq!(expr.to_string(), "iceberg_hash(host) < 0");
     }
 
     #[test]

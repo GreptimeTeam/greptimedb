@@ -14,16 +14,21 @@
 
 use std::any::Any;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
-use datafusion_expr::ColumnarValue;
-use datafusion_physical_expr::PhysicalExpr;
+use datafusion_common::ToDFSchema;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion_expr::{ColumnarValue, Expr};
+use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
 use datatypes::arrow::buffer::BooleanBuffer;
-use datatypes::arrow::datatypes::Schema;
+use datatypes::arrow::datatypes::{Field, Schema};
+use datatypes::data_type::DataType as _;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use serde::{Deserialize, Serialize};
@@ -34,12 +39,25 @@ use crate::PartitionRule;
 use crate::checker::PartitionChecker;
 use crate::error::{self, Result, UndefinedColumnSnafu};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
+use crate::function::PartitionFunction;
 use crate::partition::RegionMask;
 
 /// The default region number when no partition exprs are matched.
 const DEFAULT_REGION: RegionNumber = 0;
 
-type PhysicalExprCache = Option<(Vec<Arc<dyn PhysicalExpr>>, Arc<Schema>)>;
+type PhysicalExprCache = Option<Arc<PhysicalPartitionExprs>>;
+
+/// Partition predicates planned for one input schema.
+#[derive(Debug)]
+struct PhysicalPartitionExprs {
+    input_schema: Arc<Schema>,
+    exprs: Vec<Arc<dyn PhysicalExpr>>,
+    /// Partition functions with the input index of their argument. Each is evaluated
+    /// once per batch and appended to the input as `eval_schema` describes, and
+    /// `exprs` read the results instead of evaluating the function per predicate.
+    functions: Vec<(PartitionFunction, usize)>,
+    eval_schema: Arc<Schema>,
+}
 
 /// Multi-Dimiension partition rule. RFC [here](https://github.com/GreptimeTeam/greptimedb/blob/main/docs/rfcs/2024-02-21-multi-dimension-partition-rule/rfc.md)
 ///
@@ -136,6 +154,14 @@ impl MultiDimPartitionRule {
                 let r = &values[*index];
                 Self::perform_op(l, &expr.op, r)
             }
+            (Operand::Function(function), Operand::Value(r)) => {
+                let l = self.evaluate_function(function, values)?;
+                Self::perform_op(&l, &expr.op, r)
+            }
+            (Operand::Value(l), Operand::Function(function)) => {
+                let r = self.evaluate_function(function, values)?;
+                Self::perform_op(l, &expr.op, &r)
+            }
             (Operand::Expr(lhs), Operand::Expr(rhs)) => {
                 let lhs = self.evaluate_expr(lhs, values)?;
                 let rhs = self.evaluate_expr(rhs, values)?;
@@ -147,6 +173,15 @@ impl MultiDimPartitionRule {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn evaluate_function(&self, function: &PartitionFunction, values: &[Value]) -> Result<Value> {
+        let column = function.column();
+        let index = self
+            .name_to_index
+            .get(column)
+            .context(UndefinedColumnSnafu { column })?;
+        function.evaluate_value(&values[*index])
     }
 
     fn perform_op(lhs: &Value, op: &RestrictedOp, rhs: &Value) -> Result<bool> {
@@ -238,27 +273,39 @@ impl MultiDimPartitionRule {
         }
         let physical_exprs = {
             let cache_read_guard = self.physical_expr_cache.read().unwrap();
-            if let Some((cached_exprs, schema)) = cache_read_guard.as_ref()
-                && schema == record_batch.schema_ref()
+            if let Some(cached) = cache_read_guard.as_ref()
+                && &cached.input_schema == record_batch.schema_ref()
             {
-                cached_exprs.clone()
+                cached.clone()
             } else {
                 drop(cache_read_guard); // Release the read lock before acquiring write lock
 
-                let schema = record_batch.schema();
-                let new_cache = self
-                    .exprs
-                    .iter()
-                    .map(|e| e.try_as_physical_expr(&schema))
-                    .collect::<Result<Vec<_>>>()?;
-
+                let new_cache = Arc::new(self.plan_physical_exprs(record_batch.schema())?);
                 let mut cache_write_guard = self.physical_expr_cache.write().unwrap();
-                cache_write_guard.replace((new_cache.clone(), schema));
+                cache_write_guard.replace(new_cache.clone());
                 new_cache
             }
         };
 
+        let eval_batch;
+        let record_batch = if physical_exprs.functions.is_empty() {
+            record_batch
+        } else {
+            let mut columns = record_batch.columns().to_vec();
+            for (function, index) in &physical_exprs.functions {
+                columns.push(
+                    function
+                        .evaluate_array(record_batch.column(*index).as_ref())
+                        .context(error::EvaluateRecordBatchSnafu)?,
+                );
+            }
+            eval_batch = RecordBatch::try_new(physical_exprs.eval_schema.clone(), columns)
+                .context(error::ComputeArrowKernelSnafu)?;
+            &eval_batch
+        };
+
         let mut result: HashMap<u32, RegionMask> = physical_exprs
+            .exprs
             .iter()
             .zip(self.regions.iter())
             .filter_map(|(expr, region_num)| {
@@ -320,6 +367,107 @@ impl MultiDimPartitionRule {
             }
         }
         Ok(result)
+    }
+
+    fn plan_physical_exprs(&self, input_schema: Arc<Schema>) -> Result<PhysicalPartitionExprs> {
+        let mut functions = BTreeSet::new();
+        for expr in &self.exprs {
+            collect_functions(expr, &mut functions);
+        }
+        if functions.is_empty() {
+            let exprs = self
+                .exprs
+                .iter()
+                .map(|e| e.try_as_physical_expr(&input_schema))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(PhysicalPartitionExprs {
+                eval_schema: input_schema.clone(),
+                input_schema,
+                exprs,
+                functions: vec![],
+            });
+        }
+
+        let mut fields = input_schema.fields().to_vec();
+        let mut function_columns = HashMap::with_capacity(functions.len());
+        let mut evaluated = Vec::with_capacity(functions.len());
+        for function in functions {
+            let index =
+                input_schema
+                    .index_of(function.column())
+                    .ok()
+                    .context(UndefinedColumnSnafu {
+                        column: function.column(),
+                    })?;
+            let mut name = format!("__partition_function_{}", evaluated.len());
+            while input_schema.field_with_name(&name).is_ok() {
+                name.push('_');
+            }
+            fields.push(Arc::new(Field::new(
+                &name,
+                function.output_type().as_arrow_type(),
+                true,
+            )));
+            function_columns.insert(
+                function.to_logical_expr(),
+                Expr::Column(datafusion_common::Column::from_name(name)),
+            );
+            evaluated.push((function, index));
+        }
+        let eval_schema = Arc::new(Schema::new(fields));
+
+        let df_schema = eval_schema
+            .clone()
+            .to_dfschema_ref()
+            .context(error::ToDFSchemaSnafu)?;
+        let exprs = self
+            .exprs
+            .iter()
+            .map(|expr| {
+                let expr = expr
+                    .try_as_logical_expr()?
+                    .transform(|expr| {
+                        Ok(match function_columns.get(&expr) {
+                            Some(column) => Transformed::yes(column.clone()),
+                            None => Transformed::no(expr),
+                        })
+                    })
+                    .context(error::CreatePhysicalExprSnafu)?
+                    .data;
+                debug_assert!(
+                    !expr
+                        .exists(|expr| Ok(matches!(expr, Expr::ScalarFunction(_))))
+                        .unwrap(),
+                    "partition functions should read precomputed columns: {expr}"
+                );
+                create_physical_expr(
+                    &expr,
+                    &df_schema,
+                    &ExecutionProps::default(),
+                    &PhysicalPlanningContext::default(),
+                )
+                .context(error::CreatePhysicalExprSnafu)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(PhysicalPartitionExprs {
+            input_schema,
+            exprs,
+            functions: evaluated,
+            eval_schema,
+        })
+    }
+}
+
+fn collect_functions(expr: &PartitionExpr, functions: &mut BTreeSet<PartitionFunction>) {
+    for operand in [expr.lhs(), expr.rhs()] {
+        match operand {
+            Operand::Function(function) => {
+                functions.insert(function.clone());
+            }
+            Operand::Expr(expr) => collect_functions(expr, functions),
+            Operand::Column(_) | Operand::Value(_) => {}
+        }
     }
 }
 
@@ -975,6 +1123,84 @@ mod test_split_record_batch {
 
         let total_rows = result.get(&0).unwrap().selected_rows();
         assert_eq!(total_rows, batch.num_rows());
+    }
+
+    #[test]
+    fn test_hash_partition_batch_matches_row() {
+        use datatypes::arrow::array::{Array, StringDictionaryBuilder, UInt64Array};
+        use datatypes::arrow::datatypes::{DataType, Field, UInt32Type};
+
+        let host_hash = Operand::Function(PartitionFunction::IcebergHash("host".to_string()));
+        let tenant_hash = Operand::Function(PartitionFunction::IcebergHash("tenant".to_string()));
+        let exprs = [
+            host_hash
+                .clone()
+                .lt(Value::Int32(0))
+                .and(col("tenant").lt(Value::UInt64(100))),
+            host_hash
+                .clone()
+                .lt(Value::Int32(0))
+                .and(col("tenant").gt_eq(Value::UInt64(100))),
+            host_hash
+                .clone()
+                .gt_eq(Value::Int32(0))
+                .and(tenant_hash.clone().lt(Value::Int32(0))),
+            host_hash
+                .gt_eq(Value::Int32(0))
+                .and(tenant_hash.gt_eq(Value::Int32(0))),
+        ]
+        .iter()
+        .map(|expr| {
+            PartitionExpr::from_json_str(&expr.as_json_str().unwrap())
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "tenant".to_string()],
+            vec![1, 2, 3, 4],
+            exprs,
+            true,
+        )
+        .unwrap();
+
+        let hosts = [
+            None,
+            Some(""),
+            Some("a"),
+            Some("b"),
+            Some("中🙂"),
+            Some("server42"),
+        ];
+        let tenants = [None, Some(0), Some(99), Some(100), Some(u64::MAX)];
+        let mut host_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut tenant_values = vec![];
+        for host in hosts {
+            for tenant in tenants {
+                host_builder.append_option(host);
+                tenant_values.push(tenant);
+            }
+        }
+        let host_array = Arc::new(host_builder.finish());
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("host", host_array.data_type().clone(), true),
+                Field::new("tenant", DataType::UInt64, true),
+            ])),
+            vec![host_array, Arc::new(UInt64Array::from(tenant_values))],
+        )
+        .unwrap();
+
+        let by_row = rule.split_record_batch_naive(&batch).unwrap();
+        let by_batch = rule.split_record_batch(&batch).unwrap();
+        assert!(!by_batch.contains_key(&DEFAULT_REGION));
+        for (region, expected) in by_row {
+            let actual = by_batch
+                .get(&region)
+                .map(|mask| mask.array().clone())
+                .unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]));
+            assert_eq!(actual, expected, "region {region}");
+        }
     }
 
     #[test]

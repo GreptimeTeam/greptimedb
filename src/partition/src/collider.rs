@@ -26,7 +26,7 @@
 //! force inside nucleons.
 
 use std::collections::HashMap;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
 use datafusion_expr::Operator;
@@ -38,10 +38,44 @@ use datatypes::value::{OrderedF64, OrderedFloat, Value};
 use crate::error;
 use crate::error::Result;
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
+use crate::function::PartitionFunction;
 
 const ZERO: OrderedF64 = OrderedFloat(0.0f64);
 pub(crate) const NORMALIZE_STEP: OrderedF64 = OrderedFloat(1.0f64);
 pub(crate) const CHECK_STEP: OrderedF64 = OrderedFloat(0.5f64);
+
+/// A dimension of the partition space: a column, or a function of a column.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PartitionDim {
+    Column(String),
+    Function(PartitionFunction),
+}
+
+impl PartitionDim {
+    fn from_operand(operand: &Operand) -> Option<Self> {
+        match operand {
+            Operand::Column(column) => Some(Self::Column(column.clone())),
+            Operand::Function(function) => Some(Self::Function(function.clone())),
+            Operand::Value(_) | Operand::Expr(_) => None,
+        }
+    }
+
+    pub fn to_operand(&self) -> Operand {
+        match self {
+            Self::Column(column) => Operand::Column(column.clone()),
+            Self::Function(function) => Operand::Function(function.clone()),
+        }
+    }
+}
+
+impl Display for PartitionDim {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Column(column) => write!(f, "{column}"),
+            Self::Function(function) => write!(f, "{function}"),
+        }
+    }
+}
 
 /// Represents an "atomic" Expression, which isn't composed (OR-ed) of other expressions.
 #[allow(unused)]
@@ -55,10 +89,15 @@ pub struct AtomicExpr {
 }
 
 impl AtomicExpr {
-    pub fn to_physical_expr(&self, schema: &Schema) -> Arc<dyn PhysicalExpr> {
+    /// Builds the conjunction over `schema`, where `field_name` maps each dimension to its field.
+    pub fn to_physical_expr(
+        &self,
+        schema: &Schema,
+        field_name: impl Fn(&PartitionDim) -> String,
+    ) -> Arc<dyn PhysicalExpr> {
         let mut exprs = Vec::with_capacity(self.nucleons.len());
         for nucleon in &self.nucleons {
-            exprs.push(nucleon.to_physical_expr(schema));
+            exprs.push(nucleon.to_physical_expr(schema, &field_name(&nucleon.column)));
         }
         let result: Arc<dyn PhysicalExpr> = exprs
             .into_iter()
@@ -79,23 +118,23 @@ impl PartialOrd for AtomicExpr {
 /// This struct is used to compose [`AtomicExpr`], hence "nucleon".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NucleonExpr {
-    column: String,
+    column: PartitionDim,
     op: GluonOp,
     /// Normalized [`Value`].
     value: OrderedF64,
 }
 
 impl NucleonExpr {
-    pub fn to_physical_expr(&self, schema: &Schema) -> Arc<dyn PhysicalExpr> {
+    pub fn to_physical_expr(&self, schema: &Schema, field_name: &str) -> Arc<dyn PhysicalExpr> {
         Arc::new(BinaryExpr::new(
-            col(&self.column, schema).unwrap(),
+            col(field_name, schema).unwrap(),
             self.op.to_operator(),
             lit(*self.value.as_ref()),
         ))
     }
 
-    /// Get the column name
-    pub fn column(&self) -> &str {
+    /// Get the dimension
+    pub fn column(&self) -> &PartitionDim {
         &self.column
     }
 
@@ -109,12 +148,8 @@ impl NucleonExpr {
         &self.op
     }
 
-    pub fn new(column: impl Into<String>, op: GluonOp, value: OrderedF64) -> Self {
-        Self {
-            column: column.into(),
-            op,
-            value,
-        }
+    pub fn new(column: PartitionDim, op: GluonOp, value: OrderedF64) -> Self {
+        Self { column, op, value }
     }
 }
 
@@ -153,22 +188,22 @@ pub struct Collider<'a> {
     source_exprs: &'a [PartitionExpr],
 
     pub atomic_exprs: Vec<AtomicExpr>,
-    /// A map of column name to a list of `(value, normalized value)` pairs.
+    /// A map of dimension to a list of `(value, normalized value)` pairs.
     ///
     /// The normalized value is used for comparison. The normalization process keeps the order of the values.
-    pub normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
+    pub normalized_values: HashMap<PartitionDim, Vec<(Value, OrderedF64)>>,
 }
 
 impl<'a> Collider<'a> {
     pub fn new(source_exprs: &'a [PartitionExpr]) -> Result<Self> {
         // first walk to collect all values
-        let mut values: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut values: HashMap<PartitionDim, Vec<Value>> = HashMap::new();
         for expr in source_exprs {
             Self::collect_column_values_from_expr(expr, &mut values)?;
         }
 
         // normalize values, assumes all values on a column are the same type
-        let mut normalized_values: HashMap<String, HashMap<Value, OrderedF64>> =
+        let mut normalized_values: HashMap<PartitionDim, HashMap<Value, OrderedF64>> =
             HashMap::with_capacity(values.len());
         for (column, mut column_values) in values {
             column_values.sort_unstable();
@@ -215,13 +250,14 @@ impl<'a> Collider<'a> {
     /// Helper to collect values with their associated columns from an expression
     fn collect_column_values_from_expr(
         expr: &PartitionExpr,
-        values: &mut HashMap<String, Vec<Value>>,
+        values: &mut HashMap<PartitionDim, Vec<Value>>,
     ) -> Result<()> {
         // Handle binary operations between column and value
         match (&*expr.lhs, &*expr.rhs) {
-            (Operand::Column(col), Operand::Value(val))
-            | (Operand::Value(val), Operand::Column(col)) => {
-                values.entry(col.clone()).or_default().push(val.clone());
+            (dim, Operand::Value(val)) | (Operand::Value(val), dim)
+                if let Some(dim) = PartitionDim::from_operand(dim) =>
+            {
+                values.entry(dim).or_default().push(val.clone());
                 Ok(())
             }
             (Operand::Expr(left_expr), Operand::Expr(right_expr)) => {
@@ -241,7 +277,7 @@ impl<'a> Collider<'a> {
     fn collide_expr(
         expr: &PartitionExpr,
         index: usize,
-        normalized_values: &HashMap<String, HashMap<Value, OrderedF64>>,
+        normalized_values: &HashMap<PartitionDim, HashMap<Value, OrderedF64>>,
         result: &mut Vec<AtomicExpr>,
     ) -> Result<()> {
         match expr.op {
@@ -300,7 +336,7 @@ impl<'a> Collider<'a> {
     fn collect_nucleons_from_expr(
         expr: &PartitionExpr,
         nucleons: &mut Vec<NucleonExpr>,
-        normalized_values: &HashMap<String, HashMap<Value, OrderedF64>>,
+        normalized_values: &HashMap<PartitionDim, HashMap<Value, OrderedF64>>,
     ) -> Result<()> {
         match expr.op {
             RestrictedOp::And => {
@@ -325,7 +361,7 @@ impl<'a> Collider<'a> {
     fn collect_nucleons_from_operand(
         operand: &Operand,
         nucleons: &mut Vec<NucleonExpr>,
-        normalized_values: &HashMap<String, HashMap<Value, OrderedF64>>,
+        normalized_values: &HashMap<PartitionDim, HashMap<Value, OrderedF64>>,
     ) -> Result<()> {
         match operand {
             Operand::Expr(expr) => {
@@ -346,7 +382,7 @@ impl<'a> Collider<'a> {
         lhs: &Operand,
         op: &RestrictedOp,
         rhs: &Operand,
-        normalized_values: &HashMap<String, HashMap<Value, OrderedF64>>,
+        normalized_values: &HashMap<PartitionDim, HashMap<Value, OrderedF64>>,
     ) -> Result<NucleonExpr> {
         let gluon_op = match op {
             RestrictedOp::Eq => GluonOp::Eq,
@@ -365,19 +401,19 @@ impl<'a> Collider<'a> {
         };
 
         match (lhs, rhs) {
-            (Operand::Column(col), Operand::Value(val)) => {
-                if let Some(column_values) = normalized_values.get(col)
+            (dim, Operand::Value(val)) if let Some(dim) = PartitionDim::from_operand(dim) => {
+                if let Some(column_values) = normalized_values.get(&dim)
                     && let Some(&normalized_val) = column_values.get(val)
                 {
                     return Ok(NucleonExpr {
-                        column: col.clone(),
+                        column: dim,
                         op: gluon_op,
                         value: normalized_val,
                     });
                 }
             }
-            (Operand::Value(val), Operand::Column(col)) => {
-                if let Some(column_values) = normalized_values.get(col)
+            (Operand::Value(val), dim) if let Some(dim) = PartitionDim::from_operand(dim) => {
+                if let Some(column_values) = normalized_values.get(&dim)
                     && let Some(&normalized_val) = column_values.get(val)
                 {
                     // Flip the operation for value op column
@@ -389,7 +425,7 @@ impl<'a> Collider<'a> {
                         op => op, // Eq and NotEq remain the same
                     };
                     return Ok(NucleonExpr {
-                        column: col.clone(),
+                        column: dim,
                         op: flipped_op,
                         value: normalized_val,
                     });
@@ -436,7 +472,7 @@ mod test {
         assert_eq!(collider.normalized_values.len(), 4);
 
         // Check age column - should have 2 unique values (25, 30)
-        let age_values = &collider.normalized_values["age"];
+        let age_values = &collider.normalized_values[&PartitionDim::Column("age".to_string())];
         assert_eq!(age_values.len(), 2);
         assert_eq!(
             age_values,
@@ -447,7 +483,7 @@ mod test {
         );
 
         // Check name column - should have 2 values
-        let name_values = &collider.normalized_values["name"];
+        let name_values = &collider.normalized_values[&PartitionDim::Column("name".to_string())];
         assert_eq!(name_values.len(), 2);
         assert_eq!(
             name_values,
@@ -458,7 +494,8 @@ mod test {
         );
 
         // Check active column - should have 2 values
-        let active_values = &collider.normalized_values["active"];
+        let active_values =
+            &collider.normalized_values[&PartitionDim::Column("active".to_string())];
         assert_eq!(active_values.len(), 2);
         assert_eq!(
             active_values,
@@ -469,7 +506,7 @@ mod test {
         );
 
         // Check score column - should have 2 values
-        let score_values = &collider.normalized_values["score"];
+        let score_values = &collider.normalized_values[&PartitionDim::Column("score".to_string())];
         assert_eq!(score_values.len(), 2);
         assert_eq!(
             score_values,
@@ -665,10 +702,26 @@ mod test {
 
         // Should have normalized values for all 4 columns
         assert_eq!(collider.normalized_values.len(), 4);
-        assert!(collider.normalized_values.contains_key("name"));
-        assert!(collider.normalized_values.contains_key("age"));
-        assert!(collider.normalized_values.contains_key("status"));
-        assert!(collider.normalized_values.contains_key("score"));
+        assert!(
+            collider
+                .normalized_values
+                .contains_key(&PartitionDim::Column("name".to_string()))
+        );
+        assert!(
+            collider
+                .normalized_values
+                .contains_key(&PartitionDim::Column("age".to_string()))
+        );
+        assert!(
+            collider
+                .normalized_values
+                .contains_key(&PartitionDim::Column("status".to_string()))
+        );
+        assert!(
+            collider
+                .normalized_values
+                .contains_key(&PartitionDim::Column("score".to_string()))
+        );
     }
 
     #[test]

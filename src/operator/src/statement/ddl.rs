@@ -72,6 +72,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
+use partition::function::PartitionFunction;
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
@@ -92,7 +93,10 @@ use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
 use sql::statements::statement::Statement;
-use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
+use sqlparser::ast::{
+    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, UnaryOperator,
+    Value as ParserValue,
+};
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
@@ -2871,6 +2875,15 @@ fn ensure_partition_operand_columns_in_target(
             ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
             ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
         }
+        Operand::Function(function) => ensure!(
+            target_partition_columns.contains(&function.column().to_string()),
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "partition expression references column '{}' that is not in target partition columns",
+                    function.column()
+                )
+            }
+        ),
         Operand::Value(_) => {}
     }
 
@@ -2922,6 +2935,22 @@ fn convert_one_expr(
             let value = convert_value(&v.value, data_type, timezone, Some(*unary_op))?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
+        // func, val
+        (Expr::Function(function), literal)
+            if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
+        {
+            let function = convert_partition_function(function, column_name_and_type)?;
+            let value = convert_literal(literal, function.output_type(), timezone)?;
+            (Operand::Function(function), op, Operand::Value(value))
+        }
+        // val, func
+        (literal, Expr::Function(function))
+            if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
+        {
+            let function = convert_partition_function(function, column_name_and_type)?;
+            let value = convert_literal(literal, function.output_type(), timezone)?;
+            (Operand::Value(value), op, Operand::Function(function))
+        }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
             // sub-expr must against another sub-expr
             let lhs = convert_one_expr(left, column_name_and_type, timezone)?;
@@ -2937,6 +2966,65 @@ fn convert_one_expr(
     };
 
     Ok(PartitionExpr::new(lhs, op, rhs))
+}
+
+/// Converts a partition function call, which takes exactly one partition column.
+fn convert_partition_function(
+    function: &Function,
+    column_name_and_type: &HashMap<&String, ConcreteDataType>,
+) -> Result<PartitionFunction> {
+    let invalid = || {
+        InvalidPartitionRuleSnafu {
+            reason: format!("unsupported partition function call {function}"),
+        }
+        .build()
+    };
+    let FunctionArguments::List(args) = &function.args else {
+        return Err(invalid());
+    };
+    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident)))] =
+        args.args.as_slice()
+    else {
+        return Err(invalid());
+    };
+    if function.filter.is_some()
+        || function.over.is_some()
+        || function.null_treatment.is_some()
+        || !function.within_group.is_empty()
+        || !matches!(function.parameters, FunctionArguments::None)
+        || args.duplicate_treatment.is_some()
+        || !args.clauses.is_empty()
+    {
+        return Err(invalid());
+    }
+    let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+    let partition_function = PartitionFunction::try_new(&function.name.to_string(), column_name)
+        .with_context(|| InvalidPartitionRuleSnafu {
+            reason: format!("unsupported partition function {}", function.name),
+        })?;
+    ensure!(
+        partition_function.accepts(&data_type),
+        InvalidPartitionRuleSnafu {
+            reason: format!(
+                "partition function {} does not support column type {data_type}",
+                partition_function.name()
+            ),
+        }
+    );
+    Ok(partition_function)
+}
+
+fn convert_literal(expr: &Expr, data_type: ConcreteDataType, timezone: &Timezone) -> Result<Value> {
+    match expr {
+        Expr::Value(value) => convert_value(&value.value, data_type, timezone, None),
+        Expr::UnaryOp { op, expr } if let Expr::Value(value) = &**expr => {
+            convert_value(&value.value, data_type, timezone, Some(*op))
+        }
+        _ => InvalidPartitionRuleSnafu {
+            reason: format!("expect a literal in partition expr, got {expr}"),
+        }
+        .fail(),
+    }
 }
 
 fn convert_identifier(
@@ -3677,6 +3765,59 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert!(!NAME_PATTERN_REG.is_match("#test"));
         assert!(!NAME_PATTERN_REG.is_match("@"));
         assert!(!NAME_PATTERN_REG.is_match("#"));
+    }
+
+    #[test]
+    fn test_convert_partition_function() {
+        let names = ["host", "count", "device", "measure"].map(String::from);
+        let column_name_and_type = HashMap::from([
+            (&names[0], ConcreteDataType::string_datatype()),
+            (&names[1], ConcreteDataType::int16_datatype()),
+            (&names[2], ConcreteDataType::uint64_datatype()),
+            (&names[3], ConcreteDataType::float64_datatype()),
+        ]);
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let dialect = GreptimeDbDialect {};
+        let parse = |sql: &str| {
+            Parser::new(&dialect)
+                .try_with_sql(sql)
+                .unwrap()
+                .parse_expr()
+                .unwrap()
+        };
+
+        for sql in [
+            "iceberg_hash(host) < 0",
+            "ICEBERG_HASH(device) >= -1073741824",
+            "0 > iceberg_hash(count)",
+            "iceberg_hash(host) < 100 AND host < 'm'",
+        ] {
+            let expr = convert_one_expr(&parse(sql), &column_name_and_type, &timezone).unwrap();
+            // SHOW CREATE TABLE prints the rule back as SQL.
+            let restored = parse(&expr.to_parser_expr().to_string());
+            assert_eq!(
+                convert_one_expr(&restored, &column_name_and_type, &timezone).unwrap(),
+                expr,
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "iceberg_hash(measure) < 0",
+            "iceberg_hash(host, count) < 0",
+            "iceberg_hash('a') < 0",
+            "iceberg_hash(missing) < 0",
+            "iceberg_hash(DISTINCT host) < 0",
+            "md5(host) < 0",
+            "iceberg_hash(host) < host",
+            "iceberg_hash(host) < 'abc'",
+            "iceberg_hash(host) < 2147483648",
+        ] {
+            assert!(
+                convert_one_expr(&parse(sql), &column_name_and_type, &timezone).is_err(),
+                "{sql}"
+            );
+        }
     }
 
     #[test]

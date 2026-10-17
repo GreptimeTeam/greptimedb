@@ -206,6 +206,10 @@ impl ConstraintPruner {
 
                 true
             }
+            // Query predicates never constrain a function dimension, so its values all
+            // come from partition rules, already typed as the function output.
+            (Operand::Function(_), Operand::Value(_))
+            | (Operand::Value(_), Operand::Function(_)) => true,
             _ => false,
         }
     }
@@ -268,6 +272,57 @@ mod tests {
 
         // Should include Region 2, and potentially others due to conservative approach
         assert!(pruned.contains(&RegionId::new(1, 2)));
+    }
+
+    #[test]
+    fn test_constraint_pruning_with_hash_dimension() {
+        use partition::function::PartitionFunction;
+
+        let hash = Operand::Function(PartitionFunction::IcebergHash("host".to_string()));
+        let partitions = [
+            col("ts")
+                .lt(Value::Int64(100))
+                .and(hash.clone().lt(Value::Int32(0))),
+            col("ts")
+                .lt(Value::Int64(100))
+                .and(hash.clone().gt_eq(Value::Int32(0))),
+            col("ts")
+                .gt_eq(Value::Int64(100))
+                .and(hash.clone().lt(Value::Int32(0))),
+            col("ts")
+                .gt_eq(Value::Int64(100))
+                .and(hash.gt_eq(Value::Int32(0))),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, expr)| create_test_partition_info(i as u64 + 1, Some(expr)))
+        .collect::<Vec<_>>();
+        let column_datatypes = HashMap::from_iter([
+            ("ts".to_string(), ConcreteDataType::int64_datatype()),
+            ("host".to_string(), ConcreteDataType::string_datatype()),
+        ]);
+        let prune = |query: PartitionExpr| {
+            let mut regions =
+                ConstraintPruner::prune_regions(&[query], &partitions, column_datatypes.clone())
+                    .unwrap();
+            regions.sort();
+            regions
+        };
+
+        // A filter on the hashed column can't exclude any hash range.
+        assert_eq!(
+            prune(col("host").eq(Value::String("a".into()))),
+            (1..=4).map(|i| RegionId::new(1, i)).collect::<Vec<_>>()
+        );
+        // Plain columns in the same rule still prune.
+        assert_eq!(
+            prune(
+                col("host")
+                    .eq(Value::String("a".into()))
+                    .and(col("ts").gt_eq(Value::Int64(100)))
+            ),
+            vec![RegionId::new(1, 3), RegionId::new(1, 4)]
+        );
     }
 
     #[test]
