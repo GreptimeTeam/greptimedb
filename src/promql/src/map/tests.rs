@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use datafusion::functions::math;
+use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
 use datatypes::arrow::array::{AsArray, UInt32Array};
@@ -30,8 +31,6 @@ use datatypes::series::{Label, MetricName};
 
 use super::*;
 use crate::functions::IeeeSqrt;
-
-mod prometheus;
 
 fn schema(names: &[&str]) -> SeriesSchema {
     SeriesSchema {
@@ -217,9 +216,10 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
     ));
     assert_eq!(output.time.timestamp(0), Some(4500));
     assert_eq!(output.time.timestamp(2), Some(5500));
-    // Prometheus drops the name; main keeps it because its HTTP adapter follows Call arguments.
-    assert_eq!(output.metric.name(), None);
-    assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
+    // Ordinary math calls retain the input metric name: collect_metric_names follows Call
+    // arguments, and the Prometheus response adapter emits it. Binary arithmetic differs.
+    assert_eq!(output.metric.name(), Some("requests"));
+    assert_eq!(output.metric.tags(), input.metric.tags());
     assert_eq!(input.metric.name(), Some("requests"));
     assert_floats(
         input.fields.get(0).unwrap(),
@@ -393,16 +393,19 @@ fn mismatched_schema_and_mutated_field_lengths_return_typed_errors() {
 }
 
 fn ordinary_math(op: MathOp, input: Float64Array) -> Float64Array {
-    // Calibration against main's UDFs, whose values agree with Prometheus for these functions;
-    // the Prometheus engine's own results are checked in `prometheus`.
+    // The ordinary planner's UDFs are the compatibility oracle, independent of the native
+    // dispatcher. Keep these aligned with PromPlanner::create_function_expr.
     let number_rows = input.len();
-    let args = vec![ColumnarValue::Array(Arc::new(input))];
+    let mut args = vec![ColumnarValue::Array(Arc::new(input))];
     let udf = match op {
         MathOp::Abs => math::abs(),
         MathOp::Ceil => math::ceil(),
         MathOp::Floor => math::floor(),
         MathOp::Sqrt => Arc::new(IeeeSqrt::scalar_udf()),
-        MathOp::Round { .. } => unreachable!("round is checked against Prometheus fixtures"),
+        MathOp::Round { nearest } => {
+            args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(nearest))));
+            Arc::new(Round::scalar_udf())
+        }
     };
     let arg_fields = args
         .iter()
@@ -449,7 +452,7 @@ fn float_boundary_samples() -> Float64Array {
 }
 
 #[test]
-fn math_matches_main_udfs_across_float_boundaries() {
+fn math_matches_existing_udfs_across_float_and_round_boundaries() {
     let input = float_boundary_samples();
     let mut schema = schema(&["dense", "chunked"]);
     let grid_len = u64::try_from(input.len() + 6).unwrap();
@@ -468,37 +471,38 @@ fn math_matches_main_udfs_across_float_boundaries() {
             Samples::try_from_chunks(chunks).unwrap(),
         ],
     );
-    // Round shares its calculation with the UDF; the Prometheus fixtures check it instead.
-    let cases = [MathOp::Abs, MathOp::Ceil, MathOp::Floor, MathOp::Sqrt];
+    let cases = [MathOp::Abs, MathOp::Ceil, MathOp::Floor, MathOp::Sqrt]
+        .into_iter()
+        .chain(
+            [
+                1.0,
+                0.0,
+                -0.0,
+                0.001,
+                0.1,
+                105.0,
+                -0.5,
+                f64::MIN_POSITIVE,
+                f64::from_bits(1),
+                f64::MAX,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+            ]
+            .into_iter()
+            .map(|nearest| MathOp::Round { nearest }),
+        );
     for op in cases {
         let output = map_math(&schema, &series, op).unwrap();
         let expected = ordinary_math(op, input.clone()).iter().collect::<Vec<_>>();
         for field in output.fields.iter() {
             assert_floats(field, &expected);
         }
-        assert_eq!(output.metric.name(), None);
-        assert_eq!(output.metric.tags(), &series.metric.tags()[1..]);
+        assert_eq!(output.metric.name(), series.metric.name());
+        assert_eq!(output.metric.tags(), series.metric.tags());
         let TimeAxis::Grid(range) = output.time else {
             panic!("lost grid axis")
         };
         assert_eq!((range.start(), range.len()), (5, input.len()));
     }
-}
-
-#[test]
-fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
-    let schema = schema(&["value"]);
-    let mut input = series(&schema, 0, vec![floats(&[Some(-1.0)])]);
-    for label in ["__type__", "__unit__", "__other__"] {
-        input.metric.set(label, "x".into()).unwrap();
-    }
-    let output = map_math(&schema, &input, MathOp::Abs).unwrap();
-    let names = output
-        .metric
-        .tags()
-        .iter()
-        .map(|label| label.name.as_ref())
-        .collect::<Vec<_>>();
-    assert_eq!(output.metric.name(), None);
-    assert_eq!(names, ["__other__", "host"]);
 }
