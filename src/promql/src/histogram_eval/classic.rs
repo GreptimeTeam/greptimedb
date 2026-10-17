@@ -12,124 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `histogram_quantile` and `histogram_fraction` over classic histograms, following Prometheus
-//! `resetHistograms`, `BucketQuantile` and `BucketFraction`.
+//! Prometheus `BucketQuantile` and `BucketFraction` over the buckets of a classic histogram at
+//! one point.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
-use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::TimeAxis;
-
-use crate::grid_series::{GridSeriesBuilder, LabelSet, label_set, merge_same_labelset};
-
-#[cfg(test)]
-mod tests;
-
-const BUCKET_LABEL: &str = "le";
 /// Relative difference under which neighbouring bucket counts are taken as equal.
 const SMALL_DELTA_TOLERANCE: f64 = 1e-12;
 
-/// A classic histogram function with its constant arguments.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ClassicHistogramFunction {
-    /// `histogram_quantile(q, v)`.
-    Quantile(f64),
-    /// `histogram_fraction(lower, upper, v)`.
-    Fraction { lower: f64, upper: f64 },
-}
-
-/// Evaluates `function` over the classic histograms in `series`.
-///
-/// Series form a histogram when their labels other than `le` are equal; series whose `le` does
-/// not parse as a float are ignored. At every point, each field is evaluated over the buckets
-/// present there. Results drop `le` and `__name__`; histograms that then share a label set are
-/// merged as [`merge_same_labelset`] does.
-pub fn classic_histogram(
-    function: ClassicHistogramFunction,
-    schema: &Arc<SeriesSchema>,
-    series: &[Series],
-) -> Result<Vec<Series>> {
-    let mut histograms: HashMap<LabelSet, Histogram<'_>> = HashMap::new();
-    for series in series {
-        let Some(upper_bound) = series.metric.get(BUCKET_LABEL).and_then(parse_bound) else {
-            continue;
-        };
-        let mut metric = series.metric.clone();
-        metric.remove(BUCKET_LABEL);
-        histograms
-            .entry(label_set(&metric))
-            .or_insert_with(|| Histogram {
-                metric,
-                members: Vec::new(),
-            })
-            .members
-            .push((upper_bound, series));
-    }
-
-    let mut output = Vec::with_capacity(histograms.len());
-    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    let mut buckets = Vec::new();
-    let mut values = vec![None; schema.fields.len()];
-    for Histogram {
-        mut metric,
-        mut members,
-    } in histograms.into_values()
-    {
-        // Pre-sorting by bound keeps the buckets of every point sorted.
-        members.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut ranges = Vec::with_capacity(members.len());
-        for (_, series) in &members {
-            let TimeAxis::Grid(range) = &series.time else {
-                return Err(DataFusionError::Execution(
-                    "histogram functions require evaluated series".into(),
-                ));
-            };
-            ranges.push((range.start(), range.start() + range.len()));
-        }
-        let start = ranges.iter().map(|range| range.0).min().unwrap_or(0);
-        let end = ranges.iter().map(|range| range.1).max().unwrap_or(0);
-        for point in start..end {
-            for (field, value) in values.iter_mut().enumerate() {
-                buckets.clear();
-                for ((upper_bound, series), &(series_start, series_end)) in
-                    members.iter().zip(&ranges)
-                {
-                    if !(series_start..series_end).contains(&point) {
-                        continue;
-                    }
-                    match series.fields.as_slice()[field].sample(point - series_start) {
-                        SampleRef::Missing => {}
-                        SampleRef::Float(count) => buckets.push(Bucket {
-                            upper_bound: *upper_bound,
-                            count,
-                        }),
-                        SampleRef::Histogram(_) => {
-                            return Err(DataFusionError::NotImplemented(
-                                "histogram functions over native histogram samples".into(),
-                            ));
-                        }
-                    }
-                }
-                *value = (!buckets.is_empty()).then(|| match function {
-                    ClassicHistogramFunction::Quantile(q) => bucket_quantile(q, &mut buckets),
-                    ClassicHistogramFunction::Fraction { lower, upper } => {
-                        bucket_fraction(lower, upper, &mut buckets)
-                    }
-                });
-            }
-            builder.push(point, &values)?;
-        }
-        metric.remove("__name__");
-        output.extend(builder.finish(metric)?);
-    }
-    merge_same_labelset(schema, output)
-}
-
 /// Go's `strconv.ParseFloat`, which rejects finite literals out of the f64 range.
-fn parse_bound(text: &str) -> Option<f64> {
+pub(super) fn parse_bound(text: &str) -> Option<f64> {
     let value: f64 = text.parse().ok()?;
     if value.is_infinite() {
         let unsigned = text.trim_start_matches(['+', '-']);
@@ -140,20 +30,14 @@ fn parse_bound(text: &str) -> Option<f64> {
     Some(value)
 }
 
-/// The bucket series of one histogram, with their upper bounds.
-struct Histogram<'a> {
-    metric: MetricName,
-    members: Vec<(f64, &'a Series)>,
-}
-
 #[derive(Debug, Clone, Copy)]
-struct Bucket {
-    upper_bound: f64,
-    count: f64,
+pub(super) struct Bucket {
+    pub(super) upper_bound: f64,
+    pub(super) count: f64,
 }
 
 /// Prometheus `BucketQuantile` over buckets sorted by upper bound.
-fn bucket_quantile(q: f64, buckets: &mut Vec<Bucket>) -> f64 {
+pub(super) fn bucket_quantile(q: f64, buckets: &mut Vec<Bucket>) -> f64 {
     if q.is_nan() {
         return f64::NAN;
     }
@@ -195,7 +79,7 @@ fn bucket_quantile(q: f64, buckets: &mut Vec<Bucket>) -> f64 {
 }
 
 /// Prometheus `BucketFraction` over buckets sorted by upper bound.
-fn bucket_fraction(lower: f64, upper: f64, buckets: &mut Vec<Bucket>) -> f64 {
+pub(super) fn bucket_fraction(lower: f64, upper: f64, buckets: &mut Vec<Bucket>) -> f64 {
     if buckets.last().unwrap().upper_bound != f64::INFINITY {
         return f64::NAN;
     }

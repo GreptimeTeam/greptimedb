@@ -127,6 +127,8 @@ pub(crate) struct GoldenCase {
     pub(crate) spec: Vec<String>,
     pub(crate) grid: Arc<EvalGrid>,
     pub(crate) inputs: Vec<(Labels, Points)>,
+    /// Native histogram points of each input, as written by the generator.
+    pub(crate) histograms: Vec<BTreeMap<usize, String>>,
     /// Result series by label set, or the error message.
     pub(crate) outcome: Result<BTreeMap<Labels, Points>, String>,
 }
@@ -142,16 +144,19 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
             })
             .collect()
     };
-    let points = |text: &str| -> Points {
-        text.split_whitespace()
-            .map(|point| {
-                let (index, bits) = point.split_once(':').unwrap();
-                (
-                    index.parse().unwrap(),
-                    u64::from_str_radix(bits, 16).unwrap(),
-                )
-            })
-            .collect()
+    let points = |text: &str| -> (Points, BTreeMap<usize, String>) {
+        let mut floats = Points::new();
+        let mut histograms = BTreeMap::new();
+        for point in text.split_whitespace() {
+            let (index, value) = point.split_once(':').unwrap();
+            let index = index.parse().unwrap();
+            if let Some(histogram) = value.strip_prefix('H') {
+                histograms.insert(index, histogram.to_string());
+            } else {
+                floats.insert(index, u64::from_str_radix(value, 16).unwrap());
+            }
+        }
+        (floats, histograms)
     };
     let mut cases = Vec::new();
     for case in text.split("end\n").filter(|case| case.contains("case ")) {
@@ -164,6 +169,7 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
             .collect();
         let grid = GridSpec::try_new(grid[0], grid[1], grid[2] as u64).unwrap();
         let mut inputs = Vec::new();
+        let mut histograms = Vec::new();
         let mut outcome = Ok(BTreeMap::new());
         for line in &lines[2..] {
             if let Some(message) = line.strip_prefix("error ") {
@@ -172,9 +178,13 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
             }
             let (kind, rest) = line.split_once(' ').unwrap();
             let (series_labels, series_points) = rest.split_once(" ;").unwrap();
-            let entry = (labels(series_labels), points(series_points));
+            let (floats, histogram_points) = points(series_points);
+            let entry = (labels(series_labels), floats);
             match kind {
-                "series" => inputs.push(entry),
+                "series" => {
+                    inputs.push(entry);
+                    histograms.push(histogram_points);
+                }
                 "result" => {
                     outcome.as_mut().unwrap().insert(entry.0, entry.1);
                 }
@@ -185,6 +195,7 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
             spec: spec.split('\t').map(str::to_string).collect(),
             grid: Arc::new(EvalGrid::try_new(grid).unwrap()),
             inputs,
+            histograms,
             outcome,
         });
     }
