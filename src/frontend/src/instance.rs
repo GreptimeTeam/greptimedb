@@ -3321,7 +3321,7 @@ mod tests {
                 false,
             )
             .with_time_index(true),
-            ColumnSchema::new("extra_field", ConcreteDataType::float64_datatype(), false),
+            ColumnSchema::new("extra_field", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
                 greptime_value(),
                 ConcreteDataType::float64_datatype(),
@@ -3332,7 +3332,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as VectorRef,
-                Arc::new(Float64Vector::from_vec(vec![99.0, 99.0, 99.0])) as VectorRef,
+                Arc::new(StringVector::from(vec!["99", "99", "99"])) as VectorRef,
                 Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as VectorRef,
             ],
         )
