@@ -50,7 +50,8 @@ pub(crate) struct FloatWindow<'a> {
     /// Sample timestamps shifted by the offset onto the evaluation timeline; non-empty.
     pub timestamps: &'a [i64],
     pub values: &'a [f64],
-    /// Evaluation timestamp `T`; `timestamps` lie in `(T - range_ms, T]`.
+    /// Evaluation timestamp `T`. `timestamps` lie in `(T - range_ms, T]`, except for an
+    /// `@`-anchored `predict_linear`, which evaluates the first point's window at every `T`.
     pub eval_ts: i64,
     pub range_ms: i64,
 }
@@ -119,7 +120,7 @@ impl RangeEvaluator {
         window: RangeWindow,
         function: RangeFunction,
     ) -> Result<Self> {
-        let fold_offset = fold_offset(&grid, window)?;
+        let fold_offset = fold_offset(grid.spec(), window)?;
         let step_invariant = !matches!(function, RangeFunction::PredictLinear(_));
         if !step_invariant {
             let spec = grid.spec();
@@ -161,7 +162,7 @@ impl RangeEvaluator {
             (Some(_), true) => Replay::Once,
             (Some(_), false) => Replay::EveryPoint,
         };
-        window.offset_ms = fold_offset(&grid, window)?;
+        window.offset_ms = fold_offset(grid.spec(), window)?;
         let output_schema = Arc::new(SeriesSchema {
             fields: input.fields.clone(),
             eval_grid: Some(grid.clone()),
@@ -490,11 +491,7 @@ fn evaluate_row(
 
 /// The offset samples are shifted by: the selector offset, or for `@` the offset that places
 /// the anchored window at the first grid point.
-fn fold_offset(grid: &EvalGrid, window: RangeWindow) -> Result<i64> {
-    fold_offset_of(grid.spec(), window)
-}
-
-fn fold_offset_of(grid: GridSpec, window: RangeWindow) -> Result<i64> {
+fn fold_offset(grid: GridSpec, window: RangeWindow) -> Result<i64> {
     let Some(anchor) = window.anchor_ms else {
         return Ok(window.offset_ms);
     };
@@ -523,7 +520,7 @@ pub fn subquery_grid(
             "subquery step must be positive, got {step_ms} ms"
         )));
     }
-    let fold_offset = i128::from(fold_offset_of(outer, window)?);
+    let fold_offset = i128::from(fold_offset(outer, window)?);
     let step = i128::from(step_ms);
     let start = i128::from(outer.start_ms);
     let last_eval = match window.anchor_ms {
