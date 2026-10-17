@@ -109,6 +109,7 @@ fn random_side(rng: &mut StdRng, grid: &Arc<EvalGrid>, fields: usize) -> Side {
             ("host", ["a", "b", ""]),
             ("job", ["x", "y", "y"]),
             ("zone", ["z1", "", ""]),
+            ("__type__", ["counter", "", ""]),
         ] {
             let value = values[rng.random_range(0..values.len())];
             if !value.is_empty() {
@@ -171,7 +172,9 @@ fn signature(labels: &Labels, matching: &MatchingLabels) -> Labels {
 fn result_labels(many: &Labels, one: &Labels, matching: &BinaryMatching) -> Labels {
     let mut labels = many.clone();
     if matching.return_bool || !matching.op.is_comparison() {
-        labels.remove("__name__");
+        for name in ["__name__", "__type__", "__unit__"] {
+            labels.remove(name);
+        }
     }
     let include = match &matching.cardinality {
         Cardinality::OneToOne => {
@@ -303,7 +306,11 @@ fn reference_binary(
             let dense = output
                 .entry(result)
                 .or_insert_with(|| vec![vec![None; fields]; points]);
-            assert!(!present(&dense[point]), "result label sets collide");
+            // Prometheus rejects the step once the operator is done.
+            if present(&dense[point]) {
+                violations.insert(Violation::DuplicateLabelSet);
+                continue;
+            }
             dense[point] = row;
         }
     }
@@ -754,4 +761,54 @@ fn pow_and_atan2_match_go() {
         checked += 1;
     }
     assert_eq!(checked, 452);
+}
+
+/// Results that share a label set once `__type__` is dropped fail as a grouping violation within
+/// one match group, and as duplicate label sets across match groups, which Prometheus detects
+/// only after the operator.
+#[test]
+fn colliding_results_fail_by_where_they_collide() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap());
+    let schema = schema(1, &grid);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+    let mut series = |labels: &[(&str, &str)]| {
+        builder.push(0, &[Some(1.0)]).unwrap();
+        let labels = labels
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        builder.finish(metric(&labels)).unwrap().unwrap()
+    };
+    let lhs = vec![
+        series(&[("__name__", "a"), ("__type__", "counter"), ("job", "x")]),
+        series(&[("__name__", "a"), ("__type__", "gauge"), ("job", "x")]),
+    ];
+    let rhs = [
+        series(&[("__name__", "b"), ("__type__", "counter"), ("job", "x")]),
+        series(&[("__name__", "b"), ("__type__", "gauge"), ("job", "x")]),
+    ];
+    for (labels, expected) in [
+        // `__type__` is part of the match group.
+        (MatchingLabels::Ignoring(Vec::new()), "same labelset"),
+        // Both left series fall into the group of each right series.
+        (
+            MatchingLabels::On(vec![Arc::from("job")]),
+            "grouping labels must ensure unique matches",
+        ),
+    ] {
+        let rhs = match &labels {
+            MatchingLabels::On(_) => &rhs[..1],
+            MatchingLabels::Ignoring(_) => &rhs[..],
+        };
+        let matching = BinaryMatching {
+            op: BinaryOp::Add,
+            return_bool: false,
+            labels,
+            cardinality: Cardinality::ManyToOne(Vec::new()),
+        };
+        let error = binary_vectors(&matching, &schema, &lhs, &schema, rhs)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
 }

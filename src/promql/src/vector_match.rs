@@ -175,6 +175,11 @@ pub fn binary_vectors(
     let fields = output.fields.len();
     let drop_name = !matching.op.is_comparison() || matching.return_bool;
     let mut results = Results::default();
+    let group_ids: HashMap<&GroupKey, usize> = one_groups
+        .keys()
+        .enumerate()
+        .map(|(id, key)| (key, id))
+        .collect();
     let mut matched_groups: HashMap<GroupKey, Vec<usize>> = HashMap::new();
     let mut values = vec![None; fields];
     for (many_index, many_series) in many.series.iter().enumerate() {
@@ -182,6 +187,7 @@ pub fn binary_vectors(
         let Some(candidates) = one_groups.get(&key) else {
             continue;
         };
+        let group_id = group_ids[&key];
         if matches!(matching.cardinality, Cardinality::OneToOne) {
             matched_groups.entry(key).or_default().push(many_index);
         }
@@ -224,7 +230,7 @@ pub fn binary_vectors(
                         _ => None,
                     };
                 }
-                results.insert(&metric, point, &values);
+                results.insert(&metric, group_id, point, &values);
             }
         }
     }
@@ -249,36 +255,60 @@ pub fn binary_vectors(
             implicit_many_to_one = Some((point, key));
         }
     }
-    let grouping_duplicate = results.sort_rows();
-    // Prometheus fails at the first failing step, and checks the one side before matching.
-    let error = match (one_duplicate, implicit_many_to_one, grouping_duplicate) {
-        (Some((point, key)), many_to_one, grouping)
-            if many_to_one.is_none_or(|(first, _)| point <= first)
-                && grouping.as_ref().is_none_or(|(first, _)| point <= *first) =>
-        {
-            let side = if one_is_left { "left" } else { "right" };
-            Some(format!(
+    // Prometheus fails at the first failing step. Within a step it checks the one side, then
+    // matches, and only after the operator checks that result label sets are unique.
+    let mut errors: Vec<(usize, u8, String)> = Vec::new();
+    if let Some((point, key)) = one_duplicate {
+        let side = if one_is_left { "left" } else { "right" };
+        errors.push((
+            point,
+            0,
+            format!(
                 "found duplicate series for the match group {} on the {side} hand-side of the \
                  operation at {} ms; many-to-many matching not allowed: matching labels must be \
                  unique on one side",
                 render(key),
                 grid.timestamps()[point]
-            ))
-        }
-        (_, Some((point, key)), _) => Some(format!(
-            "multiple matches for labels {} at {} ms: many-to-one matching must be explicit \
-             (group_left/group_right)",
-            render(key),
-            grid.timestamps()[point]
-        )),
-        (_, _, Some((point, key))) => Some(format!(
-            "multiple matches for labels {} at {} ms: grouping labels must ensure unique matches",
-            render(&key),
-            grid.timestamps()[point]
-        )),
-        _ => None,
-    };
-    if let Some(error) = error {
+            ),
+        ));
+    }
+    if let Some((point, key)) = implicit_many_to_one {
+        errors.push((
+            point,
+            1,
+            format!(
+                "multiple matches for labels {} at {} ms: many-to-one matching must be explicit \
+                 (group_left/group_right)",
+                render(key),
+                grid.timestamps()[point]
+            ),
+        ));
+    }
+    if let Some(duplicate) = results.sort_rows() {
+        let grouping = duplicate.within_group && matching.cardinality != Cardinality::OneToOne;
+        errors.push(if grouping {
+            (
+                duplicate.point,
+                1,
+                format!(
+                    "multiple matches for labels {} at {} ms: grouping labels must ensure \
+                     unique matches",
+                    render(&duplicate.key),
+                    grid.timestamps()[duplicate.point]
+                ),
+            )
+        } else {
+            (
+                duplicate.point,
+                2,
+                same_labelset(&duplicate.key, grid.timestamps()[duplicate.point]),
+            )
+        });
+    }
+    if let Some((_, _, error)) = errors
+        .into_iter()
+        .min_by_key(|(point, rank, _)| (*point, *rank))
+    {
         return Err(DataFusionError::Execution(error));
     }
     results.build(output)
@@ -319,7 +349,7 @@ pub fn set_vectors(
             for point in lhs.range(index) {
                 if lhs.present(index, point)? {
                     lhs.row(index, point, &mut values)?;
-                    results.insert(&lhs.series[index].metric, point, &values);
+                    results.insert(&lhs.series[index].metric, 0, point, &values);
                 }
             }
         }
@@ -339,15 +369,14 @@ pub fn set_vectors(
             }
             if matched == keep_matched {
                 kept.row(index, point, &mut values)?;
-                results.insert(&series.metric, point, &values);
+                results.insert(&series.metric, 0, point, &values);
             }
         }
     }
-    if let Some((point, key)) = results.sort_rows() {
-        return Err(DataFusionError::Execution(format!(
-            "vector cannot contain metrics with the same labelset {} at {} ms",
-            render(&key),
-            grid.timestamps()[point]
+    if let Some(duplicate) = results.sort_rows() {
+        return Err(DataFusionError::Execution(same_labelset(
+            &duplicate.key,
+            grid.timestamps()[duplicate.point],
         )));
     }
     results.build(output)
@@ -444,6 +473,9 @@ fn overlap(
     Ok(first)
 }
 
+/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
+const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
+
 fn result_metric(
     many: &MetricName,
     one: &MetricName,
@@ -453,7 +485,7 @@ fn result_metric(
 ) -> Result<MetricName> {
     let mut metric = many.clone();
     if drop_name {
-        metric.remove("__name__");
+        metric.remove_all(&METADATA_LABELS);
     }
     if matching.cardinality == Cardinality::OneToOne {
         match &matching.labels {
@@ -586,37 +618,58 @@ struct Results {
     series: HashMap<GroupKey, ResultRows>,
 }
 
-/// Rows in arrival order: their points, and their field values laid out row after row.
+/// Rows in arrival order: their points, the match group each came from, and their field
+/// values laid out row after row.
 struct ResultRows {
     metric: MetricName,
     points: Vec<usize>,
+    groups: Vec<usize>,
     values: Vec<Option<f64>>,
 }
 
+/// Two rows of one result label set at one point.
+struct Duplicate {
+    point: usize,
+    key: GroupKey,
+    /// Whether two of the rows came from the same match group.
+    within_group: bool,
+}
+
+fn same_labelset(key: &GroupKey, timestamp: i64) -> String {
+    format!(
+        "vector cannot contain metrics with the same labelset {} at {timestamp} ms",
+        render(key)
+    )
+}
+
 impl Results {
-    fn insert(&mut self, metric: &MetricName, point: usize, values: &[Option<f64>]) {
+    fn insert(&mut self, metric: &MetricName, group: usize, point: usize, values: &[Option<f64>]) {
         let rows = match self.series.entry(key_of(metric)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(ResultRows {
                 metric: metric.clone(),
                 points: Vec::new(),
+                groups: Vec::new(),
                 values: Vec::new(),
             }),
         };
         rows.points.push(point);
+        rows.groups.push(group);
         rows.values.extend_from_slice(values);
     }
 
     /// Sorts the rows of each label set by point and returns the earliest point where a label
-    /// set has two rows. Prometheus evaluates step by step and fails at the first such step.
-    fn sort_rows(&mut self) -> Option<(usize, GroupKey)> {
-        let mut first: Option<(usize, &GroupKey)> = None;
+    /// set has two rows, preferring one within a match group at that point. Prometheus
+    /// evaluates step by step and fails at the first such step.
+    fn sort_rows(&mut self) -> Option<Duplicate> {
+        let mut first: Option<(usize, bool, &GroupKey)> = None;
         for (key, rows) in &mut self.series {
             if !rows.points.is_sorted() {
                 let fields = rows.values.len() / rows.points.len();
                 let mut order: Vec<usize> = (0..rows.points.len()).collect();
                 order.sort_by_key(|&row| rows.points[row]);
                 rows.points = order.iter().map(|&row| rows.points[row]).collect();
+                rows.groups = order.iter().map(|&row| rows.groups[row]).collect();
                 rows.values = order
                     .iter()
                     .flat_map(|&row| {
@@ -626,13 +679,29 @@ impl Results {
                     })
                     .collect();
             }
-            if let Some(pair) = rows.points.windows(2).find(|pair| pair[0] == pair[1])
-                && first.is_none_or(|(point, _)| pair[0] < point)
-            {
-                first = Some((pair[0], key));
+            let mut start = 0;
+            while start < rows.points.len() {
+                let point = rows.points[start];
+                let end = start + rows.points[start..].partition_point(|&p| p == point);
+                if end - start > 1 {
+                    let mut groups = rows.groups[start..end].to_vec();
+                    groups.sort_unstable();
+                    let within_group = groups.windows(2).any(|pair| pair[0] == pair[1]);
+                    if first.is_none_or(|(first_point, first_within, _)| {
+                        (point, !within_group) < (first_point, !first_within)
+                    }) {
+                        first = Some((point, within_group, key));
+                    }
+                    break;
+                }
+                start = end;
             }
         }
-        first.map(|(point, key)| (point, key.clone()))
+        first.map(|(point, within_group, key)| Duplicate {
+            point,
+            key: key.clone(),
+            within_group,
+        })
     }
 
     /// Builds the result series from rows sorted by [`Results::sort_rows`] without duplicates.
