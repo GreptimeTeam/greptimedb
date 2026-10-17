@@ -22,6 +22,7 @@ mod tests;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::arrow::array::Float64Array;
+use datatypes::series::MetricName;
 use datatypes::series::samples::{DenseSamplesRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
@@ -42,7 +43,8 @@ pub enum MathOp {
     Round { nearest: f64 },
 }
 
-/// Applies float math to every field of one evaluated series, preserving its labels.
+/// Applies float math to every field of one evaluated series and drops the metric name, like
+/// Prometheus' `simpleFloatFunc`.
 ///
 /// The explicit schema and actual grid range are preserved. Fields are processed in their own
 /// chunk boundaries, without expanding to the full grid or densifying chunked samples. Missing
@@ -53,6 +55,10 @@ pub enum MathOp {
 /// Raw time axes and histogram/mixed segments are rejected. Unsupported query types must be
 /// admitted to the ordinary path before execution; this function neither falls back nor returns
 /// partial results.
+///
+/// Distinct inputs can share a label set once the name is dropped. Merging them, or failing
+/// when both have a value at one step, is left to the caller (Prometheus
+/// `mergeSeriesWithSameLabelset`).
 pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Series> {
     if !matches!(series.time, TimeAxis::Grid(_)) {
         return Err(DataFusionError::Execution(
@@ -65,10 +71,15 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Se
         .map(|samples| map_samples(samples, op))
         .collect::<Result<Vec<_>>>()?;
     let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
-    // Ordinary math calls preserve the metric name (unlike binary arithmetic): the HTTP
-    // adapter's collect_metric_names follows Call arguments. Keep that compatibility here.
-    Series::try_new(schema, series.metric.clone(), series.time.clone(), fields)
-        .map_err(series_error)
+    let mut metric = series.metric.clone();
+    drop_metric_name(&mut metric);
+    Series::try_new(schema, metric, series.time.clone(), fields).map_err(series_error)
+}
+
+/// Prometheus `DropReserved(schema.IsMetadataLabel)` drops the type and unit labels with the
+/// name.
+pub(crate) fn drop_metric_name(metric: &mut MetricName) {
+    metric.remove_all(&["__name__", "__type__", "__unit__"]);
 }
 
 impl MathOp {

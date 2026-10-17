@@ -32,6 +32,8 @@ use datatypes::series::{Label, MetricName};
 use super::*;
 use crate::functions::IeeeSqrt;
 
+mod prometheus;
+
 fn schema(names: &[&str]) -> SeriesSchema {
     SeriesSchema {
         fields: names
@@ -216,9 +218,8 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
     ));
     assert_eq!(output.time.timestamp(0), Some(4500));
     assert_eq!(output.time.timestamp(2), Some(5500));
-    // Ordinary math calls retain the input metric name: collect_metric_names follows Call
-    // arguments, and the Prometheus response adapter emits it. Binary arithmetic differs.
-    assert_eq!(output.metric.name(), Some("requests"));
+    // Prometheus drops the name; main keeps it because its HTTP adapter follows Call arguments.
+    assert_eq!(output.metric.name(), None);
     assert_eq!(output.metric.tags(), input.metric.tags());
     assert_eq!(input.metric.name(), Some("requests"));
     assert_floats(
@@ -393,8 +394,8 @@ fn mismatched_schema_and_mutated_field_lengths_return_typed_errors() {
 }
 
 fn ordinary_math(op: MathOp, input: Float64Array) -> Float64Array {
-    // The ordinary planner's UDFs are the compatibility oracle, independent of the native
-    // dispatcher. Keep these aligned with PromPlanner::create_function_expr.
+    // Calibration against main's UDFs, whose values agree with Prometheus for these functions;
+    // the Prometheus engine's own results are checked in `prometheus`.
     let number_rows = input.len();
     let mut args = vec![ColumnarValue::Array(Arc::new(input))];
     let udf = match op {
@@ -452,7 +453,7 @@ fn float_boundary_samples() -> Float64Array {
 }
 
 #[test]
-fn math_matches_existing_udfs_across_float_and_round_boundaries() {
+fn math_matches_main_udfs_across_float_and_round_boundaries() {
     let input = float_boundary_samples();
     let mut schema = schema(&["dense", "chunked"]);
     let grid_len = u64::try_from(input.len() + 6).unwrap();
@@ -498,11 +499,29 @@ fn math_matches_existing_udfs_across_float_and_round_boundaries() {
         for field in output.fields.iter() {
             assert_floats(field, &expected);
         }
-        assert_eq!(output.metric.name(), series.metric.name());
+        assert_eq!(output.metric.name(), None);
         assert_eq!(output.metric.tags(), series.metric.tags());
         let TimeAxis::Grid(range) = output.time else {
             panic!("lost grid axis")
         };
         assert_eq!((range.start(), range.len()), (5, input.len()));
     }
+}
+
+#[test]
+fn math_drops_reserved_metadata_labels_with_the_name() {
+    let schema = schema(&["value"]);
+    let mut input = series(&schema, 0, vec![floats(&[Some(-1.0)])]);
+    for label in ["__type__", "__unit__", "__other__"] {
+        input.metric.set(label, "x".into()).unwrap();
+    }
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let names = output
+        .metric
+        .tags()
+        .iter()
+        .map(|label| label.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(output.metric.name(), None);
+    assert_eq!(names, ["__other__", "empty", "host"]);
 }
