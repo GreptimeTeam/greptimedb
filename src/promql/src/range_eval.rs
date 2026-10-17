@@ -561,11 +561,12 @@ pub fn subquery_grid(
     if first > last {
         return Ok(None);
     }
-    let len = (last - first) / step + 1;
+    let len = u64::try_from((last - first) / step + 1)
+        .map_err(|_| DataFusionError::Plan("subquery grid has too many points".into()))?;
     let first = i64::try_from(first).map_err(|_| {
         DataFusionError::Plan(format!("subquery grid start {first} ms is out of range"))
     })?;
-    GridSpec::try_new(first, step_ms, len as u64)
+    GridSpec::try_new(first, step_ms, len)
         .map(Some)
         .map_err(|error| DataFusionError::External(Box::new(error)))
 }

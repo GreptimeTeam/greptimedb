@@ -1062,3 +1062,54 @@ fn samples_after_the_last_window_are_validated_but_not_retained() {
         Err(DataFusionError::Execution(_))
     ));
 }
+
+/// An anchored `predict_linear` regresses the one anchored window around each grid point, as
+/// Prometheus does with `enh.Ts`; over `y = t` that predicts `T` whatever the offset.
+#[test]
+fn anchored_predict_linear_regresses_around_each_point() {
+    let rows: Vec<Row> = (0..=60)
+        .step_by(5)
+        .map(|ts| (ts, vec![Some(ts as f64)]))
+        .collect();
+    for offset_ms in [0, 10] {
+        let window = RangeWindow {
+            range_ms: 30,
+            offset_ms,
+            anchor_ms: Some(50),
+        };
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(100, 10, 3),
+            window,
+            RangeFunction::PredictLinear(0.0),
+        )
+        .unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let values: Vec<_> = (0..3)
+            .map(|index| match series.fields.as_slice()[0].sample(index) {
+                SampleRef::Float(value) => value,
+                _ => panic!("expected a float"),
+            })
+            .collect();
+        for (value, expected) in values.into_iter().zip([100.0, 110.0, 120.0]) {
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "offset {offset_ms}: {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_a_subquery_grid_longer_than_u64() {
+    let outer = GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap();
+    let window = RangeWindow {
+        range_ms: 7,
+        offset_ms: -6,
+        anchor_ms: None,
+    };
+    assert!(matches!(
+        subquery_grid(outer, window, 1),
+        Err(DataFusionError::Plan(_))
+    ));
+}
