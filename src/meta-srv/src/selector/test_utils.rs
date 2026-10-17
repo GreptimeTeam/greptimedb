@@ -38,6 +38,9 @@ pub fn new_test_selector_context() -> SelectorContext {
         affinity_fallback: Default::default(),
         affinity: Arc::new(NoopAffinity),
         peer_discovery: meta_peer_client,
+        drain_node_status_manager: Arc::new(
+            crate::procedure::drain_node::status::DrainNodeStatusManager::new(kv_backend),
+        ),
     }
 }
 

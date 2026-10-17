@@ -71,6 +71,8 @@ use crate::metasrv::{
     TABLE_ID_SEQ,
 };
 use crate::peer::MetasrvPeerAllocator;
+use crate::procedure::drain_node::DrainNodeManager;
+use crate::procedure::drain_node::status::DrainNodeStatusManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
@@ -285,6 +287,7 @@ impl MetasrvBuilder {
                 .and_then(|plugins| plugins.get::<AffinityRef>())
                 .unwrap_or_else(|| Arc::new(NoopAffinity)),
             peer_discovery: meta_peer_client.clone(),
+            drain_node_status_manager: Arc::new(DrainNodeStatusManager::new(kv_backend.clone())),
         };
 
         let wal_provider = build_wal_provider(&options.wal, kv_backend.clone())
@@ -301,6 +304,7 @@ impl MetasrvBuilder {
             );
             let peer_allocator = Arc::new(
                 MetasrvPeerAllocator::new(selector_ctx.clone(), selector.clone())
+                    .exclude_draining_datanodes()
                     .with_max_items(MAX_REGION_SEQ),
             );
             Arc::new(TableMetadataAllocator::with_peer_allocator(
@@ -382,23 +386,35 @@ impl MetasrvBuilder {
         };
 
         // region migration manager
-        let region_migration_manager = Arc::new(RegionMigrationManager::new(
-            procedure_manager.clone(),
-            DefaultContextFactory::new(
-                in_memory.clone(),
-                table_metadata_manager.clone(),
-                memory_region_keeper.clone(),
-                region_failure_detector_controller.clone(),
-                mailbox.clone(),
-                options.grpc.server_addr.clone(),
-                cache_invalidator.clone(),
-            ),
-        ));
+        let region_migration_manager = Arc::new(
+            RegionMigrationManager::new(
+                procedure_manager.clone(),
+                DefaultContextFactory::new(
+                    in_memory.clone(),
+                    table_metadata_manager.clone(),
+                    memory_region_keeper.clone(),
+                    region_failure_detector_controller.clone(),
+                    mailbox.clone(),
+                    options.grpc.server_addr.clone(),
+                    cache_invalidator.clone(),
+                ),
+            )
+            .with_drain_node_status_manager(selector_ctx.drain_node_status_manager.clone()),
+        );
         region_migration_manager.try_start()?;
         let affinity_resolver = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<SelectorFactoryRef>())
             .and_then(|factory| factory.build_affinity_resolver(meta_peer_client.clone()));
+        let drain_node_manager = Arc::new(DrainNodeManager::new(
+            procedure_manager.clone(),
+            table_metadata_manager.clone(),
+            selector_ctx.clone(),
+            Arc::new(RoundRobinSelector::new(SelectTarget::Datanode)),
+            region_migration_manager.clone(),
+            affinity_resolver.clone(),
+        ));
+        drain_node_manager.try_start()?;
         let region_supervisor_selector = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<RegionStatAwareSelectorRef>());
@@ -668,6 +684,7 @@ impl MetasrvBuilder {
             plugins: plugins.unwrap_or_else(Plugins::default),
             memory_region_keeper,
             region_migration_manager,
+            drain_node_manager,
             region_supervisor_ticker,
             cache_invalidator,
             leader_region_registry,

@@ -702,7 +702,12 @@ impl RegionSupervisor {
         } else {
             None
         };
-        let exclude_peer_ids = HashSet::from_iter(failure_datanodes.iter().copied());
+        let mut exclude_peer_ids = self
+            .selector_context
+            .drain_node_status_manager
+            .excluded_ids()
+            .await?;
+        exclude_peer_ids.extend(failure_datanodes.iter().copied());
         match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
                 let opts = SelectorOptions {

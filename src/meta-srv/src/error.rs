@@ -92,6 +92,25 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Draining datanode {} with follower regions is unsupported: {:?}",
+        datanode_id,
+        follower_regions
+    ))]
+    DrainNodeFollowerRegionUnsupported {
+        #[snafu(implicit)]
+        location: Location,
+        datanode_id: DatanodeId,
+        follower_regions: Vec<RegionId>,
+    },
+
+    #[snafu(display("Failed to persist or read drain-node status"))]
+    DrainNodeStatus {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display(
         "The region migration procedure is completed for region: {}, target_peer: {}",
         region_id,
         target_peer_id
@@ -1206,7 +1225,9 @@ impl ErrorExt for Error {
             Error::SerializePartitionExpr { source, .. }
             | Error::DeserializePartitionExpr { source, .. } => source.status_code(),
 
-            Error::Unsupported { .. } => StatusCode::Unsupported,
+            Error::Unsupported { .. } | Error::DrainNodeFollowerRegionUnsupported { .. } => {
+                StatusCode::Unsupported
+            }
 
             Error::SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
@@ -1294,7 +1315,8 @@ impl ErrorExt for Error {
             Error::BuildTlsOptions { source, .. } => source.status_code(),
             Error::Other { source, .. } => source.status_code(),
             Error::RepartitionCreateSubtasks { source, .. } => source.status_code(),
-            Error::RepartitionGcRequirement { source, .. } => source.status_code(),
+            Error::RepartitionGcRequirement { source, .. }
+            | Error::DrainNodeStatus { source, .. } => source.status_code(),
             Error::InspectRepartitionProcedures { source, .. } => source.status_code(),
             Error::RepartitionSubprocedureStateReceiver { source, .. } => source.status_code(),
             Error::AllocateRegions { source, .. } => source.status_code(),
@@ -1387,7 +1409,8 @@ impl ErrorExt for Error {
             | Error::BuildCreateRequest { source, .. }
             | Error::AllocateRegionRoutes { source, .. }
             | Error::AllocateWalOptions { source, .. }
-            | Error::RepartitionGcRequirement { source, .. } => source.retry_hint(),
+            | Error::RepartitionGcRequirement { source, .. }
+            | Error::DrainNodeStatus { source, .. } => source.retry_hint(),
 
             Error::Other { source, .. }
             | Error::ListCatalogs { source, .. }
