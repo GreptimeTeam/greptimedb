@@ -44,6 +44,35 @@ fn expand(series: &Series) -> Dense {
 
 /// Asserts `actual` is the trimmed form of `expected`, with identical value bits and metric.
 pub(crate) fn assert_series_eq(actual: Option<&Series>, expected: &Dense, metric: &MetricName) {
+    assert_series_matches(actual, expected, metric, f64::to_bits, "");
+}
+
+/// Like [`assert_series_eq`], but any NaN equals any NaN: Prometheus' NaN payloads depend on how
+/// the Go compiler orders commutative operands, and every NaN is serialized as `NaN`.
+/// `context` names the case in failure messages.
+pub(crate) fn assert_series_eq_any_nan(
+    actual: Option<&Series>,
+    expected: &Dense,
+    metric: &MetricName,
+    context: &str,
+) {
+    let any_nan = |value: f64| {
+        if value.is_nan() {
+            f64::NAN.to_bits()
+        } else {
+            value.to_bits()
+        }
+    };
+    assert_series_matches(actual, expected, metric, any_nan, context);
+}
+
+fn assert_series_matches(
+    actual: Option<&Series>,
+    expected: &Dense,
+    metric: &MetricName,
+    bits_of: fn(f64) -> u64,
+    context: &str,
+) {
     let valid_rows = || {
         expected
             .iter()
@@ -52,28 +81,31 @@ pub(crate) fn assert_series_eq(actual: Option<&Series>, expected: &Dense, metric
             .map(|(index, _)| index)
     };
     let Some((first, last)) = valid_rows().next().zip(valid_rows().next_back()) else {
-        assert!(actual.is_none(), "expected no series, got {actual:?}");
+        assert!(
+            actual.is_none(),
+            "{context}: expected no series, got {actual:?}"
+        );
         return;
     };
-    let actual = actual.unwrap_or_else(|| panic!("expected a series over [{first}, {last}]"));
+    let actual =
+        actual.unwrap_or_else(|| panic!("{context}: expected a series over [{first}, {last}]"));
     let TimeAxis::Grid(range) = &actual.time else {
         panic!("expected a grid series, got {:?}", actual.time);
     };
     assert_eq!(
         (range.start(), range.len()),
         (first, last + 1 - first),
-        "grid range is not trimmed to the valid rows"
+        "{context}: grid range is not trimmed to the valid rows"
     );
     assert_eq!(range.grid().timestamps().len(), expected.len());
     assert_eq!(&actual.metric, metric);
-    assert_eq!(bits(&expand(actual)), bits(expected));
-}
-
-fn bits(dense: &Dense) -> Vec<Vec<Option<u64>>> {
-    dense
-        .iter()
-        .map(|row| row.iter().map(|value| value.map(f64::to_bits)).collect())
-        .collect()
+    let bits = |dense: &Dense| -> Vec<Vec<Option<u64>>> {
+        dense
+            .iter()
+            .map(|row| row.iter().map(|value| value.map(bits_of)).collect())
+            .collect()
+    };
+    assert_eq!(bits(&expand(actual)), bits(expected), "{context}");
 }
 
 /// Values covering the bit patterns kernels most often mishandle.

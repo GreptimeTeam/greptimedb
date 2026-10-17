@@ -26,8 +26,11 @@ use datatypes::series::time::EvalGrid;
 
 use crate::grid_series::GridSeriesBuilder;
 
+mod function;
 #[cfg(test)]
 mod tests;
+
+pub use function::RangeFunction;
 
 /// The samples a range selector reads at evaluation time `T`:
 /// source timestamps in `(T - offset_ms - range_ms, T - offset_ms]`.
@@ -40,7 +43,7 @@ pub struct RangeWindow {
 }
 
 /// The valid samples of one field inside one window, in source order.
-pub struct FloatWindow<'a> {
+pub(crate) struct FloatWindow<'a> {
     /// Sample timestamps shifted by the offset onto the evaluation timeline; non-empty.
     pub timestamps: &'a [i64],
     pub values: &'a [f64],
@@ -50,7 +53,7 @@ pub struct FloatWindow<'a> {
 }
 
 /// Computes one window result; `None` means the window has no result.
-pub type WindowKernel = Box<dyn FnMut(FloatWindow<'_>) -> Option<f64> + Send>;
+pub(crate) type WindowKernel = Box<dyn FnMut(FloatWindow<'_>) -> Option<f64> + Send>;
 
 /// Evaluates range windows over raw float series, one series at a time.
 ///
@@ -67,7 +70,13 @@ pub struct RangeEvaluator {
     series: Option<SeriesState>,
     fields: Vec<FieldSamples>,
     row: Vec<Option<f64>>,
+    drops_metric_name: bool,
+    /// Raised by the first non-empty window, where Prometheus validates function arguments.
+    window_error: Option<String>,
 }
+
+/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
+const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 struct SeriesState {
     primary_key: Buffer,
@@ -86,8 +95,44 @@ struct FieldSamples {
 }
 
 impl RangeEvaluator {
-    /// Creates an evaluator for raw series of `input` onto `grid`.
+    /// Creates an evaluator of `function` for raw series of `input` onto `grid`.
     pub fn try_new(
+        input: &SeriesSchema,
+        grid: Arc<EvalGrid>,
+        window: RangeWindow,
+        function: RangeFunction,
+    ) -> Result<Self> {
+        let mut window_error = None;
+        if let RangeFunction::DoubleExponentialSmoothing { smoothing, trend } = function {
+            // Prometheus rejects factors outside (0, 1); NaN passes its check.
+            window_error = [("smoothing", smoothing), ("trend", trend)]
+                .into_iter()
+                .find(|(_, factor)| *factor <= 0.0 || *factor >= 1.0)
+                .map(|(name, factor)| {
+                    format!("invalid {name} factor. Expected: 0 < factor < 1, got: {factor}")
+                });
+        }
+        if let RangeFunction::PredictLinear(_) = function {
+            let spec = grid.spec();
+            let last =
+                i128::from(spec.start_ms) + i128::from(spec.step_ms) * (i128::from(spec.len) - 1);
+            for eval_ts in [i128::from(spec.start_ms), last] {
+                if i64::try_from(eval_ts + i128::from(window.offset_ms)).is_err() {
+                    return Err(DataFusionError::Plan(format!(
+                        "predict_linear evaluation time {eval_ts} overflows with offset {} ms",
+                        window.offset_ms
+                    )));
+                }
+            }
+        }
+        let mut evaluator =
+            Self::with_kernel(input, grid, window, function.kernel(window.offset_ms))?;
+        evaluator.drops_metric_name = function.drops_metric_name();
+        evaluator.window_error = window_error;
+        Ok(evaluator)
+    }
+
+    pub(crate) fn with_kernel(
         input: &SeriesSchema,
         grid: Arc<EvalGrid>,
         window: RangeWindow,
@@ -121,6 +166,8 @@ impl RangeEvaluator {
                 .map(|_| FieldSamples::default())
                 .collect(),
             row: Vec::with_capacity(input.fields.len()),
+            drops_metric_name: false,
+            window_error: None,
         })
     }
 
@@ -147,11 +194,14 @@ impl RangeEvaluator {
             return Ok(None);
         }
         self.evaluate(None)?;
-        let state = self.series.take().expect("checked by check_chunk");
+        let mut state = self.series.take().expect("checked by check_chunk");
         for field in &mut self.fields {
             field.timestamps.clear();
             field.values.clear();
             field.head = 0;
+        }
+        if self.drops_metric_name {
+            state.metric.remove_all(&METADATA_LABELS);
         }
         self.output.finish(state.metric)
     }
@@ -287,6 +337,9 @@ impl RangeEvaluator {
                 let steps = (i128::from(earliest) - i128::from(spec.start_ms) + step - 1) / step;
                 state.cursor = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
                 continue;
+            }
+            if let Some(error) = &self.window_error {
+                return Err(DataFusionError::Execution(error.clone()));
             }
 
             self.row.clear();
