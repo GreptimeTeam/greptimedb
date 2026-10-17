@@ -29,7 +29,7 @@ pub enum RangeFunction {
 
 impl RangeFunction {
     /// Returns the kernel computing this function over one window.
-    pub fn kernel(self) -> WindowKernel {
+    pub(crate) fn kernel(self) -> WindowKernel {
         match self {
             Self::Rate => Box::new(extrapolated::<true, true>),
             Self::Increase => Box::new(extrapolated::<true, false>),
