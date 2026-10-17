@@ -1,0 +1,45 @@
+[
+  {
+    "name": "missing_defaults_to_contiguous",
+    "metadata": {
+      "greptime.series.layout": "v1",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps"
+    },
+    "ordering": "contiguous"
+  },
+  {
+    "name": "known_contiguous",
+    "metadata": {
+      "greptime.series.layout": "v1",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "contiguous"
+    },
+    "ordering": "contiguous"
+  },
+  {
+    "name": "known_read_key_then_time",
+    "metadata": {
+      "greptime.series.layout": "v1",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "read_key_then_time"
+    },
+    "ordering": "read_key_then_time"
+  },
+  {
+    "name": "unknown_ordering_rejected",
+    "metadata": {
+      "greptime.series.layout": "v1",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "future_value"
+    },
+    "ordering": null
+  }
+]
