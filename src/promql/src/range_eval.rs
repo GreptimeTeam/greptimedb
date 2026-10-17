@@ -96,6 +96,16 @@ impl RangeEvaluator {
         window: RangeWindow,
         function: RangeFunction,
     ) -> Result<Self> {
+        if let RangeFunction::DoubleExponentialSmoothing { smoothing, trend } = function {
+            for (name, factor) in [("smoothing", smoothing), ("trend", trend)] {
+                // Prometheus rejects factors outside (0, 1); NaN passes its check.
+                if factor <= 0.0 || factor >= 1.0 {
+                    return Err(DataFusionError::Plan(format!(
+                        "invalid {name} factor. Expected: 0 < factor < 1, got: {factor}"
+                    )));
+                }
+            }
+        }
         if let RangeFunction::PredictLinear(_) = function {
             let spec = grid.spec();
             let last =

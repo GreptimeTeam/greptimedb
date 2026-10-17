@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Float range-vector functions as window kernels, sharing their arithmetic with the range UDFs.
-
-use datafusion::arrow::array::Float64Array;
-use datafusion::arrow::buffer::ScalarBuffer;
-use datafusion::arrow::compute;
+//! Float range-vector functions as window kernels.
+//!
+//! Each kernel follows the Prometheus function of the same name, including its floating point
+//! operation order. Arithmetic that GreptimeDB's range UDFs compute the same way is shared with
+//! them.
 
 use super::{FloatWindow, WindowKernel};
-use crate::functions::{
-    EdgeKind, add_counter_resets, count_edges, double_exponential_smoothing_impl, extrapolate,
-    extremum, instant_delta, linear_regression_samples, stddev, stdvar, window_quantile,
-};
+use crate::functions::{EdgeKind, add_counter_resets, count_edges, extremum, instant_delta};
 
 /// A PromQL range-vector function over float samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,9 +43,9 @@ pub enum RangeFunction {
     Resets,
     Changes,
     Deriv,
-    /// `predict_linear` with a constant horizon in whole seconds, as the planner casts it.
-    PredictLinear(i64),
-    /// `double_exponential_smoothing` (`holt_winters`) with constant factors.
+    /// `predict_linear` with a constant horizon in seconds.
+    PredictLinear(f64),
+    /// `double_exponential_smoothing` (`holt_winters`) with constant factors in `(0, 1)`.
     DoubleExponentialSmoothing {
         smoothing: f64,
         trend: f64,
@@ -59,31 +56,23 @@ impl RangeFunction {
     /// Returns the kernel computing this function over windows read with `offset_ms`.
     pub(crate) fn kernel(self, offset_ms: i64) -> WindowKernel {
         match self {
-            Self::Rate => Box::new(extrapolated::<true, true>),
-            Self::Increase => Box::new(extrapolated::<true, false>),
-            Self::Delta => Box::new(extrapolated::<false, false>),
+            Self::Rate => Box::new(extrapolated_rate::<true, true>),
+            Self::Increase => Box::new(extrapolated_rate::<true, false>),
+            Self::Delta => Box::new(extrapolated_rate::<false, false>),
             Self::Irate => Box::new(last_two::<true>),
             Self::Idelta => Box::new(last_two::<false>),
-            Self::AvgOverTime => {
-                let mut scratch = Vec::new();
-                Box::new(move |window| {
-                    sum(&mut scratch, window.values).map(|sum| sum / window.values.len() as f64)
-                })
-            }
+            Self::AvgOverTime => Box::new(|window| Some(avg(window.values))),
             Self::MinOverTime => Box::new(|window| extremum(window.values.iter().copied(), true)),
             Self::MaxOverTime => Box::new(|window| extremum(window.values.iter().copied(), false)),
-            Self::SumOverTime => {
-                let mut scratch = Vec::new();
-                Box::new(move |window| sum(&mut scratch, window.values))
-            }
+            Self::SumOverTime => Box::new(|window| Some(sum(window.values))),
             Self::CountOverTime => Box::new(|window| Some(window.values.len() as f64)),
             Self::LastOverTime => Box::new(|window| window.values.last().copied()),
             Self::PresentOverTime => Box::new(|_| Some(1.0)),
-            Self::StddevOverTime => Box::new(|window| stddev(window.values.iter().copied())),
-            Self::StdvarOverTime => Box::new(|window| stdvar(window.values.iter().copied())),
-            Self::QuantileOverTime(quantile) => {
+            Self::StddevOverTime => Box::new(|window| Some(variance(window.values).sqrt())),
+            Self::StdvarOverTime => Box::new(|window| Some(variance(window.values))),
+            Self::QuantileOverTime(q) => {
                 let mut scratch = Vec::new();
-                Box::new(move |window| window_quantile(window.values, quantile, &mut scratch))
+                Box::new(move |window| Some(quantile(q, window.values, &mut scratch)))
             }
             Self::Resets => {
                 Box::new(|window| Some(count_edges(window.values, EdgeKind::Resets) as f64))
@@ -91,72 +80,164 @@ impl RangeFunction {
             Self::Changes => {
                 Box::new(|window| Some(count_edges(window.values, EdgeKind::Changes) as f64))
             }
-            Self::Deriv => Box::new(|window| regression(&window, window.timestamps[0]).0),
+            Self::Deriv => Box::new(|window| {
+                (window.values.len() >= 2)
+                    .then(|| linear_regression(&window, window.timestamps[0]).0)
+            }),
             // Prometheus regresses the unshifted samples around the evaluation time, which on the
             // shifted timeline is `eval_ts + offset`; `RangeEvaluator::try_new` checks it fits.
-            Self::PredictLinear(horizon) => Box::new(move |window| {
+            Self::PredictLinear(duration) => Box::new(move |window| {
+                if window.values.len() < 2 {
+                    return None;
+                }
                 let (slope, intercept) =
-                    regression(&window, window.eval_ts.checked_add(offset_ms)?);
-                Some(slope? * horizon as f64 + intercept?)
+                    linear_regression(&window, window.eval_ts.checked_add(offset_ms)?);
+                Some(slope * duration + intercept)
             }),
             Self::DoubleExponentialSmoothing { smoothing, trend } => Box::new(move |window| {
-                double_exponential_smoothing_impl(window.values, smoothing, trend)
+                double_exponential_smoothing(window.values, smoothing, trend)
             }),
         }
     }
 }
 
-fn regression(window: &FloatWindow<'_>, intercept_time: i64) -> (Option<f64>, Option<f64>) {
-    linear_regression_samples(
-        window
-            .timestamps
-            .iter()
-            .copied()
-            .zip(window.values.iter().copied()),
-        intercept_time,
-    )
+/// Prometheus `kahansum.Inc`: Kahan–Neumaier summation that drops the compensation once the
+/// sum is infinite.
+fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
+    let t = sum + inc;
+    let c = if t.is_infinite() {
+        0.0
+    } else if sum.abs() >= inc.abs() {
+        c + ((sum - t) + inc)
+    } else {
+        c + ((inc - t) + sum)
+    };
+    (t, c)
 }
 
-/// Sums like the `sum_over_time` UDF: Arrow's lane-wise `sum` over the window's samples.
-///
-/// `scratch` keeps the buffer the window is copied into between calls.
-fn sum(scratch: &mut Vec<f64>, values: &[f64]) -> Option<f64> {
-    let mut buffer = std::mem::take(scratch);
-    buffer.clear();
-    buffer.extend_from_slice(values);
-    let array = Float64Array::new(ScalarBuffer::from(buffer), None);
-    let sum = compute::sum(&array);
-    let (_, buffer, _) = array.into_parts();
-    if let Ok(buffer) = buffer.into_inner().into_vec() {
-        *scratch = buffer;
+/// Prometheus `funcSumOverTime`.
+fn sum(values: &[f64]) -> f64 {
+    let (sum, c) = values
+        .iter()
+        .fold((0.0, 0.0), |(sum, c), &value| kahan_inc(value, sum, c));
+    sum + c
+}
+
+/// Prometheus `funcAvgOverTime`: the Kahan sum divided by the count, switching to an
+/// incremental mean once the sum would overflow.
+fn avg(values: &[f64]) -> f64 {
+    let (mut sum, mut count) = (values[0], 1.0);
+    let (mut mean, mut kahan_c) = (0.0, 0.0);
+    let mut incremental_mean = false;
+    for (i, &value) in values[1..].iter().enumerate() {
+        count = (i + 2) as f64;
+        if !incremental_mean {
+            let (new_sum, new_c) = kahan_inc(value, sum, kahan_c);
+            if !new_sum.is_infinite() {
+                (sum, kahan_c) = (new_sum, new_c);
+                continue;
+            }
+            incremental_mean = true;
+            mean = sum / (count - 1.0);
+            kahan_c /= count - 1.0;
+        }
+        let q = (count - 1.0) / count;
+        (mean, kahan_c) = kahan_inc(value / count, q * mean, q * kahan_c);
     }
-    sum
+    if incremental_mean {
+        mean + kahan_c
+    } else {
+        sum / count + kahan_c / count
+    }
 }
 
-fn extrapolated<const IS_COUNTER: bool, const IS_RATE: bool>(
+/// Prometheus `varianceOverTime`, the population variance.
+fn variance(values: &[f64]) -> f64 {
+    let mut count = 0.0;
+    let (mut mean, mut c_mean) = (0.0, 0.0);
+    let (mut aux, mut c_aux) = (0.0, 0.0);
+    for &value in values {
+        count += 1.0;
+        let delta = value - (mean + c_mean);
+        (mean, c_mean) = kahan_inc(delta / count, mean, c_mean);
+        (aux, c_aux) = kahan_inc(delta * (value - (mean + c_mean)), aux, c_aux);
+    }
+    (aux + c_aux) / count
+}
+
+/// Prometheus `quantile`, which sorts NaN before every number.
+fn quantile(q: f64, values: &[f64], sorted: &mut Vec<f64>) -> f64 {
+    if q.is_nan() {
+        return f64::NAN;
+    }
+    if q < 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if q > 1.0 {
+        return f64::INFINITY;
+    }
+    sorted.clear();
+    sorted.extend_from_slice(values);
+    sorted.sort_unstable_by(|a, b| match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => a.total_cmp(b),
+    });
+    let n = sorted.len() as f64;
+    let rank = q * (n - 1.0);
+    let lower = rank.floor().max(0.0);
+    let upper = (n - 1.0).min(lower + 1.0);
+    let weight = rank - rank.floor();
+    sorted[lower as usize] * (1.0 - weight) + sorted[upper as usize] * weight
+}
+
+/// Prometheus `extrapolatedRate` over floats.
+fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
     window: FloatWindow<'_>,
 ) -> Option<f64> {
     let FloatWindow {
-        timestamps, values, ..
+        timestamps,
+        values,
+        eval_ts,
+        range_ms,
     } = window;
-    if values.len() < 2 {
-        return None;
-    }
+    let samples_minus_one = values.len().checked_sub(1).filter(|n| *n > 0)?;
+    let (first_t, last_t) = (timestamps[0], timestamps[samples_minus_one]);
     let first = values[0];
-    let last = values[values.len() - 1];
-    let mut result = last - first;
+    let mut result = values[samples_minus_one] - first;
     if IS_COUNTER {
         result = add_counter_resets(result, values);
     }
-    Some(extrapolate::<IS_COUNTER, IS_RATE>(
-        result,
-        first,
-        timestamps[0],
-        timestamps[timestamps.len() - 1],
-        values.len(),
-        window.eval_ts,
-        window.range_ms,
-    ))
+    let range_start = i128::from(eval_ts) - i128::from(range_ms);
+    let mut duration_to_start = (i128::from(first_t) - range_start) as f64 / 1000.0;
+    let mut duration_to_end = (i128::from(eval_ts) - i128::from(last_t)) as f64 / 1000.0;
+    let sampled_interval = (i128::from(last_t) - i128::from(first_t)) as f64 / 1000.0;
+    let average_interval = sampled_interval / samples_minus_one as f64;
+    let threshold = average_interval * 1.1;
+    if duration_to_start >= threshold {
+        duration_to_start = average_interval / 2.0;
+    }
+    if IS_COUNTER {
+        let mut duration_to_zero = duration_to_start;
+        if result > 0.0 && first >= 0.0 {
+            duration_to_zero = sampled_interval * (first / result);
+        }
+        if duration_to_zero < duration_to_start {
+            duration_to_start = duration_to_zero;
+        }
+    }
+    if duration_to_end >= threshold {
+        duration_to_end = average_interval / 2.0;
+    }
+    let mut factor = 1.0;
+    if sampled_interval != 0.0 {
+        factor = (sampled_interval + duration_to_start + duration_to_end) / sampled_interval;
+    }
+    if IS_RATE {
+        factor /= range_ms as f64 / 1000.0;
+    }
+    Some(result * factor)
 }
 
 fn last_two<const IS_RATE: bool>(window: FloatWindow<'_>) -> Option<f64> {
@@ -167,4 +248,63 @@ fn last_two<const IS_RATE: bool>(window: FloatWindow<'_>) -> Option<f64> {
         return None;
     };
     instant_delta::<IS_RATE>((*prev_ts, *prev), (*last_ts, *last))
+}
+
+/// Prometheus `linearRegression`: `(slope, intercept)` with `x` in seconds from
+/// `intercept_time`. Needs at least two samples.
+fn linear_regression(window: &FloatWindow<'_>, intercept_time: i64) -> (f64, f64) {
+    let init_y = window.values[0];
+    let mut const_y = true;
+    let mut n = 0.0;
+    let (mut sum_x, mut c_x) = (0.0, 0.0);
+    let (mut sum_y, mut c_y) = (0.0, 0.0);
+    let (mut sum_xy, mut c_xy) = (0.0, 0.0);
+    let (mut sum_x2, mut c_x2) = (0.0, 0.0);
+    for (i, (&t, &y)) in window.timestamps.iter().zip(window.values).enumerate() {
+        if const_y && i > 0 && y != init_y {
+            const_y = false;
+        }
+        n += 1.0;
+        let x = (i128::from(t) - i128::from(intercept_time)) as f64 / 1e3;
+        (sum_x, c_x) = kahan_inc(x, sum_x, c_x);
+        (sum_y, c_y) = kahan_inc(y, sum_y, c_y);
+        (sum_xy, c_xy) = kahan_inc(x * y, sum_xy, c_xy);
+        (sum_x2, c_x2) = kahan_inc(x * x, sum_x2, c_x2);
+    }
+    if const_y {
+        if init_y.is_infinite() {
+            return (f64::NAN, f64::NAN);
+        }
+        return (0.0, init_y);
+    }
+    sum_x += c_x;
+    sum_y += c_y;
+    sum_xy += c_xy;
+    sum_x2 += c_x2;
+    let cov_xy = sum_xy - sum_x * sum_y / n;
+    let var_x = sum_x2 - sum_x * sum_x / n;
+    let slope = cov_xy / var_x;
+    let intercept = sum_y / n - slope * sum_x / n;
+    (slope, intercept)
+}
+
+/// Prometheus `funcDoubleExponentialSmoothing`; the factors are checked by
+/// `RangeEvaluator::try_new`.
+fn double_exponential_smoothing(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
+    if values.len() < 2 {
+        return None;
+    }
+    let (mut s0, mut s1) = (0.0, values[0]);
+    let mut b = values[1] - values[0];
+    for (i, &value) in values.iter().enumerate().skip(1) {
+        let x = sf * value;
+        b = if i == 1 {
+            b
+        } else {
+            tf * (s1 - s0) + (1.0 - tf) * b
+        };
+        let y = (1.0 - sf) * (s1 + b);
+        (s0, s1) = (s1, x + y);
+    }
+    Some(s1)
 }

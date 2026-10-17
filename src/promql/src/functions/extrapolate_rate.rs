@@ -195,6 +195,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
         let mut result_builder = Float64Builder::with_capacity(num_windows);
         let range_length = self.range_length;
+        let range_length_secs = range_length as f64 / 1000.0;
 
         // Range windows normally overlap heavily, so scanning every one for resets costs far
         // more than a single pass over the values. Index the reset positions once that is the
@@ -258,74 +259,53 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
                 };
             }
 
-            result_builder.append_value(extrapolate::<IS_COUNTER, IS_RATE>(
-                result_value,
-                first_value,
-                all_timestamps[first_index],
-                all_timestamps[last_index],
-                sample_count,
-                eval_ts[index],
-                range_length,
-            ));
+            let first_ts = all_timestamps[first_index];
+            let last_ts = all_timestamps[last_index];
+            let range_end = eval_ts[index];
+            let range_start = range_end - range_length;
+            let sampled_interval_ms = (last_ts - first_ts) as f64;
+            let average_interval_ms = sampled_interval_ms / (sample_count - 1) as f64;
+            let mut duration_to_start_ms = (first_ts - range_start) as f64;
+            let mut duration_to_end_ms = (range_end - last_ts) as f64;
+            let extrapolation_threshold = average_interval_ms * 1.1;
+
+            // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
+            // close enough, otherwise only half an average sampling interval, which is the guess
+            // for where the series actually starts or ends.
+            if duration_to_start_ms >= extrapolation_threshold {
+                duration_to_start_ms = average_interval_ms / 2.0;
+            }
+            // Counters cannot be negative, so the extrapolation can snap back to the inferred
+            // zero point instead of extending into negative values. Prometheus applies this
+            // after the threshold clamp, so it can only shorten the leading extrapolation.
+            if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
+                let duration_to_zero = sampled_interval_ms * (first_value / result_value);
+                if duration_to_zero < duration_to_start_ms {
+                    duration_to_start_ms = duration_to_zero;
+                }
+            }
+            if duration_to_end_ms >= extrapolation_threshold {
+                duration_to_end_ms = average_interval_ms / 2.0;
+            }
+
+            // Samples sharing one timestamp leave nothing to extrapolate over.
+            let mut factor = if sampled_interval_ms == 0.0 {
+                1.0
+            } else {
+                (sampled_interval_ms + duration_to_start_ms + duration_to_end_ms)
+                    / sampled_interval_ms
+            };
+
+            if IS_RATE {
+                factor /= range_length_secs;
+            }
+
+            result_builder.append_value(result_value * factor);
         }
 
         let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
-}
-
-/// Extrapolates the counter-corrected `result_value` of a window over `range_length`
-/// milliseconds ending at `range_end`, as Prometheus `extrapolatedRate` does.
-///
-/// `first_value`, `first_ts` and `last_ts` belong to the first and last of the
-/// `sample_count` samples, whose timestamps are on the evaluation timeline.
-pub(crate) fn extrapolate<const IS_COUNTER: bool, const IS_RATE: bool>(
-    result_value: f64,
-    first_value: f64,
-    first_ts: i64,
-    last_ts: i64,
-    sample_count: usize,
-    range_end: i64,
-    range_length: i64,
-) -> f64 {
-    let range_start = range_end - range_length;
-    let sampled_interval_ms = (last_ts - first_ts) as f64;
-    let average_interval_ms = sampled_interval_ms / (sample_count - 1) as f64;
-    let mut duration_to_start_ms = (first_ts - range_start) as f64;
-    let mut duration_to_end_ms = (range_end - last_ts) as f64;
-    let extrapolation_threshold = average_interval_ms * 1.1;
-
-    // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
-    // close enough, otherwise only half an average sampling interval, which is the guess
-    // for where the series actually starts or ends.
-    if duration_to_start_ms >= extrapolation_threshold {
-        duration_to_start_ms = average_interval_ms / 2.0;
-    }
-    // Counters cannot be negative, so the extrapolation can snap back to the inferred
-    // zero point instead of extending into negative values. Prometheus applies this
-    // after the threshold clamp, so it can only shorten the leading extrapolation.
-    if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
-        let duration_to_zero = sampled_interval_ms * (first_value / result_value);
-        if duration_to_zero < duration_to_start_ms {
-            duration_to_start_ms = duration_to_zero;
-        }
-    }
-    if duration_to_end_ms >= extrapolation_threshold {
-        duration_to_end_ms = average_interval_ms / 2.0;
-    }
-
-    // Samples sharing one timestamp leave nothing to extrapolate over.
-    let mut factor = if sampled_interval_ms == 0.0 {
-        1.0
-    } else {
-        (sampled_interval_ms + duration_to_start_ms + duration_to_end_ms) / sampled_interval_ms
-    };
-
-    if IS_RATE {
-        factor /= range_length as f64 / 1000.0;
-    }
-
-    result_value * factor
 }
 
 /// Adds the value preceding every counter reset in `values` to `result`, in sample order.
