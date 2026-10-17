@@ -263,17 +263,19 @@ impl RangeEvaluator {
         let range = i128::from(self.window.range_ms);
         while state.cursor < grid.len() {
             let eval_ts = grid[state.cursor];
-            if ready.is_some_and(|ready| i128::from(eval_ts) > ready) {
-                break;
-            }
             let lower = i128::from(eval_ts) - range;
             let mut earliest = None;
+            // Later windows start no earlier, so samples behind this one go even when the point
+            // itself is not ready yet.
             for field in &mut self.fields {
                 field.head += field.timestamps[field.head..]
                     .partition_point(|&timestamp| i128::from(timestamp) <= lower);
                 if let Some(&timestamp) = field.timestamps.get(field.head) {
                     earliest = Some(earliest.map_or(timestamp, |min: i64| min.min(timestamp)));
                 }
+            }
+            if ready.is_some_and(|ready| i128::from(eval_ts) > ready) {
+                break;
             }
             // No retained sample: either the series is done or the next one is not here yet.
             let Some(earliest) = earliest else {
