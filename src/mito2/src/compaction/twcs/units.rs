@@ -35,6 +35,20 @@
 //! order until the window receives new writes. Active-window picks are not
 //! closed and may add conflicts, so each of them must remove a file: `N`
 //! strictly decreases.
+//!
+//! The argument relies on how the compactor writes outputs:
+//!
+//! - Outputs hold a subset of the input rows, so each output's time and key
+//!   bounds lie inside the inputs' bounding box.
+//! - Outputs are one stream in (key, time) order split by size, so two outputs
+//!   share at most a boundary key, and two outputs of a single key have
+//!   touching time ranges. Neither is an [`Extent::conflicts`] pair.
+//! - A split only starts a new file once the current one reaches the size
+//!   threshold, and outputs are not larger than inputs in total, so
+//!   [`PickLimits::predicted_outputs`] bounds the output count.
+//!
+//! `test_closed_merges_terminate` and `test_active_l1_picks_terminate` replay
+//! random windows with outputs written under these rules.
 
 use std::cmp::Reverse;
 use std::ops::Range;
