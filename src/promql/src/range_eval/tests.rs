@@ -932,7 +932,7 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
 }
 
 /// Range functions drop the metric name and the other metadata labels, except
-/// `last_over_time`, as Prometheus does.
+/// `last_over_time` and `first_over_time`, as Prometheus does.
 #[test]
 fn range_functions_drop_metadata_labels() {
     let labels = |names: &[&str]| -> Vec<Label> {
@@ -961,6 +961,7 @@ fn range_functions_drop_metadata_labels() {
             MetricName::try_new(None, labels(&["host"])).unwrap(),
         ),
         (RangeFunction::LastOverTime, input.clone()),
+        (RangeFunction::FirstOverTime, input.clone()),
     ] {
         let mut chunk = chunk(&rows, 1, 0, true);
         chunk.metric = Some(input.clone());

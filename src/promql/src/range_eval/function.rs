@@ -63,7 +63,7 @@ impl RangeFunction {
     /// Whether the result drops the metric name, as Prometheus does for every range function
     /// except `last_over_time` and `first_over_time`.
     pub(crate) fn drops_metric_name(self) -> bool {
-        !matches!(self, Self::LastOverTime)
+        !matches!(self, Self::LastOverTime | Self::FirstOverTime)
     }
 
     /// Returns the kernel computing this function over windows read with `offset_ms`.
