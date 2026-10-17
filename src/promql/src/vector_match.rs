@@ -17,7 +17,8 @@
 //! Semantics follow Prometheus `VectorBinop`, `VectorAnd`, `VectorOr` and `VectorUnless`
 //! evaluated at every grid point. Series are processed whole, over their own grid ranges, and
 //! the cardinality rules are checked per point: series sharing a match group only conflict at
-//! points where both are present.
+//! points where both are present. Each field is matched on its own, as if the operands held
+//! only that field; the results of all fields with one label set form one series.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -130,8 +131,7 @@ pub fn binary_output_schema(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Ar
 
 /// Applies `matching` to every pair of matched series at every grid point.
 ///
-/// Fields are paired by position and computed independently; a point is present in a series
-/// when any of its fields has a value. Arithmetic and `bool` comparisons drop `__name__`;
+/// Fields are paired by position. Arithmetic and `bool` comparisons drop `__name__`;
 /// comparisons without `bool` keep the left value where they hold.
 pub fn binary_vectors(
     matching: &BinaryMatching,
@@ -145,12 +145,30 @@ pub fn binary_vectors(
         .eval_grid
         .clone()
         .expect("set by binary_output_schema");
-    let lhs = Operand::try_new(lhs_schema, lhs)?;
-    let rhs = Operand::try_new(rhs_schema, rhs)?;
+    let mut errors = Vec::new();
+    let mut fields = Vec::with_capacity(output.fields.len());
+    for field in 0..output.fields.len() {
+        let lhs = Operand::try_new(lhs_schema, lhs, field)?;
+        let rhs = Operand::try_new(rhs_schema, rhs, field)?;
+        fields.push(binary_field(matching, &grid, &lhs, &rhs, &mut errors)?);
+    }
+    earliest_error(errors)?;
+    merge_fields(fields, output)
+}
+
+/// Matches one field of each side, collecting the first failure of each kind as
+/// `(point, rank, message)`.
+fn binary_field(
+    matching: &BinaryMatching,
+    grid: &EvalGrid,
+    lhs: &Operand<'_>,
+    rhs: &Operand<'_>,
+    errors: &mut Vec<(usize, u8, String)>,
+) -> Result<Results> {
     let (many, one, include, one_is_left) = match &matching.cardinality {
-        Cardinality::OneToOne => (&lhs, &rhs, &[][..], false),
-        Cardinality::ManyToOne(include) => (&lhs, &rhs, &include[..], false),
-        Cardinality::OneToMany(include) => (&rhs, &lhs, &include[..], true),
+        Cardinality::OneToOne => (lhs, rhs, &[][..], false),
+        Cardinality::ManyToOne(include) => (lhs, rhs, &include[..], false),
+        Cardinality::OneToMany(include) => (rhs, lhs, &include[..], true),
     };
     let points = grid.timestamps().len();
     // Prometheus short-circuits a point where either side is empty, before any check.
@@ -171,7 +189,6 @@ pub fn binary_vectors(
         }
     }
 
-    let fields = output.fields.len();
     let drop_name = !matching.op.is_comparison() || matching.return_bool;
     let mut results = Results::default();
     let group_ids: HashMap<&GroupKey, usize> = one_groups
@@ -180,7 +197,6 @@ pub fn binary_vectors(
         .map(|(id, key)| (key, id))
         .collect();
     let mut matched_groups: HashMap<GroupKey, Vec<usize>> = HashMap::new();
-    let mut values = vec![None; fields];
     for (many_index, many_series) in many.series.iter().enumerate() {
         let key = group_key(&many_series.metric, &matching.labels);
         let Some(candidates) = one_groups.get(&key) else {
@@ -203,33 +219,25 @@ pub fn binary_vectors(
                 if !(many.present(many_index, point)? && one.present(one_index, point)?) {
                     continue;
                 }
-                for (field, value) in values.iter_mut().enumerate() {
-                    let (lhs_value, rhs_value) = if one_is_left {
-                        (
-                            one.value(one_index, field, point)?,
-                            many.value(many_index, field, point)?,
-                        )
-                    } else {
-                        (
-                            many.value(many_index, field, point)?,
-                            one.value(one_index, field, point)?,
-                        )
-                    };
-                    *value = match (lhs_value, rhs_value) {
-                        (Some(lhs_value), Some(rhs_value)) => {
-                            let (result, holds) = matching.op.apply(lhs_value, rhs_value);
-                            if !matching.op.is_comparison() {
-                                Some(result)
-                            } else if matching.return_bool {
-                                Some(if holds { 1.0 } else { 0.0 })
-                            } else {
-                                holds.then_some(result)
-                            }
-                        }
-                        _ => None,
-                    };
-                }
-                results.insert(&metric, group_id, point, &values);
+                let (many_value, one_value) = (
+                    many.value(many_index, point)?.expect("present"),
+                    one.value(one_index, point)?.expect("present"),
+                );
+                let (lhs_value, rhs_value) = if one_is_left {
+                    (one_value, many_value)
+                } else {
+                    (many_value, one_value)
+                };
+                let (result, holds) = matching.op.apply(lhs_value, rhs_value);
+                let value = if !matching.op.is_comparison() {
+                    Some(result)
+                } else if matching.return_bool {
+                    Some(if holds { 1.0 } else { 0.0 })
+                } else {
+                    // A filtered comparison still counts as a match.
+                    holds.then_some(result)
+                };
+                results.insert(&metric, group_id, point, value);
             }
         }
     }
@@ -256,7 +264,6 @@ pub fn binary_vectors(
     }
     // Prometheus fails at the first failing step. Within a step it checks the one side, then
     // matches, and only after the operator checks that result label sets are unique.
-    let mut errors: Vec<(usize, u8, String)> = Vec::new();
     if let Some((point, key)) = one_duplicate {
         let side = if one_is_left { "left" } else { "right" };
         errors.push((
@@ -304,16 +311,21 @@ pub fn binary_vectors(
             )
         });
     }
-    if let Some((_, _, error)) = errors
+    Ok(results)
+}
+
+fn earliest_error(errors: Vec<(usize, u8, String)>) -> Result<()> {
+    match errors
         .into_iter()
         .min_by_key(|(point, rank, _)| (*point, *rank))
     {
-        return Err(DataFusionError::Execution(error));
+        Some((_, _, error)) => Err(DataFusionError::Execution(error)),
+        None => Ok(()),
     }
-    results.build(output)
 }
 
-/// Applies a set operator at every grid point. Series keep their labels and values.
+/// Applies a set operator at every grid point. Series keep their labels and values; fields are
+/// paired by position.
 pub fn set_vectors(
     op: SetOp,
     labels: &MatchingLabels,
@@ -323,32 +335,49 @@ pub fn set_vectors(
     rhs: &[Series],
 ) -> Result<Vec<Series>> {
     let grid = same_grid(lhs_schema, rhs_schema)?;
-    if op == SetOp::Or && lhs_schema.fields.len() != rhs_schema.fields.len() {
+    if lhs_schema.fields.len() != rhs_schema.fields.len() {
         return Err(DataFusionError::NotImplemented(
-            "`or` between vectors with different field counts".into(),
+            "set operators between vectors with different field counts".into(),
         ));
     }
     let output = Arc::new(SeriesSchema {
         fields: lhs_schema.fields.clone(),
         eval_grid: Some(grid.clone()),
     });
-    let lhs = Operand::try_new(lhs_schema, lhs)?;
-    let rhs = Operand::try_new(rhs_schema, rhs)?;
+    let mut errors = Vec::new();
+    let mut fields = Vec::with_capacity(output.fields.len());
+    for field in 0..output.fields.len() {
+        let lhs = Operand::try_new(lhs_schema, lhs, field)?;
+        let rhs = Operand::try_new(rhs_schema, rhs, field)?;
+        let mut results = set_field(op, labels, &lhs, &rhs)?;
+        if let Some(duplicate) = results.sort_rows() {
+            let timestamp = grid.timestamps()[duplicate.point];
+            errors.push((duplicate.point, 0, same_labelset(&duplicate.key, timestamp)));
+        }
+        fields.push(results);
+    }
+    earliest_error(errors)?;
+    merge_fields(fields, output)
+}
+
+fn set_field(
+    op: SetOp,
+    labels: &MatchingLabels,
+    lhs: &Operand<'_>,
+    rhs: &Operand<'_>,
+) -> Result<Results> {
     let (kept, filter, keep_matched) = match op {
-        SetOp::And => (&lhs, &rhs, true),
-        SetOp::Unless => (&lhs, &rhs, false),
-        SetOp::Or => (&rhs, &lhs, false),
+        SetOp::And => (lhs, rhs, true),
+        SetOp::Unless => (lhs, rhs, false),
+        SetOp::Or => (rhs, lhs, false),
     };
     let filter_groups = group(filter, labels);
     let mut results = Results::default();
-    let fields = output.fields.len();
-    let mut values = vec![None; fields];
     if op == SetOp::Or {
         for index in 0..lhs.series.len() {
             for point in lhs.range(index) {
-                if lhs.present(index, point)? {
-                    lhs.row(index, point, &mut values)?;
-                    results.insert(&lhs.series[index].metric, 0, point, &values);
+                if let Some(value) = lhs.value(index, point)? {
+                    results.insert(&lhs.series[index].metric, 0, point, Some(value));
                 }
             }
         }
@@ -356,9 +385,9 @@ pub fn set_vectors(
     for (index, series) in kept.series.iter().enumerate() {
         let candidates = filter_groups.get(&group_key(&series.metric, labels));
         for point in kept.range(index) {
-            if !kept.present(index, point)? {
+            let Some(value) = kept.value(index, point)? else {
                 continue;
-            }
+            };
             let mut matched = false;
             for &candidate in candidates.into_iter().flatten() {
                 if filter.covers(candidate, point) && filter.present(candidate, point)? {
@@ -367,18 +396,48 @@ pub fn set_vectors(
                 }
             }
             if matched == keep_matched {
-                kept.row(index, point, &mut values)?;
-                results.insert(&series.metric, 0, point, &values);
+                results.insert(&series.metric, 0, point, Some(value));
             }
         }
     }
-    if let Some(duplicate) = results.sort_rows() {
-        return Err(DataFusionError::Execution(same_labelset(
-            &duplicate.key,
-            grid.timestamps()[duplicate.point],
-        )));
+    Ok(results)
+}
+
+/// Joins the per-field results into series with all fields, by label set.
+fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<Series>> {
+    let width = schema.fields.len();
+    // Per label set: the metric and its `(point, field, value)` samples.
+    type Merged = (MetricName, Vec<(usize, usize, f64)>);
+    let mut merged: HashMap<GroupKey, Merged> = HashMap::new();
+    for (field, results) in fields.into_iter().enumerate() {
+        for (key, rows) in results.series {
+            let (_, samples) = merged
+                .entry(key)
+                .or_insert_with(|| (rows.metric.clone(), Vec::new()));
+            for (&point, value) in rows.points.iter().zip(rows.values) {
+                if let Some(value) = value {
+                    samples.push((point, field, value));
+                }
+            }
+        }
     }
-    results.build(output)
+    let mut builder = GridSeriesBuilder::try_new(schema)?;
+    let mut row = vec![None; width];
+    let mut output = Vec::with_capacity(merged.len());
+    for (metric, mut samples) in merged.into_values() {
+        samples.sort_unstable_by_key(|&(point, field, _)| (point, field));
+        for chunk in samples.chunk_by(|a, b| a.0 == b.0) {
+            row.fill(None);
+            for &(_, field, value) in chunk {
+                row[field] = Some(value);
+            }
+            builder.push(chunk[0].0, &row)?;
+        }
+        if let Some(series) = builder.finish(metric)? {
+            output.push(series);
+        }
+    }
+    Ok(output)
 }
 
 fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {
@@ -452,24 +511,22 @@ fn overlap(
     if members.len() < 2 {
         return Ok(None);
     }
-    let start = members.iter().map(|&m| operand.start(m)).min().unwrap_or(0);
-    let end = members.iter().map(|&m| operand.end(m)).max().unwrap_or(0);
-    let mut seen = vec![false; end.saturating_sub(start)];
-    let mut first = None;
+    // Sorting the present points keeps the cost proportional to them, not to the span.
+    let mut points = Vec::new();
     for &member in members {
         for point in operand.range(member) {
-            if first.is_some_and(|first| point >= first) {
-                break;
-            }
-            if !operand.present(member, point)? {
-                continue;
-            }
-            if std::mem::replace(&mut seen[point - start], true) && relevant(point)? {
-                first = Some(point);
+            if operand.present(member, point)? {
+                points.push(point);
             }
         }
     }
-    Ok(first)
+    points.sort_unstable();
+    for pair in points.windows(2) {
+        if pair[0] == pair[1] && relevant(pair[0])? {
+            return Ok(Some(pair[0]));
+        }
+    }
+    Ok(None)
 }
 
 /// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
@@ -507,14 +564,15 @@ fn result_metric(
     Ok(metric)
 }
 
-/// One side's series with checked grid ranges.
+/// One field of one side's series, with checked grid ranges.
 struct Operand<'a> {
     series: &'a [Series],
     starts: Vec<usize>,
+    field: usize,
 }
 
 impl<'a> Operand<'a> {
-    fn try_new(schema: &SeriesSchema, series: &'a [Series]) -> Result<Self> {
+    fn try_new(schema: &SeriesSchema, series: &'a [Series], field: usize) -> Result<Self> {
         let grid = schema.eval_grid.as_ref().map(|grid| grid.spec());
         let mut starts = Vec::with_capacity(series.len());
         for item in series {
@@ -533,7 +591,11 @@ impl<'a> Operand<'a> {
             }
             starts.push(range.start());
         }
-        Ok(Self { series, starts })
+        Ok(Self {
+            series,
+            starts,
+            field,
+        })
     }
 
     fn start(&self, index: usize) -> usize {
@@ -559,25 +621,13 @@ impl<'a> Operand<'a> {
         (start, end.max(start))
     }
 
-    fn value(&self, index: usize, field: usize, point: usize) -> Result<Option<f64>> {
-        let samples = &self.series[index].fields.as_slice()[field];
+    fn value(&self, index: usize, point: usize) -> Result<Option<f64>> {
+        let samples = &self.series[index].fields.as_slice()[self.field];
         sample(samples, point - self.starts[index])
     }
 
     fn present(&self, index: usize, point: usize) -> Result<bool> {
-        for field in 0..self.series[index].fields.len() {
-            if self.value(index, field, point)?.is_some() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    fn row(&self, index: usize, point: usize, values: &mut [Option<f64>]) -> Result<()> {
-        for (field, value) in values.iter_mut().enumerate() {
-            *value = self.value(index, field, point)?;
-        }
-        Ok(())
+        Ok(self.value(index, point)?.is_some())
     }
 
     /// Whether any series is present at each grid point.
@@ -617,8 +667,8 @@ struct Results {
     series: HashMap<GroupKey, ResultRows>,
 }
 
-/// Rows in arrival order: their points, the match group each came from, and their field
-/// values laid out row after row.
+/// Rows in arrival order: their points, the match group each came from, and their values;
+/// `None` is a comparison that filtered the match.
 struct ResultRows {
     metric: MetricName,
     points: Vec<usize>,
@@ -642,7 +692,7 @@ fn same_labelset(key: &GroupKey, timestamp: i64) -> String {
 }
 
 impl Results {
-    fn insert(&mut self, metric: &MetricName, group: usize, point: usize, values: &[Option<f64>]) {
+    fn insert(&mut self, metric: &MetricName, group: usize, point: usize, value: Option<f64>) {
         let rows = match self.series.entry(key_of(metric)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(ResultRows {
@@ -654,7 +704,7 @@ impl Results {
         };
         rows.points.push(point);
         rows.groups.push(group);
-        rows.values.extend_from_slice(values);
+        rows.values.push(value);
     }
 
     /// Sorts the rows of each label set by point and returns the earliest point where a label
@@ -664,19 +714,11 @@ impl Results {
         let mut first: Option<(usize, bool, &GroupKey)> = None;
         for (key, rows) in &mut self.series {
             if !rows.points.is_sorted() {
-                let fields = rows.values.len() / rows.points.len();
                 let mut order: Vec<usize> = (0..rows.points.len()).collect();
                 order.sort_by_key(|&row| rows.points[row]);
                 rows.points = order.iter().map(|&row| rows.points[row]).collect();
                 rows.groups = order.iter().map(|&row| rows.groups[row]).collect();
-                rows.values = order
-                    .iter()
-                    .flat_map(|&row| {
-                        rows.values[row * fields..(row + 1) * fields]
-                            .iter()
-                            .copied()
-                    })
-                    .collect();
+                rows.values = order.iter().map(|&row| rows.values[row]).collect();
             }
             let mut start = 0;
             while start < rows.points.len() {
@@ -701,21 +743,5 @@ impl Results {
             key: key.clone(),
             within_group,
         })
-    }
-
-    /// Builds the result series from rows sorted by [`Results::sort_rows`] without duplicates.
-    fn build(self, schema: Arc<SeriesSchema>) -> Result<Vec<Series>> {
-        let fields = schema.fields.len();
-        let mut builder = GridSeriesBuilder::try_new(schema)?;
-        let mut output = Vec::with_capacity(self.series.len());
-        for rows in self.series.into_values() {
-            for (row, &point) in rows.points.iter().enumerate() {
-                builder.push(point, &rows.values[row * fields..(row + 1) * fields])?;
-            }
-            if let Some(series) = builder.finish(rows.metric)? {
-                output.push(series);
-            }
-        }
-        Ok(output)
     }
 }

@@ -224,22 +224,62 @@ fn present(row: &[Option<f64>]) -> bool {
     row.iter().any(Option::is_some)
 }
 
-fn present_at(side: &Side, point: usize) -> Vec<&(Labels, Dense)> {
-    side.dense
-        .iter()
+fn present_at(side: &[(Labels, Dense)], point: usize) -> Vec<&(Labels, Dense)> {
+    side.iter()
         .filter(|(_, dense)| present(&dense[point]))
         .collect()
 }
 
-/// Prometheus `VectorBinop` evaluated on its own at every point, collecting every violation
-/// instead of stopping at the first.
+/// Field `field` of every series of `side`, as single-field series.
+fn project(side: &Side, field: usize) -> Vec<(Labels, Dense)> {
+    side.dense
+        .iter()
+        .map(|(labels, dense)| {
+            let column = dense.iter().map(|row| vec![row[field]]).collect();
+            (labels.clone(), column)
+        })
+        .collect()
+}
+
+/// Evaluates `reference` on each field projection and joins the results by label set.
+fn per_field(
+    fields: usize,
+    points: usize,
+    mut reference: impl FnMut(usize) -> Expected,
+) -> Expected {
+    let mut output: BTreeMap<Labels, Dense> = BTreeMap::new();
+    let mut violations = BTreeSet::new();
+    for field in 0..fields {
+        match reference(field) {
+            Ok(results) => {
+                for (labels, dense) in results {
+                    let target = output
+                        .entry(labels)
+                        .or_insert_with(|| vec![vec![None; fields]; points]);
+                    for (row, value) in target.iter_mut().zip(dense) {
+                        row[field] = value[0];
+                    }
+                }
+            }
+            Err(found) => violations.extend(found),
+        }
+    }
+    if violations.is_empty() {
+        Ok(output)
+    } else {
+        Err(violations)
+    }
+}
+
+/// Prometheus `VectorBinop` on single-field operands, evaluated on its own at every point,
+/// collecting every violation instead of stopping at the first.
 fn reference_binary(
     matching: &BinaryMatching,
-    lhs: &Side,
-    rhs: &Side,
+    lhs: &[(Labels, Dense)],
+    rhs: &[(Labels, Dense)],
     points: usize,
-    fields: usize,
 ) -> Expected {
+    let fields = 1;
     let mut output: BTreeMap<Labels, Dense> = BTreeMap::new();
     let mut violations = BTreeSet::new();
     let swapped = matches!(matching.cardinality, Cardinality::OneToMany(_));
@@ -321,15 +361,16 @@ fn reference_binary(
     }
 }
 
-/// Prometheus `VectorAnd`, `VectorOr` and `VectorUnless` at every point.
+/// Prometheus `VectorAnd`, `VectorOr` and `VectorUnless` on single-field operands at every
+/// point.
 fn reference_set(
     op: SetOp,
     labels: &MatchingLabels,
-    lhs: &Side,
-    rhs: &Side,
+    lhs: &[(Labels, Dense)],
+    rhs: &[(Labels, Dense)],
     points: usize,
 ) -> Expected {
-    let fields = lhs.schema.fields.len();
+    let fields = 1;
     let mut output: BTreeMap<Labels, Dense> = BTreeMap::new();
     let mut violations = BTreeSet::new();
     for point in 0..points {
@@ -433,7 +474,15 @@ fn binary_vectors_match_prometheus_reference() {
             cardinality,
         };
         let fields = lhs_fields.min(rhs_fields);
-        let expected = reference_binary(&matching, &lhs, &rhs, grid.timestamps().len(), fields);
+        let points = grid.timestamps().len();
+        let expected = per_field(fields, points, |field| {
+            reference_binary(
+                &matching,
+                &project(&lhs, field),
+                &project(&rhs, field),
+                points,
+            )
+        });
         if expected.is_ok() {
             matched += 1;
         } else {
@@ -464,7 +513,16 @@ fn set_vectors_match_prometheus_reference() {
         let rhs = random_side(&mut rng, &grid, fields);
         let op = [SetOp::And, SetOp::Or, SetOp::Unless][rng.random_range(0..3)];
         let labels = random_labels(&mut rng);
-        let expected = reference_set(op, &labels, &lhs, &rhs, grid.timestamps().len());
+        let points = grid.timestamps().len();
+        let expected = per_field(fields, points, |field| {
+            reference_set(
+                op,
+                &labels,
+                &project(&lhs, field),
+                &project(&rhs, field),
+                points,
+            )
+        });
         let actual = set_vectors(
             op,
             &labels,
