@@ -91,6 +91,7 @@ use crate::region_query::RegionQueryHandlerRef;
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: SessionContext,
+    experimental_native_promql: bool,
     catalog_manager: CatalogManagerRef,
     dyn_filter_registry_manager: Arc<DynFilterRegistryManager>,
     function_state: Arc<FunctionState>,
@@ -284,6 +285,7 @@ impl QueryEngineState {
 
         Ok(Self {
             df_context,
+            experimental_native_promql: options.experimental_native_promql,
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
@@ -484,6 +486,10 @@ impl QueryEngineState {
             .unwrap_or(false)
     }
 
+    pub(crate) fn experimental_native_promql(&self) -> bool {
+        self.experimental_native_promql
+    }
+
     pub fn session_state(&self) -> SessionState {
         self.df_context.state()
     }
@@ -575,6 +581,7 @@ impl DfQueryPlanner {
         partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
         enable_per_region_metrics: bool,
+        capture_native_raw_route: bool,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
             Arc::new(PromExtensionPlanner),
@@ -589,6 +596,7 @@ impl DfQueryPlanner {
                 partition_rule_manager,
                 region_query_handler,
                 enable_per_region_metrics,
+                capture_native_raw_route,
             )));
             planners.push(Arc::new(MergeSortExtensionPlanner {}));
         }
