@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod arithmetic;
+mod math_functions;
 
 use std::sync::Arc;
 
@@ -400,6 +401,28 @@ fn ordinary_math(op: MathOp, input: Float64Array) -> Float64Array {
     let number_rows = input.len();
     let mut args = vec![ColumnarValue::Array(Arc::new(input))];
     let udf = match op {
+        MathOp::Exp => math::exp(),
+        MathOp::Ln => math::ln(),
+        MathOp::Log2 => math::log2(),
+        MathOp::Log10 => math::log10(),
+        MathOp::Sin => math::sin(),
+        MathOp::Cos => math::cos(),
+        MathOp::Tan => math::tan(),
+        MathOp::Asin => math::asin(),
+        MathOp::Acos => math::acos(),
+        MathOp::Atan => math::atan(),
+        MathOp::Sinh => math::sinh(),
+        MathOp::Cosh => math::cosh(),
+        MathOp::Tanh => math::tanh(),
+        MathOp::Asinh => math::asinh(),
+        MathOp::Acosh => math::acosh(),
+        MathOp::Atanh => math::atanh(),
+        MathOp::Deg => math::degrees(),
+        MathOp::Rad => math::radians(),
+        MathOp::Sgn => math::signum(),
+        MathOp::Clamp { .. } | MathOp::ClampMin { .. } | MathOp::ClampMax { .. } => {
+            unreachable!("clamp has a separate oracle")
+        }
         MathOp::Abs => math::abs(),
         MathOp::Ceil => math::ceil(),
         MathOp::Floor => math::floor(),
@@ -473,27 +496,51 @@ fn math_matches_existing_udfs_across_float_and_round_boundaries() {
             Samples::try_from_chunks(chunks).unwrap(),
         ],
     );
-    let cases = [MathOp::Abs, MathOp::Ceil, MathOp::Floor, MathOp::Sqrt]
+    let cases = [
+        MathOp::Abs,
+        MathOp::Ceil,
+        MathOp::Floor,
+        MathOp::Sqrt,
+        MathOp::Exp,
+        MathOp::Ln,
+        MathOp::Log2,
+        MathOp::Log10,
+        MathOp::Sin,
+        MathOp::Cos,
+        MathOp::Tan,
+        MathOp::Asin,
+        MathOp::Acos,
+        MathOp::Atan,
+        MathOp::Sinh,
+        MathOp::Cosh,
+        MathOp::Tanh,
+        MathOp::Asinh,
+        MathOp::Acosh,
+        MathOp::Atanh,
+        MathOp::Deg,
+        MathOp::Rad,
+        MathOp::Sgn,
+    ]
+    .into_iter()
+    .chain(
+        [
+            1.0,
+            0.0,
+            -0.0,
+            0.001,
+            0.1,
+            105.0,
+            -0.5,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ]
         .into_iter()
-        .chain(
-            [
-                1.0,
-                0.0,
-                -0.0,
-                0.001,
-                0.1,
-                105.0,
-                -0.5,
-                f64::MIN_POSITIVE,
-                f64::from_bits(1),
-                f64::MAX,
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-                f64::NAN,
-            ]
-            .into_iter()
-            .map(|nearest| MathOp::Round { nearest }),
-        );
+        .map(|nearest| MathOp::Round { nearest }),
+    );
     for op in cases {
         let output = map_math(&schema, &series, op).unwrap();
         let expected = ordinary_math(op, input.clone()).iter().collect::<Vec<_>>();

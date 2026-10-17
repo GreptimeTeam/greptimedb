@@ -22,6 +22,8 @@ mod tests;
 
 use std::sync::Arc;
 
+use common_function::function::Function;
+use common_function::scalars::math::ClampFunction;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::functions::math;
 use datafusion_common::ScalarValue;
@@ -29,8 +31,9 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
 use datatypes::arrow::array::{AsArray, Float64Array};
 use datatypes::arrow::datatypes::{DataType, Field, Float64Type};
+use datatypes::series::MetricName;
 use datatypes::series::samples::{DenseSamplesRef, Samples, Series, SeriesFields, SeriesSchema};
-use datatypes::series::time::TimeAxis;
+use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::functions::Round;
 
@@ -46,7 +49,38 @@ pub enum MathOp {
     /// IEEE square root, returning NaN for negative input.
     Sqrt,
     /// Rounds to a constant multiple; use `1.0` for PromQL's default argument.
-    Round { nearest: f64 },
+    Round {
+        nearest: f64,
+    },
+    Exp,
+    Ln,
+    Log2,
+    Log10,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+    Deg,
+    Rad,
+    Sgn,
+    Clamp {
+        min: f64,
+        max: f64,
+    },
+    ClampMin {
+        min: f64,
+    },
+    ClampMax {
+        max: f64,
+    },
 }
 
 /// Float arithmetic against a constant scalar, with ordinary-path semantics.
@@ -82,7 +116,7 @@ pub enum ScalarOperand {
 pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Series> {
     // Ordinary math calls preserve the metric name (unlike binary arithmetic): the HTTP
     // adapter's collect_metric_names follows Call arguments. Keep that compatibility here.
-    map_float_fields(schema, series, |floats| Ok(op.apply(floats)))
+    map_float_fields(schema, series, |floats| op.apply(floats))
 }
 
 /// Negates every float field and removes the metric name, like the ordinary unary path.
@@ -110,6 +144,28 @@ pub fn map_arithmetic(
     Ok(output)
 }
 
+/// Produces an unlabelled scalar over exactly the requested evaluated range.
+///
+/// Scalar results require a single-field schema. No points outside `range` are allocated.
+pub fn constant_series(schema: &SeriesSchema, range: GridRange, scalar: f64) -> Result<Series> {
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+        scalar;
+        range.len()
+    ])));
+    Series::try_new(
+        schema,
+        MetricName::try_new(None, vec![]).map_err(series_error)?,
+        TimeAxis::Grid(range),
+        fields,
+    )
+    .map_err(series_error)
+}
+
+/// Evaluates `pi()` without a vector input, preserving the requested short grid range.
+pub fn map_pi(schema: &SeriesSchema, range: GridRange) -> Result<Series> {
+    constant_series(schema, range, std::f64::consts::PI)
+}
+
 fn map_float_fields(
     schema: &SeriesSchema,
     series: &Series,
@@ -131,8 +187,30 @@ fn map_float_fields(
 }
 
 impl MathOp {
-    fn apply(self, floats: &Float64Array) -> Float64Array {
-        match self {
+    fn apply(self, floats: &Float64Array) -> Result<Float64Array> {
+        Ok(match self {
+            Self::Exp => floats.unary(f64::exp),
+            Self::Ln => floats.unary(f64::ln),
+            Self::Log2 => floats.unary(f64::log2),
+            Self::Log10 => floats.unary(f64::log10),
+            Self::Sin => floats.unary(f64::sin),
+            Self::Cos => floats.unary(f64::cos),
+            Self::Tan => floats.unary(f64::tan),
+            Self::Asin => floats.unary(f64::asin),
+            Self::Acos => floats.unary(f64::acos),
+            Self::Atan => floats.unary(f64::atan),
+            Self::Sinh => floats.unary(f64::sinh),
+            Self::Cosh => floats.unary(f64::cosh),
+            Self::Tanh => floats.unary(f64::tanh),
+            Self::Asinh => floats.unary(f64::asinh),
+            Self::Acosh => floats.unary(f64::acosh),
+            Self::Atanh => floats.unary(f64::atanh),
+            Self::Deg => floats.unary(f64::to_degrees),
+            Self::Rad => floats.unary(f64::to_radians),
+            Self::Sgn => floats.unary(|v| if v == 0.0 { 0.0 } else { v.signum() }),
+            Self::Clamp { min, max } => return map_clamp(floats, min, max),
+            Self::ClampMin { min } => return map_clamp(floats, min, f64::INFINITY),
+            Self::ClampMax { max } => return map_clamp(floats, f64::NEG_INFINITY, max),
             Self::Abs => floats.unary(f64::abs),
             Self::Ceil => floats.unary(f64::ceil),
             Self::Floor => floats.unary(f64::floor),
@@ -140,8 +218,29 @@ impl MathOp {
             Self::Round { nearest } => {
                 floats.unary(|sample| Round::round_to_nearest(sample, nearest))
             }
-        }
+        })
     }
+}
+
+fn map_clamp(floats: &Float64Array, min: f64, max: f64) -> Result<Float64Array> {
+    // Keep the ordinary path's bounds errors, NaN comparisons, and signed-zero behavior.
+    let args = vec![
+        ColumnarValue::Array(Arc::new(floats.clone())),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(min))),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(max))),
+    ];
+    let field = Arc::new(Field::new("value", DataType::Float64, true));
+    let output = ClampFunction::default().invoke_with_args(ScalarFunctionArgs {
+        arg_fields: vec![field.clone(); 3],
+        args,
+        number_rows: floats.len(),
+        return_field: field,
+        config_options: Arc::new(ConfigOptions::default()),
+    })?;
+    Ok(output
+        .into_array(floats.len())?
+        .as_primitive::<Float64Type>()
+        .clone())
 }
 
 impl ArithmeticOp {
