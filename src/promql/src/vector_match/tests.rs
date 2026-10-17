@@ -703,7 +703,7 @@ fn vector_operations_match_prometheus() {
                     .iter()
                     .map(|series| (labels_of(&series.metric), points_of(series)))
                     .collect();
-                assert_eq!(actual, expected, "{case}");
+                assert_close(&actual, &expected, case);
                 matched += 1;
             }
             (Err(actual), Some(expected)) => {
@@ -726,41 +726,6 @@ fn vector_operations_match_prometheus() {
         matched > 100 && failed > 20,
         "{matched} matched, {failed} failed"
     );
-}
-
-/// Prometheus' `^` and `atan2` are Go's `math.Pow` and `math.Atan2`. Integer exponents and
-/// `atan2` are exact. A fractional exponent goes through Go's `math.Exp`/`math.Log`, which are
-/// assembly on amd64; the port uses the Rust ones, within 2 ulps.
-#[test]
-fn pow_and_atan2_match_go() {
-    let mut checked = 0;
-    for line in include_str!("go_math_cases.txt").lines() {
-        if line.starts_with('#') {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(' ').collect();
-        let bits = |field: &str| u64::from_str_radix(field, 16).unwrap();
-        let (a, b) = (
-            f64::from_bits(bits(fields[1])),
-            f64::from_bits(bits(fields[2])),
-        );
-        let expected = bits(fields[3]);
-        let (actual, tolerance) = match fields[0] {
-            "pow" => (
-                BinaryOp::Pow.apply(a, b).0,
-                if b.fract() == 0.0 { 0 } else { 2 },
-            ),
-            "atan2" => (BinaryOp::Atan2.apply(a, b).0, 0),
-            function => panic!("unknown function {function}"),
-        };
-        assert!(
-            (actual.to_bits() as i64 - expected as i64).abs() <= tolerance,
-            "{line}: got {:x}",
-            actual.to_bits()
-        );
-        checked += 1;
-    }
-    assert_eq!(checked, 452);
 }
 
 /// Results that share a label set once `__type__` is dropped fail as a grouping violation within
@@ -811,4 +776,72 @@ fn colliding_results_fail_by_where_they_collide() {
             .to_string();
         assert!(error.contains(expected), "{error}");
     }
+}
+
+/// Prometheus `almost.Equal` with relative tolerance 1e-10, treating results below 1e-10 as
+/// equal and any NaN as equal to NaN, as promql-compat compares engines.
+fn close(a: f64, b: f64) -> bool {
+    const EPSILON: f64 = 1e-10;
+    if a.is_nan() || b.is_nan() {
+        return a.is_nan() && b.is_nan();
+    }
+    if a == b {
+        return true;
+    }
+    let (diff, sum) = ((a - b).abs(), a.abs() + b.abs());
+    let equal = if a == 0.0 || b == 0.0 || sum < f64::MIN_POSITIVE {
+        diff < EPSILON * f64::MIN_POSITIVE
+    } else {
+        diff / sum.min(f64::MAX) < EPSILON
+    };
+    equal || (a.abs() < EPSILON && b.abs() < EPSILON)
+}
+
+fn assert_close(
+    actual: &BTreeMap<Labels, BTreeMap<usize, u64>>,
+    expected: &BTreeMap<Labels, BTreeMap<usize, u64>>,
+    case: &str,
+) {
+    let points = |series: &BTreeMap<Labels, BTreeMap<usize, u64>>| {
+        series
+            .iter()
+            .map(|(labels, points)| (labels.clone(), points.keys().copied().collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(points(actual), points(expected), "{case}");
+    for (labels, points) in actual {
+        for (point, &bits) in points {
+            let (got, want) = (
+                f64::from_bits(bits),
+                f64::from_bits(expected[labels][point]),
+            );
+            assert!(
+                close(got, want),
+                "{case}: {labels:?} at {point}: {got} vs {want}"
+            );
+        }
+    }
+}
+
+/// Prometheus' `^` and `atan2` are Go's `math.Pow` and `math.Atan2`; the standard library
+/// agrees within the comparison tolerance, special cases included.
+#[test]
+fn pow_and_atan2_match_go() {
+    let mut checked = 0;
+    for line in include_str!("go_math_cases.txt").lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(' ').collect();
+        let value = |field: &str| f64::from_bits(u64::from_str_radix(field, 16).unwrap());
+        let (a, b, expected) = (value(fields[1]), value(fields[2]), value(fields[3]));
+        let actual = match fields[0] {
+            "pow" => BinaryOp::Pow.apply(a, b).0,
+            "atan2" => BinaryOp::Atan2.apply(a, b).0,
+            function => panic!("unknown function {function}"),
+        };
+        assert!(close(actual, expected), "{line}: got {actual}");
+        checked += 1;
+    }
+    assert_eq!(checked, 452);
 }

@@ -31,7 +31,6 @@ use datatypes::series::time::{EvalGrid, TimeAxis};
 
 use crate::grid_series::GridSeriesBuilder;
 
-mod go_math;
 #[cfg(test)]
 mod tests;
 
@@ -69,8 +68,8 @@ impl BinaryOp {
             Self::Mul => (lhs * rhs, true),
             Self::Div => (lhs / rhs, true),
             Self::Mod => (lhs % rhs, true),
-            Self::Pow => (go_math::pow(lhs, rhs), true),
-            Self::Atan2 => (go_math::atan2(lhs, rhs), true),
+            Self::Pow => (lhs.powf(rhs), true),
+            Self::Atan2 => (lhs.atan2(rhs), true),
             Self::Eq => (lhs, lhs == rhs),
             Self::Ne => (lhs, lhs != rhs),
             Self::Gt => (lhs, lhs > rhs),
