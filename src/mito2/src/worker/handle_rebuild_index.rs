@@ -268,6 +268,17 @@ impl<S> RegionWorkerLoop<S> {
                 file_handle.meta_ref().file_id
             );
 
+            // `set_region_role` can change the state while tasks are scheduled.
+            if region.should_abort_index() {
+                warn!(
+                    "Region {} is in state {:?}, abort index rebuild process for file_id {}",
+                    region_id,
+                    region.state(),
+                    file_handle.meta_ref().file_id
+                );
+                break;
+            }
+
             let mut result_senders = request.result_senders.clone();
             result_senders.push(tx.clone());
             let task = self.new_index_build_task(
