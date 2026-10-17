@@ -1026,3 +1026,29 @@ fn waiting_for_a_point_drops_samples_behind_its_window() {
     let last = chunk(&[(100_000, vec![Some(1.0)])], 1, 0, true);
     assert!(evaluator.push(&last).unwrap().is_some());
 }
+
+/// Prometheus 3.15 reports `ts_of_last_over_time` as the max of the last float timestamp and
+/// a histogram timestamp that defaults to 0, so a window of negative timestamps reports 0;
+/// `ts_of_first_over_time` takes the min and keeps them.
+#[test]
+fn ts_of_last_over_time_reports_zero_for_negative_timestamps() {
+    let window = RangeWindow {
+        range_ms: 2_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let rows: Vec<Row> = vec![(-1_000, vec![Some(7.0)])];
+    for (function, expected) in [
+        (RangeFunction::TsOfLastOverTime, 0.0),
+        (RangeFunction::TsOfFirstOverTime, -1.0),
+    ] {
+        let mut evaluator =
+            RangeEvaluator::try_new(&raw_schema(1), grid(0, 1_000, 1), window, function).unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        assert_series_eq(
+            Some(&series),
+            &vec![vec![Some(expected)]],
+            &output_metric(function, 0),
+        );
+    }
+}

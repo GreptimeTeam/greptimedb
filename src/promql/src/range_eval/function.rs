@@ -125,10 +125,11 @@ impl RangeFunction {
             Self::TsOfFirstOverTime => {
                 Box::new(move |window| Some(seconds(window.timestamps[0] - offset_ms)))
             }
+            // Prometheus takes the max with the histogram timestamp, 0 when there is none, so a
+            // negative timestamp reports 0.
             Self::TsOfLastOverTime => Box::new(move |window| {
-                Some(seconds(
-                    window.timestamps[window.timestamps.len() - 1] - offset_ms,
-                ))
+                let last = window.timestamps[window.timestamps.len() - 1] - offset_ms;
+                Some(seconds(last.max(0)))
             }),
             Self::TsOfMinOverTime => Box::new(move |window| {
                 Some(seconds(timestamp_of_extremum(&window, false) - offset_ms))
