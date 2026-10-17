@@ -81,6 +81,11 @@ TQL EVAL (0, 0, '1s', '300s') native_time_us{series="offset"} offset -1s;
 TQL EVAL (1, 1, '1s', '300s') count_over_time(native_time_us{series="window"}[1s]);
 TQL EVAL (1, 1, '1s', '300s') sum_over_time(native_time_us{series="window"}[1s]);
 TQL EVAL (1, 1, '1s', '300s') last_over_time(native_time_us{series="window"}[1s]);
+TQL EVAL (1, 1, '1s') first_over_time(native_time_us{series="window"}[1s]);
+TQL EVAL (1, 1, '1s') first_over_time(native_time_us{series="exact"}[1s]);
+TQL EVAL (2, 2, '1s') first_over_time(native_time_us{series="window"}[1s] offset 1s);
+TQL EVAL (2, 3, '1s') first_over_time(native_time_us{series="window"}[1s] @ 1);
+TQL EVAL (1, 2, '1s') first_over_time((native_time_us{series="window"})[2s:1s]);
 
 -- The inner selector consumes native time; the subquery consumes ms evaluations.
 TQL EVAL (1, 1, '1s') last_over_time((native_time_us{series="exact"})[1s:1s]);
@@ -171,6 +176,11 @@ TQL EVAL (0, 0, '1s', '300s') native_time_ns{series="offset"} offset -1s;
 TQL EVAL (1, 1, '1s', '300s') count_over_time(native_time_ns{series="window"}[1s]);
 TQL EVAL (1, 1, '1s', '300s') sum_over_time(native_time_ns{series="window"}[1s]);
 TQL EVAL (1, 1, '1s', '300s') last_over_time(native_time_ns{series="window"}[1s]);
+TQL EVAL (1, 1, '1s') first_over_time(native_time_ns{series="window"}[1s]);
+TQL EVAL (1, 1, '1s') first_over_time(native_time_ns{series="exact"}[1s]);
+TQL EVAL (2, 2, '1s') first_over_time(native_time_ns{series="window"}[1s] offset 1s);
+TQL EVAL (2, 3, '1s') first_over_time(native_time_ns{series="window"}[1s] @ 1);
+TQL EVAL (1, 2, '1s') first_over_time((native_time_ns{series="window"})[2s:1s]);
 
 -- The inner selector consumes native time; the subquery consumes ms evaluations.
 TQL EVAL (1, 1, '1s') last_over_time((native_time_ns{series="exact"})[1s:1s]);
