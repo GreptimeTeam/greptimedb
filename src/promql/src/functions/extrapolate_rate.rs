@@ -314,7 +314,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 /// their own, and the two are not interchangeable in f64: a reset large enough to swallow a
 /// later one in an isolated sum still leaves it visible once the first difference is folded
 /// in first.
-fn add_counter_resets(result: f64, values: &[f64]) -> f64 {
+pub(crate) fn add_counter_resets(result: f64, values: &[f64]) -> f64 {
     values
         .windows(2)
         .filter(|pair| pair[1] < pair[0])
