@@ -1044,30 +1044,59 @@ fn ts_of_last_over_time_reports_zero_for_negative_timestamps() {
     }
 }
 
-/// Equal values keep window order in `quantile_over_time`, so the zero a quantile lands on is
-/// the one Prometheus picks: `1 / quantile_over_time(1, m[3s])` over +0, -0, -0 is -Inf.
+/// `quantile_over_time` sorts the window as Go's `sort.Sort` does, so the zero a rank lands on,
+/// and the sign of the result, match Prometheus over windows longer than its insertion sort.
 #[test]
-fn quantile_keeps_the_window_order_of_signed_zeros() {
+fn quantile_picks_the_signed_zero_go_picks() {
     let window = RangeWindow {
-        range_ms: 3_000,
+        range_ms: 20_000,
         offset_ms: 0,
         anchor_ms: None,
     };
-    let rows: Vec<Row> = [(0, 0.0), (1_000, -0.0), (2_000, -0.0)]
-        .map(|(ts, value)| (ts, vec![Some(value)]))
-        .to_vec();
-    let mut evaluator = RangeEvaluator::try_new(
-        &raw_schema(1),
-        grid(2_000, 1_000, 1),
-        window,
-        RangeFunction::QuantileOverTime(1.0),
-    )
-    .unwrap();
-    let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
-    let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
-        panic!("expected a float");
-    };
-    assert_eq!(1.0 / value, f64::NEG_INFINITY);
+    let (z, n) = (0.0, -0.0);
+    let values = [
+        z,
+        n,
+        n,
+        z,
+        1.0,
+        n,
+        z,
+        z,
+        n,
+        f64::NAN,
+        n,
+        z,
+        -1.0,
+        z,
+        n,
+        n,
+        z,
+        2.0,
+        n,
+        z,
+    ];
+    let rows: Vec<Row> = values
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| (i as i64 * 1_000, vec![Some(value)]))
+        .collect();
+    // Go's `sort.Sort` on amd64 gives a negative quantile for q = k / 19 only at these k.
+    let go_negative = |k: i32| matches!(k, 1 | 8 | 14);
+    for k in 1..=19 {
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(19_000, 1_000, 1),
+            window,
+            RangeFunction::QuantileOverTime(f64::from(k) / 19.0),
+        )
+        .unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
+            panic!("expected a float");
+        };
+        assert_eq!(value.is_sign_negative(), go_negative(k), "k = {k}: {value}");
+    }
 }
 
 /// Chunks after the last grid point are only validated, so nothing accumulates and the outcome
