@@ -42,6 +42,8 @@ pub use aggregate::{HistogramAggregate, aggregate_histograms};
 use crate::grid_series::{GridSeriesBuilder, LabelSet, label_set, merge_same_labelset};
 
 const BUCKET_LABEL: &str = "le";
+/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
+const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 /// `histogram_quantile` or `histogram_fraction` with its constant arguments.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,7 +144,7 @@ pub fn evaluate_histograms(
             }
             builder.push(point, &values)?;
         }
-        group.metric.remove("__name__");
+        group.metric.remove_all(&METADATA_LABELS);
         output.extend(builder.finish(group.metric)?);
     }
     merge_same_labelset(schema, output)
@@ -230,6 +232,7 @@ pub fn map_native_histogram(
         builder.push(point, &values)?;
     }
     let mut metric = series.metric.clone();
+    // Prometheus `simpleHistogramFunc` drops only `__name__`, unlike `histogram_quantile`.
     metric.remove("__name__");
     builder.finish(metric)
 }

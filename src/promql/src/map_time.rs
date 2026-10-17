@@ -72,7 +72,7 @@ pub fn map_date(
         ));
     };
     let mut metric = series.metric.clone();
-    metric.remove("__name__");
+    metric.remove_all(&METADATA_LABELS);
     let map = |seconds: f64| function.apply(go_int64(seconds));
 
     let all_floats = series.fields.iter().all(|samples| {
@@ -144,6 +144,9 @@ fn go_int64(value: f64) -> i64 {
         i64::MIN
     }
 }
+
+/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
+const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 const SECONDS_PER_DAY: u64 = 86_400;
 const MARCH_THRU_DECEMBER: u32 = 306;

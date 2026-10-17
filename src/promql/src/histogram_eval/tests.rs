@@ -476,3 +476,62 @@ fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
         })
         .collect()
 }
+
+/// `histogram_quantile` drops all metadata labels; the single-histogram functions drop only
+/// `__name__`, as Prometheus does.
+#[test]
+fn histogram_functions_drop_metadata_labels() {
+    let grid = Arc::new(
+        datatypes::series::time::EvalGrid::try_new(
+            datatypes::series::time::GridSpec::try_new(0, 1_000, 1).unwrap(),
+        )
+        .unwrap(),
+    );
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let labels = |extra: &[(&str, &str)]| -> Labels {
+        [
+            ("__name__", "m"),
+            ("__type__", "histogram"),
+            ("__unit__", "seconds"),
+            ("job", "x"),
+        ]
+        .iter()
+        .chain(extra)
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+    };
+    let one = BTreeMap::from([(0, 1f64.to_bits())]);
+    let buckets = vec![
+        mixed_series(&schema, &labels(&[("le", "1")]), &one, &BTreeMap::new()).unwrap(),
+        mixed_series(&schema, &labels(&[("le", "+Inf")]), &one, &BTreeMap::new()).unwrap(),
+    ];
+    let quantile =
+        evaluate_histograms(HistogramFunction::Quantile(0.5), &schema, &buckets).unwrap();
+    assert_eq!(
+        labels_of(&quantile[0].metric),
+        Labels::from([("job".to_string(), "x".to_string())])
+    );
+
+    let native = mixed_series(
+        &schema,
+        &labels(&[]),
+        &BTreeMap::new(),
+        &BTreeMap::from([(
+            0,
+            "0/0/0/3ff0000000000000/3ff0000000000000/0/0_1/3ff0000000000000///".to_string(),
+        )]),
+    )
+    .unwrap();
+    let count = map_native_histogram(NativeHistogramFunction::Count, &schema, &native)
+        .unwrap()
+        .unwrap();
+    let mut expected = labels(&[]);
+    expected.remove("__name__");
+    assert_eq!(labels_of(&count.metric), expected);
+}
