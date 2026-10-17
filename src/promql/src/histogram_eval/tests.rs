@@ -691,3 +691,54 @@ fn widened_zero_threshold_uses_go_bounds() {
     ));
     assert!(!current.detect_reset(&previous).unwrap());
 }
+
+/// Only mixing exponential and custom buckets ends a group without a result; any other
+/// addition error, such as an invalid layout, fails the aggregation.
+#[test]
+fn aggregation_propagates_errors_other_than_mixed_schemas() {
+    let grid = Arc::new(
+        datatypes::series::time::EvalGrid::try_new(
+            datatypes::series::time::GridSpec::try_new(0, 1_000, 1).unwrap(),
+        )
+        .unwrap(),
+    );
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let group = |texts: [&str; 2]| -> Vec<Series> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(host, text)| {
+                let labels = Labels::from([("host".to_string(), host.to_string())]);
+                let histograms = BTreeMap::from([(0, text.to_string())]);
+                mixed_series(&schema, &labels, &BTreeMap::new(), &histograms).unwrap()
+            })
+            .collect()
+    };
+    let exponential = "0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///";
+    let custom =
+        "-53/0/0/3ff0000000000000/3ff0000000000000/0/0_1/3ff0000000000000///3ff0000000000000";
+    let invalid =
+        "9/3ff0000000000000/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///";
+    for op in [HistogramAggregate::Sum, HistogramAggregate::Avg] {
+        let mixed = aggregate_histograms(
+            op,
+            &schema,
+            &group([exponential, custom]),
+            metric_of(&Labels::new()),
+        );
+        assert!(mixed.unwrap().is_none());
+        let invalid = aggregate_histograms(
+            op,
+            &schema,
+            &group([invalid, invalid]),
+            metric_of(&Labels::new()),
+        );
+        assert!(invalid.is_err());
+    }
+}

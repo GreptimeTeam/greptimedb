@@ -679,8 +679,6 @@ fn iterate(side: &Buckets, schema: i32, target: i32, threshold: f64) -> Result<B
         let target_idx = target_index(idx, schema, target);
         match out.last_mut() {
             Some(last) if schema != target && last.0 == target_idx => last.1 += count,
-            // A merged bucket starts its sum from zero.
-            _ if schema != target => out.push((target_idx, 0.0 + count)),
             _ => out.push((target_idx, count)),
         }
     }

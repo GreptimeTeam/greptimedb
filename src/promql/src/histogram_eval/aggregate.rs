@@ -128,33 +128,31 @@ fn aggregate_point<'a>(
         if incompatible {
             continue;
         }
+        // The only addition error Go's `handleAggregationError` absorbs; others propagate.
+        if current.uses_custom_buckets() != h.uses_custom_buckets() {
+            incompatible = true;
+            continue;
+        }
         match op {
-            HistogramAggregate::Sum => match current.kahan_add(&h, compensation.take()) {
-                Ok((c, _)) => compensation = Some(c),
-                Err(_) => incompatible = true,
-            },
+            HistogramAggregate::Sum => {
+                let (c, _) = current.kahan_add(&h, compensation.take())?;
+                compensation = Some(c);
+            }
             HistogramAggregate::Avg => {
                 if mean.is_none() {
                     let mut sum = current.clone();
-                    match sum.kahan_add(&h, compensation.clone()) {
-                        Ok((c, _)) if !sum.has_overflow() => {
-                            *current = sum;
-                            compensation = Some(c);
-                            continue;
-                        }
-                        Ok(_) => {
-                            let mut started = current.clone();
-                            started.div(count - 1.0);
-                            if let Some(c) = compensation.as_mut() {
-                                c.div(count - 1.0);
-                            }
-                            mean = Some(started);
-                        }
-                        Err(_) => {
-                            incompatible = true;
-                            continue;
-                        }
+                    let (c, _) = sum.kahan_add(&h, compensation.clone())?;
+                    if !sum.has_overflow() {
+                        *current = sum;
+                        compensation = Some(c);
+                        continue;
                     }
+                    let mut started = current.clone();
+                    started.div(count - 1.0);
+                    if let Some(c) = compensation.as_mut() {
+                        c.div(count - 1.0);
+                    }
+                    mean = Some(started);
                 }
                 // Go switches to an incremental mean once the plain sum overflows.
                 let q = (count - 1.0) / count;
@@ -165,10 +163,8 @@ fn aggregate_point<'a>(
                 to_add.div(count);
                 let mean = mean.as_mut().expect("set above");
                 mean.mul(q);
-                match mean.kahan_add(&to_add, compensation.take()) {
-                    Ok((c, _)) => compensation = Some(c),
-                    Err(_) => incompatible = true,
-                }
+                let (c, _) = mean.kahan_add(&to_add, compensation.take())?;
+                compensation = Some(c);
             }
         }
     }
