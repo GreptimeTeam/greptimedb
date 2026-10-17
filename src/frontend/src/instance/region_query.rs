@@ -21,7 +21,7 @@ use client::region::{
 };
 use common_error::ext::BoxedError;
 use common_meta::node_manager::NodeManagerRef;
-use common_query::request::QueryRequest;
+use common_query::request::{PreparedNamedRawSeries, QueryRequest};
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};
 use query::region_query::{RegionQueryHandler, RegionQueryTarget};
@@ -66,6 +66,18 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
         request: QueryRequest,
     ) -> QueryResult<common_recordbatch::SendableRecordBatchStream> {
         self.do_get_inner(target, request)
+            .await
+            .map_err(BoxedError::new)
+            .context(RegionQuerySnafu)
+    }
+
+    /// Forwards the preflight to the datanode that serves the frozen target.
+    async fn prepare_named_raw_series_query(
+        &self,
+        target: &RegionQueryTarget,
+        request: QueryRequest,
+    ) -> QueryResult<Option<PreparedNamedRawSeries>> {
+        self.prepare_named_raw_series_query_inner(target, request)
             .await
             .map_err(BoxedError::new)
             .context(RegionQuerySnafu)
@@ -123,6 +135,19 @@ impl FrontendRegionQueryHandler {
             .datanode(target.peer())
             .await
             .handle_query(request)
+            .await
+            .context(RequestQuerySnafu)
+    }
+
+    async fn prepare_named_raw_series_query_inner(
+        &self,
+        target: &RegionQueryTarget,
+        request: QueryRequest,
+    ) -> Result<Option<PreparedNamedRawSeries>> {
+        self.node_manager
+            .datanode(target.peer())
+            .await
+            .prepare_named_raw_series_query(request)
             .await
             .context(RequestQuerySnafu)
     }

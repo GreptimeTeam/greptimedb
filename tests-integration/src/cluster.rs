@@ -69,8 +69,9 @@ use meta_srv::mocks::MockInfo;
 use mito2::gc::GcConfig;
 use mito2::region::MitoRegionRef;
 use object_store::config::ObjectStoreConfig;
+use query::options::QueryOptions;
 use rand::Rng;
-use servers::grpc::flight::FlightCraftWrapper;
+use servers::grpc::flight::{FlightCraftRef, FlightCraftWrapper};
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::grpc::{GrpcOptions, HealthCheckHandler};
 use servers::server::ServerHandlers;
@@ -88,20 +89,30 @@ use crate::test_util::{
     create_tmp_dir_and_datanode_opts,
 };
 
-/// Flight `DoGet` requests another node sent to a datanode over its network address (see
+/// Flight requests another node sent to a datanode over its network address (see
 /// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]).
 ///
-/// The frontend and datanodes inside the test process use in-process clients, so counted requests
-/// come from remote nodes querying regions owned by this datanode.
+/// The datanodes inside the test process, and the frontend unless it opts into real clients (see
+/// [`GreptimeDbClusterBuilder::with_real_frontend_clients`]), use in-process clients whose duplex
+/// streams are not counted. Counted requests therefore come from the nodes that dial the real
+/// listener: a datanode querying regions owned by another datanode, or a frontend that opted into
+/// real clients.
 #[derive(Debug, Default)]
 pub struct DatanodeRpcStats {
     do_get_requests: AtomicUsize,
+    do_action_requests: AtomicUsize,
 }
 
 impl DatanodeRpcStats {
     /// The number of Flight `DoGet` requests another node sent to the datanode.
     pub fn requests(&self) -> usize {
         self.do_get_requests.load(Ordering::Relaxed)
+    }
+
+    /// The number of Flight `DoAction` requests another node sent to the datanode, e.g. the named
+    /// raw-series preflight of the native PromQL path.
+    pub fn prepare_requests(&self) -> usize {
+        self.do_action_requests.load(Ordering::Relaxed)
     }
 }
 
@@ -192,6 +203,15 @@ impl GreptimeDbCluster {
     }
 }
 
+/// Builds the Flight handler that serves a datanode at its real network address.
+///
+/// The hook receives the node id and the region server of the datanode, and the handler it
+/// returns serves every Flight request that reaches the real TCP listener of the datanode; the
+/// in-process duplex listener keeps serving the bare region server (see
+/// [`GreptimeDbClusterBuilder::with_datanode_flight_hook`]).
+type DatanodeFlightHook =
+    dyn Fn(DatanodeId, datanode::region_server::RegionServer) -> FlightCraftRef + Send + Sync;
+
 pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
     kv_backend: KvBackendRef,
@@ -209,6 +229,9 @@ pub struct GreptimeDbClusterBuilder {
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
+    real_frontend_clients: bool,
+    frontend_query_options: QueryOptions,
+    datanode_flight_hook: Option<Arc<DatanodeFlightHook>>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -247,6 +270,9 @@ impl GreptimeDbClusterBuilder {
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
+            real_frontend_clients: false,
+            frontend_query_options: QueryOptions::default(),
+            datanode_flight_hook: None,
         }
     }
 
@@ -347,6 +373,47 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Serves the frontend with its own clients that dial the real datanode addresses, instead of
+    /// the in-process duplex clients that every other in-process node uses.
+    ///
+    /// By default the frontend keeps the in-process clients, so its requests stay out of
+    /// [`DatanodeRpcStats`]. Opting in makes the frontend reach the datanodes over the network,
+    /// where both its Flight `DoGet` reads and its Flight `DoAction` named raw-series preflight
+    /// are counted. This requires [`Self::with_real_datanode_grpc_addr`] to be enabled: the
+    /// datanode addresses of the table routes must be real listeners.
+    ///
+    /// The metasrv, the datanodes and the information extension keep the shared in-process
+    /// clients; only the query engine of the frontend receives these clients.
+    #[must_use]
+    pub fn with_real_frontend_clients(mut self, real_frontend_clients: bool) -> Self {
+        self.real_frontend_clients = real_frontend_clients;
+        self
+    }
+
+    /// Sets the [`QueryOptions`] of the frontend query engine.
+    ///
+    /// The datanodes keep the options they are built with, exactly like a real deployment where
+    /// the planning node is configured on its own.
+    #[must_use]
+    pub fn with_frontend_query_options(mut self, frontend_query_options: QueryOptions) -> Self {
+        self.frontend_query_options = frontend_query_options;
+        self
+    }
+
+    /// Replaces the Flight handler that serves the region server of every datanode at its real
+    /// network address (see [`Self::with_real_datanode_grpc_addr`]).
+    ///
+    /// The hook is invoked once per datanode with its node id and its region server, and the
+    /// handler it returns serves every Flight request that reaches the real TCP listener. The
+    /// in-process duplex listener keeps serving the bare region server, so the hook does not
+    /// change the traffic of the in-process clients. Leave the hook unset to serve the bare
+    /// region server everywhere.
+    #[must_use]
+    pub fn with_datanode_flight_hook(mut self, hook: Arc<DatanodeFlightHook>) -> Self {
+        self.datanode_flight_hook = Some(hook);
+        self
+    }
+
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
@@ -355,8 +422,15 @@ impl GreptimeDbClusterBuilder {
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
 
+        assert!(
+            !self.real_frontend_clients || self.real_datanode_grpc_addr,
+            "with_real_frontend_clients(true) requires with_real_datanode_grpc_addr(true): the \
+             real frontend clients dial the datanode addresses recorded in the table routes, which \
+             only exist when every datanode is served at its own address"
+        );
+
         let channel_config = ChannelConfig::new().timeout(Some(Duration::from_secs(20)));
-        let datanode_clients = Arc::new(NodeClients::new(channel_config));
+        let datanode_clients = Arc::new(NodeClients::new(channel_config.clone()));
 
         let opt = MetasrvOptions {
             procedure: ProcedureConfig {
@@ -408,17 +482,30 @@ impl GreptimeDbClusterBuilder {
             &datanode_instances,
             &datanode_options,
             &datanode_rpc_stats,
+            self.datanode_flight_hook.as_deref(),
         )
         .await;
 
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
+        // The frontend keeps the shared in-process clients by default. A frontend that must really
+        // reach the datanodes gets its own clients built from the same channel configuration: the
+        // shared clients have mock connectors registered for every datanode address (see
+        // `create_datanode_client`), but these fresh managers have none, so the frontend dials the
+        // real listeners and its requests are counted.
+        let frontend_node_clients = if self.real_frontend_clients {
+            Arc::new(NodeClients::new(channel_config))
+        } else {
+            datanode_clients.clone()
+        };
+
         let mut frontend = self
             .build_frontend(
                 metasrv.clone(),
                 datanode_clients.clone(),
                 start_frontend_servers,
+                frontend_node_clients,
             )
             .await;
 
@@ -574,6 +661,7 @@ impl GreptimeDbClusterBuilder {
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
         start_frontend_servers: bool,
+        frontend_node_clients: Arc<NodeClients>,
     ) -> Frontend {
         let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
@@ -619,7 +707,7 @@ impl GreptimeDbClusterBuilder {
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,
-            datanode_clients,
+            frontend_node_clients,
             meta_client.clone(),
             Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
@@ -653,6 +741,7 @@ impl GreptimeDbClusterBuilder {
         let mut fe_opts = FrontendOptions {
             auto_create_table: self.frontend_auto_create_table,
             event_recorder: self.event_recorder_options.clone(),
+            query: self.frontend_query_options.clone(),
             ..Default::default()
         };
 
@@ -710,14 +799,17 @@ async fn build_datanode_clients(
     instances: &HashMap<DatanodeId, Datanode>,
     options: &[DatanodeOptions],
     rpc_stats: &HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
+    flight_hook: Option<&DatanodeFlightHook>,
 ) {
     for opts in options {
         let datanode_id = opts.node_id.unwrap();
         let instance = &instances[&datanode_id];
         let (addr, client) = create_datanode_client(
             instance,
+            datanode_id,
             &opts.grpc.server_addr,
             rpc_stats.get(&datanode_id).cloned(),
+            flight_hook,
         )
         .await;
         clients
@@ -728,10 +820,14 @@ async fn build_datanode_clients(
 
 /// Runs a gRPC server that serves the region server of `datanode` over `incoming` until the
 /// cluster is dropped.
+///
+/// `flight_craft` replaces the Flight handler that serves the region server; `None` serves the
+/// bare region server.
 fn serve_datanode_region_server<I, IO>(
     datanode: &Datanode,
     incoming: I,
     rpc_stats: Option<Arc<DatanodeRpcStats>>,
+    flight_craft: Option<FlightCraftRef>,
 ) where
     I: futures::Stream<Item = Result<IO, std::io::Error>> + Send + 'static,
     IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
@@ -742,7 +838,8 @@ fn serve_datanode_region_server<I, IO>(
         .build()
         .unwrap();
 
-    let flight_handler = FlightCraftWrapper(datanode.region_server());
+    let flight_handler =
+        FlightCraftWrapper(flight_craft.unwrap_or_else(|| Arc::new(datanode.region_server())));
     let region_server_handler =
         RegionServerRequestHandler::new(Arc::new(datanode.region_server()), runtime);
 
@@ -771,30 +868,39 @@ fn serve_datanode_region_server<I, IO>(
 
 /// Serves the region server of `datanode` and returns the address and the client of the address.
 ///
-/// The returned client is always an in-process client: the frontend and the datanodes of the test
-/// process reach the region server through a duplex stream, no matter which address they use. This
-/// keeps the in-process traffic out of `rpc_stats`.
+/// The returned client is always an in-process client. The datanodes of the test process, and the
+/// frontend unless it opts into real clients
+/// ([`GreptimeDbClusterBuilder::with_real_frontend_clients`]), reach the region server through a
+/// duplex stream, no matter which address they use. This keeps that in-process traffic out of
+/// `rpc_stats`.
 ///
 /// [`test_util::PEER_PLACEHOLDER_ADDR`] is not a real address, so it cannot be served over the
 /// network at all. Any other address is a real one: the region server is additionally served on
-/// its local TCP port (`rpc_stats` counts the requests of the remote nodes that reach it, e.g. the
-/// region query that a datanode sends for the regions of another datanode).
+/// its local TCP port (`rpc_stats` counts the requests of the nodes that dial it, e.g. the region
+/// query that a datanode sends for the regions of another datanode, or a request of a frontend
+/// configured with real clients), and `flight_hook` builds the handler of that listener.
 async fn create_datanode_client(
     datanode: &Datanode,
+    datanode_id: DatanodeId,
     addr: &str,
     rpc_stats: Option<Arc<DatanodeRpcStats>>,
+    flight_hook: Option<&DatanodeFlightHook>,
 ) -> (String, Client) {
     let (client, server) = tokio::io::duplex(1024);
     serve_datanode_region_server(
         datanode,
         futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]),
         None,
+        None,
     );
 
     if addr != test_util::PEER_PLACEHOLDER_ADDR {
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-        serve_datanode_region_server(datanode, incoming, rpc_stats);
+        // Only the real TCP listener is instrumented: the in-process duplex listener above keeps
+        // serving the bare region server, and the hook is invoked once for the listener.
+        let flight_craft = flight_hook.map(|hook| hook(datanode_id, datanode.region_server()));
+        serve_datanode_region_server(datanode, incoming, rpc_stats, flight_craft);
     }
 
     let mut client = Some(client);
@@ -822,7 +928,7 @@ async fn create_datanode_client(
     )
 }
 
-/// Counts Flight `DoGet` requests received by the wrapped server.
+/// Counts Flight `DoGet` and `DoAction` requests received by the wrapped server.
 #[derive(Clone)]
 struct CountRequests<S> {
     inner: S,
@@ -842,10 +948,16 @@ where
     }
 
     fn call(&mut self, request: http::Request<ReqBody>) -> Self::Future {
-        if request.uri().path() == "/arrow.flight.protocol.FlightService/DoGet"
-            && let Some(rpc_stats) = &self.rpc_stats
-        {
-            rpc_stats.do_get_requests.fetch_add(1, Ordering::Relaxed);
+        if let Some(rpc_stats) = &self.rpc_stats {
+            match request.uri().path() {
+                "/arrow.flight.protocol.FlightService/DoGet" => {
+                    rpc_stats.do_get_requests.fetch_add(1, Ordering::Relaxed);
+                }
+                "/arrow.flight.protocol.FlightService/DoAction" => {
+                    rpc_stats.do_action_requests.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
         }
 
         self.inner.call(request)
