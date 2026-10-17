@@ -132,11 +132,7 @@ pub(crate) fn hex(bits: &str) -> f64 {
 }
 
 /// Builds the trimmed series Eval produces: from the first to the last point, nulls between.
-pub(crate) fn grid_series(
-    schema: &SeriesSchema,
-    metric: MetricName,
-    points: &Points,
-) -> Option<Series> {
+fn grid_series(schema: &SeriesSchema, metric: MetricName, points: &Points) -> Option<Series> {
     let (&(start, _), &(last, _)) = points.first().zip(points.last())?;
     let mut values = vec![None; last - start + 1];
     for &(index, value) in points {

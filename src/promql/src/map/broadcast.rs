@@ -16,13 +16,13 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{
-    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesSchema,
-};
-use datatypes::series::time::{GridRange, TimeAxis};
+use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesSchema};
+use datatypes::series::time::GridRange;
 
 use crate::grid_series::GridSeriesBuilder;
-use crate::map::{ArithmeticOp, Comparison, drop_metric_name, series_error};
+use crate::map::{
+    ArithmeticOp, Comparison, drop_metric_name, float_sample, series_error, validate_float_series,
+};
 
 /// A time-varying, unlabelled single-field scalar, with explicit operand direction.
 #[derive(Clone, Copy, Debug)]
@@ -81,7 +81,7 @@ fn map_grid_scalar(
     metric: MetricName,
     calculate: impl Fn(f64, f64, f64) -> Option<f64>,
 ) -> Result<Option<Series>> {
-    let vector_range = validate_series(schema, vector)?;
+    let vector_range = validate_float_series(schema, vector)?;
     let (scalar_series, scalar_left) = match scalar {
         ScalarSeriesOperand::Left(s) => (s, true),
         ScalarSeriesOperand::Right(s) => (s, false),
@@ -107,10 +107,10 @@ fn map_grid_scalar(
     let mut fields = fields.iter().map(Samples::iter).collect::<Vec<_>>();
     let mut row = Vec::with_capacity(fields.len());
     for (offset, scalar) in scalar_samples.iter().enumerate() {
-        let scalar = float_or_missing(scalar)?;
+        let scalar = float_sample(scalar);
         row.clear();
         for field in &mut fields {
-            let sample = float_or_missing(field.next().expect("sliced to the same length"))?;
+            let sample = float_sample(field.next().expect("sliced to the same length"));
             row.push(scalar.zip(sample).and_then(|(scalar, sample)| {
                 if scalar_left {
                     calculate(scalar, sample, sample)
@@ -122,14 +122,6 @@ fn map_grid_scalar(
         builder.push(start + offset, &row)?;
     }
     builder.finish(metric)
-}
-
-fn float_or_missing(sample: SampleRef<'_>) -> Result<Option<f64>> {
-    match sample {
-        SampleRef::Float(sample) => Ok(Some(sample)),
-        SampleRef::Missing => Ok(None),
-        _ => Err(not_float()),
-    }
 }
 
 fn validate_scalar<'a>(schema: &SeriesSchema, scalar: &'a Series) -> Result<&'a GridRange> {
@@ -145,34 +137,5 @@ fn validate_scalar<'a>(schema: &SeriesSchema, scalar: &'a Series) -> Result<&'a 
         .into(),
         eval_grid: schema.eval_grid.clone(),
     };
-    validate_series(&schema, scalar)
-}
-
-fn validate_series<'a>(schema: &SeriesSchema, series: &'a Series) -> Result<&'a GridRange> {
-    let TimeAxis::Grid(range) = &series.time else {
-        return Err(DataFusionError::Execution(
-            "Map requires an evaluated grid time axis".into(),
-        ));
-    };
-    Series::try_new(
-        schema,
-        series.metric.clone(),
-        series.time.clone(),
-        series.fields.clone(),
-    )
-    .map_err(series_error)?;
-    for field in series.fields.iter() {
-        if field
-            .segments()
-            .iter()
-            .any(|segment| !matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
-        {
-            return Err(not_float());
-        }
-    }
-    Ok(range)
-}
-
-fn not_float() -> DataFusionError {
-    DataFusionError::NotImplemented("Map supports only float samples".into())
+    validate_float_series(&schema, scalar)
 }

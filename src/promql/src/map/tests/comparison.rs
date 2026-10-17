@@ -141,6 +141,13 @@ fn comparisons_reject_raw_axes_and_late_histogram_chunks() {
     ])
     .unwrap();
     let input = series(&schema, 3, vec![unsupported]);
+    // A segment of another type is rejected even when it holds no present sample.
+    let all_missing = Samples::try_from_chunks(vec![
+        floats(&[Some(1.0)]),
+        Samples::try_from_histogram(UInt32Array::from(vec![None]), histogram_batch()).unwrap(),
+    ])
+    .unwrap();
+    let all_missing = series(&schema, 3, vec![all_missing]);
     let mut raw_schema = schema.as_ref().clone();
     raw_schema.eval_grid = None;
     let raw_schema = Arc::new(raw_schema);
@@ -155,10 +162,12 @@ fn comparisons_reject_raw_axes_and_late_histogram_chunks() {
         Comparison::Bool(ComparisonOp::Equal),
         Comparison::Filter(ComparisonOp::Equal),
     ] {
-        assert!(matches!(
-            map_compare(&schema, &input, comparison, ScalarOperand::Right(1.0)),
-            Err(DataFusionError::NotImplemented(_))
-        ));
+        for input in [&input, &all_missing] {
+            assert!(matches!(
+                map_compare(&schema, input, comparison, ScalarOperand::Right(1.0)),
+                Err(DataFusionError::NotImplemented(_))
+            ));
+        }
         assert!(matches!(
             map_compare(&raw_schema, &raw, comparison, ScalarOperand::Right(1.0)),
             Err(DataFusionError::Execution(_))

@@ -351,10 +351,12 @@ fn histogram_and_mixed_fields_are_rejected_without_partial_success() {
     for unsupported in [histogram, mixed, null_histogram, chunks] {
         let prefix = floats(&vec![Some(-2.0); unsupported.len()]);
         let input = series(&schema, 2, vec![prefix, unsupported]);
-        assert!(matches!(
-            map_math(&schema, &input, MathOp::Abs),
-            Err(DataFusionError::NotImplemented(_))
-        ));
+        for op in [MathOp::Abs, MathOp::Clamp { min: 2.0, max: 1.0 }] {
+            assert!(matches!(
+                map_math(&schema, &input, op),
+                Err(DataFusionError::NotImplemented(_))
+            ));
+        }
         assert_floats(
             input.fields.get(0).unwrap(),
             &vec![Some(-2.0); input.time.len()],

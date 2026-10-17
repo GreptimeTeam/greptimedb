@@ -188,11 +188,8 @@ fn compensated_sum_and_overflowing_avg_follow_prometheus() {
     // The direct sum overflows, so the mean switches to the incremental form.
     let avg = aggregate_float(&schema, &series, AggregateOp::Avg, Grouping::By(&[])).unwrap();
     let (_, avg) = values(&avg[0], 0);
-    let avg = avg[0].unwrap();
-    assert!(
-        (avg / (f64::MAX / 6.0 * 5.0) - 1.0).abs() < 1e-15,
-        "{avg:e}"
-    );
+    // Bits from the same calculation in Go on amd64; a plain mean is +Inf.
+    assert_eq!(avg, vec![Some(f64::from_bits(0x7feaaaaaaaaaaaa9))]);
     let sum = aggregate_float(&schema, &series, AggregateOp::Sum, Grouping::By(&[])).unwrap();
     assert_eq!(values(&sum[0], 0), (3, vec![Some(f64::INFINITY)]));
 }

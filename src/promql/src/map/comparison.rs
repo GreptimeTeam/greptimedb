@@ -14,12 +14,15 @@
 
 use std::sync::Arc;
 
-use datafusion::error::{DataFusionError, Result};
-use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::{GridRange, TimeAxis};
+use datafusion::error::Result;
+use datatypes::series::samples::{Series, SeriesSchema};
+use datatypes::series::time::GridRange;
 
 use crate::grid_series::GridSeriesBuilder;
-use crate::map::{ArithmeticOp, ScalarOperand, constant_series, drop_metric_name, map_arithmetic};
+use crate::map::{
+    ArithmeticOp, ScalarOperand, constant_series, drop_metric_name, float_sample, map_arithmetic,
+    validate_float_series,
+};
 
 /// IEEE comparisons: NaN only satisfies `NotEqual`, and signed zeros compare equal.
 #[derive(Clone, Copy, Debug)]
@@ -50,18 +53,7 @@ pub fn map_compare(
     comparison: Comparison,
     scalar: ScalarOperand,
 ) -> Result<Option<Series>> {
-    let TimeAxis::Grid(range) = &series.time else {
-        return Err(DataFusionError::Execution(
-            "Map requires an evaluated grid time axis".into(),
-        ));
-    };
-    Series::try_new(
-        schema,
-        series.metric.clone(),
-        series.time.clone(),
-        series.fields.clone(),
-    )
-    .map_err(crate::map::series_error)?;
+    let range = validate_float_series(schema, series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut fields = series
         .fields
@@ -72,15 +64,7 @@ pub fn map_compare(
     for index in range.start()..range.start() + range.len() {
         row.clear();
         for field in &mut fields {
-            let sample = match field.next() {
-                Some(SampleRef::Float(sample)) => Some(sample),
-                Some(SampleRef::Missing) => None,
-                _ => {
-                    return Err(DataFusionError::NotImplemented(
-                        "Map supports only float samples".into(),
-                    ));
-                }
-            };
+            let sample = float_sample(field.next().expect("validated length"));
             row.push(sample.and_then(|sample| {
                 let (left, right) = match scalar {
                     ScalarOperand::Left(scalar) => (scalar, sample),
@@ -130,7 +114,7 @@ impl Comparison {
 }
 
 impl ComparisonOp {
-    pub(crate) fn apply(self, left: f64, right: f64) -> bool {
+    fn apply(self, left: f64, right: f64) -> bool {
         match self {
             Self::Equal => left == right,
             Self::NotEqual => left != right,

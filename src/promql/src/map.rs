@@ -31,7 +31,9 @@ use std::f64::consts::PI;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::arrow::array::Float64Array;
 use datatypes::series::MetricName;
-use datatypes::series::samples::{DenseSamplesRef, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{
+    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::functions::Round;
@@ -120,10 +122,11 @@ pub enum ScalarOperand {
 /// when both have a value at one step, is left to the caller (Prometheus
 /// `mergeSeriesWithSameLabelset`).
 pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Option<Series>> {
-    let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
     if op.is_empty_clamp() {
+        validate_float_series(schema, series)?;
         return Ok(None);
     }
+    let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
     drop_metric_name(&mut output.metric);
     Ok(Some(output))
 }
@@ -201,6 +204,11 @@ fn map_float_fields(
 /// hide a same-labelset collision from the caller.
 pub(crate) fn drop_metric_name(metric: &mut MetricName) {
     metric.remove_all(&["__name__", "__type__", "__unit__"]);
+    drop_empty_labels(metric);
+}
+
+/// Drops labels with empty values, which Prometheus treats as absent.
+pub(crate) fn drop_empty_labels(metric: &mut MetricName) {
     let empty: Vec<_> = metric
         .tags()
         .iter()
@@ -343,6 +351,43 @@ fn map_float_segment(
     Ok(Samples::from_float(map(floats)))
 }
 
-pub(super) fn series_error(error: datatypes::error::Error) -> DataFusionError {
+fn series_error(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
+}
+
+/// Checks an evaluated float series up front, so no segment of another type yields a result.
+fn validate_float_series<'a>(schema: &SeriesSchema, series: &'a Series) -> Result<&'a GridRange> {
+    let TimeAxis::Grid(range) = &series.time else {
+        return Err(DataFusionError::Execution(
+            "Map requires an evaluated grid time axis".into(),
+        ));
+    };
+    Series::try_new(
+        schema,
+        series.metric.clone(),
+        series.time.clone(),
+        series.fields.clone(),
+    )
+    .map_err(series_error)?;
+    for field in series.fields.iter() {
+        if field
+            .segments()
+            .iter()
+            .any(|segment| !matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
+        {
+            return Err(DataFusionError::NotImplemented(
+                "Map supports only float samples; histogram/mixed samples are not supported".into(),
+            ));
+        }
+    }
+    Ok(range)
+}
+
+/// A sample of a series accepted by [`validate_float_series`].
+fn float_sample(sample: SampleRef<'_>) -> Option<f64> {
+    match sample {
+        SampleRef::Float(sample) => Some(sample),
+        SampleRef::Missing => None,
+        _ => unreachable!("validated as float"),
+    }
 }

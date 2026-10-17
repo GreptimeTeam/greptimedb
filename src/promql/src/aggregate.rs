@@ -28,6 +28,7 @@ use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchem
 use datatypes::series::time::TimeAxis;
 
 use crate::grid_series::GridSeriesBuilder;
+use crate::map::drop_empty_labels;
 
 /// Basic float aggregations.
 #[derive(Clone, Copy, Debug)]
@@ -156,15 +157,7 @@ impl Grouping<'_> {
         if metric.name() == Some("") {
             metric.remove("__name__");
         }
-        let empty: Vec<_> = metric
-            .tags()
-            .iter()
-            .filter(|label| label.value.is_empty())
-            .map(|label| label.name.clone())
-            .collect();
-        for name in empty {
-            metric.remove(&name);
-        }
+        drop_empty_labels(&mut metric);
         metric
     }
 }

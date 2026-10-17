@@ -118,14 +118,14 @@ fn sgn_deg_and_rad_keep_prometheus_operation_order() {
         &field(MathOp::Sgn),
         &[Some(-0.0), Some(f64::NAN), Some(1.0), Some(1.0)],
     );
-    // 11 and 3 round differently under to_degrees/to_radians.
+    // Bits from Go on amd64; 11 and 3 round differently under to_degrees/to_radians.
     assert_floats(
         &field(MathOp::Deg),
         &[
             Some(-0.0),
             Some(f64::NAN),
-            Some(11.0 * 180.0 / PI),
-            Some(3.0 * 180.0 / PI),
+            Some(f64::from_bits(0x4083b2075224955b)),
+            Some(f64::from_bits(0x40657c6513cad17a)),
         ],
     );
     assert_ne!(11.0 * 180.0 / PI, 11.0_f64.to_degrees());
@@ -134,8 +134,8 @@ fn sgn_deg_and_rad_keep_prometheus_operation_order() {
         &[
             Some(-0.0),
             Some(f64::NAN),
-            Some(11.0 * PI / 180.0),
-            Some(3.0 * PI / 180.0),
+            Some(f64::from_bits(0x3fc893011f31982e)),
+            Some(f64::from_bits(0x3faacee9f37bebd5)),
         ],
     );
     assert_ne!(3.0 * PI / 180.0, 3.0_f64.to_radians());
