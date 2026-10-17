@@ -44,6 +44,7 @@ use crate::grid_series::reference::{
     Dense, assert_series_eq, assert_series_eq_any_nan, random_dense, special_value,
 };
 use crate::range_array::RangeArray;
+use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
 type Row = (i64, Vec<Option<f64>>);
@@ -1206,4 +1207,104 @@ fn anchored_window_before_the_series_retains_nothing() {
         evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
         assert!(evaluator.fields[0].timestamps.len() <= 100);
     }
+}
+
+/// `absent_over_time(v[r])` is `absent` over the series of `present_over_time(v[r])`, with the
+/// labels derived from the selector's matchers. Checked against 120 cases from the Prometheus
+/// v3.15.0 engine (`absent_over_time_cases.txt`, promql-compat `cmd/narthex-golden-vector
+/// -absent-over-time`); samples sit on grid points.
+#[test]
+fn absent_over_time_is_absent_over_present_over_time() {
+    let text = include_str!("absent_over_time_cases.txt");
+    let mut checked = 0;
+    for case in text.split("end\n").filter(|case| case.contains("case ")) {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let spec: Vec<&str> = lines[0].split_whitespace().collect();
+        let range_ms: i64 = spec[2].parse().unwrap();
+        let matchers: Vec<LabelMatcher> = spec[3]
+            .split(',')
+            .filter(|matcher| *matcher != "-")
+            .map(|matcher| {
+                let (name, op, value) = match matcher.split_once("!=") {
+                    Some((name, value)) => (name, MatchOp::NotEqual, value),
+                    None => {
+                        let (name, value) = matcher.split_once('=').unwrap();
+                        (name, MatchOp::Equal, value)
+                    }
+                };
+                let value = value.trim_matches('"');
+                LabelMatcher {
+                    name: Arc::from(name),
+                    op,
+                    value: Arc::from(value),
+                    matches_empty: (op == MatchOp::Equal) == value.is_empty(),
+                }
+            })
+            .collect();
+        let grid_spec: Vec<i64> = lines[1]
+            .split_whitespace()
+            .skip(1)
+            .map(|field| field.parse().unwrap())
+            .collect();
+        let grid = grid(grid_spec[0], grid_spec[1], grid_spec[2] as u64);
+        let window = RangeWindow {
+            range_ms,
+            offset_ms: 0,
+            anchor_ms: None,
+        };
+        let mut present = Vec::new();
+        let mut expected = None;
+        for (host, line) in lines[2..].iter().enumerate() {
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (labels, points) = rest.split_once(" ;").unwrap();
+            let points: Vec<(i64, f64)> = points
+                .split_whitespace()
+                .map(|point| {
+                    let (index, bits) = point.split_once(':').unwrap();
+                    let ts = grid_spec[0] + index.parse::<i64>().unwrap() * grid_spec[1];
+                    (ts, f64::from_bits(u64::from_str_radix(bits, 16).unwrap()))
+                })
+                .collect();
+            if kind == "result" {
+                let mut dense = vec![vec![None]; grid_spec[2] as usize];
+                for (ts, value) in points {
+                    dense[((ts - grid_spec[0]) / grid_spec[1]) as usize][0] = Some(value);
+                }
+                expected = Some(dense);
+                continue;
+            }
+            let selected = matchers.iter().all(|matcher| {
+                let value = labels
+                    .split(',')
+                    .find_map(|pair| pair.strip_prefix(&format!("{}=", matcher.name)))
+                    .unwrap_or("");
+                (value == &*matcher.value) == (matcher.op == MatchOp::Equal)
+            });
+            if !selected || points.is_empty() {
+                continue;
+            }
+            let rows: Vec<Row> = points
+                .into_iter()
+                .map(|(ts, value)| (ts, vec![Some(value)]))
+                .collect();
+            let mut evaluator = RangeEvaluator::try_new(
+                &raw_schema(1),
+                grid.clone(),
+                window,
+                RangeFunction::PresentOverTime,
+            )
+            .unwrap();
+            present.extend(evaluator.push(&chunk(&rows, 1, host as u64, true)).unwrap());
+        }
+        let schema = SeriesSchema {
+            fields: raw_schema(1).fields,
+            eval_grid: Some(grid.clone()),
+        };
+        let labels = absent_labels(&matchers).unwrap();
+        let actual = absent(&schema, &present, labels.clone()).unwrap();
+        let expected = expected.unwrap_or_else(|| vec![vec![None]; grid_spec[2] as usize]);
+        assert_series_eq(actual.as_ref(), &expected, &labels);
+        checked += 1;
+    }
+    assert_eq!(checked, 120);
 }
