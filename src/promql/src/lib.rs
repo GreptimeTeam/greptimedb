@@ -20,6 +20,7 @@ mod go_sort;
 pub mod grid_series;
 pub mod histogram_eval;
 pub mod instant_eval;
+pub mod map;
 pub mod map_label;
 pub mod map_time;
 mod metrics;
