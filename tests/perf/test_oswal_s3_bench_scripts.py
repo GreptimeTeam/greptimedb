@@ -1285,5 +1285,66 @@ esac
             self.assertIn("reports no version or commit", done.stderr)
 
 
+    def test_check_runtime_pins_the_digest_from_the_manifest_without_a_pull(self):
+        digest = "sha256:" + "c" * 64
+        fake_docker = f"""#!/usr/bin/env bash
+printf '%s\\n' "docker $*" >> "$FAKE_LOG"
+[[ "$1 $2 $3" == "buildx imagetools inspect" ]] || exit 9
+printf '{{"mediaType": "application/vnd.oci.image.index.v1+json", "digest": "{digest}", "size": 856}}\\n'
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docker").write_text(fake_docker)
+            (root / "docker").chmod(0o755)
+            env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
+                                "GITHUB_OUTPUT": str(root / "output")}
+            repository = "public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime"
+            for image, error in ((f"{repository}:77a84e1c8136", None), (f"{repository}:77a84e1c8136@{digest}", None),
+                                 (f"{repository}@sha256:{'d' * 64}", f"is served as {digest}"),
+                                 ("docker.io/greptime/o11ybenchruntime:1", "must come from AWS ECR Public")):
+                with self.subTest(image=image):
+                    (root / "output").write_text("")
+                    done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "check-runtime", image],
+                                          env=env, capture_output=True, text=True, timeout=60)
+                    if error is None:
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                        self.assertEqual((root / "output").read_text(), f"runtime_image={repository}@{digest}\n")
+                    else:
+                        self.assertNotEqual(done.returncode, 0)
+                        self.assertIn(error, done.stderr)
+            self.assertNotIn("docker pull", (root / "fake.log").read_text())
+            self.assertNotIn("docker run", (root / "fake.log").read_text())
+
+    def test_the_benchmark_host_checks_the_runtime_contents_before_pulling_greptimedb(self):
+        fake_docker = r"""#!/usr/bin/env bash
+printf '%s\n' "docker $*" >> "$FAKE_LOG"
+case "$1" in
+    run) exit "${FAKE_CONTENTS_RC:-0}" ;;
+    image) echo '[{}]' ;;
+esac
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, body in (("docker", fake_docker), ("timeout", '#!/usr/bin/env bash\nshift 2\nexec "$@"\n')):
+                (root / name).write_text(body)
+                (root / name).chmod(0o755)
+            runtime = "public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime@sha256:" + "c" * 64
+            env = os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
+                                "RESULTS": str(root / "results"), "RUNTIME_IMAGE": runtime,
+                                "GREPTIMEDB_IMAGES": json.dumps([{"label": "", "image": "greptimedb@sha256:" + "a" * 64}])}
+            done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "pull"], env=env,
+                                  capture_output=True, text=True, timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            log = (root / "fake.log").read_text().splitlines()
+            self.assertEqual([line.split()[1] for line in log], ["pull", "run", "pull", "image", "image"])
+            self.assertIn(f"docker run --rm --entrypoint sh {runtime} -c test -f scripts/agent-observability/greptimedb.sh", log[1])
+            (root / "fake.log").unlink()
+            done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "pull"],
+                                  env=env | {"FAKE_CONTENTS_RC": "1"}, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn("lacks the agent observability loader or generator", done.stderr)
+            self.assertNotIn("greptimedb@sha256", (root / "fake.log").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -130,7 +130,7 @@ jobs:
         BUCKET_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
         RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
       run: python3 greptimedb/.github/scripts/oswal-s3-bench.py regions --bucket "$BUCKET_REGION" --runner "$RUNNER_REGION"
-    - name: Check the runtime image
+    - name: Pin the runtime image digest
       id: runtime
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh check-runtime "$RUNTIME_IMAGE"
   provision:
@@ -200,7 +200,7 @@ jobs:
       run: |
         bash greptimedb/.github/scripts/pull-benchmark-image.sh greptime/minio:2024
         docker compose -f greptimedb/tests-integration/fixtures/docker-compose.yml up -d --wait minio
-    - name: Pull images and write the plan
+    - name: Pull and check images, write the plan
       run: |
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \

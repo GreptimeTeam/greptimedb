@@ -10,15 +10,22 @@ runtime() {
         --security-opt no-new-privileges --cap-drop ALL "$@"
 }
 
+# Pin the runtime image to its digest from the registry's manifest alone: an anonymous pull from ECR
+# Public on a hosted runner can exceed the registry's data limit. The benchmark host checks the contents.
 check_runtime() {
-    local image=$1 resolved
+    local image=$1 repository digest attempt
     [[ "$image" == public.ecr.aws/* ]] || { echo 'The runtime image must come from AWS ECR Public' >&2; return 1; }
-    bash "$here/pull-benchmark-image.sh" "$image"
-    resolved=$(docker image inspect "$image" | jq -er '.[0].RepoDigests[0]')
-    docker run --rm --entrypoint sh "$resolved" -c \
-        'test -f scripts/agent-observability/greptimedb.sh && test -f scripts/generate_agent_observations.py' \
-        || { echo 'The runtime image lacks the agent observability loader or generator' >&2; return 1; }
-    printf 'runtime_image=%s\n' "$resolved" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+    for attempt in 1 2 3; do
+        digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$image" | jq -er .digest) && break
+        ((attempt < 3)) || { echo "Cannot read the manifest of $image" >&2; return 1; }
+        sleep $((attempt * 10))
+    done
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "$image has no sha256 manifest digest" >&2; return 1; }
+    # A reference that names a digest must be served under it.
+    [[ "$image" != *@* || "${image##*@}" == "$digest" ]] || { echo "$image is served as $digest" >&2; return 1; }
+    repository=${image%@*}
+    [[ "${repository##*/}" != *:* ]] || repository=${repository%:*}
+    printf 'runtime_image=%s@%s\n' "$repository" "$digest" >> "${GITHUB_OUTPUT:-/dev/stdout}"
 }
 
 # Pull every GreptimeDB image of the run, pin it to its digest and record the version and
@@ -46,6 +53,9 @@ pull_images() {
     local image images=()
     mkdir -p "$RESULTS/images"
     bash "$here/pull-benchmark-image.sh" "$RUNTIME_IMAGE"
+    docker run --rm --entrypoint sh "$RUNTIME_IMAGE" -c \
+        'test -f scripts/agent-observability/greptimedb.sh && test -f scripts/generate_agent_observations.py' \
+        || { echo 'The runtime image lacks the agent observability loader or generator' >&2; return 1; }
     while IFS= read -r image; do
         bash "$here/pull-benchmark-image.sh" "$image"
         images+=("$image")
