@@ -921,14 +921,23 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
         anchor_ms: None,
     };
     for (smoothing, trend) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.5)] {
-        assert!(matches!(
+        let evaluator = || {
             RangeEvaluator::try_new(
                 &raw_schema(1),
                 grid(0, 10, 4),
                 window,
-                RangeFunction::DoubleExponentialSmoothing { smoothing, trend }
-            ),
-            Err(DataFusionError::Plan(_))
+                RangeFunction::DoubleExponentialSmoothing { smoothing, trend },
+            )
+            .unwrap()
+        };
+        // Like Prometheus, only a window holding a sample checks the factors.
+        let outside = chunk(&[(100, vec![Some(1.0)])], 1, 0, true);
+        assert!(evaluator().push(&outside).unwrap().is_none());
+        evaluator().finish().unwrap();
+        let inside = chunk(&[(5, vec![Some(1.0)])], 1, 0, true);
+        assert!(matches!(
+            evaluator().push(&inside),
+            Err(DataFusionError::Execution(_))
         ));
     }
 }
@@ -1079,4 +1088,94 @@ fn quantile_keeps_the_window_order_of_signed_zeros() {
         panic!("expected a float");
     };
     assert_eq!(1.0 / value, f64::NEG_INFINITY);
+}
+
+/// Chunks after the last grid point are only validated, so nothing accumulates and the outcome
+/// does not depend on where the series is split.
+#[test]
+fn samples_after_the_last_window_are_validated_but_not_retained() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 2), window);
+    for chunk_index in 0..900 {
+        let rows: Vec<Row> = (0..100)
+            .map(|row| (1 + chunk_index * 100 + row, vec![Some(1.0)]))
+            .collect();
+        evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
+        assert!(evaluator.fields[0].timestamps.len() <= 100);
+    }
+
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 10,
+        anchor_ms: None,
+    };
+    let late = i64::MAX - 5;
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
+    evaluator
+        .push(&chunk(
+            &[(15, vec![Some(1.0)]), (20, vec![Some(1.0)])],
+            1,
+            0,
+            false,
+        ))
+        .unwrap();
+    assert!(matches!(
+        evaluator.push(&chunk(&[(late, vec![Some(1.0)])], 1, 0, true)),
+        Err(DataFusionError::Execution(_))
+    ));
+}
+
+/// An anchored `predict_linear` regresses the one anchored window around each grid point, as
+/// Prometheus does with `enh.Ts`; over `y = t` that predicts `T` whatever the offset.
+#[test]
+fn anchored_predict_linear_regresses_around_each_point() {
+    let rows: Vec<Row> = (0..=60)
+        .step_by(5)
+        .map(|ts| (ts, vec![Some(ts as f64)]))
+        .collect();
+    for offset_ms in [0, 10] {
+        let window = RangeWindow {
+            range_ms: 30,
+            offset_ms,
+            anchor_ms: Some(50),
+        };
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(100, 10, 3),
+            window,
+            RangeFunction::PredictLinear(0.0),
+        )
+        .unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let values: Vec<_> = (0..3)
+            .map(|index| match series.fields.as_slice()[0].sample(index) {
+                SampleRef::Float(value) => value,
+                _ => panic!("expected a float"),
+            })
+            .collect();
+        for (value, expected) in values.into_iter().zip([100.0, 110.0, 120.0]) {
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "offset {offset_ms}: {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_a_subquery_grid_longer_than_u64() {
+    let outer = GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap();
+    let window = RangeWindow {
+        range_ms: 7,
+        offset_ms: -6,
+        anchor_ms: None,
+    };
+    assert!(matches!(
+        subquery_grid(outer, window, 1),
+        Err(DataFusionError::Plan(_))
+    ));
 }
