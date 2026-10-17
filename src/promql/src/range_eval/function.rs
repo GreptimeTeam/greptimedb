@@ -56,8 +56,8 @@ pub enum RangeFunction {
 }
 
 impl RangeFunction {
-    /// Returns the kernel computing this function over one window.
-    pub(crate) fn kernel(self) -> WindowKernel {
+    /// Returns the kernel computing this function over windows read with `offset_ms`.
+    pub(crate) fn kernel(self, offset_ms: i64) -> WindowKernel {
         match self {
             Self::Rate => Box::new(extrapolated::<true, true>),
             Self::Increase => Box::new(extrapolated::<true, false>),
@@ -92,8 +92,11 @@ impl RangeFunction {
                 Box::new(|window| Some(count_edges(window.values, EdgeKind::Changes) as f64))
             }
             Self::Deriv => Box::new(|window| regression(&window, window.timestamps[0]).0),
+            // Prometheus regresses the unshifted samples around the evaluation time, which on the
+            // shifted timeline is `eval_ts + offset`; `RangeEvaluator::try_new` checks it fits.
             Self::PredictLinear(horizon) => Box::new(move |window| {
-                let (slope, intercept) = regression(&window, window.eval_ts);
+                let (slope, intercept) =
+                    regression(&window, window.eval_ts.checked_add(offset_ms)?);
                 Some(slope? * horizon as f64 + intercept?)
             }),
             Self::DoubleExponentialSmoothing { smoothing, trend } => Box::new(move |window| {

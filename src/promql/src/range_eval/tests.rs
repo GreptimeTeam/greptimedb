@@ -350,9 +350,14 @@ fn udf_reference(
                 args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(quantile))));
             }
             RangeFunction::PredictLinear(horizon) => {
+                // The planner passes the evaluation time plus the fold offset.
                 args.push(ColumnarValue::Scalar(ScalarValue::Int64(Some(horizon))));
                 args.push(ColumnarValue::Array(Arc::new(
-                    TimestampMillisecondArray::new(grid.timestamps().clone(), None),
+                    TimestampMillisecondArray::from_iter_values(
+                        grid.timestamps()
+                            .iter()
+                            .map(|eval_ts| eval_ts + window.offset_ms),
+                    ),
                 )));
             }
             RangeFunction::DoubleExponentialSmoothing { smoothing, trend } => {
@@ -566,6 +571,20 @@ fn rejects_invalid_parameters() {
     };
     assert!(matches!(
         RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, RangeFunction::Rate),
+        Err(DataFusionError::Plan(_))
+    ));
+
+    let far_offset = RangeWindow {
+        range_ms: 10,
+        offset_ms: i64::MAX - 20,
+    };
+    assert!(matches!(
+        RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(0, 10, 4),
+            far_offset,
+            RangeFunction::PredictLinear(0)
+        ),
         Err(DataFusionError::Plan(_))
     ));
 }

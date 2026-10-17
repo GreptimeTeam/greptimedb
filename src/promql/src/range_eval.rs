@@ -96,7 +96,20 @@ impl RangeEvaluator {
         window: RangeWindow,
         function: RangeFunction,
     ) -> Result<Self> {
-        Self::with_kernel(input, grid, window, function.kernel())
+        if let RangeFunction::PredictLinear(_) = function {
+            let spec = grid.spec();
+            let last =
+                i128::from(spec.start_ms) + i128::from(spec.step_ms) * (i128::from(spec.len) - 1);
+            for eval_ts in [i128::from(spec.start_ms), last] {
+                if i64::try_from(eval_ts + i128::from(window.offset_ms)).is_err() {
+                    return Err(DataFusionError::Plan(format!(
+                        "predict_linear evaluation time {eval_ts} overflows with offset {} ms",
+                        window.offset_ms
+                    )));
+                }
+            }
+        }
+        Self::with_kernel(input, grid, window, function.kernel(window.offset_ms))
     }
 
     pub(crate) fn with_kernel(
