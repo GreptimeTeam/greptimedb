@@ -41,7 +41,6 @@ use crate::read::BoxedRecordBatchStream;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
-use crate::read::series_reader::SeriesRange;
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
@@ -77,7 +76,7 @@ pub(crate) struct ScanRequestFingerprint {
 enum RangeScanStage {
     Data,
     CandidateSeries,
-    SeriesData(SeriesRange),
+    SeriesData,
 }
 
 #[derive(Debug)]
@@ -191,7 +190,7 @@ impl ScanRequestFingerprint {
         }
     }
 
-    fn for_series_data(&self, range: SeriesRange) -> Self {
+    fn for_series_data(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
             time_filters: self.time_filters.clone(),
@@ -200,7 +199,7 @@ impl ScanRequestFingerprint {
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
             sequence_range: self.sequence_range,
-            stage: RangeScanStage::SeriesData(range),
+            stage: RangeScanStage::SeriesData,
             partition_expr_version: self.partition_expr_version,
         }
     }
@@ -519,13 +518,8 @@ pub(crate) fn build_candidate_range_cache_key(
 pub(crate) fn build_series_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
-    range: SeriesRange,
 ) -> Option<RangeScanCacheKey> {
-    build_range_cache_key_inner(
-        stream_ctx,
-        part_range,
-        Some(RangeScanStage::SeriesData(range)),
-    )
+    build_range_cache_key_inner(stream_ctx, part_range, Some(RangeScanStage::SeriesData))
 }
 
 fn build_range_cache_key_inner(
@@ -582,7 +576,7 @@ fn build_range_cache_key_inner(
     };
     let scan = match stage {
         Some(RangeScanStage::CandidateSeries) => scan.for_candidate_series(),
-        Some(RangeScanStage::SeriesData(assignment)) => scan.for_series_data(assignment),
+        Some(RangeScanStage::SeriesData) => scan.for_series_data(),
         Some(RangeScanStage::Data) | None => scan,
     };
 
@@ -1203,17 +1197,13 @@ mod tests {
 
         let data_key = build_range_cache_key(&ctx, &part_range).unwrap();
         let candidate_key = build_candidate_range_cache_key(&ctx, &part_range).unwrap();
-        let range_0 = SeriesRange::new(0, 2).unwrap();
-        let range_1 = SeriesRange::new(1, 2).unwrap();
-        let series_key_0 = build_series_range_cache_key(&ctx, &part_range, range_0).unwrap();
-        let series_key_1 = build_series_range_cache_key(&ctx, &part_range, range_1).unwrap();
+        let series_key = build_series_range_cache_key(&ctx, &part_range).unwrap();
 
         assert_ne!(data_key.scan, candidate_key.scan);
-        assert_ne!(data_key.scan, series_key_0.scan);
-        assert_ne!(candidate_key.scan, series_key_0.scan);
-        assert_ne!(series_key_0.scan, series_key_1.scan);
+        assert_ne!(data_key.scan, series_key.scan);
+        assert_ne!(candidate_key.scan, series_key.scan);
         assert_eq!(data_key.row_groups, candidate_key.row_groups);
-        assert_eq!(data_key.row_groups, series_key_0.row_groups);
+        assert_eq!(data_key.row_groups, series_key.row_groups);
     }
 
     #[tokio::test]
@@ -1497,7 +1487,7 @@ mod tests {
 
         let reset = fingerprint.without_time_filters();
         let candidate = fingerprint.for_candidate_series();
-        let series_data = fingerprint.for_series_data(SeriesRange::new(0, 1).unwrap());
+        let series_data = fingerprint.for_series_data();
 
         assert_eq!(reset.read_columns(), fingerprint.read_columns());
         assert_eq!(reset.read_column_types(), fingerprint.read_column_types());

@@ -1704,6 +1704,7 @@ async fn check_two_phase_series_scan(
     let mut series_to_partition = BTreeMap::new();
     let mut actual_rows = Vec::new();
     for (partition, batches) in partition_batches.into_iter().enumerate() {
+        let mut previous_row = None;
         for batch in batches {
             let tags = batch.column_by_name("tag_0").unwrap();
             let fields = batch
@@ -1718,6 +1719,14 @@ async fn check_two_phase_series_scan(
                 let tag = datatypes::arrow_array::string_array_value_at_index(tags, row)
                     .unwrap()
                     .to_string();
+                // Fixture tags a..d follow the encoded (table_id, tsid) order.
+                let row_key = (tag.clone(), timestamps.value(row));
+                assert!(
+                    previous_row
+                        .as_ref()
+                        .is_none_or(|previous| previous <= &row_key)
+                );
+                previous_row = Some(row_key);
                 let previous = series_to_partition.insert(tag.clone(), partition);
                 if let Some(previous) = previous {
                     assert_eq!(previous, partition, "series {tag} moved partitions");
@@ -1739,10 +1748,6 @@ async fn check_two_phase_series_scan(
         actual_rows
     );
     assert_eq!(4, series_to_partition.len());
-    assert_eq!(Some(&0), series_to_partition.get("a"));
-    assert_eq!(Some(&0), series_to_partition.get("c"));
-    assert_eq!(Some(&2), series_to_partition.get("b"));
-    assert_eq!(Some(&2), series_to_partition.get("d"));
 
     scanner.reset_state();
     assert_eq!("two_phase", scanner.mode());
@@ -1755,39 +1760,73 @@ async fn check_two_phase_series_scan(
             .map(Vec::len)
             .collect::<Vec<_>>()
     );
-    let replay_batches = try_join_all((0..3).map(|partition| {
-        let stream = scanner
-            .scan_partition(&context, &metrics_set, partition)
-            .unwrap();
-        async move { stream.try_collect::<Vec<_>>().await }
-    }))
+    // The shared dispatcher must also support consuming partitions sequentially.
+    let replay_batches = tokio::time::timeout(Duration::from_secs(10), async {
+        scanner
+            .build_stream()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+    })
     .await
+    .expect("sequential series scan stalled")
     .unwrap();
     let mut replay_rows = Vec::new();
-    for batches in replay_batches {
-        for batch in batches {
-            let tags = batch.column_by_name("tag_0").unwrap();
-            let fields = batch
-                .column_by_name("field_0")
-                .unwrap()
-                .as_primitive::<UInt64Type>();
-            let timestamps = batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_primitive::<TimestampMillisecondType>();
-            for row in 0..batch.num_rows() {
-                replay_rows.push((
-                    datatypes::arrow_array::string_array_value_at_index(tags, row)
-                        .unwrap()
-                        .to_string(),
-                    fields.value(row),
-                    timestamps.value(row),
-                ));
-            }
+    for batch in replay_batches {
+        let tags = batch.column_by_name("tag_0").unwrap();
+        let fields = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_primitive::<UInt64Type>();
+        let timestamps = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_primitive::<TimestampMillisecondType>();
+        for row in 0..batch.num_rows() {
+            replay_rows.push((
+                datatypes::arrow_array::string_array_value_at_index(tags, row)
+                    .unwrap()
+                    .to_string(),
+                fields.value(row),
+                timestamps.value(row),
+            ));
         }
     }
     replay_rows.sort();
     assert_eq!(actual_rows, replay_rows);
+
+    // A range builder/merge holding the only range permit must still receive
+    // batches from independently budgeted file sources.
+    scanner.reset_state();
+    let ranges = scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    scanner
+        .prepare(
+            PrepareRequest::default()
+                .with_ranges(vec![ranges])
+                .with_target_partitions(1),
+        )
+        .unwrap();
+    let batches = tokio::time::timeout(Duration::from_secs(10), async {
+        scanner
+            .scan_partition(&context, &metrics_set, 0)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+    })
+    .await
+    .expect("single-permit series scan stalled")
+    .unwrap();
+    assert_eq!(
+        actual_rows.len(),
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
 
     // Exercise precise field/time filtering and candidate tag filtering on both paths.
     let filtered = engine
@@ -4320,37 +4359,55 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
         filters: vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("a".to_string()))))],
         ..Default::default()
     };
-    let scan = |request| async {
+    let engine = &engine;
+    let scan = |request, num_partitions: usize| async move {
         let scanner = engine.scanner(region_id, request).await.unwrap();
-        let Scanner::Series(scanner) = scanner else {
+        let Scanner::Series(mut scanner) = scanner else {
             panic!("sparse metric scan must use SeriesScan");
         };
         assert_eq!("two_phase", scanner.mode());
-        assert_eq!(1, scanner.properties().num_partitions());
+        let mut ranges = vec![Vec::new(); num_partitions];
+        ranges[0] = scanner
+            .properties()
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        scanner
+            .prepare(
+                PrepareRequest::default()
+                    .with_ranges(ranges)
+                    .with_target_partitions(num_partitions),
+            )
+            .unwrap();
         let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
             .await
             .unwrap();
+        // Output partitions only receive series. Candidate discovery uses N,
+        // and the data reader/distributor uses N + 1. Only the latter proves
+        // series-data replay.
+        let verbose = format!("{}", VerboseDisplay(scanner));
+        let data_partition = format!("\"partition\":{}, \"metrics\":", num_partitions + 1);
+        let data_metrics = verbose
+            .split(data_partition.as_str())
+            .nth(1)
+            .and_then(|metrics| metrics.split("\"partition\":").next())
+            .expect("missing two-phase data-reader metrics");
         (
             canonical_sparse_rows(&batches),
-            format!("{}", VerboseDisplay(scanner)),
+            data_metrics.contains("\"range_cache_hit\":"),
         )
     };
 
-    let (cold, _) = scan(restrictive.clone()).await;
+    let (cold, _) = scan(restrictive.clone(), 1).await;
     // Cache insertion is performed by the range stream's async concat task.
     // Wait for the SeriesReader's data-stage entry, rather than treating a
     // candidate-stage cache hit as evidence that the reader replayed its data.
     let warm = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let (rows, verbose) = scan(restrictive.clone()).await;
-            // The single output partition is 0; the candidate distributor uses
-            // synthetic partition 1. Only a partition-0 hit proves data replay.
-            let data_metrics = verbose
-                .split("\"partition\":0, \"metrics\":")
-                .nth(1)
-                .and_then(|metrics| metrics.split("\"partition\":").next())
-                .expect("missing two-phase data-reader metrics");
-            if data_metrics.contains("\"range_cache_hit\":") {
+            let (rows, data_cache_hit) = scan(restrictive.clone(), 1).await;
+            if data_cache_hit {
                 return rows;
             }
             tokio::task::yield_now().await;
@@ -4359,6 +4416,11 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
     .await
     .expect("series-data range cache did not complete and replay within timeout");
     assert_eq!(cold, warm);
+
+    // Changing downstream parallelism must reuse the same complete data cache.
+    let (repartitioned, data_cache_hit) = scan(restrictive.clone(), 3).await;
+    assert_eq!(cold, repartitioned);
+    assert!(data_cache_hit);
 
     assert_eq!(
         vec![
@@ -4373,10 +4435,13 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
 
     // (0, 5] selects the same three flushed files as (0, 4] but its output
     // includes a's sequence-5 row, so it must not reuse the restrictive rows.
-    let (different_upper, _) = scan(ScanRequest {
-        memtable_max_sequence: Some(5),
-        ..restrictive.clone()
-    })
+    let (different_upper, _) = scan(
+        ScanRequest {
+            memtable_max_sequence: Some(5),
+            ..restrictive.clone()
+        },
+        1,
+    )
     .await;
     assert_eq!(
         vec![
@@ -4390,11 +4455,14 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
         "different upper bound reused restrictive rows"
     );
 
-    let (unbounded, _) = scan(ScanRequest {
-        distribution: Some(TimeSeriesDistribution::PerSeries),
-        filters: restrictive.filters.clone(),
-        ..Default::default()
-    })
+    let (unbounded, _) = scan(
+        ScanRequest {
+            distribution: Some(TimeSeriesDistribution::PerSeries),
+            filters: restrictive.filters.clone(),
+            ..Default::default()
+        },
+        1,
+    )
     .await;
     assert_eq!(
         vec![
