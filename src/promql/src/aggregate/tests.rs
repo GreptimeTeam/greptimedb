@@ -194,6 +194,66 @@ fn compensated_sum_and_overflowing_avg_follow_prometheus() {
     assert_eq!(values(&sum[0], 0), (3, vec![Some(f64::INFINITY)]));
 }
 
+/// Kahan compensation is part of Prometheus' algorithm, but its effect on these means stays
+/// within the fixture tolerance, so the Prometheus bits (from `aggregate/prometheus_cases.txt`)
+/// are compared exactly.
+#[test]
+fn avg_compensation_matches_prometheus_bits() {
+    let schema = schema(&["value"]);
+    let cases: [(&[u64], u64); 3] = [
+        // Compensation added to the incremental mean.
+        (
+            &[
+                0x7fefffffffffffff,
+                0x7fe2b55f24962471,
+                0x7f7b95c7ed3a8f06,
+                0x7f75d53a379fb517,
+                0x7f71a21ceafb8ae4,
+                0xffe1f8b2ce599b68,
+            ],
+            0x7fc62c8462e82319,
+        ),
+        // The direct mean divides sum and compensation separately.
+        (
+            &[
+                0x406c76fff31cc498,
+                0xc300281b07086372,
+                0xc2b33ace5f269b56,
+                0xc2807b0afee3570f,
+                0x40527b1b3a5c44e6,
+            ],
+            0xc2daea473b33e9f1,
+        ),
+        // The compensation is rescaled when the mean switches to the incremental form.
+        (
+            &[
+                0xffe985777be7cf98,
+                0x7fb976769842f3a1,
+                0xffe6ef0261aba506,
+                0x7fbc6cc7f64a3057,
+            ],
+            0xffd4dc0905e0e810,
+        ),
+    ];
+    for (inputs, expected) in cases {
+        let series = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, bits)| {
+                input(
+                    &schema,
+                    metric("a", &[("i", &i.to_string())]),
+                    1,
+                    &[vec![Some(f64::from_bits(*bits))]],
+                )
+            })
+            .collect::<Vec<_>>();
+        let avg = aggregate_float(&schema, &series, AggregateOp::Avg, Grouping::By(&[])).unwrap();
+        let (_, avg) = values(&avg[0], 0);
+        assert_eq!(avg[0].map(f64::to_bits), Some(expected));
+    }
+}
+
 #[test]
 fn fields_are_aggregated_independently() {
     // A field without input values at a row is null there, even for count and group; the row
