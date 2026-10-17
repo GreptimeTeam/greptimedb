@@ -38,6 +38,7 @@ use datatypes::series::time::TimeAxis;
 
 pub use aggregate::{HistogramAggregate, aggregate_histograms};
 
+use crate::go_sort;
 use crate::grid_series::{GridSeriesBuilder, LabelSet, label_set, merge_same_labelset};
 
 const BUCKET_LABEL: &str = "le";
@@ -58,9 +59,9 @@ pub enum HistogramFunction {
 /// Float series with the same labels other than `le` form a classic histogram; a float series
 /// whose `le` does not parse is ignored. Native histogram samples are evaluated one by one. At a
 /// point where a native histogram and classic buckets with the same labels (`le` aside) are both
-/// present, neither is evaluated. Each field is evaluated on its own. Results drop `le` and
-/// `__name__`, and series that then share a label set are merged as [`merge_same_labelset`]
-/// does.
+/// present, neither is evaluated. Each field is evaluated on its own. Classic results drop
+/// `le`; all results drop `__name__`, `__type__` and `__unit__`. Series that then share a label
+/// set are merged as [`merge_same_labelset`] does.
 pub fn evaluate_histograms(
     function: HistogramFunction,
     schema: &Arc<SeriesSchema>,
@@ -97,14 +98,6 @@ pub fn evaluate_histograms(
     let mut native_buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
     for mut group in groups.into_values() {
-        // Pre-sorting by bound keeps the buckets of every point sorted. Like Go's comparison,
-        // +0 and -0 are equal and keep input order, and coalescing keeps the first bound.
-        group
-            .classic
-            .sort_by(|a, b| match (a.0.is_nan(), b.0.is_nan()) {
-                (false, false) => a.0.partial_cmp(&b.0).expect("neither is NaN"),
-                (nan_a, nan_b) => nan_a.cmp(&nan_b),
-            });
         let ranges = group
             .classic
             .iter()
@@ -120,6 +113,10 @@ pub fn evaluate_histograms(
                         classic_buckets.push(classic::Bucket { upper_bound, count });
                     }
                 }
+                // Go sorts the buckets present at each point by `<`: +0 and -0 tie and NaN
+                // ties with everything, so which of them coalescing keeps and where a NaN
+                // bound lands follow its sort algorithm.
+                go_sort::sort_by(&mut classic_buckets, |a, b| a.upper_bound < b.upper_bound);
                 let native = group.native.and_then(|(series, range)| {
                     match sample(series, range, field, point) {
                         Some(SampleRef::Histogram(h)) => Some(h),

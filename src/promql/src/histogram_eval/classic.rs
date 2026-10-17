@@ -18,9 +18,21 @@
 /// Relative difference under which neighbouring bucket counts are taken as equal.
 const SMALL_DELTA_TOLERANCE: f64 = 1e-12;
 
-/// Go's `strconv.ParseFloat`, which rejects finite literals out of the f64 range.
+/// Go's `strconv.ParseFloat`, which rejects finite literals out of the f64 range and a signed
+/// NaN, and accepts `_` between digits. Hexadecimal literals are not supported.
 pub(super) fn parse_bound(text: &str) -> Option<f64> {
-    let value: f64 = text.parse().ok()?;
+    let unsigned = text.trim_start_matches(['+', '-']);
+    if unsigned.len() != text.len() && unsigned.eq_ignore_ascii_case("nan") {
+        return None;
+    }
+    let value: f64 = if text.contains('_') {
+        if !underscores_ok(text) {
+            return None;
+        }
+        text.replace('_', "").parse().ok()?
+    } else {
+        text.parse().ok()?
+    };
     if value.is_infinite() {
         let unsigned = text.trim_start_matches(['+', '-']);
         if !unsigned.eq_ignore_ascii_case("inf") && !unsigned.eq_ignore_ascii_case("infinity") {
@@ -28,6 +40,17 @@ pub(super) fn parse_bound(text: &str) -> Option<f64> {
         }
     }
     Some(value)
+}
+
+/// Go's `strconv.underscoreOK` for a decimal literal: every `_` sits between two digits.
+fn underscores_ok(text: &str) -> bool {
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text).as_bytes();
+    digits.iter().enumerate().all(|(i, &byte)| {
+        byte != b'_'
+            || (i > 0
+                && digits[i - 1].is_ascii_digit()
+                && digits.get(i + 1).is_some_and(u8::is_ascii_digit))
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
