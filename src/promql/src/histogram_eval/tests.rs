@@ -673,3 +673,21 @@ fn bounds_parse_like_go() {
         assert_eq!(super::classic::parse_bound(rejected), None, "{rejected}");
     }
 }
+
+/// Widened zero thresholds take Go's table bound, one ulp below `2^0.5` for schema 1 bucket 1,
+/// and later comparisons see that exact value.
+#[test]
+fn widened_zero_threshold_uses_go_bounds() {
+    let go_bound = f64::from_bits(0x3ff6a09e667f3bcc);
+    let mut a = histogram("1/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let previous = a.clone();
+    a.add(&histogram("1/3ff3333333333333/0/0/0/0/////"))
+        .unwrap();
+    assert_eq!(a.zero_threshold.to_bits(), go_bound.to_bits());
+
+    let current = histogram(&format!(
+        "1/{:x}/3ff0000000000000/3ff0000000000000/0/0/////",
+        go_bound.to_bits()
+    ));
+    assert!(!current.detect_reset(&previous).unwrap());
+}

@@ -18,6 +18,7 @@
 //! `histogram_stddev` and `histogram_stdvar` over native histograms.
 
 mod aggregate;
+mod bounds;
 mod classic;
 // `sub`, `copy_to_schema`, `detect_reset` and `equals` are for the native histogram range
 // functions and binary operators, which build on other branches.
