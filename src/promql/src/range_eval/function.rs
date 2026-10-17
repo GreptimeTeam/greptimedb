@@ -18,8 +18,8 @@
 //! operation order. Arithmetic that GreptimeDB's range UDFs compute the same way is shared with
 //! them.
 
-use super::{FloatWindow, WindowKernel};
 use crate::functions::{EdgeKind, add_counter_resets, count_edges, extremum, instant_delta};
+use crate::range_eval::{FloatWindow, WindowKernel};
 
 /// A PromQL range-vector function over float samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
