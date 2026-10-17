@@ -30,19 +30,20 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel};
+use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel, subquery_grid};
 use crate::functions::{
     AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing, IDelta,
     Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
     QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
 };
-use crate::grid_series::reference::{Dense, assert_series_eq, special_value};
+use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::reference::{Dense, assert_series_eq, random_dense, special_value};
 use crate::range_array::RangeArray;
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
@@ -195,20 +196,23 @@ fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
         .collect()
 }
 
-/// Rows without stale markers and, for each grid point, the range of those rows in its window,
-/// found by scanning all rows independently of chunking and cursors.
+/// Rows on the evaluation timeline, without stale rows when `drop_stale`, and for each grid
+/// point the range of those rows in its window, found by scanning all rows independently of
+/// chunking and cursors.
 fn reference_windows(
     rows: &[Row],
     grid: &EvalGrid,
     window: RangeWindow,
+    drop_stale: bool,
 ) -> (Vec<Row>, Vec<Range<usize>>) {
     let kept: Vec<_> = rows
         .iter()
         .filter(|(_, values)| {
-            !values
-                .iter()
-                .flatten()
-                .any(|value| value.to_bits() == PROMETHEUS_STALE_NAN_BITS)
+            !drop_stale
+                || !values
+                    .iter()
+                    .flatten()
+                    .any(|value| value.to_bits() == PROMETHEUS_STALE_NAN_BITS)
         })
         .map(|(timestamp, values)| (timestamp + fold_offset(grid, window), values.clone()))
         .collect();
@@ -250,8 +254,14 @@ fn windows_of(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Vec<Range<u
 }
 
 /// Applies the probe to the valid samples of every reference window.
-fn reference(rows: &[Row], grid: &EvalGrid, window: RangeWindow, fields: usize) -> Dense {
-    let (kept, windows) = reference_windows(rows, grid, window);
+fn reference(
+    rows: &[Row],
+    grid: &EvalGrid,
+    window: RangeWindow,
+    fields: usize,
+    drop_stale: bool,
+) -> Dense {
+    let (kept, windows) = reference_windows(rows, grid, window, drop_stale);
     grid.timestamps()
         .iter()
         .zip(windows)
@@ -291,8 +301,9 @@ fn udf_reference(
     grid: &EvalGrid,
     window: RangeWindow,
     fields: usize,
+    drop_stale: bool,
 ) -> Dense {
-    let (kept, _) = reference_windows(rows, grid, window);
+    let (kept, _) = reference_windows(rows, grid, window, drop_stale);
     let mut dense = vec![vec![None; fields]; grid.timestamps().len()];
     for field in 0..fields {
         let rows: Vec<_> = if matches!(
@@ -455,7 +466,7 @@ fn evaluator_matches_brute_force_reference() {
         let mut evaluator = probe_evaluator(fields, grid.clone(), window);
         for host in 0..3 {
             let rows = random_rows(&mut rng, fields);
-            let expected = reference(&rows, &grid, window, fields);
+            let expected = reference(&rows, &grid, window, fields, true);
             let mut result = None;
             for piece in random_chunks(&mut rng, &rows, fields, host) {
                 assert!(
@@ -470,9 +481,9 @@ fn evaluator_matches_brute_force_reference() {
     }
 }
 
-#[test]
-fn functions_match_range_udfs() {
-    for function in [
+/// Every function, with parameters inside, at and outside their valid ranges.
+fn all_functions() -> Vec<RangeFunction> {
+    vec![
         RangeFunction::Rate,
         RangeFunction::Increase,
         RangeFunction::Delta,
@@ -519,7 +530,12 @@ fn functions_match_range_udfs() {
             smoothing: f64::NAN,
             trend: 0.1,
         },
-    ] {
+    ]
+}
+
+#[test]
+fn functions_match_range_udfs() {
+    for function in all_functions() {
         for seed in 0..300 {
             let mut rng = StdRng::seed_from_u64(seed);
             let fields = rng.random_range(1..=3);
@@ -529,7 +545,7 @@ fn functions_match_range_udfs() {
                     .unwrap();
             for host in 0..3 {
                 let rows = random_rows(&mut rng, fields);
-                let expected = udf_reference(function, &rows, &grid, window, fields);
+                let expected = udf_reference(function, &rows, &grid, window, fields, true);
                 let mut result = None;
                 for piece in random_chunks(&mut rng, &rows, fields, host) {
                     result = evaluator.push(&piece).unwrap();
@@ -590,18 +606,6 @@ fn rejects_invalid_parameters() {
             zero_range,
             RangeFunction::Rate
         ),
-        Err(DataFusionError::Plan(_))
-    ));
-
-    let mut evaluated = raw_schema(1);
-    evaluated.eval_grid = Some(grid(0, 10, 4));
-    let window = RangeWindow {
-        range_ms: 10,
-        offset_ms: 0,
-        anchor_ms: None,
-    };
-    assert!(matches!(
-        RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, RangeFunction::Rate),
         Err(DataFusionError::Plan(_))
     ));
 
@@ -755,4 +759,122 @@ fn retains_only_samples_later_windows_need() {
         // At most one window plus one grid step of samples survives each chunk.
         assert!(evaluator.fields[0].timestamps.len() <= 60);
     }
+}
+
+/// A random evaluated series on `grid`; values may carry the stale bit pattern, which computed
+/// input keeps as an ordinary NaN.
+fn random_evaluated(
+    rng: &mut StdRng,
+    grid: &Arc<EvalGrid>,
+    fields: usize,
+    host: u64,
+) -> (Option<Series>, Vec<Row>) {
+    let mut dense = random_dense(rng, grid.timestamps().len(), fields);
+    for value in dense.iter_mut().flatten().flatten() {
+        if rng.random_bool(0.05) {
+            *value = stale();
+        }
+    }
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(fields).fields,
+        eval_grid: Some(grid.clone()),
+    });
+    let mut builder = GridSeriesBuilder::try_new(schema).unwrap();
+    for (index, row) in dense.iter().enumerate() {
+        builder.push(index, row).unwrap();
+    }
+    let rows = grid
+        .timestamps()
+        .iter()
+        .zip(&dense)
+        .filter(|(_, row)| row.iter().any(Option::is_some))
+        .map(|(timestamp, row)| (*timestamp, row.clone()))
+        .collect();
+    (builder.finish(metric(host)).unwrap(), rows)
+}
+
+#[test]
+fn subquery_series_match_references() {
+    for seed in 0..300 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let fields = rng.random_range(1..=3);
+        let (outer, window) = random_window(&mut rng);
+        let step = rng.random_range(1..4_000);
+        let Some(inner) = subquery_grid(outer.spec(), window, step).unwrap() else {
+            continue;
+        };
+        let inner = Arc::new(EvalGrid::try_new(inner).unwrap());
+        let schema = SeriesSchema {
+            fields: raw_schema(fields).fields,
+            eval_grid: Some(inner.clone()),
+        };
+        let (Some(series), rows) = random_evaluated(&mut rng, &inner, fields, seed) else {
+            continue;
+        };
+        let mut probe =
+            RangeEvaluator::with_kernel(&schema, outer.clone(), window, Box::new(probe), true)
+                .unwrap();
+        let expected = reference(&rows, &outer, window, fields, false);
+        assert_series_eq(
+            probe.push_series(&series).unwrap().as_ref(),
+            &expected,
+            &metric(seed),
+        );
+        for function in all_functions() {
+            let mut evaluator =
+                RangeEvaluator::try_new(&schema, outer.clone(), window, function).unwrap();
+            let expected = udf_reference(function, &rows, &outer, window, fields, false);
+            assert_series_eq(
+                evaluator.push_series(&series).unwrap().as_ref(),
+                &expected,
+                &metric(seed),
+            );
+        }
+    }
+}
+
+#[test]
+fn subquery_grid_covers_every_step_multiple_in_the_windows() {
+    for seed in 0..2_000 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let (outer, window) = random_window(&mut rng);
+        let spec = outer.spec();
+        let step = rng.random_range(1..4_000);
+        let fold = fold_offset(&outer, window);
+        let last_eval = match window.anchor_ms {
+            Some(_) => spec.start_ms,
+            None => *outer.timestamps().last().unwrap(),
+        };
+        let lower = spec.start_ms - fold - window.range_ms;
+        let expected: Vec<i64> = ((lower.div_euclid(step) - 1) * step..=last_eval - fold)
+            .step_by(step as usize)
+            .filter(|point| *point > lower && point.rem_euclid(step) == 0)
+            .collect();
+        let actual = subquery_grid(spec, window, step)
+            .unwrap()
+            .map(|grid| EvalGrid::try_new(grid).unwrap().timestamps().to_vec())
+            .unwrap_or_default();
+        assert_eq!(actual, expected, "seed {seed}");
+    }
+}
+
+#[test]
+fn rejects_input_of_the_other_kind() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let evaluated = SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid(0, 10, 4)),
+    };
+    let mut evaluator =
+        RangeEvaluator::try_new(&evaluated, grid(0, 10, 4), window, RangeFunction::Rate).unwrap();
+    execution_error(evaluator.push(&chunk(&[(1, vec![Some(1.0)])], 1, 0, true)));
+
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(evaluated)).unwrap();
+    builder.push(0, &[Some(1.0)]).unwrap();
+    let series = builder.finish(metric(0)).unwrap().unwrap();
+    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
 }

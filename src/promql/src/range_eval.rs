@@ -21,8 +21,8 @@ use datafusion::arrow::buffer::Buffer;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::EvalGrid;
+use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 
 use crate::grid_series::GridSeriesBuilder;
 
@@ -72,13 +72,17 @@ pub struct RangeEvaluator {
     kernel: WindowKernel,
     output_schema: Arc<SeriesSchema>,
     output: GridSeriesBuilder,
+    /// The grid of evaluated input series, such as the inner result of a subquery; `None` for
+    /// raw input.
+    input_grid: Option<GridSpec>,
     series: Option<SeriesState>,
     fields: Vec<FieldSamples>,
     row: Vec<Option<f64>>,
 }
 
 struct SeriesState {
-    primary_key: Buffer,
+    /// `None` for evaluated input, which arrives as one complete series.
+    primary_key: Option<Buffer>,
     metric: MetricName,
     last_ts: i64,
     /// Next grid index to evaluate.
@@ -146,11 +150,6 @@ impl RangeEvaluator {
         kernel: WindowKernel,
         step_invariant: bool,
     ) -> Result<Self> {
-        if input.eval_grid.is_some() {
-            return Err(DataFusionError::Plan(
-                "range evaluation input must be a raw series schema".into(),
-            ));
-        }
         if window.range_ms <= 0 {
             return Err(DataFusionError::Plan(format!(
                 "range must be positive, got {} ms",
@@ -173,6 +172,7 @@ impl RangeEvaluator {
             replay,
             kernel,
             output: GridSeriesBuilder::try_new(output_schema.clone())?,
+            input_grid: input.eval_grid.as_ref().map(|grid| grid.spec()),
             output_schema,
             series: None,
             fields: input
@@ -196,8 +196,13 @@ impl RangeEvaluator {
     ///
     /// The evaluator must not be reused after an error.
     pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<Series>> {
+        if self.input_grid.is_some() {
+            return Err(DataFusionError::Execution(
+                "raw series chunk pushed to an evaluator of evaluated series".into(),
+            ));
+        }
         self.check_chunk(chunk)?;
-        self.ingest(chunk)?;
+        self.ingest(chunk.time.as_buffer(), &chunk.fields, true)?;
         let last_ts = chunk.time.as_buffer()[chunk.time.len() - 1];
         if !chunk.is_last {
             // Later chunks only hold samples after `last_ts`.
@@ -206,8 +211,44 @@ impl RangeEvaluator {
             ))?;
             return Ok(None);
         }
+        self.finish_series()
+    }
+
+    /// Evaluates one complete evaluated series, such as the inner result of a subquery: the
+    /// value at each grid point is a sample at that time. Stale markers are kept as values,
+    /// since the input is computed.
+    pub fn push_series(&mut self, series: &Series) -> Result<Option<Series>> {
+        let TimeAxis::Grid(range) = &series.time else {
+            return Err(DataFusionError::Execution(
+                "evaluated range input must be a grid series".into(),
+            ));
+        };
+        if self.input_grid != Some(range.grid().spec())
+            || series.fields.len() != self.fields.len()
+            || series.fields.iter().any(|field| field.len() != range.len())
+        {
+            return Err(DataFusionError::Execution(
+                "evaluated series does not match the input schema".into(),
+            ));
+        }
+        if self.series.is_some() {
+            return Err(DataFusionError::Execution(
+                "evaluated series pushed inside a raw series".into(),
+            ));
+        }
+        self.series = Some(SeriesState {
+            primary_key: None,
+            metric: series.metric.clone(),
+            last_ts: 0,
+            cursor: 0,
+        });
+        self.ingest(&range.timestamps(), &series.fields, false)?;
+        self.finish_series()
+    }
+
+    fn finish_series(&mut self) -> Result<Option<Series>> {
         self.evaluate(None)?;
-        let state = self.series.take().expect("checked by check_chunk");
+        let state = self.series.take().expect("set by the caller");
         for field in &mut self.fields {
             field.timestamps.clear();
             field.values.clear();
@@ -227,6 +268,7 @@ impl RangeEvaluator {
     }
 
     fn check_chunk(&mut self, chunk: &RawSeriesChunk) -> Result<()> {
+        let primary_key = Some(chunk.primary_key.as_slice());
         let time = chunk.time.as_buffer();
         if time.is_empty()
             || chunk.fields.len() != self.fields.len()
@@ -247,14 +289,14 @@ impl RangeEvaluator {
                     )
                 })?;
                 self.series = Some(SeriesState {
-                    primary_key: chunk.primary_key.clone(),
+                    primary_key: Some(chunk.primary_key.clone()),
                     metric,
                     last_ts: time[time.len() - 1],
                     cursor: 0,
                 });
             }
             Some(state) => {
-                if state.primary_key.as_slice() != chunk.primary_key.as_slice()
+                if state.primary_key.as_ref().map(|key| key.as_slice()) != primary_key
                     || chunk.metric.as_ref() != Some(&state.metric)
                 {
                     return Err(DataFusionError::Execution(
@@ -273,18 +315,25 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    fn ingest(&mut self, chunk: &RawSeriesChunk) -> Result<()> {
-        let state = self.series.as_ref().expect("checked by check_chunk");
+    /// Retains the samples of `fields` at `timestamps`; with `drop_stale`, a row holding a stale
+    /// marker in any field is dropped.
+    fn ingest(
+        &mut self,
+        timestamps: &[i64],
+        fields: &SeriesFields,
+        drop_stale: bool,
+    ) -> Result<()> {
+        let state = self.series.as_ref().expect("set by the caller");
         if state.cursor >= self.points_read() {
             // Every window that reads samples has been evaluated.
             return Ok(());
         }
-        let mut samples: Vec<_> = chunk.fields.iter().map(|field| field.iter()).collect();
-        for &timestamp in chunk.time.as_buffer().iter() {
+        let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();
+        for &timestamp in timestamps {
             self.row.clear();
             let mut stale = false;
             for field in &mut samples {
-                match field.next().expect("field length checked by check_chunk") {
+                match field.next().expect("field length checked by the caller") {
                     SampleRef::Missing => self.row.push(None),
                     SampleRef::Float(value) => {
                         stale |= is_prometheus_stale_nan(value);
@@ -297,7 +346,7 @@ impl RangeEvaluator {
                     }
                 }
             }
-            if stale {
+            if stale && drop_stale {
                 continue;
             }
             // Like RangeManipulate, any kept sample whose shifted time leaves i64 fails the series.
@@ -442,16 +491,55 @@ fn evaluate_row(
 /// The offset samples are shifted by: the selector offset, or for `@` the offset that places
 /// the anchored window at the first grid point.
 fn fold_offset(grid: &EvalGrid, window: RangeWindow) -> Result<i64> {
+    fold_offset_of(grid.spec(), window)
+}
+
+fn fold_offset_of(grid: GridSpec, window: RangeWindow) -> Result<i64> {
     let Some(anchor) = window.anchor_ms else {
         return Ok(window.offset_ms);
     };
     anchor
         .checked_sub(window.offset_ms)
-        .and_then(|end| grid.spec().start_ms.checked_sub(end))
+        .and_then(|end| grid.start_ms.checked_sub(end))
         .ok_or_else(|| {
             DataFusionError::Plan(format!(
                 "@ {anchor} ms with offset {} ms is out of range",
                 window.offset_ms
             ))
         })
+}
+
+/// The inner grid of a subquery read by `window` from the outer grid `outer`: the multiples of
+/// `step_ms` after `start - F - range` up to the last window end, where `F` is the fold offset
+/// of `window`; with `@`, the only window end is `start - F`. `None` when no multiple falls in
+/// the windows.
+pub fn subquery_grid(
+    outer: GridSpec,
+    window: RangeWindow,
+    step_ms: i64,
+) -> Result<Option<GridSpec>> {
+    if step_ms <= 0 {
+        return Err(DataFusionError::Plan(format!(
+            "subquery step must be positive, got {step_ms} ms"
+        )));
+    }
+    let fold_offset = i128::from(fold_offset_of(outer, window)?);
+    let step = i128::from(step_ms);
+    let start = i128::from(outer.start_ms);
+    let last_eval = match window.anchor_ms {
+        Some(_) => start,
+        None => start + i128::from(outer.step_ms) * (i128::from(outer.len) - 1),
+    };
+    let first = ((start - fold_offset - i128::from(window.range_ms)).div_euclid(step) + 1) * step;
+    let last = last_eval - fold_offset;
+    if first > last {
+        return Ok(None);
+    }
+    let len = (last - first) / step + 1;
+    let first = i64::try_from(first).map_err(|_| {
+        DataFusionError::Plan(format!("subquery grid start {first} ms is out of range"))
+    })?;
+    GridSpec::try_new(first, step_ms, len as u64)
+        .map(Some)
+        .map_err(|error| DataFusionError::External(Box::new(error)))
 }
