@@ -318,6 +318,22 @@ impl WorkerGroup {
         self.worker(region_id).submit_request(request).await
     }
 
+    /// Submits the writes of one request, those of each worker in one message, so that the
+    /// worker handles them in one batch.
+    pub(crate) async fn submit_writes(&self, writes: Vec<SenderWriteRequest>) -> Result<()> {
+        let mut writes_by_worker: HashMap<usize, Vec<SenderWriteRequest>> = HashMap::new();
+        for write in writes {
+            let index = region_id_to_index(write.request.region_id, self.workers.len());
+            writes_by_worker.entry(index).or_default().push(write);
+        }
+        for (index, writes) in writes_by_worker {
+            self.workers[index]
+                .submit_request(WorkerRequest::Writes(writes))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Returns true if the specific region exists.
     pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.worker(region_id).is_region_exists(region_id)
@@ -1057,6 +1073,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                             match request_with_time.request {
                                 WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                                WorkerRequest::Writes(sender_reqs) => write_req_buffer.extend(sender_reqs),
                                 WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
                                 WorkerRequest::BulkInserts(bulk_insert) => {
                                     bulk_insert_req_num += 1;
@@ -1110,6 +1127,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                         match request_with_time.request {
                             WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                            WorkerRequest::Writes(sender_reqs) => {
+                                write_req_buffer.extend(sender_reqs)
+                            }
                             WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
                             WorkerRequest::BulkInserts(bulk_insert) => {
                                 bulk_insert_req_num += 1;
@@ -1184,7 +1204,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ) {
         for worker_req in general_requests.drain(..) {
             match worker_req {
-                WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
+                WorkerRequest::Write(_) | WorkerRequest::Writes(_) | WorkerRequest::Ddl(_) => {
                     // These requests are categorized before dispatching general requests.
                     continue;
                 }
