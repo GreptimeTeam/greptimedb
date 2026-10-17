@@ -10706,7 +10706,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.41.1"
-source = "git+https://github.com/sunng87/pgwire?branch=master#2389926332062022aec944e926e8725614c69af3"
+source = "git+https://github.com/sunng87/pgwire?branch=master#989351a62414aaf18db379dd7eec6466ab37a774"
 dependencies = [
  "async-trait",
  "aws-lc-rs",

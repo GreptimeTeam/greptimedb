@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use ::auth::{
     BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
@@ -26,6 +26,7 @@ use common_error::status_code::StatusCode;
 use common_time::Timezone;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
+use pgwire::api::auth::driver::AuthOutcome;
 use pgwire::api::auth::mechanism::{AuthMechanism, AuthMechanismFactory, AuthState};
 use pgwire::api::auth::sasl::scram::{ScramAuth, ScramSecret};
 use pgwire::api::auth::{AuthSource, LoginInfo as WireLoginInfo};
@@ -43,10 +44,6 @@ use crate::postgres::PostgresServerHandlerInner;
 use crate::postgres::types::PgErrorCode;
 use crate::postgres::utils::convert_err;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-
-/// Set by the auth mechanism on success, read by the startup handler once
-/// the driver completed the handshake.
-pub(crate) type AuthOutcome = Arc<OnceLock<UserInfoRef>>;
 
 /// Query cancellation is not supported yet, so announce pid/secret key 0 as
 /// before the `AuthDriver` adoption.
@@ -218,14 +215,13 @@ impl AuthSource for FixedScramSecretSource {
 }
 
 /// pgwire's SCRAM mechanism plus the GreptimeDB authorization check, run
-/// after the client proof is verified.
+/// after the client proof is verified. Reports the verified identity.
 struct PgScramMechanism {
     inner: Box<dyn AuthMechanism>,
     user_provider: UserProviderRef,
     login: LoginInfo,
     /// `None` for unknown users, whose mock verifier can never be satisfied.
     user_info: Option<UserInfoRef>,
-    outcome: AuthOutcome,
 }
 
 impl PgScramMechanism {
@@ -237,23 +233,37 @@ impl PgScramMechanism {
             .inc();
         result
     }
+
+    /// Maps an inner state, dropping its `()` identity.
+    fn map_state(state: AuthState) -> AuthState<UserInfoRef> {
+        match state {
+            AuthState::InProgress(message) => AuthState::InProgress(message),
+            AuthState::Ok { final_message, .. } => AuthState::Ok {
+                final_message,
+                identity: None,
+            },
+            AuthState::Failed(e) => AuthState::Failed(e),
+        }
+    }
 }
 
 #[async_trait]
-impl AuthMechanism for PgScramMechanism {
-    async fn begin(&mut self, client: &(dyn ClientInfo + Send + Sync)) -> PgWireResult<AuthState> {
-        self.inner.begin(client).await
+impl AuthMechanism<UserInfoRef> for PgScramMechanism {
+    async fn begin(
+        &mut self,
+        client: &(dyn ClientInfo + Send + Sync),
+    ) -> PgWireResult<AuthState<UserInfoRef>> {
+        self.inner.begin(client).await.map(Self::map_state)
     }
 
     async fn next(
         &mut self,
         client: &(dyn ClientInfo + Send + Sync),
         message: PasswordMessageFamily,
-    ) -> PgWireResult<AuthState> {
-        let state = self.inner.next(client, message).await;
-        match state {
+    ) -> PgWireResult<AuthState<UserInfoRef>> {
+        match self.inner.next(client, message).await {
             // Proof verified: authorize before the handshake completes.
-            Ok(AuthState::Ok(final_message)) => {
+            Ok(AuthState::Ok { final_message, .. }) => {
                 let Some(user_info) = self.user_info.take() else {
                     return Ok(Self::record_scram_failure(AuthState::Failed(
                         PgWireError::InvalidPassword(self.login.user.clone().unwrap_or_default()),
@@ -263,10 +273,12 @@ impl AuthMechanism for PgScramMechanism {
                     // Already recorded by `authorize`; don't double-count.
                     return Ok(AuthState::Failed(e));
                 }
-                let _ = self.outcome.set(user_info);
-                Ok(AuthState::Ok(final_message))
+                Ok(AuthState::Ok {
+                    final_message,
+                    identity: Some(user_info),
+                })
             }
-            Ok(state @ AuthState::InProgress(_)) => Ok(state),
+            Ok(AuthState::InProgress(message)) => Ok(AuthState::InProgress(message)),
             Ok(AuthState::Failed(e)) => Ok(Self::record_scram_failure(AuthState::Failed(e))),
             Err(e) => Err(Self::record_scram_failure(e)),
         }
@@ -276,12 +288,14 @@ impl AuthMechanism for PgScramMechanism {
 struct PgCleartextMechanism {
     user_provider: UserProviderRef,
     login: LoginInfo,
-    outcome: AuthOutcome,
 }
 
 #[async_trait]
-impl AuthMechanism for PgCleartextMechanism {
-    async fn begin(&mut self, _client: &(dyn ClientInfo + Send + Sync)) -> PgWireResult<AuthState> {
+impl AuthMechanism<UserInfoRef> for PgCleartextMechanism {
+    async fn begin(
+        &mut self,
+        _client: &(dyn ClientInfo + Send + Sync),
+    ) -> PgWireResult<AuthState<UserInfoRef>> {
         Ok(AuthState::InProgress(Authentication::CleartextPassword))
     }
 
@@ -289,16 +303,43 @@ impl AuthMechanism for PgCleartextMechanism {
         &mut self,
         _client: &(dyn ClientInfo + Send + Sync),
         message: PasswordMessageFamily,
-    ) -> PgWireResult<AuthState> {
+    ) -> PgWireResult<AuthState<UserInfoRef>> {
         let message = message.into_password()?;
         // Metrics are recorded inside `authenticate_password`.
         match authenticate_password(&self.user_provider, &self.login, &message.password).await {
-            Ok(user_info) => {
-                let _ = self.outcome.set(user_info);
-                Ok(AuthState::Ok(None))
-            }
+            Ok(user_info) => Ok(AuthState::Ok {
+                final_message: None,
+                identity: Some(user_info),
+            }),
             Err(e) => Ok(AuthState::Failed(e)),
         }
+    }
+}
+
+/// For connections without a configured user provider: reports success
+/// immediately so the driver completes the startup protocol without
+/// authentication.
+struct NoAuthMechanism;
+
+#[async_trait]
+impl AuthMechanism<UserInfoRef> for NoAuthMechanism {
+    async fn begin(
+        &mut self,
+        _client: &(dyn ClientInfo + Send + Sync),
+    ) -> PgWireResult<AuthState<UserInfoRef>> {
+        Ok(AuthState::Ok {
+            final_message: None,
+            identity: None,
+        })
+    }
+
+    async fn next(
+        &mut self,
+        _client: &(dyn ClientInfo + Send + Sync),
+        _message: PasswordMessageFamily,
+    ) -> PgWireResult<AuthState<UserInfoRef>> {
+        // `begin` completes immediately, so the driver never calls this.
+        Err(PgWireError::NoAuthenticationInProgress)
     }
 }
 
@@ -376,21 +417,15 @@ impl StartupHandler for PostgresServerHandlerInner {
                     Some(user_provider) => {
                         let login = LoginInfo::from_client_info(client);
                         if login.user.as_deref() == Some(BEARER_TOKEN_USER) {
-                            Some(Self::cleartext_mechanism(
-                                user_provider.clone(),
-                                login,
-                                self.auth_outcome.clone(),
-                            ))
+                            Some(Self::cleartext_mechanism(user_provider.clone(), login))
                         } else {
                             match postgres_auth_info(user_provider, &login).await {
                                 Err(_) => {
                                     return send_password_authentication_failed(client).await;
                                 }
-                                Ok(PgAuthInfo::Cleartext) => Some(Self::cleartext_mechanism(
-                                    user_provider.clone(),
-                                    login,
-                                    self.auth_outcome.clone(),
-                                )),
+                                Ok(PgAuthInfo::Cleartext) => {
+                                    Some(Self::cleartext_mechanism(user_provider.clone(), login))
+                                }
                                 Ok(PgAuthInfo::ScramSha256 {
                                     verifier,
                                     user_info,
@@ -399,7 +434,6 @@ impl StartupHandler for PostgresServerHandlerInner {
                                     login,
                                     user_info,
                                     to_scram_secret(&verifier),
-                                    self.auth_outcome.clone(),
                                 )),
                             }
                         }
@@ -407,13 +441,16 @@ impl StartupHandler for PostgresServerHandlerInner {
                 };
 
                 match mechanism {
-                    // No user provider configured: skip authentication.
+                    // No user provider configured: skip authentication with a
+                    // mechanism that completes immediately.
                     None => {
                         self.session.set_user_info(userinfo_by_name(
                             client.metadata().get(super::METADATA_USER).cloned(),
                         ));
                         set_client_info(client, &self.session);
-                        self.auth_driver.complete_authentication(client).await?;
+                        self.auth_driver
+                            .begin_authentication(client, Box::new(NoAuthMechanism))
+                            .await?;
                     }
                     Some(mechanism) => {
                         if self
@@ -428,14 +465,17 @@ impl StartupHandler for PostgresServerHandlerInner {
                 }
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
-                // Ok covers both "still in progress" and "completed"; the
-                // outcome is set only on completion.
-                if let Err(_e) = self.auth_driver.advance_authentication(client, pwd).await {
-                    return send_password_authentication_failed(client).await;
-                }
-                if let Some(user_info) = self.auth_outcome.get() {
-                    self.session.set_user_info(user_info.clone());
-                    set_client_info(client, &self.session);
+                match self.auth_driver.advance_authentication(client, pwd).await {
+                    // The handshake completed and the mechanism reported the
+                    // verified identity; bind it to the session.
+                    Ok(AuthOutcome::Completed(identity)) => {
+                        if let Some(user_info) = identity {
+                            self.session.set_user_info(user_info);
+                        }
+                        set_client_info(client, &self.session);
+                    }
+                    Ok(AuthOutcome::InProgress) => {}
+                    Err(_) => return send_password_authentication_failed(client).await,
                 }
             }
             _ => {}
@@ -448,12 +488,10 @@ impl PostgresServerHandlerInner {
     fn cleartext_mechanism(
         user_provider: UserProviderRef,
         login: LoginInfo,
-        outcome: AuthOutcome,
-    ) -> Box<dyn AuthMechanism> {
+    ) -> Box<dyn AuthMechanism<UserInfoRef>> {
         Box::new(PgCleartextMechanism {
             user_provider,
             login,
-            outcome,
         })
     }
 
@@ -462,15 +500,13 @@ impl PostgresServerHandlerInner {
         login: LoginInfo,
         user_info: Option<UserInfoRef>,
         secret: ScramSecret,
-        outcome: AuthOutcome,
-    ) -> Box<dyn AuthMechanism> {
+    ) -> Box<dyn AuthMechanism<UserInfoRef>> {
         let scram = ScramAuth::new(Arc::new(FixedScramSecretSource::new(secret)));
         Box::new(PgScramMechanism {
             inner: scram.create(),
             user_provider,
             login,
             user_info,
-            outcome,
         })
     }
 }

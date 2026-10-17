@@ -28,7 +28,7 @@ pub(crate) const METADATA_SCHEMA: &str = "schema";
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use ::auth::{UserInfoRef, UserProviderRef};
 use derive_builder::Builder;
@@ -78,9 +78,7 @@ pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
     force_tls: bool,
-    auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>>,
-    /// Set by the auth mechanism, read by the startup handler on completion.
-    auth_outcome: Arc<OnceLock<UserInfoRef>>,
+    auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>, UserInfoRef>,
 
     batching_enabled: bool,
     session: Arc<Session>,
@@ -135,7 +133,6 @@ impl MakePostgresServerHandler {
             force_tls: self.force_tls,
             auth_driver: AuthDriver::new(self.param_provider.clone())
                 .with_pid_secret_key_generator(Arc::new(ZeroPidSecretKeyGenerator)),
-            auth_outcome: Arc::new(OnceLock::new()),
 
             batching_enabled,
             session: session.clone(),
