@@ -91,6 +91,7 @@ use crate::region_query::RegionQueryHandlerRef;
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: SessionContext,
+    experimental_native_promql: bool,
     catalog_manager: CatalogManagerRef,
     dyn_filter_registry_manager: Arc<DynFilterRegistryManager>,
     function_state: Arc<FunctionState>,
@@ -284,6 +285,7 @@ impl QueryEngineState {
 
         Ok(Self {
             df_context,
+            experimental_native_promql: options.experimental_native_promql,
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
@@ -482,6 +484,10 @@ impl QueryEngineState {
         self.plugins
             .map::<QueryOptions, _, _>(|x| x.disallow_cross_catalog_query)
             .unwrap_or(false)
+    }
+
+    pub(crate) fn experimental_native_promql(&self) -> bool {
+        self.experimental_native_promql
     }
 
     pub fn session_state(&self) -> SessionState {
