@@ -717,14 +717,23 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
         offset_ms: 0,
     };
     for (smoothing, trend) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.5)] {
-        assert!(matches!(
+        let evaluator = || {
             RangeEvaluator::try_new(
                 &raw_schema(1),
                 grid(0, 10, 4),
                 window,
-                RangeFunction::DoubleExponentialSmoothing { smoothing, trend }
-            ),
-            Err(DataFusionError::Plan(_))
+                RangeFunction::DoubleExponentialSmoothing { smoothing, trend },
+            )
+            .unwrap()
+        };
+        // Like Prometheus, only a window holding a sample checks the factors.
+        let outside = chunk(&[(100, vec![Some(1.0)])], 1, 0, true);
+        assert!(evaluator().push(&outside).unwrap().is_none());
+        evaluator().finish().unwrap();
+        let inside = chunk(&[(5, vec![Some(1.0)])], 1, 0, true);
+        assert!(matches!(
+            evaluator().push(&inside),
+            Err(DataFusionError::Execution(_))
         ));
     }
 }

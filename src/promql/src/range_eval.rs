@@ -71,6 +71,8 @@ pub struct RangeEvaluator {
     fields: Vec<FieldSamples>,
     row: Vec<Option<f64>>,
     drops_metric_name: bool,
+    /// Raised by the first non-empty window, where Prometheus validates function arguments.
+    window_error: Option<String>,
 }
 
 /// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
@@ -100,15 +102,15 @@ impl RangeEvaluator {
         window: RangeWindow,
         function: RangeFunction,
     ) -> Result<Self> {
+        let mut window_error = None;
         if let RangeFunction::DoubleExponentialSmoothing { smoothing, trend } = function {
-            for (name, factor) in [("smoothing", smoothing), ("trend", trend)] {
-                // Prometheus rejects factors outside (0, 1); NaN passes its check.
-                if factor <= 0.0 || factor >= 1.0 {
-                    return Err(DataFusionError::Plan(format!(
-                        "invalid {name} factor. Expected: 0 < factor < 1, got: {factor}"
-                    )));
-                }
-            }
+            // Prometheus rejects factors outside (0, 1); NaN passes its check.
+            window_error = [("smoothing", smoothing), ("trend", trend)]
+                .into_iter()
+                .find(|(_, factor)| *factor <= 0.0 || *factor >= 1.0)
+                .map(|(name, factor)| {
+                    format!("invalid {name} factor. Expected: 0 < factor < 1, got: {factor}")
+                });
         }
         if let RangeFunction::PredictLinear(_) = function {
             let spec = grid.spec();
@@ -126,6 +128,7 @@ impl RangeEvaluator {
         let mut evaluator =
             Self::with_kernel(input, grid, window, function.kernel(window.offset_ms))?;
         evaluator.drops_metric_name = function.drops_metric_name();
+        evaluator.window_error = window_error;
         Ok(evaluator)
     }
 
@@ -164,6 +167,7 @@ impl RangeEvaluator {
                 .collect(),
             row: Vec::with_capacity(input.fields.len()),
             drops_metric_name: false,
+            window_error: None,
         })
     }
 
@@ -333,6 +337,9 @@ impl RangeEvaluator {
                 let steps = (i128::from(earliest) - i128::from(spec.start_ms) + step - 1) / step;
                 state.cursor = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
                 continue;
+            }
+            if let Some(error) = &self.window_error {
+                return Err(DataFusionError::Execution(error.clone()));
             }
 
             self.row.clear();
