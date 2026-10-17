@@ -29,7 +29,7 @@ use datatypes::series::time::TimeAxis;
 use datatypes::series::{Label, MetricName};
 
 use crate::go_sort;
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSeriesBuilder, external};
 
 #[cfg(test)]
 mod tests;
@@ -450,8 +450,4 @@ fn value_at(series: &Series, point: usize) -> Result<Option<f64>> {
             "select operators over histogram samples".into(),
         )),
     }
-}
-
-fn external(error: datatypes::error::Error) -> DataFusionError {
-    DataFusionError::External(Box::new(error))
 }

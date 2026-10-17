@@ -149,6 +149,16 @@ pub(crate) fn compensated_sum_inc(inc: f64, sum: f64, mut compensation: f64) -> 
     (new_sum, compensation)
 }
 
+/// Prometheus `kahansum.Inc`: [`compensated_sum_inc`] that also drops the compensation once the
+/// sum is infinite.
+pub(crate) fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
+    let t = sum + inc;
+    if t.is_infinite() {
+        return (t, 0.0);
+    }
+    compensated_sum_inc(inc, sum, c)
+}
+
 /// linear_regression performs a least-square linear regression analysis on the
 /// times and values. It return the slope and intercept based on times and values.
 /// Prometheus's implementation: <https://github.com/prometheus/prometheus/blob/90b2f7a540b8a70d8d81372e6692dcbb67ccbaaa/promql/functions.go#L793-L837>

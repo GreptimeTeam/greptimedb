@@ -30,7 +30,7 @@ use datatypes::series::MetricName;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, TimeAxis};
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
 
 #[cfg(test)]
 mod tests;
@@ -528,9 +528,6 @@ fn overlap(
     }
     Ok(None)
 }
-
-/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
-const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 fn result_metric(
     many: &MetricName,

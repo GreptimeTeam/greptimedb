@@ -24,7 +24,7 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
 
 mod function;
 #[cfg(test)]
@@ -83,9 +83,6 @@ pub struct RangeEvaluator {
     /// Raised by the first non-empty window, where Prometheus validates function arguments.
     window_error: Option<String>,
 }
-
-/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
-const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 struct SeriesState {
     /// `None` for evaluated input, which arrives as one complete series.

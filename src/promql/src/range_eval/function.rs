@@ -19,7 +19,9 @@
 //! them.
 
 use super::{FloatWindow, WindowKernel};
-use crate::functions::{EdgeKind, add_counter_resets, count_edges, extremum, instant_delta};
+use crate::functions::{
+    EdgeKind, add_counter_resets, count_edges, extremum, instant_delta, kahan_inc,
+};
 
 /// A PromQL range-vector function over float samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,20 +141,6 @@ impl RangeFunction {
             }),
         }
     }
-}
-
-/// Prometheus `kahansum.Inc`: Kahan–Neumaier summation that drops the compensation once the
-/// sum is infinite.
-fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
-    let t = sum + inc;
-    let c = if t.is_infinite() {
-        0.0
-    } else if sum.abs() >= inc.abs() {
-        c + ((sum - t) + inc)
-    } else {
-        c + ((inc - t) + sum)
-    };
-    (t, c)
 }
 
 /// Prometheus `funcSumOverTime`.
