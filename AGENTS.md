@@ -124,6 +124,13 @@ portability and validation guidance in
 
 ## Before opening a PR
 
+Open or update a PR with the `greptimedb-create-pr` skill and review one with
+`greptimedb-review-pr`, rather than a personal skill of the same purpose. They
+split the author's context into a public PR body and a private rationale that
+reviewers read only after a blind review. After pushing new commits to an open
+PR, for example review fixes, publish a revision of the rationale (Step 6 of
+`greptimedb-create-pr`).
+
 1. If you added a `.rs`, `.py`, or `.ts` file, apply and verify its license
    header with `hawkeye format` followed by `hawkeye check`. Use the inception
    year from `licenserc.toml`, not the current year.
