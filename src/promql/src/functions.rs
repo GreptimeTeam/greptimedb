@@ -32,11 +32,11 @@ mod vector_matching;
 
 use std::sync::Arc;
 
+pub(crate) use aggr_over_time::extremum;
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
     PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
 };
-pub(crate) use aggr_over_time::{extremum, stddev, stdvar};
 pub use changes::Changes;
 use datafusion::arrow::array::{
     ArrayRef, DictionaryArray, Float64Array, TimestampMillisecondArray,
@@ -48,10 +48,9 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType, Int64Type};
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
-pub(crate) use double_exponential_smoothing::double_exponential_smoothing_impl;
 pub(crate) use edge_count::{EdgeKind, count_edges};
+pub(crate) use extrapolate_rate::add_counter_resets;
 pub use extrapolate_rate::{Delta, Increase, Rate};
-pub(crate) use extrapolate_rate::{add_counter_resets, extrapolate};
 pub use idelta::IDelta;
 pub(crate) use idelta::instant_delta;
 pub use ieee_float::{IeeeComparison, IeeeSqrt};
@@ -69,7 +68,6 @@ pub use native_histogram::{
 };
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
-pub(crate) use quantile::window_quantile;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
 pub use resets::Resets;
 pub use round::Round;
@@ -182,20 +180,6 @@ pub(crate) fn linear_regression_slices(
 ) -> (Option<f64>, Option<f64>) {
     let raw_values = values.values();
     let has_nulls = values.null_count() > 0;
-    linear_regression_samples(
-        (0..len)
-            .filter(|i| !has_nulls || values.is_valid(value_offset + i))
-            .map(|i| (times[time_offset + i], raw_values[value_offset + i])),
-        intercept_time,
-    )
-}
-
-/// Least-squares `(slope, intercept)` of `(timestamp, value)` samples, with `x` in seconds
-/// relative to `intercept_time`; `(None, None)` with fewer than two samples.
-pub(crate) fn linear_regression_samples(
-    samples: impl IntoIterator<Item = (i64, f64)>,
-    intercept_time: i64,
-) -> (Option<f64>, Option<f64>) {
     let mut count: f64 = 0.0;
     let mut sum_x: f64 = 0.0;
     let mut sum_y: f64 = 0.0;
@@ -209,8 +193,14 @@ pub(crate) fn linear_regression_samples(
     let mut const_y = true;
     let mut init_y = None;
 
-    for (time, value) in samples {
-        let time = time as f64;
+    for i in 0..len {
+        let time_idx = time_offset + i;
+        let value_idx = value_offset + i;
+        if has_nulls && values.is_null(value_idx) {
+            continue;
+        }
+        let value = raw_values[value_idx];
+        let time = times[time_idx] as f64;
         let initial = init_y.get_or_insert(value);
         if const_y && count > 0.0 && value != *initial {
             const_y = false;

@@ -557,15 +557,10 @@ pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -
     display_name = prom_stdvar_over_time
 )]
 pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    stdvar(values.iter().flatten())
-}
-
-/// Population variance of `values`, `None` when there are none.
-pub(crate) fn stdvar(values: impl IntoIterator<Item = f64>) -> Option<f64> {
     let mut count = 0;
     let mut mean: f64 = 0.0;
     let mut result: f64 = 0.0;
-    for value in values {
+    for value in values.iter().flatten() {
         let new_count = count + 1;
         let delta1 = value - mean;
         let new_mean = delta1 / new_count as f64 + mean;
@@ -587,17 +582,12 @@ pub(crate) fn stdvar(values: impl IntoIterator<Item = f64>) -> Option<f64> {
     display_name = prom_stddev_over_time
 )]
 pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    stddev(values.iter().flatten())
-}
-
-/// Population standard deviation of `values`, `None` when there are none.
-pub(crate) fn stddev(values: impl IntoIterator<Item = f64>) -> Option<f64> {
     let mut count = 0.0;
     let mut mean = 0.0;
     let mut comp_mean = 0.0;
     let mut deviations_sum_sq = 0.0;
     let mut comp_deviations_sum_sq = 0.0;
-    for current_value in values {
+    for current_value in values.iter().flatten() {
         count += 1.0;
         let delta = current_value - (mean + comp_mean);
         let (new_mean, new_comp_mean) = compensated_sum_inc(delta / count, mean, comp_mean);

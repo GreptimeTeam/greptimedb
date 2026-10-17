@@ -16,14 +16,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
-use datafusion::arrow::array::{
-    ArrayRef, Float64Array, Int64Array, TimestampMillisecondArray, UInt32Array,
-};
+use datafusion::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray, UInt32Array};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
-use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::series::histogram::{
@@ -38,12 +35,12 @@ use rand::{Rng, SeedableRng};
 
 use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel, subquery_grid};
 use crate::functions::{
-    AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing, IDelta,
-    Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, StddevOverTime, StdvarOverTime, SumOverTime,
+    Changes, CountOverTime, IDelta, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Resets,
 };
 use crate::grid_series::GridSeriesBuilder;
-use crate::grid_series::reference::{Dense, assert_series_eq, random_dense, special_value};
+use crate::grid_series::reference::{
+    Dense, assert_series_eq, assert_series_eq_any_nan, random_dense, special_value,
+};
 use crate::range_array::RangeArray;
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
@@ -100,6 +97,16 @@ fn metric(host: u64) -> MetricName {
 fn probe_evaluator(fields: usize, grid: Arc<EvalGrid>, window: RangeWindow) -> RangeEvaluator {
     let kernel: WindowKernel = Box::new(probe);
     RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, true).unwrap()
+}
+
+/// A probe evaluator whose anchored result is evaluated at every point, like `predict_linear`.
+fn per_point_probe_evaluator(
+    fields: usize,
+    grid: Arc<EvalGrid>,
+    window: RangeWindow,
+) -> RangeEvaluator {
+    let kernel: WindowKernel = Box::new(probe);
+    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, false).unwrap()
 }
 
 /// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
@@ -253,13 +260,15 @@ fn windows_of(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Vec<Range<u
         .collect()
 }
 
-/// Applies the probe to the valid samples of every reference window.
+/// Applies the probe to the valid samples of every reference window. With `@`, a step-invariant
+/// probe is evaluated at the first point and others at each point.
 fn reference(
     rows: &[Row],
     grid: &EvalGrid,
     window: RangeWindow,
     fields: usize,
     drop_stale: bool,
+    step_invariant: bool,
 ) -> Dense {
     let (kept, windows) = reference_windows(rows, grid, window, drop_stale);
     grid.timestamps()
@@ -276,7 +285,11 @@ fn reference(
                         probe(FloatWindow {
                             timestamps: &timestamps,
                             values: &values,
-                            eval_ts: window_end(grid, window, eval_ts),
+                            eval_ts: if step_invariant {
+                                window_end(grid, window, eval_ts)
+                            } else {
+                                eval_ts
+                            },
                             range_ms: window.range_ms,
                         })
                         .unwrap()
@@ -288,13 +301,9 @@ fn reference(
 }
 
 /// Evaluates every reference window with the ordinary range UDF, on the row layout
-/// `RangeManipulate` produces: shifted timestamps and nullable values per field.
-///
-/// Some UDFs depend on where null slots sit, which the evaluator does not keep, so they get only
-/// the field's valid rows: Arrow's lane-wise sum in `sum_over_time` and `avg_over_time`, the
-/// first slot's timestamp in `deriv`, and the slot payloads `double_exponential_smoothing` reads.
-/// `double_exponential_smoothing` also returns NaN for an empty window, where the evaluator
-/// follows Prometheus and leaves the point missing.
+/// `RangeManipulate` produces: shifted timestamps and nullable values per field. Only functions
+/// whose UDF agrees with Prometheus are checked this way; the others are checked against
+/// Prometheus itself in `range_functions_match_prometheus`.
 fn udf_reference(
     function: RangeFunction,
     rows: &[Row],
@@ -303,36 +312,34 @@ fn udf_reference(
     fields: usize,
     drop_stale: bool,
 ) -> Dense {
-    let (kept, _) = reference_windows(rows, grid, window, drop_stale);
-    let mut dense = vec![vec![None; fields]; grid.timestamps().len()];
+    let (kept, windows) = reference_windows(rows, grid, window, drop_stale);
+    let ranges: Vec<_> = windows
+        .iter()
+        .map(|rows| (rows.start as u32, rows.len() as u32))
+        .collect();
+    let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from_iter_values(
+        kept.iter().map(|(timestamp, _)| *timestamp),
+    ));
+    let udf = match function {
+        RangeFunction::Irate => IDelta::<true>::scalar_udf(),
+        RangeFunction::Idelta => IDelta::<false>::scalar_udf(),
+        RangeFunction::MinOverTime => MinOverTime::scalar_udf(),
+        RangeFunction::MaxOverTime => MaxOverTime::scalar_udf(),
+        RangeFunction::CountOverTime => CountOverTime::scalar_udf(),
+        RangeFunction::LastOverTime => LastOverTime::scalar_udf(),
+        RangeFunction::PresentOverTime => PresentOverTime::scalar_udf(),
+        RangeFunction::Resets => Resets::scalar_udf(),
+        RangeFunction::Changes => Changes::scalar_udf(),
+        other => unreachable!("{other:?} is checked against Prometheus"),
+    };
+    let mut dense = vec![vec![None; fields]; ranges.len()];
     for field in 0..fields {
-        let rows: Vec<_> = if matches!(
-            function,
-            RangeFunction::SumOverTime
-                | RangeFunction::AvgOverTime
-                | RangeFunction::Deriv
-                | RangeFunction::DoubleExponentialSmoothing { .. }
-        ) {
-            kept.iter()
-                .filter(|(_, values)| values[field].is_some())
-                .cloned()
-                .collect()
-        } else {
-            kept.clone()
-        };
-        let ranges: Vec<_> = windows_of(&rows, grid, window)
-            .iter()
-            .map(|rows| (rows.start as u32, rows.len() as u32))
-            .collect();
-        let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from_iter_values(
-            rows.iter().map(|(timestamp, _)| *timestamp),
-        ));
         let values: ArrayRef = Arc::new(Float64Array::from_iter(
-            rows.iter().map(|(_, values)| values[field]),
+            kept.iter().map(|(_, values)| values[field]),
         ));
-        let mut args = vec![
+        let args = vec![
             ColumnarValue::Array(Arc::new(
-                RangeArray::from_ranges(timestamps, ranges.iter().copied())
+                RangeArray::from_ranges(timestamps.clone(), ranges.iter().copied())
                     .unwrap()
                     .into_dict(),
             )),
@@ -342,64 +349,6 @@ fn udf_reference(
                     .into_dict(),
             )),
         ];
-        let udf = match function {
-            RangeFunction::Rate => Rate::scalar_udf(),
-            RangeFunction::Increase => Increase::scalar_udf(),
-            RangeFunction::Delta => Delta::scalar_udf(),
-            RangeFunction::Irate => IDelta::<true>::scalar_udf(),
-            RangeFunction::Idelta => IDelta::<false>::scalar_udf(),
-            RangeFunction::AvgOverTime => AvgOverTime::scalar_udf(),
-            RangeFunction::MinOverTime => MinOverTime::scalar_udf(),
-            RangeFunction::MaxOverTime => MaxOverTime::scalar_udf(),
-            RangeFunction::SumOverTime => SumOverTime::scalar_udf(),
-            RangeFunction::CountOverTime => CountOverTime::scalar_udf(),
-            RangeFunction::LastOverTime => LastOverTime::scalar_udf(),
-            RangeFunction::PresentOverTime => PresentOverTime::scalar_udf(),
-            RangeFunction::StddevOverTime => StddevOverTime::scalar_udf(),
-            RangeFunction::StdvarOverTime => StdvarOverTime::scalar_udf(),
-            RangeFunction::QuantileOverTime(_) => QuantileOverTime::scalar_udf(),
-            RangeFunction::Resets => Resets::scalar_udf(),
-            RangeFunction::Changes => Changes::scalar_udf(),
-            RangeFunction::Deriv => Deriv::scalar_udf(),
-            RangeFunction::PredictLinear(_) => PredictLinear::scalar_udf(),
-            RangeFunction::DoubleExponentialSmoothing { .. } => {
-                DoubleExponentialSmoothing::scalar_udf()
-            }
-        };
-        match function {
-            RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta => {
-                // An anchored call is evaluated once, at the start, then replayed.
-                args.push(ColumnarValue::Array(Arc::new(
-                    TimestampMillisecondArray::from_iter_values(
-                        grid.timestamps()
-                            .iter()
-                            .map(|&eval_ts| window_end(grid, window, eval_ts)),
-                    ),
-                )));
-                args.push(ColumnarValue::Array(Arc::new(Int64Array::from(vec![
-                    window.range_ms,
-                ]))));
-            }
-            RangeFunction::QuantileOverTime(quantile) => {
-                args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(quantile))));
-            }
-            RangeFunction::PredictLinear(horizon) => {
-                // The planner passes the evaluation time plus the fold offset.
-                args.push(ColumnarValue::Scalar(ScalarValue::Int64(Some(horizon))));
-                args.push(ColumnarValue::Array(Arc::new(
-                    TimestampMillisecondArray::from_iter_values(
-                        grid.timestamps()
-                            .iter()
-                            .map(|eval_ts| eval_ts + fold_offset(grid, window)),
-                    ),
-                )));
-            }
-            RangeFunction::DoubleExponentialSmoothing { smoothing, trend } => {
-                args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(smoothing))));
-                args.push(ColumnarValue::Scalar(ScalarValue::Float64(Some(trend))));
-            }
-            _ => {}
-        }
         let arg_fields = args
             .iter()
             .enumerate()
@@ -417,8 +366,8 @@ fn udf_reference(
             .into_array(ranges.len())
             .unwrap();
         let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
-        for ((row, value), (_, len)) in dense.iter_mut().zip(output.iter()).zip(&ranges) {
-            row[field] = value.filter(|_| *len > 0);
+        for (row, value) in dense.iter_mut().zip(output.iter()) {
+            row[field] = value;
         }
     }
     dense
@@ -462,11 +411,16 @@ fn evaluator_matches_brute_force_reference() {
         let mut rng = StdRng::seed_from_u64(seed);
         let fields = rng.random_range(1..=3);
         let (grid, window) = random_window(&mut rng);
+        let step_invariant = rng.random_bool(0.5);
         // One evaluator serves several series, so state must not leak between them.
-        let mut evaluator = probe_evaluator(fields, grid.clone(), window);
+        let mut evaluator = if step_invariant {
+            probe_evaluator(fields, grid.clone(), window)
+        } else {
+            per_point_probe_evaluator(fields, grid.clone(), window)
+        };
         for host in 0..3 {
             let rows = random_rows(&mut rng, fields);
-            let expected = reference(&rows, &grid, window, fields, true);
+            let expected = reference(&rows, &grid, window, fields, true, step_invariant);
             let mut result = None;
             for piece in random_chunks(&mut rng, &rows, fields, host) {
                 assert!(
@@ -481,61 +435,24 @@ fn evaluator_matches_brute_force_reference() {
     }
 }
 
-/// Every function, with parameters inside, at and outside their valid ranges.
-fn all_functions() -> Vec<RangeFunction> {
+/// Functions whose range UDF agrees with Prometheus.
+fn udf_functions() -> Vec<RangeFunction> {
     vec![
-        RangeFunction::Rate,
-        RangeFunction::Increase,
-        RangeFunction::Delta,
         RangeFunction::Irate,
         RangeFunction::Idelta,
-        RangeFunction::AvgOverTime,
         RangeFunction::MinOverTime,
         RangeFunction::MaxOverTime,
-        RangeFunction::SumOverTime,
         RangeFunction::CountOverTime,
         RangeFunction::LastOverTime,
         RangeFunction::PresentOverTime,
-        RangeFunction::StddevOverTime,
-        RangeFunction::StdvarOverTime,
-        RangeFunction::QuantileOverTime(-0.5),
-        RangeFunction::QuantileOverTime(0.0),
-        RangeFunction::QuantileOverTime(0.9),
-        RangeFunction::QuantileOverTime(1.0),
-        RangeFunction::QuantileOverTime(1.5),
-        RangeFunction::QuantileOverTime(f64::NAN),
         RangeFunction::Resets,
         RangeFunction::Changes,
-        RangeFunction::Deriv,
-        RangeFunction::PredictLinear(-600),
-        RangeFunction::PredictLinear(0),
-        RangeFunction::PredictLinear(3_600),
-        RangeFunction::DoubleExponentialSmoothing {
-            smoothing: 0.5,
-            trend: 0.1,
-        },
-        RangeFunction::DoubleExponentialSmoothing {
-            smoothing: 0.9,
-            trend: 0.6,
-        },
-        RangeFunction::DoubleExponentialSmoothing {
-            smoothing: 1.5,
-            trend: 0.1,
-        },
-        RangeFunction::DoubleExponentialSmoothing {
-            smoothing: 0.5,
-            trend: -0.1,
-        },
-        RangeFunction::DoubleExponentialSmoothing {
-            smoothing: f64::NAN,
-            trend: 0.1,
-        },
     ]
 }
 
 #[test]
 fn functions_match_range_udfs() {
-    for function in all_functions() {
+    for function in udf_functions() {
         for seed in 0..300 {
             let mut rng = StdRng::seed_from_u64(seed);
             let fields = rng.random_range(1..=3);
@@ -619,7 +536,7 @@ fn rejects_invalid_parameters() {
             &raw_schema(1),
             grid(0, 10, 4),
             far_offset,
-            RangeFunction::PredictLinear(0)
+            RangeFunction::PredictLinear(0.0)
         ),
         Err(DataFusionError::Plan(_))
     ));
@@ -814,13 +731,13 @@ fn subquery_series_match_references() {
         let mut probe =
             RangeEvaluator::with_kernel(&schema, outer.clone(), window, Box::new(probe), true)
                 .unwrap();
-        let expected = reference(&rows, &outer, window, fields, false);
+        let expected = reference(&rows, &outer, window, fields, false, true);
         assert_series_eq(
             probe.push_series(&series).unwrap().as_ref(),
             &expected,
             &metric(seed),
         );
-        for function in all_functions() {
+        for function in udf_functions() {
             let mut evaluator =
                 RangeEvaluator::try_new(&schema, outer.clone(), window, function).unwrap();
             let expected = udf_reference(function, &rows, &outer, window, fields, false);
@@ -877,4 +794,114 @@ fn rejects_input_of_the_other_kind() {
     builder.push(0, &[Some(1.0)]).unwrap();
     let series = builder.finish(metric(0)).unwrap().unwrap();
     execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
+}
+
+/// Range functions evaluated by the Prometheus v3.15.0 engine over random single series; see
+/// the header of `prometheus_cases.txt`.
+#[test]
+fn range_functions_match_prometheus() {
+    let parse_points = |points: &str| -> Vec<(i64, f64)> {
+        points
+            .split_whitespace()
+            .map(|point| {
+                let (timestamp, bits) = point.split_once(':').unwrap();
+                (
+                    timestamp.parse().unwrap(),
+                    f64::from_bits(u64::from_str_radix(bits, 16).unwrap()),
+                )
+            })
+            .collect()
+    };
+    let mut checked = 0;
+    for line in include_str!("prometheus_cases.txt").lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split(';');
+        let header: Vec<_> = parts.next().unwrap().split_whitespace().collect();
+        let samples = parse_points(parts.next().unwrap());
+        let expected_points = parse_points(parts.next().unwrap());
+        let params: Vec<f64> = match header[1] {
+            "-" => Vec::new(),
+            params => params.split(',').map(|p| p.parse().unwrap()).collect(),
+        };
+        let function = match header[0] {
+            "rate" => RangeFunction::Rate,
+            "increase" => RangeFunction::Increase,
+            "delta" => RangeFunction::Delta,
+            "irate" => RangeFunction::Irate,
+            "idelta" => RangeFunction::Idelta,
+            "avg_over_time" => RangeFunction::AvgOverTime,
+            "min_over_time" => RangeFunction::MinOverTime,
+            "max_over_time" => RangeFunction::MaxOverTime,
+            "sum_over_time" => RangeFunction::SumOverTime,
+            "count_over_time" => RangeFunction::CountOverTime,
+            "last_over_time" => RangeFunction::LastOverTime,
+            "present_over_time" => RangeFunction::PresentOverTime,
+            "stddev_over_time" => RangeFunction::StddevOverTime,
+            "stdvar_over_time" => RangeFunction::StdvarOverTime,
+            "quantile_over_time" => RangeFunction::QuantileOverTime(params[0]),
+            "resets" => RangeFunction::Resets,
+            "changes" => RangeFunction::Changes,
+            "deriv" => RangeFunction::Deriv,
+            "predict_linear" => RangeFunction::PredictLinear(params[0]),
+            "double_exponential_smoothing" => RangeFunction::DoubleExponentialSmoothing {
+                smoothing: params[0],
+                trend: params[1],
+            },
+            other => panic!("unknown function {other}"),
+        };
+        let numbers: Vec<i64> = header[2..].iter().map(|n| n.parse().unwrap()).collect();
+        let [range_ms, offset_ms, start_ms, step_ms, points] = numbers[..] else {
+            panic!("bad header {line}");
+        };
+        let grid = grid(start_ms, step_ms, points as u64);
+        let window = RangeWindow {
+            range_ms,
+            offset_ms,
+            anchor_ms: None,
+        };
+        let mut expected = vec![vec![None]; points as usize];
+        for (timestamp, value) in &expected_points {
+            expected[((timestamp - start_ms) / step_ms) as usize][0] = Some(*value);
+        }
+        let rows: Vec<Row> = samples
+            .iter()
+            .map(|(timestamp, value)| (*timestamp, vec![Some(*value)]))
+            .collect();
+        let mut evaluator =
+            RangeEvaluator::try_new(&raw_schema(1), grid, window, function).unwrap();
+        let split = rows.len() / 2;
+        let mut result = None;
+        if split > 0 {
+            evaluator.push(&chunk(&rows[..split], 1, 0, false)).unwrap();
+        }
+        result = evaluator
+            .push(&chunk(&rows[split..], 1, 0, true))
+            .unwrap()
+            .or(result);
+        assert_series_eq_any_nan(result.as_ref(), &expected, &metric(0), line);
+        checked += expected_points.len();
+    }
+    assert!(checked > 1_000, "{checked} points checked");
+}
+
+#[test]
+fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    for (smoothing, trend) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.5)] {
+        assert!(matches!(
+            RangeEvaluator::try_new(
+                &raw_schema(1),
+                grid(0, 10, 4),
+                window,
+                RangeFunction::DoubleExponentialSmoothing { smoothing, trend }
+            ),
+            Err(DataFusionError::Plan(_))
+        ));
+    }
 }
