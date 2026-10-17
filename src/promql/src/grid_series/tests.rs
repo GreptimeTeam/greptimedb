@@ -112,3 +112,33 @@ fn merge_treats_empty_label_values_as_absent() {
         Points::from([(0, 1f64.to_bits()), (1, 2f64.to_bits())])
     );
 }
+
+/// Series of one label set merge field by field: different fields at one point combine, and
+/// only one field present in both collides.
+#[test]
+fn merge_combines_disjoint_fields_at_one_point() {
+    let schema = grid_schema(2, 1);
+    let series = |row: [Option<f64>; 2]| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.push(0, &row).unwrap();
+        builder.finish(metric(0)).unwrap().unwrap()
+    };
+    let merged = merge_same_labelset(
+        &schema,
+        vec![series([Some(1.0), None]), series([None, Some(2.0)])],
+    )
+    .unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_series_eq(
+        Some(&merged[0]),
+        &vec![vec![Some(1.0), Some(2.0)]],
+        &metric(0),
+    );
+    assert!(
+        merge_same_labelset(
+            &schema,
+            vec![series([Some(1.0), None]), series([Some(2.0), None])]
+        )
+        .is_err()
+    );
+}
