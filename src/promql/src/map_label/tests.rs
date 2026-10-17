@@ -106,6 +106,7 @@ fn replacements_expand_like_go() {
         ("$0", "abc-42"),
         ("$9", ""),
         ("$1234567890", ""),
+        ("$1²", "abc²"),
     ] {
         let mut out = String::new();
         super::expand(&regex, &captures, template, &mut out);
