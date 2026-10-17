@@ -31,13 +31,15 @@ use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::{debug, warn};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datafusion_common::tree_node::TreeNode;
 use datafusion_expr::{Expr, Volatility};
 use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
+use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::types::TimestampType;
 use futures::{StreamExt, TryStreamExt};
@@ -87,6 +89,12 @@ type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
 
 /// Candidate assignment senders for output partitions.
 type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
+
+struct RawScanPreparation {
+    schema: Arc<SeriesSchema>,
+    fields: Vec<(usize, ConcreteDataType)>,
+    predicates: Vec<Arc<dyn PhysicalExpr>>,
+}
 
 struct CandidateReceiver {
     receiver: mpsc::UnboundedReceiver<Result<SeriesReaderInput>>,
@@ -192,6 +200,189 @@ impl SeriesScan {
             candidate_receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
         }
+    }
+
+    fn prepare_raw_scan(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<RawScanPreparation>, BoxedError> {
+        let input = &self.stream_ctx.input;
+        let metadata = input.mapper.metadata();
+        match label_source {
+            RawLabelSource::PrimaryKey {
+                physical_metadata,
+                logical_tags,
+                ..
+            } => {
+                if !Arc::ptr_eq(metadata, physical_metadata) {
+                    debug!(
+                        "Raw series scan preflight rejected metadata snapshot: region_id={}, physical_region_id={}, schema_version={}, physical_schema_version={}",
+                        metadata.region_id,
+                        physical_metadata.region_id,
+                        metadata.schema_version,
+                        physical_metadata.schema_version,
+                    );
+                    return Err(BoxedError::new(
+                        InvalidRecordBatchSnafu {
+                            reason: "raw label source metadata does not match scanner snapshot"
+                                .to_string(),
+                        }
+                        .build(),
+                    ));
+                }
+                let mut ids = HashSet::new();
+                let mut names = HashSet::new();
+                for tag in logical_tags.iter() {
+                    let column = metadata.column_by_id(tag.column_id).filter(|column| {
+                        column.semantic_type == SemanticType::Tag
+                            && metadata.primary_key.contains(&tag.column_id)
+                    });
+                    let valid = column.is_some_and(|column| {
+                        column.column_schema.name == tag.name.as_ref()
+                            && tag.name.as_ref() != "__name__"
+                            && !is_internal_column(tag.name.as_ref())
+                            && !is_metric_engine_internal_column(tag.name.as_ref())
+                            && !ReservedColumnId::is_reserved(tag.column_id)
+                    });
+                    let unique_id = valid && ids.insert(tag.column_id);
+                    let unique_name = unique_id && names.insert(tag.name.as_ref());
+                    if !valid || !unique_id || !unique_name {
+                        debug!(
+                            "Raw series scan preflight rejected label binding: region_id={}, column_id={}, binding_valid={}, unique_id={}, unique_name={}",
+                            metadata.region_id, tag.column_id, valid, unique_id, unique_name,
+                        );
+                        return Err(BoxedError::new(
+                            InvalidRecordBatchSnafu {
+                                reason: "invalid raw label binding".to_string(),
+                            }
+                            .build(),
+                        ));
+                    }
+                }
+            }
+            RawLabelSource::Explicit => {
+                debug!(
+                    "Raw series scan preflight rejected explicit labels: region_id={}",
+                    metadata.region_id,
+                );
+                return Ok(None);
+            }
+        }
+        let selected = input.mapper.output_schema();
+        let mut fields = Vec::new();
+        let mut specs = Vec::new();
+        for output in selected.column_schemas() {
+            let Some(column) = metadata.column_metadatas.iter().find(|column| {
+                column.column_schema.name == output.name
+                    && column.semantic_type == SemanticType::Field
+            }) else {
+                continue;
+            };
+            let Some((index, (_, data_type))) = input
+                .mapper
+                .batch_schema()
+                .iter()
+                .enumerate()
+                .find(|(_, (id, _))| *id == column.column_id)
+            else {
+                debug!(
+                    "Raw series scan preflight missing mapper field: region_id={}, column_id={}",
+                    metadata.region_id, column.column_id,
+                );
+                return Err(BoxedError::new(
+                    InvalidRecordBatchSnafu {
+                        reason: format!(
+                            "selected field {} is missing from mapper batch schema",
+                            output.name
+                        ),
+                    }
+                    .build(),
+                ));
+            };
+            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
+                debug!(
+                    "Raw series scan preflight rejected field type: region_id={}, column_id={}",
+                    metadata.region_id, column.column_id,
+                );
+                return Ok(None);
+            }
+            fields.push((index, data_type.clone()));
+            specs.push(FieldSpec {
+                name: Arc::from(output.name.as_str()),
+            });
+        }
+        let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
+        if fields.is_empty()
+            || input.append_mode
+            || input.series_row_selector.is_some()
+            || !time_is_millis
+        {
+            debug!(
+                "Raw series scan preflight rejected scan options: region_id={}, selected_fields={}, append_mode={}, row_selector={}, time_is_millis={}",
+                metadata.region_id,
+                fields.len(),
+                input.append_mode,
+                input.series_row_selector.is_some(),
+                time_is_millis,
+            );
+            return Ok(None);
+        }
+        let schema = Arc::new(SeriesSchema {
+            fields: specs.into(),
+            eval_grid: None,
+        });
+        let typed_schema = input.mapper.input_arrow_schema(false);
+        let mut predicates = Vec::new();
+        if let Some(predicate) = input.predicate_group().predicate_without_region() {
+            if !predicate.dyn_filters().is_empty() {
+                debug!(
+                    "Raw series scan preflight rejected dynamic predicate filters: region_id={}",
+                    metadata.region_id,
+                );
+                return Ok(None);
+            }
+            for expr in predicate.exprs() {
+                // Fresh execution properties cannot preserve Stable or query-dependent semantics.
+                if expr
+                    .exists(|node| {
+                        Ok(matches!(node, Expr::ScalarFunction(function)
+                            if function.func.signature().volatility != Volatility::Immutable)
+                            || matches!(node, Expr::ScalarVariable(..)))
+                    })
+                    .unwrap_or(true)
+                {
+                    debug!(
+                        "Raw series scan preflight rejected predicate volatility or variable: region_id={}",
+                        metadata.region_id,
+                    );
+                    return Ok(None);
+                }
+                // Evaluate residuals with original types before raw conversion to Float64.
+                let Ok(physical) = Predicate::to_physical_expr(expr, &typed_schema) else {
+                    debug!(
+                        "Raw series scan preflight failed predicate compilation: region_id={}",
+                        metadata.region_id,
+                    );
+                    return Ok(None);
+                };
+                if !matches!(
+                    physical.data_type(&typed_schema),
+                    Ok(ArrowDataType::Boolean | ArrowDataType::Null)
+                ) {
+                    debug!(
+                        "Raw series scan preflight rejected predicate type: region_id={}",
+                        metadata.region_id,
+                    );
+                    return Ok(None);
+                }
+                predicates.push(physical);
+            }
+        }
+        Ok(Some(RawScanPreparation {
+            schema,
+            fields,
+            predicates,
+        }))
     }
 
     fn supports_two_phase(input: &ScanInput) -> bool {
@@ -578,6 +769,22 @@ impl RegionScanner for SeriesScan {
             .map_err(BoxedError::new)
     }
 
+    fn raw_series_ordering(&self) -> SeriesOrdering {
+        match self.mode {
+            SeriesScanMode::Legacy => SeriesOrdering::KeyThenTime,
+            SeriesScanMode::TwoPhase => SeriesOrdering::Contiguous,
+        }
+    }
+
+    fn raw_series_schema(
+        &self,
+        label_source: &RawLabelSource,
+    ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+        Ok(self
+            .prepare_raw_scan(label_source)?
+            .map(|preparation| preparation.schema))
+    }
+
     fn scan_series_partition(
         &self,
         ctx: &QueryScanContext,
@@ -585,171 +792,9 @@ impl RegionScanner for SeriesScan {
         partition: usize,
         label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
-        let input = &self.stream_ctx.input;
-        let metadata = input.mapper.metadata();
-        match label_source {
-            RawLabelSource::PrimaryKey {
-                physical_metadata,
-                logical_tags,
-                ..
-            } => {
-                if !Arc::ptr_eq(metadata, physical_metadata) {
-                    debug!(
-                        "Raw series scan preflight rejected metadata snapshot: region_id={}, physical_region_id={}, schema_version={}, physical_schema_version={}",
-                        metadata.region_id,
-                        physical_metadata.region_id,
-                        metadata.schema_version,
-                        physical_metadata.schema_version,
-                    );
-                    return Err(BoxedError::new(
-                        InvalidRecordBatchSnafu {
-                            reason: "raw label source metadata does not match scanner snapshot"
-                                .to_string(),
-                        }
-                        .build(),
-                    ));
-                }
-                let mut ids = HashSet::new();
-                let mut names = HashSet::new();
-                for tag in logical_tags.iter() {
-                    let column = metadata.column_by_id(tag.column_id).filter(|column| {
-                        column.semantic_type == SemanticType::Tag
-                            && metadata.primary_key.contains(&tag.column_id)
-                    });
-                    let valid = column.is_some_and(|column| {
-                        column.column_schema.name == tag.name.as_ref()
-                            && tag.name.as_ref() != "__name__"
-                            && !is_internal_column(tag.name.as_ref())
-                            && !is_metric_engine_internal_column(tag.name.as_ref())
-                            && !ReservedColumnId::is_reserved(tag.column_id)
-                    });
-                    let unique_id = valid && ids.insert(tag.column_id);
-                    let unique_name = unique_id && names.insert(tag.name.as_ref());
-                    if !valid || !unique_id || !unique_name {
-                        debug!(
-                            "Raw series scan preflight rejected label binding: region_id={}, column_id={}, binding_valid={}, unique_id={}, unique_name={}",
-                            metadata.region_id, tag.column_id, valid, unique_id, unique_name,
-                        );
-                        return Err(BoxedError::new(
-                            InvalidRecordBatchSnafu {
-                                reason: "invalid raw label binding".to_string(),
-                            }
-                            .build(),
-                        ));
-                    }
-                }
-            }
-            RawLabelSource::Explicit => {
-                debug!(
-                    "Raw series scan preflight rejected explicit labels: region_id={}",
-                    metadata.region_id,
-                );
-                return Ok(None);
-            }
-        }
-        let selected = input.mapper.output_schema();
-        let mut fields = Vec::new();
-        let mut specs = Vec::new();
-        for output in selected.column_schemas() {
-            let Some(column) = metadata.column_metadatas.iter().find(|column| {
-                column.column_schema.name == output.name
-                    && column.semantic_type == SemanticType::Field
-            }) else {
-                continue;
-            };
-            let Some((index, (_, data_type))) = input
-                .mapper
-                .batch_schema()
-                .iter()
-                .enumerate()
-                .find(|(_, (id, _))| *id == column.column_id)
-            else {
-                debug!(
-                    "Raw series scan preflight missing mapper field: region_id={}, column_id={}",
-                    metadata.region_id, column.column_id,
-                );
-                return Err(BoxedError::new(
-                    InvalidRecordBatchSnafu {
-                        reason: format!(
-                            "selected field {} is missing from mapper batch schema",
-                            output.name
-                        ),
-                    }
-                    .build(),
-                ));
-            };
-            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
-                debug!(
-                    "Raw series scan preflight rejected field type: region_id={}, column_id={}",
-                    metadata.region_id, column.column_id,
-                );
-                return Ok(None);
-            }
-            fields.push((index, data_type.clone()));
-            specs.push(FieldSpec {
-                name: Arc::from(output.name.as_str()),
-            });
-        }
-        let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
-        if fields.is_empty()
-            || input.append_mode
-            || input.series_row_selector.is_some()
-            || !time_is_millis
-        {
-            debug!(
-                "Raw series scan preflight rejected scan options: region_id={}, selected_fields={}, append_mode={}, row_selector={}, time_is_millis={}",
-                metadata.region_id,
-                fields.len(),
-                input.append_mode,
-                input.series_row_selector.is_some(),
-                time_is_millis,
-            );
+        let Some(preparation) = self.prepare_raw_scan(label_source)? else {
             return Ok(None);
-        }
-        let schema = Arc::new(SeriesSchema {
-            fields: specs.into(),
-            eval_grid: None,
-        });
-        let typed_schema = input.mapper.input_arrow_schema(false);
-        let mut predicates = Vec::new();
-        if let Some(predicate) = input.predicate_group().predicate_without_region() {
-            for expr in predicate.exprs() {
-                // Fresh execution properties cannot preserve Stable or query-dependent semantics.
-                if expr
-                    .exists(|node| {
-                        Ok(matches!(node, Expr::ScalarFunction(function)
-                            if function.func.signature().volatility != Volatility::Immutable)
-                            || matches!(node, Expr::ScalarVariable(..)))
-                    })
-                    .unwrap_or(true)
-                {
-                    debug!(
-                        "Raw series scan preflight rejected predicate volatility or variable: region_id={}",
-                        metadata.region_id,
-                    );
-                    return Ok(None);
-                }
-                // Evaluate residuals with original types before raw conversion to Float64.
-                let Ok(physical) = Predicate::to_physical_expr(expr, &typed_schema) else {
-                    debug!(
-                        "Raw series scan preflight failed predicate compilation: region_id={}",
-                        metadata.region_id,
-                    );
-                    return Ok(None);
-                };
-                if !matches!(
-                    physical.data_type(&typed_schema),
-                    Ok(ArrowDataType::Boolean | ArrowDataType::Null)
-                ) {
-                    debug!(
-                        "Raw series scan preflight rejected predicate type: region_id={}",
-                        metadata.region_id,
-                    );
-                    return Ok(None);
-                }
-                predicates.push(physical);
-            }
-        }
+        };
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -760,13 +805,15 @@ impl RegionScanner for SeriesScan {
         let batches = self
             .scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)
             .map_err(BoxedError::new)?;
+        let ordering = self.raw_series_ordering();
         Ok(Some(raw::make_stream(
             batches,
-            schema,
+            preparation.schema,
             label_source.clone(),
-            fields,
+            preparation.fields,
             metrics,
-            predicates,
+            preparation.predicates,
+            ordering,
         )))
     }
 
