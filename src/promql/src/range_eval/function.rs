@@ -218,11 +218,14 @@ fn quantile(q: f64, values: &[f64], sorted: &mut Vec<f64>) -> f64 {
     }
     sorted.clear();
     sorted.extend_from_slice(values);
-    sorted.sort_unstable_by(|a, b| match (a.is_nan(), b.is_nan()) {
+    // Go's `vectorByValueHeap` puts NaN first and treats +0 and -0 as equal; Go sorts short
+    // inputs by insertion, which keeps equal values in window order, and which zero is picked
+    // decides the sign of the result.
+    sorted.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
         (true, true) => std::cmp::Ordering::Equal,
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
-        (false, false) => a.total_cmp(b),
+        (false, false) => a.partial_cmp(b).expect("neither is NaN"),
     });
     let n = sorted.len() as f64;
     let rank = q * (n - 1.0);

@@ -27,7 +27,9 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
@@ -1051,4 +1053,30 @@ fn ts_of_last_over_time_reports_zero_for_negative_timestamps() {
             &output_metric(function, 0),
         );
     }
+}
+
+/// Equal values keep window order in `quantile_over_time`, so the zero a quantile lands on is
+/// the one Prometheus picks: `1 / quantile_over_time(1, m[3s])` over +0, -0, -0 is -Inf.
+#[test]
+fn quantile_keeps_the_window_order_of_signed_zeros() {
+    let window = RangeWindow {
+        range_ms: 3_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let rows: Vec<Row> = [(0, 0.0), (1_000, -0.0), (2_000, -0.0)]
+        .map(|(ts, value)| (ts, vec![Some(value)]))
+        .to_vec();
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(2_000, 1_000, 1),
+        window,
+        RangeFunction::QuantileOverTime(1.0),
+    )
+    .unwrap();
+    let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+    let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
+        panic!("expected a float");
+    };
+    assert_eq!(1.0 / value, f64::NEG_INFINITY);
 }
