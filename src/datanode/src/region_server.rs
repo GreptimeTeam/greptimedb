@@ -2002,9 +2002,9 @@ impl RegionServerInner {
             match closed {
                 Ok(_) => debug!("Region {region_id} is closed"),
                 Err(e) => {
-                    // The close failed to flush writes that skipped the WAL,
-                    // which nothing replays.
-                    error!(e; "Failed to close region {region_id}, its unflushed writes that skipped the WAL are lost");
+                    // A close that failed may not have flushed writes that
+                    // skipped the WAL, which nothing replays.
+                    error!(e; "Failed to close region {region_id}; writes that skipped the WAL may be lost");
                     record_shutdown_error(
                         &mut first_error,
                         Err(e).context(HandleRegionRequestSnafu { region_id }),
