@@ -1182,3 +1182,22 @@ fn rejects_a_subquery_grid_longer_than_u64() {
         Err(DataFusionError::Plan(_))
     ));
 }
+
+/// An anchored window that ends before the series starts skips past the one point it reads;
+/// later chunks must not pile up either.
+#[test]
+fn anchored_window_before_the_series_retains_nothing() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: Some(5),
+    };
+    let mut evaluator = probe_evaluator(1, grid(100, 10, 3), window);
+    for chunk_index in 0..100 {
+        let rows: Vec<Row> = (0..100)
+            .map(|row| (50 + chunk_index * 100 + row, vec![Some(1.0)]))
+            .collect();
+        evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
+        assert!(evaluator.fields[0].timestamps.len() <= 100);
+    }
+}

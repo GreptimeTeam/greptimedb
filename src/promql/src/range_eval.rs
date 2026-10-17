@@ -468,7 +468,8 @@ impl RangeEvaluator {
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.
-            if state.cursor == points_read {
+            // An anchored selector can skip past the one point it reads.
+            if state.cursor >= points_read {
                 field.head = field.timestamps.len();
             }
             field.timestamps.drain(..field.head);
