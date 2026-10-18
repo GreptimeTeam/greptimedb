@@ -176,7 +176,13 @@ impl TwcsPicker {
                 let primary_key_mapper = primary_key_mapper.clone();
                 handles.push(common_runtime::spawn_blocking_compact(move || {
                     let pick = time_windows.get(&window).and_then(|files| {
-                        picker.pick_window(region_id, files, active_window, &primary_key_mapper)
+                        picker.pick_window(
+                            region_id,
+                            files,
+                            active_window,
+                            time_window_size,
+                            &primary_key_mapper,
+                        )
                     });
                     (window, pick)
                 }));
@@ -244,6 +250,7 @@ impl TwcsPicker {
         region_id: RegionId,
         window: &Window,
         active_window: Option<i64>,
+        time_window_size: Option<i64>,
         mapper: &PrimaryKeyRangeMapper,
     ) -> Option<WindowPick> {
         let mut files: Vec<_> = window.files().cloned().collect();
@@ -275,7 +282,13 @@ impl TwcsPicker {
         {
             None
         } else {
-            self.pick_inactive_window(l0_files, l1_files, mapper)
+            let settling = !self.all_windows_inactive
+                && active_window
+                    .zip(time_window_size)
+                    .is_some_and(|(active, size)| {
+                        (1..=size).contains(&(active - window.time_window))
+                    });
+            self.pick_inactive_window(l0_files, l1_files, mapper, settling)
         }
     }
 
@@ -330,6 +343,11 @@ impl TwcsPicker {
     ///    removes files, see [`units::pick_closed_merge`]. Pure file reduction
     ///    waits for the L1 trigger; overlap resolution does not.
     ///
+    /// A `settling` window is the one right before the active window. Late data
+    /// still lands there, and resolving its overlaps now would rewrite the
+    /// window again once the late data arrives, so overlap resolution waits
+    /// until the window is older.
+    ///
     /// Without new writes each pick consumes an L0 file or makes progress on
     /// the closed merge's termination measure, so the window stops compacting.
     fn pick_inactive_window(
@@ -337,6 +355,7 @@ impl TwcsPicker {
         l0_files: Vec<FileHandle>,
         l1_files: Vec<FileHandle>,
         mapper: &PrimaryKeyRangeMapper,
+        settling: bool,
     ) -> Option<WindowPick> {
         let num_l1_files = l1_files.len();
         if !l0_files.is_empty()
@@ -363,6 +382,7 @@ impl TwcsPicker {
             ClosedMergeOptions {
                 limits: self.closed_merge_limits(),
                 allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
+                allow_overlap_resolution: !settling,
             },
         )?;
         let (class, branch) = if pick.reduces_files {
@@ -3398,6 +3418,33 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(expected, output.len(), "manual: {all_windows_inactive}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_settling_window_defers_overlap_resolution() {
+        let files = priority_test_files(3, 1, 100, true);
+        for (active_window, all_windows_inactive, expected) in
+            [(4, false, 0), (5, false, 1), (2, false, 1), (4, true, 1)]
+        {
+            let picker = TwcsPicker {
+                all_windows_inactive,
+                ..priority_test_picker(1)
+            };
+            let output = picker
+                .build_output_with_time_range(
+                    RegionId::from_u64(1),
+                    assign_to_windows(files.iter(), 1),
+                    Some(active_window),
+                    Some(1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                expected,
+                output.len(),
+                "active: {active_window}, manual: {all_windows_inactive}"
+            );
         }
     }
 
