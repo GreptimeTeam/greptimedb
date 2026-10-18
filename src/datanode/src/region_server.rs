@@ -750,6 +750,7 @@ impl RegionServer {
             })
             .collect();
         let started = Instant::now();
+        let tracing_context = TracingContext::from_current_span();
         // The accounting tasks are spawned by the batch task, so a caller that goes away does not
         // lose them.
         let tasks = common_runtime::spawn_ingest(async move {
@@ -757,23 +758,30 @@ impl RegionServer {
                 .handle_batch_put_requests(puts)
                 .into_iter()
                 .map(|(region_id, response)| {
-                    common_runtime::spawn_ingest(async move {
-                        let result = response
-                            .await
-                            .context(HandleRegionRequestSnafu { region_id });
-                        crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-                            .with_label_values(&[request_type])
-                            .observe(started.elapsed().as_secs_f64());
-                        match &result {
-                            Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
+                    let span = tracing_context.attach(info_span!(
+                        "RegionServer::handle_region_request",
+                        region_id = region_id.to_string()
+                    ));
+                    common_runtime::spawn_ingest(
+                        async move {
+                            let result = response
+                                .await
+                                .context(HandleRegionRequestSnafu { region_id });
+                            crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
                                 .with_label_values(&[request_type])
-                                .inc_by(response.affected_rows as u64),
-                            Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                                .with_label_values(&[request_type, err.status_code().as_ref()])
-                                .inc(),
+                                .observe(started.elapsed().as_secs_f64());
+                            match &result {
+                                Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
+                                    .with_label_values(&[request_type])
+                                    .inc_by(response.affected_rows as u64),
+                                Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                                    .with_label_values(&[request_type, err.status_code().as_ref()])
+                                    .inc(),
+                            }
+                            result
                         }
-                        result
-                    })
+                        .trace(span),
+                    )
                 })
                 .collect::<Vec<_>>()
         })
