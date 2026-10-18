@@ -258,10 +258,16 @@ pub(super) fn extrapolation_factor(
     is_rate: bool,
     zero_point: Option<f64>,
 ) -> f64 {
-    let range_start = i128::from(eval_ts) - i128::from(range_ms);
-    let mut duration_to_start = (i128::from(first_t) - range_start) as f64 / 1000.0;
-    let mut duration_to_end = (i128::from(eval_ts) - i128::from(last_t)) as f64 / 1000.0;
-    let sampled_interval = (i128::from(last_t) - i128::from(first_t)) as f64 / 1000.0;
+    // Millisecond differences in 64-bit arithmetic: widening to `i128` and narrowing back with
+    // `as f64` compiles to a call to the `__floattidf` builtin instead of an instruction, once per
+    // grid point per series. `saturating_sub` is exact here: a difference too large for `i64` is
+    // either a window start below every representable instant, which puts every sample inside the
+    // window either way, or a distance far past the extrapolation threshold, where the saturated
+    // and unbounded values take the same branch.
+    let range_start = eval_ts.saturating_sub(range_ms);
+    let mut duration_to_start = first_t.saturating_sub(range_start) as f64 / 1000.0;
+    let mut duration_to_end = eval_ts.saturating_sub(last_t) as f64 / 1000.0;
+    let sampled_interval = last_t.saturating_sub(first_t) as f64 / 1000.0;
     let average_interval = sampled_interval / samples_minus_one as f64;
     let threshold = average_interval * 1.1;
     if duration_to_start >= threshold {
