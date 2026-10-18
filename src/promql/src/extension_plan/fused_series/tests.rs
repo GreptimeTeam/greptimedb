@@ -1245,7 +1245,7 @@ async fn construction_rejects_a_non_nullable_field_column() {
 }
 
 #[tokio::test]
-async fn construction_rejects_a_non_nullable_tag_column() {
+async fn construction_accepts_a_non_nullable_tag_column() {
     let case = Case::new(
         &["host"],
         RangeWindow {
@@ -1256,6 +1256,8 @@ async fn construction_rejects_a_non_nullable_tag_column() {
         RangeFunction::Rate,
         vec![],
     );
+    // The PromQL plan declares a label non-nullable and expresses an absent label with the empty
+    // value Prometheus reads, so a non-nullable tag is a supported shape.
     let not_nullable = Arc::new(Schema::new(vec![
         Field::new(VALUE, DataType::Float64, true),
         Field::new("host", DataType::Utf8, false),
@@ -1265,15 +1267,21 @@ async fn construction_rejects_a_non_nullable_tag_column() {
             false,
         ),
     ]));
-    let error = case
-        .with_output_schema(not_nullable)
-        .fused(memory_child(&[]))
-        .err()
-        .unwrap();
-    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
-    let message = error.to_string();
-    assert!(message.contains("host"), "{message}");
-    assert!(message.contains("must be nullable"), "{message}");
+    let chunks = vec![chunk(
+        1,
+        "a",
+        &[(300_000, Some(1.0)), (360_000, Some(2.0))],
+        true,
+    )];
+    let case = case.with_output_schema(not_nullable);
+    let reference = case.reference(&chunks);
+    let batches = collect(run(case.fused(memory_child(&chunks)).unwrap()).await);
+    assert_matches_reference(&batches, &reference, "non-nullable tag");
+    assert_eq!(
+        string_column(&batches[0], "host"),
+        vec![Some("a".to_string()); batches[0].num_rows()],
+        "a non-nullable tag carries its value on every row"
+    );
 }
 
 #[tokio::test]

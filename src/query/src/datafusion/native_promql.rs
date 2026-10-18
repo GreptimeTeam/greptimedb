@@ -24,16 +24,22 @@ use promql::extension_plan::{InstantManipulate, InstantManipulateExec, SeriesDiv
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use table::table::scan::RegionScanExec;
 
+mod fused;
+
 use crate::datafusion::raw_expr_supported;
 use crate::dummy_catalog::DummyTableProvider;
 
-/// Selects native execution for the bounded, unmodified instant-over-divide shape.
+/// Selects native execution for a bounded, unmodified shape.
 ///
-/// Returns the original plan unchanged for any shape that does not match the local pattern.
+/// Tries the fused range-function subtree first, then the instant-over-divide shape, and returns
+/// the original plan unchanged for anything else.
 pub(crate) async fn try_select(
     logical: &LogicalPlan,
     original: Arc<dyn ExecutionPlan>,
 ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    if let Some(fused) = fused::try_select_fused(logical, &original)? {
+        return Ok(fused);
+    }
     if let Some(local) = try_select_local(logical, &original)? {
         return Ok(local);
     }

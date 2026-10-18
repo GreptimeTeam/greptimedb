@@ -422,14 +422,30 @@ fn classify_output(
                     field.data_type()
                 )));
             }
-            // `rate` and the map kernels drop `__name__`, so any tag can be absent.
+            // `rate` and the map kernels drop `__name__`, so a tag can be absent. A nullable
+            // column says so with a NULL; a non-nullable one -- which is what the PromQL plan
+            // declares -- says so with the empty label value Prometheus reads for a label the
+            // series does not carry. Both encode the same thing, so either is accepted.
+            classification.push(OutputColumn::Tag(index));
+            continue;
+        }
+        // A PromQL plan names a range-function value column after the call that produced it
+        // (`prom_rate(timestamp_range,field_0,timestamp,Int64(300000))`), not after the raw field
+        // it reads, so a `Float64` column naming no field still carries exactly one field: the
+        // next unclaimed one, in the order both were declared. Columns that do name a field were
+        // matched above, so only genuinely unnamed value columns reach this branch.
+        if field.data_type() == &DataType::Float64
+            && let Some(index) = field_seen.iter().position(|seen| !seen)
+        {
+            // A grid point inside the trimmed interval can have no value in this field.
             if !field.is_nullable() {
                 return Err(DataFusionError::Plan(format!(
-                    "tag column {name:?} of FusedSeriesExec must be nullable, because range \
-                     functions and map kernels drop the metric name"
+                    "field column {name:?} of FusedSeriesExec must be nullable, because a grid \
+                     point can be missing"
                 )));
             }
-            classification.push(OutputColumn::Tag(index));
+            field_seen[index] = true;
+            classification.push(OutputColumn::Field(index));
             continue;
         }
         return Err(DataFusionError::Plan(format!(

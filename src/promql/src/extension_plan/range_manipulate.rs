@@ -115,6 +115,41 @@ impl RangeManipulate {
         "RangeManipulate"
     }
 
+    /// Start of the evaluation time range, in milliseconds.
+    pub fn start(&self) -> Millisecond {
+        self.start
+    }
+
+    /// End of the evaluation time range, in milliseconds.
+    pub fn end(&self) -> Millisecond {
+        self.end
+    }
+
+    /// Grid step, in milliseconds.
+    pub fn interval(&self) -> Millisecond {
+        self.interval
+    }
+
+    /// Window length, in milliseconds.
+    pub fn range(&self) -> Millisecond {
+        self.range
+    }
+
+    /// Offset applied to the source timestamps, in milliseconds.
+    pub fn offset(&self) -> Millisecond {
+        self.offset
+    }
+
+    /// Column holding the source timestamps.
+    pub fn time_index(&self) -> &str {
+        &self.time_index
+    }
+
+    /// Columns the range is built over.
+    pub fn field_columns(&self) -> &[String] {
+        &self.field_columns
+    }
+
     pub fn build_timestamp_range_name(time_index: &str) -> String {
         format!("{time_index}_range")
     }
