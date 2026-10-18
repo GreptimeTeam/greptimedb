@@ -128,12 +128,18 @@ pub fn sql_value_to_value(
     column_schema: &ColumnSchema,
     sql_val: &SqlValue,
     timezone: Option<&Timezone>,
-    unary_op: Option<UnaryOperator>,
+    mut unary_op: Option<UnaryOperator>,
     auto_string_to_numeric: bool,
 ) -> Result<Value> {
     let column_name = &column_schema.name;
     let data_type = &column_schema.data_type;
     let mut value = match sql_val {
+        // Parse the sign with the digits, otherwise the minimum of a signed type
+        // overflows before it is negated.
+        SqlValue::Number(n, _) if unary_op == Some(UnaryOperator::Minus) => {
+            unary_op = None;
+            sql_number_to_value(data_type, &format!("-{n}"))?
+        }
         SqlValue::Number(n, _) => sql_number_to_value(data_type, n)?,
         SqlValue::Null => Value::Null,
         SqlValue::Boolean(b) => {
@@ -944,6 +950,36 @@ mod test {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn test_negative_number_at_type_minimum() {
+        for (data_type, digits, expected) in [
+            (
+                ConcreteDataType::int8_datatype(),
+                "128",
+                Value::Int8(i8::MIN),
+            ),
+            (
+                ConcreteDataType::int32_datatype(),
+                "2147483648",
+                Value::Int32(i32::MIN),
+            ),
+            (
+                ConcreteDataType::int64_datatype(),
+                "9223372036854775808",
+                Value::Int64(i64::MIN),
+            ),
+        ] {
+            let value = call_sql_value_to_value!(
+                "test",
+                data_type,
+                &SqlValue::Number(digits.into(), false),
+                unary_op = UnaryOperator::Minus
+            )
+            .unwrap();
+            assert_eq!(value, expected);
+        }
     }
 
     #[test]

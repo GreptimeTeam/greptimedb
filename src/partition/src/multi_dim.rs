@@ -978,6 +978,73 @@ mod test_split_record_batch {
     }
 
     #[test]
+    fn test_comparison_batch_matches_row() {
+        use datatypes::arrow::array::Array;
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        let inputs = [None, Some(4), Some(5), Some(6)];
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)])),
+            vec![Arc::new(Int64Array::from(inputs.to_vec()))],
+        )
+        .unwrap();
+        let mut mismatches = vec![];
+        for op in [
+            RestrictedOp::Eq,
+            RestrictedOp::NotEq,
+            RestrictedOp::Lt,
+            RestrictedOp::LtEq,
+            RestrictedOp::Gt,
+            RestrictedOp::GtEq,
+        ] {
+            for bound in [Value::Null, Value::Int64(5)] {
+                // Both operand orders, since a rule restored without canonicalization may
+                // keep the literal on the left.
+                for expr in [
+                    PartitionExpr::new(col("a"), op.clone(), bound.clone().into()),
+                    PartitionExpr {
+                        lhs: Box::new(bound.clone().into()),
+                        op: op.clone(),
+                        rhs: Box::new(col("a")),
+                    },
+                ] {
+                    let rule = MultiDimPartitionRule::try_new(
+                        vec!["a".to_string()],
+                        vec![1],
+                        vec![expr.clone()],
+                        false,
+                    )
+                    .unwrap();
+                    let by_batch = match expr
+                        .try_as_physical_expr(batch.schema_ref())
+                        .unwrap()
+                        .evaluate(&batch)
+                    {
+                        Ok(by_batch) => {
+                            columnar_value_to_boolean_array(by_batch, batch.num_rows()).unwrap()
+                        }
+                        Err(err) => {
+                            mismatches.push(format!("{expr}: batch error {err}"));
+                            continue;
+                        }
+                    };
+                    for (row, input) in inputs.iter().enumerate() {
+                        let value = input.map_or(Value::Null, Value::Int64);
+                        let by_row = rule.evaluate_expr(&expr, &[value]).unwrap();
+                        let by_batch = by_batch.is_valid(row) && by_batch.value(row);
+                        if by_row != by_batch {
+                            mismatches.push(format!(
+                                "{expr} with a = {input:?}: row {by_row}, batch {by_batch}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
     fn test_columnar_value_to_boolean_array_scalar_false() {
         let result = columnar_value_to_boolean_array(
             ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))),

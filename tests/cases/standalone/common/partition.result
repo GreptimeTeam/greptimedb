@@ -463,3 +463,33 @@ DROP TABLE `molestiAe`;
 
 Affected Rows: 0
 
+-- The minimum of a signed type is a valid bound.
+CREATE TABLE int_min_bound (
+  a INT PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+) PARTITION ON COLUMNS (a) (
+  a < -2147483648,
+  a >= -2147483648 AND a < 0,
+  a >= 0
+);
+
+Affected Rows: 0
+
+INSERT INTO int_min_bound VALUES (-2147483648, 1), (NULL, 2), (0, 3);
+
+Affected Rows: 3
+
+SELECT * FROM int_min_bound ORDER BY ts;
+
++-------------+-------------------------+
+| a           | ts                      |
++-------------+-------------------------+
+| -2147483648 | 1970-01-01T00:00:00.001 |
+|             | 1970-01-01T00:00:00.002 |
+| 0           | 1970-01-01T00:00:00.003 |
++-------------+-------------------------+
+
+DROP TABLE int_min_bound;
+
+Affected Rows: 0
+

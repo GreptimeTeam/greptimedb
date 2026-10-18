@@ -278,76 +278,43 @@ impl PartitionExpr {
     }
 
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
-        // Special handling for null equality.
-        // `col = NULL` -> `col IS NULL` to match SQL (DataFusion) semantics.
-        let lhs_is_null = matches!(self.lhs.as_ref(), Operand::Value(Value::Null));
-        let rhs_is_null = matches!(self.rhs.as_ref(), Operand::Value(Value::Null));
-
-        match (self.op.clone(), lhs_is_null, rhs_is_null) {
-            (RestrictedOp::Eq, _, true) => {
-                return Ok(self.lhs.try_as_logical_expr()?.is_null());
+        // Row routing compares `Value`s, which order NULL before every other value.
+        // A comparison here must give the same answer as a non-null boolean, since
+        // batch routing and region filters treat a NULL result as false.
+        let comparison = match (self.lhs.as_ref(), self.rhs.as_ref()) {
+            (column @ Operand::Column(_), Operand::Value(value)) => {
+                Some((column, value, self.op.clone()))
             }
-            (RestrictedOp::Eq, true, _) => {
-                return Ok(self.rhs.try_as_logical_expr()?.is_null());
+            (Operand::Value(value), column @ Operand::Column(_)) => {
+                Some((column, value, self.op.invert_for_swap()))
             }
-            (RestrictedOp::NotEq, _, true) => {
-                return Ok(self.lhs.try_as_logical_expr()?.is_not_null());
-            }
-            (RestrictedOp::NotEq, true, _) => {
-                return Ok(self.rhs.try_as_logical_expr()?.is_not_null());
-            }
-            _ => {}
-        }
-
-        if matches!(
-            self.op,
-            RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
-        ) {
-            // Keep filtering semantics aligned with direct PartitionExpr evaluation (null-first ordering).
-            // In DataFusion SQL semantics, range comparisons with NULL yield NULL, so we inject
-            // `OR col IS NULL` on the null-first side of the comparison.
-            if matches!(self.lhs.as_ref(), Operand::Column(_)) {
-                let column_expr = self.lhs.try_as_logical_expr()?;
-                let other_expr = self.rhs.try_as_logical_expr()?;
-                let base = match self.op {
-                    RestrictedOp::Lt => {
-                        column_expr.clone().lt(other_expr).or(column_expr.is_null())
+            _ => None,
+        };
+        if let Some((column, value, op)) = comparison {
+            let column = column.try_as_logical_expr()?;
+            if matches!(value, Value::Null) {
+                return match op {
+                    RestrictedOp::Eq | RestrictedOp::LtEq => Ok(column.is_null()),
+                    RestrictedOp::NotEq | RestrictedOp::Gt => Ok(column.is_not_null()),
+                    RestrictedOp::Lt => Ok(datafusion_expr::lit(false)),
+                    RestrictedOp::GtEq => Ok(datafusion_expr::lit(true)),
+                    RestrictedOp::And | RestrictedOp::Or => {
+                        error::InvalidExprSnafu { expr: self.clone() }.fail()
                     }
-                    RestrictedOp::LtEq => column_expr
-                        .clone()
-                        .lt_eq(other_expr)
-                        .or(column_expr.is_null()),
-                    RestrictedOp::Gt => column_expr
-                        .clone()
-                        .gt(other_expr)
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::GtEq => column_expr
-                        .clone()
-                        .gt_eq(other_expr)
-                        .and(column_expr.is_not_null()),
-                    _ => unreachable!(),
                 };
-                return Ok(base);
-            } else if matches!(self.rhs.as_ref(), Operand::Column(_)) {
-                let other_expr = self.lhs.try_as_logical_expr()?;
-                let column_expr = self.rhs.try_as_logical_expr()?;
-                let base = match self.op {
-                    RestrictedOp::Lt => other_expr
-                        .lt(column_expr.clone())
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::LtEq => other_expr
-                        .lt_eq(column_expr.clone())
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::Gt => {
-                        other_expr.gt(column_expr.clone()).or(column_expr.is_null())
-                    }
-                    RestrictedOp::GtEq => other_expr
-                        .gt_eq(column_expr.clone())
-                        .or(column_expr.is_null()),
-                    _ => unreachable!(),
-                };
-                return Ok(base);
             }
+            let bound = Operand::Value(value.clone()).try_as_logical_expr()?;
+            return match op {
+                RestrictedOp::Eq => Ok(column.eq(bound)),
+                RestrictedOp::NotEq => Ok(column.clone().not_eq(bound).or(column.is_null())),
+                RestrictedOp::Lt => Ok(column.clone().lt(bound).or(column.is_null())),
+                RestrictedOp::LtEq => Ok(column.clone().lt_eq(bound).or(column.is_null())),
+                RestrictedOp::Gt => Ok(column.clone().gt(bound).and(column.is_not_null())),
+                RestrictedOp::GtEq => Ok(column.clone().gt_eq(bound).and(column.is_not_null())),
+                RestrictedOp::And | RestrictedOp::Or => {
+                    error::InvalidExprSnafu { expr: self.clone() }.fail()
+                }
+            };
         }
 
         // Normal cases handling, without NULL
@@ -769,7 +736,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) > a OR a IS NULL"
+            "a < Int64(10) OR a IS NULL"
         );
 
         let gteq_expr_rhs_column = PartitionExpr {
@@ -782,7 +749,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) >= a OR a IS NULL"
+            "a <= Int64(10) OR a IS NULL"
         );
     }
 
