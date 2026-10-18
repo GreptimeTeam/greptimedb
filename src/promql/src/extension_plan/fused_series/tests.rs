@@ -247,6 +247,15 @@ fn memory_child_of(schema: &SeriesSchema, chunks: &[RawSeriesChunk]) -> Arc<dyn 
     )
 }
 
+/// A child whose chunks are split across one partition per slice.
+fn partitioned_child(partitions: &[&[RawSeriesChunk]]) -> Arc<dyn ExecutionPlan> {
+    let batches: Vec<Vec<_>> = partitions
+        .iter()
+        .map(|chunks| frame_batches_of(&series_schema(), chunks))
+        .collect();
+    Arc::new(TestMemoryExec::try_new(&batches, frame_schema_of(&series_schema()), None).unwrap())
+}
+
 fn grid() -> Arc<EvalGrid> {
     Arc::new(
         EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, GRID_LEN).unwrap()).unwrap(),
@@ -756,6 +765,45 @@ async fn duplicate_final_label_set_at_one_grid_point_is_an_error() {
     );
     assert!(items[0].is_ok(), "{:?}", items[0]);
     let error = items.into_iter().nth(1).unwrap().err().unwrap();
+    let message = error_chain(&error);
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "{message}"
+    );
+    assert!(
+        message.contains("host=\"x\""),
+        "the label set must be readable: {message}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_final_label_set_across_partitions_is_an_error() {
+    // One series per partition, and `rate` drops `__name__` so both reach `{host="x"}` while both
+    // cover the same grid points. A per-partition check would see one series each and report
+    // nothing, so this is what pins the check to the whole output.
+    let rows = counter_rows(60.0);
+    let a = vec![named_chunk("a_total", 1, "x", &rows, true)];
+    let b = vec![named_chunk("b_total", 2, "x", &rows, true)];
+    let case = Case::new(
+        &["host"],
+        RangeWindow {
+            range_ms: 300_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+        vec![],
+    );
+    let exec = case.fused(partitioned_child(&[&a, &b])).unwrap();
+    assert_eq!(
+        exec.properties().output_partitioning().partition_count(),
+        2,
+        "this test needs two partitions to place one series in each"
+    );
+    let plan: Arc<dyn ExecutionPlan> = Arc::new(exec);
+    let error = datafusion::physical_plan::collect(plan, Arc::new(TaskContext::default()))
+        .await
+        .expect_err("two series with the same final labels must collide across partitions");
     let message = error_chain(&error);
     assert!(
         message.contains("vector cannot contain metrics with the same labelset"),
