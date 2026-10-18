@@ -1,0 +1,477 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Brute-force reference for operators producing grid series: results are compared as dense
+//! `[grid index][field]` matrices, so a kernel cannot pass by aligning local row numbers.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use datafusion::arrow::array::{Float64Array, UInt32Array};
+use datatypes::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
+};
+use datatypes::series::samples::{
+    HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+use datatypes::series::{Label, MetricName};
+use rand::Rng;
+
+use crate::grid_series::GridSeriesBuilder;
+use crate::histogram_eval::float_histogram::FloatHistogram;
+
+/// Values by absolute grid index, then by field; `None` is missing.
+pub(crate) type Dense = Vec<Vec<Option<f64>>>;
+
+/// Expands a grid series to a dense matrix over its whole grid.
+fn expand(series: &Series) -> Dense {
+    let TimeAxis::Grid(range) = &series.time else {
+        panic!("expected a grid series, got {:?}", series.time);
+    };
+    let fields = series.fields.as_slice();
+    let mut dense = vec![vec![None; fields.len()]; range.grid().timestamps().len()];
+    for (field_index, field) in fields.iter().enumerate() {
+        for (row, sample) in field.iter().enumerate() {
+            dense[range.start() + row][field_index] = match sample {
+                SampleRef::Missing => None,
+                SampleRef::Float(value) => Some(value),
+                SampleRef::Histogram(_) => panic!("unexpected histogram sample"),
+            };
+        }
+    }
+    dense
+}
+
+/// Asserts `actual` is the trimmed form of `expected`, with identical value bits and metric.
+pub(crate) fn assert_series_eq(actual: Option<&Series>, expected: &Dense, metric: &MetricName) {
+    assert_series_matches(actual, expected, metric, f64::to_bits, "");
+}
+
+/// Like [`assert_series_eq`], but any NaN equals any NaN: Prometheus' NaN payloads depend on how
+/// the Go compiler orders commutative operands, and every NaN is serialized as `NaN`.
+/// `context` names the case in failure messages.
+pub(crate) fn assert_series_eq_any_nan(
+    actual: Option<&Series>,
+    expected: &Dense,
+    metric: &MetricName,
+    context: &str,
+) {
+    let any_nan = |value: f64| {
+        if value.is_nan() {
+            f64::NAN.to_bits()
+        } else {
+            value.to_bits()
+        }
+    };
+    assert_series_matches(actual, expected, metric, any_nan, context);
+}
+
+fn assert_series_matches(
+    actual: Option<&Series>,
+    expected: &Dense,
+    metric: &MetricName,
+    bits_of: fn(f64) -> u64,
+    context: &str,
+) {
+    let valid_rows = || {
+        expected
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.iter().any(Option::is_some))
+            .map(|(index, _)| index)
+    };
+    let Some((first, last)) = valid_rows().next().zip(valid_rows().next_back()) else {
+        assert!(
+            actual.is_none(),
+            "{context}: expected no series, got {actual:?}"
+        );
+        return;
+    };
+    let actual =
+        actual.unwrap_or_else(|| panic!("{context}: expected a series over [{first}, {last}]"));
+    let TimeAxis::Grid(range) = &actual.time else {
+        panic!("expected a grid series, got {:?}", actual.time);
+    };
+    assert_eq!(
+        (range.start(), range.len()),
+        (first, last + 1 - first),
+        "{context}: grid range is not trimmed to the valid rows"
+    );
+    assert_eq!(range.grid().timestamps().len(), expected.len());
+    assert_eq!(&actual.metric, metric);
+    let bits = |dense: &Dense| -> Vec<Vec<Option<u64>>> {
+        dense
+            .iter()
+            .map(|row| row.iter().map(|value| value.map(bits_of)).collect())
+            .collect()
+    };
+    assert_eq!(bits(&expand(actual)), bits(expected), "{context}");
+}
+
+/// Values covering the bit patterns kernels most often mishandle.
+pub(crate) fn special_value(rng: &mut impl Rng) -> f64 {
+    const SPECIAL: [f64; 7] = [
+        0.0,
+        -0.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+    ];
+    if rng.random_bool(0.2) {
+        SPECIAL[rng.random_range(0..SPECIAL.len())]
+    } else {
+        rng.random_range(-1e6..1e6)
+    }
+}
+
+/// A dense matrix with a random start, length and holes, all other rows missing.
+pub(crate) fn random_dense(rng: &mut impl Rng, grid_len: usize, fields: usize) -> Dense {
+    let mut dense = vec![vec![None; fields]; grid_len];
+    let start = rng.random_range(0..grid_len);
+    let end = rng.random_range(start..=grid_len);
+    let missing = rng.random_range(0.0..0.8);
+    for row in &mut dense[start..end] {
+        for value in row.iter_mut() {
+            if !rng.random_bool(missing) {
+                *value = Some(special_value(rng));
+            }
+        }
+    }
+    dense
+}
+
+/// Labels with `__name__` as an ordinary entry, the way Prometheus holds them.
+pub(crate) type Labels = BTreeMap<String, String>;
+
+/// Value bits by grid index.
+pub(crate) type Points = BTreeMap<usize, u64>;
+
+/// A case of a fixture written by a promql-compat `narthex-golden-*` command.
+pub(crate) struct GoldenCase {
+    /// The operation and its tab-separated arguments.
+    pub(crate) spec: Vec<String>,
+    pub(crate) grid: Arc<EvalGrid>,
+    pub(crate) inputs: Vec<(Labels, Points)>,
+    /// Native histogram points of each input, as written by the generator.
+    pub(crate) histograms: Vec<BTreeMap<usize, String>>,
+    /// Result series by label set, or the error message.
+    pub(crate) outcome: Result<BTreeMap<Labels, Points>, String>,
+    /// Native histogram points of the result series, as written by the generator.
+    pub(crate) result_histograms: BTreeMap<Labels, BTreeMap<usize, String>>,
+}
+
+/// Parses a fixture whose label pairs are separated by `|`.
+pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
+    let labels = |text: &str| -> Labels {
+        text.split('|')
+            .filter(|pair| *pair != "-")
+            .map(|pair| {
+                let (name, value) = pair.split_once('=').unwrap();
+                (name.to_string(), value.to_string())
+            })
+            .collect()
+    };
+    let points = |text: &str| -> (Points, BTreeMap<usize, String>) {
+        let mut floats = Points::new();
+        let mut histograms = BTreeMap::new();
+        for point in text.split_whitespace() {
+            let (index, value) = point.split_once(':').unwrap();
+            let index = index.parse().unwrap();
+            if let Some(histogram) = value.strip_prefix('H') {
+                histograms.insert(index, histogram.to_string());
+            } else {
+                floats.insert(index, u64::from_str_radix(value, 16).unwrap());
+            }
+        }
+        (floats, histograms)
+    };
+    let mut cases = Vec::new();
+    for case in text.split("end\n").filter(|case| case.contains("case ")) {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let spec = lines[0].strip_prefix("case ").unwrap();
+        let grid: Vec<i64> = lines[1]
+            .split_whitespace()
+            .skip(1)
+            .map(|value| value.parse().unwrap())
+            .collect();
+        let grid = GridSpec::try_new(grid[0], grid[1], grid[2] as u64).unwrap();
+        let mut inputs = Vec::new();
+        let mut histograms = Vec::new();
+        let mut result_histograms = BTreeMap::new();
+        let mut outcome = Ok(BTreeMap::new());
+        for line in &lines[2..] {
+            if let Some(message) = line.strip_prefix("error ") {
+                outcome = Err(message.to_string());
+                continue;
+            }
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (series_labels, series_points) = rest.split_once(" ;").unwrap();
+            let (floats, histogram_points) = points(series_points);
+            let entry = (labels(series_labels), floats);
+            match kind {
+                "series" => {
+                    inputs.push(entry);
+                    histograms.push(histogram_points);
+                }
+                "result" => {
+                    if !histogram_points.is_empty() {
+                        result_histograms.insert(entry.0.clone(), histogram_points);
+                    }
+                    outcome.as_mut().unwrap().insert(entry.0, entry.1);
+                }
+                other => panic!("unexpected line {other}"),
+            }
+        }
+        cases.push(GoldenCase {
+            spec: spec.split('\t').map(str::to_string).collect(),
+            grid: Arc::new(EvalGrid::try_new(grid).unwrap()),
+            inputs,
+            histograms,
+            outcome,
+            result_histograms,
+        });
+    }
+    cases
+}
+
+pub(crate) fn metric_of(labels: &Labels) -> MetricName {
+    let mut labels = labels.clone();
+    let name = labels.remove("__name__").map(Arc::from);
+    MetricName::try_new(
+        name,
+        labels
+            .into_iter()
+            .map(|(name, value)| Label {
+                name: Arc::from(name),
+                value: Arc::from(value),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+pub(crate) fn labels_of(metric: &MetricName) -> Labels {
+    let mut labels: Labels = metric
+        .tags()
+        .iter()
+        .map(|tag| (tag.name.to_string(), tag.value.to_string()))
+        .collect();
+    if let Some(name) = metric.name() {
+        labels.insert("__name__".to_string(), name.to_string());
+    }
+    labels
+}
+
+/// A single-field series of `schema` holding `points`; `None` without points.
+pub(crate) fn series_of(
+    schema: &Arc<SeriesSchema>,
+    labels: &Labels,
+    points: &Points,
+) -> Option<Series> {
+    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    for (&index, &bits) in points {
+        builder.push(index, &[Some(f64::from_bits(bits))]).unwrap();
+    }
+    builder.finish(metric_of(labels)).unwrap()
+}
+
+/// The points of a single-field series, any NaN as one NaN: Prometheus' NaN payloads depend on
+/// how the Go compiler orders operands.
+pub(crate) fn points_of(series: &Series) -> Points {
+    let TimeAxis::Grid(range) = &series.time else {
+        panic!("expected a grid series");
+    };
+    series.fields.as_slice()[0]
+        .iter()
+        .enumerate()
+        .filter_map(|(row, sample)| match sample {
+            SampleRef::Float(value) => Some((range.start() + row, canonical_bits(value))),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn canonical_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+/// Prometheus `almost.Equal`, treating results below 1e-10 as equal and any NaN as equal to NaN,
+/// as promql-compat compares engines.
+pub(crate) fn close(a: f64, b: f64, epsilon: f64) -> bool {
+    if a.is_nan() || b.is_nan() {
+        return a.is_nan() && b.is_nan();
+    }
+    if a == b {
+        return true;
+    }
+    let (diff, sum) = ((a - b).abs(), a.abs() + b.abs());
+    let equal = if a == 0.0 || b == 0.0 || sum < f64::MIN_POSITIVE {
+        diff < epsilon * f64::MIN_POSITIVE
+    } else {
+        diff / sum.min(f64::MAX) < epsilon
+    };
+    equal || (a.abs() < 1e-10 && b.abs() < 1e-10)
+}
+
+/// A native histogram written by the generator as `/`-separated fields.
+pub(crate) struct OwnedHistogram {
+    schema: i32,
+    zero_threshold: f64,
+    zero_count: f64,
+    count: f64,
+    sum: f64,
+    reset_hint: i32,
+    positive: (Vec<i32>, Vec<i32>, Vec<f64>),
+    negative: (Vec<i32>, Vec<i32>, Vec<f64>),
+    custom_values: Vec<f64>,
+}
+
+impl OwnedHistogram {
+    pub(crate) fn parse(text: &str) -> Self {
+        let fields: Vec<&str> = text.split('/').collect();
+        let float = |text: &str| f64::from_bits(u64::from_str_radix(text, 16).unwrap());
+        let floats = |text: &str| -> Vec<f64> {
+            text.split(',')
+                .filter(|v| !v.is_empty())
+                .map(float)
+                .collect()
+        };
+        let spans = |text: &str| -> (Vec<i32>, Vec<i32>) {
+            text.split(',')
+                .filter(|v| !v.is_empty())
+                .map(|span| {
+                    let (offset, length) = span.split_once('_').unwrap();
+                    (
+                        offset.parse::<i32>().unwrap(),
+                        length.parse::<i32>().unwrap(),
+                    )
+                })
+                .unzip()
+        };
+        let (positive_offsets, positive_lengths) = spans(fields[6]);
+        let (negative_offsets, negative_lengths) = spans(fields[8]);
+        Self {
+            schema: fields[0].parse().unwrap(),
+            zero_threshold: float(fields[1]),
+            zero_count: float(fields[2]),
+            count: float(fields[3]),
+            sum: float(fields[4]),
+            reset_hint: fields[5].parse().unwrap(),
+            positive: (positive_offsets, positive_lengths, floats(fields[7])),
+            negative: (negative_offsets, negative_lengths, floats(fields[9])),
+            custom_values: floats(fields[10]),
+        }
+    }
+
+    pub(crate) fn view(&self) -> HistogramView<'_> {
+        fn side(
+            (offsets, lengths, buckets): &(Vec<i32>, Vec<i32>, Vec<f64>),
+        ) -> BucketSideView<'_> {
+            BucketSideView {
+                span_offsets: offsets,
+                span_lengths: lengths,
+                buckets,
+            }
+        }
+        HistogramView {
+            schema: self.schema,
+            zero_threshold: self.zero_threshold,
+            sum: self.sum,
+            count: self.count,
+            zero_count: self.zero_count,
+            reset_hint: CounterResetHint::from(self.reset_hint),
+            start_timestamp: None,
+            custom_values: &self.custom_values,
+            positive: side(&self.positive),
+            negative: side(&self.negative),
+        }
+    }
+}
+
+/// A single-field series holding float and native histogram points.
+pub(crate) fn mixed_series(
+    schema: &Arc<SeriesSchema>,
+    labels: &Labels,
+    floats: &Points,
+    histograms: &BTreeMap<usize, String>,
+) -> Option<Series> {
+    let points = floats.keys().chain(histograms.keys());
+    let start = *points.clone().min()?;
+    let end = *points.max()? + 1;
+    let float_values: Float64Array = (start..end)
+        .map(|point| floats.get(&point).map(|bits| f64::from_bits(*bits)))
+        .collect();
+    let samples = if histograms.is_empty() {
+        Samples::from_float(float_values)
+    } else {
+        let mut builder = HistogramBatchBuilder::new();
+        let indices: Vec<_> = (start..end)
+            .map(|point| {
+                let text = histograms.get(&point)?;
+                Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
+            })
+            .collect();
+        let histograms =
+            HistogramSamples::try_new(UInt32Array::from(indices), builder.finish().unwrap())
+                .unwrap();
+        Samples::try_from_mixed(float_values, histograms).unwrap()
+    };
+    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, end - start).unwrap();
+    Some(
+        Series::try_new(
+            schema,
+            metric_of(labels),
+            TimeAxis::Grid(range),
+            SeriesFields::one(samples),
+        )
+        .unwrap(),
+    )
+}
+
+/// Asserts `got` equals `want` with values within `epsilon`, bucket by bucket.
+pub(crate) fn assert_histogram_close(
+    got: &FloatHistogram,
+    want: &FloatHistogram,
+    epsilon: f64,
+    context: &str,
+) {
+    let scalars = |h: &FloatHistogram| [h.zero_count, h.count, h.sum];
+    let ok = got.schema == want.schema
+        && got.reset_hint == want.reset_hint
+        && got.zero_threshold.to_bits() == want.zero_threshold.to_bits()
+        && got.custom_values == want.custom_values
+        && scalars(got)
+            .iter()
+            .zip(scalars(want))
+            .all(|(a, b)| close(*a, b, epsilon))
+        && [
+            (&got.positive, &want.positive),
+            (&got.negative, &want.negative),
+        ]
+        .iter()
+        .all(|(a, b)| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((i, x), (j, y))| i == j && close(*x, *y, epsilon))
+        });
+    assert!(ok, "{context}: {got:?} vs {want:?}");
+}

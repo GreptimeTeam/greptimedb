@@ -24,6 +24,7 @@ greptime-proto.workspace = true
 lazy_static.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+regex.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
@@ -32,6 +33,7 @@ criterion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
+rand.workspace = true
 tokio.workspace = true
 
 [[bench]]

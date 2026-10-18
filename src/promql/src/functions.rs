@@ -32,6 +32,7 @@ mod vector_matching;
 
 use std::sync::Arc;
 
+pub(crate) use aggr_over_time::extremum;
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
     PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
@@ -47,8 +48,11 @@ use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType, Int64Type};
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
+pub(crate) use edge_count::{EdgeKind, count_edges};
+pub(crate) use extrapolate_rate::add_counter_resets;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
+pub(crate) use idelta::instant_delta;
 pub use ieee_float::{IeeeComparison, IeeeSqrt};
 pub use native_histogram::{
     MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
@@ -143,6 +147,16 @@ pub(crate) fn compensated_sum_inc(inc: f64, sum: f64, mut compensation: f64) -> 
         compensation += (inc - new_sum) + sum;
     }
     (new_sum, compensation)
+}
+
+/// Prometheus `kahansum.Inc`: [`compensated_sum_inc`] that also drops the compensation once the
+/// sum is infinite.
+pub(crate) fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
+    let t = sum + inc;
+    if t.is_infinite() {
+        return (t, 0.0);
+    }
+    compensated_sum_inc(inc, sum, c)
 }
 
 /// linear_regression performs a least-square linear regression analysis on the
