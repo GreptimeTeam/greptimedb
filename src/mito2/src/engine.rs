@@ -109,7 +109,7 @@ use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
 use futures::FutureExt;
-use futures::future::{self, BoxFuture, join_all, try_join_all};
+use futures::future::{self, join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
 use region_hook::RegionHookRef;
@@ -123,10 +123,10 @@ use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
-    BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse, RegionEngine,
-    RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
-    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
-    SyncRegionFromRequest, SyncRegionFromResponse,
+    BatchPutResponse, BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
@@ -1414,10 +1414,7 @@ impl RegionEngine for MitoEngine {
     fn handle_batch_put_requests(
         self: Arc<Self>,
         requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Vec<(
-        RegionId,
-        BoxFuture<'static, Result<RegionResponse, BoxedError>>,
-    )> {
+    ) -> Vec<BatchPutResponse> {
         let mut writes = Vec::with_capacity(requests.len());
         let mut responses = Vec::with_capacity(requests.len());
         for (region_id, request) in requests {
@@ -1444,7 +1441,7 @@ impl RegionEngine for MitoEngine {
                     Ok(_) => unreachable!("a put converts to a write"),
                     Err(e) => future::ready(Err(BoxedError::new(e))).boxed(),
                 };
-            responses.push((region_id, response));
+            responses.push((vec![region_id], response));
         }
         let inner = self.inner.clone();
         common_runtime::spawn_global(async move { inner.workers.submit_writes(writes).await });

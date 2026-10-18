@@ -729,7 +729,8 @@ impl RegionServer {
     /// Puts into several ready mito regions together through
     /// [`RegionEngine::handle_batch_put_requests`], so that each mito worker gets the puts of the
     /// request to its regions at once and writes them in one batch. As on the per-region path,
-    /// every region's put is awaited and accounted on its own ingest task.
+    /// every response is awaited and accounted, for the regions it answers, on its own ingest
+    /// task.
     ///
     /// Returns Either::Right(original_requests) unless
     /// [`mito_engine_for_batch_puts`](Self::mito_engine_for_batch_puts) accepts the requests.
@@ -757,7 +758,8 @@ impl RegionServer {
             engine
                 .handle_batch_put_requests(puts)
                 .into_iter()
-                .map(|(region_id, response)| {
+                .map(|(region_ids, response)| {
+                    let region_id = region_ids[0];
                     let span = tracing_context.attach(info_span!(
                         "RegionServer::handle_region_request",
                         region_id = region_id.to_string()
@@ -767,16 +769,19 @@ impl RegionServer {
                             let result = response
                                 .await
                                 .context(HandleRegionRequestSnafu { region_id });
-                            crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-                                .with_label_values(&[request_type])
-                                .observe(started.elapsed().as_secs_f64());
+                            let elapsed = started.elapsed().as_secs_f64();
+                            for _ in &region_ids {
+                                crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
+                                    .with_label_values(&[request_type])
+                                    .observe(elapsed);
+                            }
                             match &result {
                                 Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
                                     .with_label_values(&[request_type])
                                     .inc_by(response.affected_rows as u64),
                                 Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
                                     .with_label_values(&[request_type, err.status_code().as_ref()])
-                                    .inc(),
+                                    .inc_by(region_ids.len() as u64),
                             }
                             result
                         }
@@ -3349,7 +3354,8 @@ mod tests {
             engine.handle_batch_put_requests(puts).into_iter().unzip();
         let responses = futures_util::future::join_all(responses).await;
 
-        assert_eq!(region_ids.to_vec(), answered);
+        let answered_regions = region_ids.map(|region_id| vec![region_id]);
+        assert_eq!(answered_regions.to_vec(), answered);
         assert_eq!(1, responses[0].as_ref().unwrap().affected_rows);
         assert!(responses[1].is_err());
         assert_eq!(3, responses[2].as_ref().unwrap().affected_rows);

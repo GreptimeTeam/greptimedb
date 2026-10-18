@@ -549,6 +549,12 @@ pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 
+/// A response of [`RegionEngine::handle_batch_put_requests`] and the regions it answers for.
+pub type BatchPutResponse = (
+    Vec<RegionId>,
+    BoxFuture<'static, Result<RegionResponse, BoxedError>>,
+);
+
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct RegionStatistic {
@@ -982,17 +988,16 @@ pub trait RegionEngine: Send + Sync {
         Ok(join_all(tasks).await)
     }
 
-    /// Handles the puts of one request to several regions of this engine and returns each
-    /// region's response, to be awaited on its own.
+    /// Handles the puts of one request to several regions of this engine and returns the
+    /// responses to await on their own, each with the regions it answers for.
     ///
-    /// The default handles each put with [`handle_request`](Self::handle_request).
+    /// The default handles each put with [`handle_request`](Self::handle_request) and answers
+    /// each region on its own. An engine that writes several puts together may answer them with
+    /// one response whose affected rows count all of them.
     fn handle_batch_put_requests(
         self: Arc<Self>,
         requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Vec<(
-        RegionId,
-        BoxFuture<'static, Result<RegionResponse, BoxedError>>,
-    )>
+    ) -> Vec<BatchPutResponse>
     where
         Self: 'static,
     {
@@ -1006,7 +1011,7 @@ pub trait RegionEngine: Send + Sync {
                         .await
                 }
                 .boxed();
-                (region_id, response)
+                (vec![region_id], response)
             })
             .collect()
     }
