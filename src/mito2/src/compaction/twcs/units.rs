@@ -666,13 +666,17 @@ mod tests {
         pick_closed_merge(
             files,
             &primary_key_mapper_for_test(),
-            ClosedMergeOptions {
-                limits: limits(max_output_file_size),
-                allow_file_reduction: true,
-                allow_conflicts: true,
-                allow_unbalanced: false,
-            },
+            closed_merge_options(max_output_file_size),
         )
+    }
+
+    fn closed_merge_options(max_output_file_size: u64) -> ClosedMergeOptions {
+        ClosedMergeOptions {
+            limits: limits(max_output_file_size),
+            allow_file_reduction: true,
+            allow_conflicts: true,
+            allow_unbalanced: false,
+        }
     }
 
     fn ids(files: &[FileHandle]) -> HashSet<FileId> {
@@ -929,6 +933,43 @@ mod tests {
             |files| (conflict_pairs(files), files.len()),
         );
         assert!(steps > 300);
+    }
+
+    #[test]
+    fn test_closed_merges_of_quiet_and_settling_windows_terminate() {
+        let mapper = primary_key_mapper_for_test();
+        // Quiet windows take merges a default window refuses; settling windows
+        // skip the conflicting ones.
+        for (seed, options, more_merges) in [
+            (
+                13,
+                ClosedMergeOptions {
+                    allow_unbalanced: true,
+                    ..closed_merge_options(MAX_OUTPUT)
+                },
+                true,
+            ),
+            (
+                17,
+                ClosedMergeOptions {
+                    allow_conflicts: false,
+                    ..closed_merge_options(MAX_OUTPUT)
+                },
+                false,
+            ),
+        ] {
+            let steps = run_to_fixpoint(
+                &mut Rng(seed),
+                |files| pick_closed_merge(files, &mapper, options),
+                |files| (conflict_pairs(files), files.len()),
+            );
+            let base = run_to_fixpoint(
+                &mut Rng(seed),
+                |files| closed_merge(files, MAX_OUTPUT),
+                |files| (conflict_pairs(files), files.len()),
+            );
+            assert_eq!(more_merges, steps > base, "seed {seed}: {steps} vs {base}");
+        }
     }
 
     #[test]
