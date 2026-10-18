@@ -10,19 +10,22 @@ runtime() {
         --security-opt no-new-privileges --cap-drop ALL "$@"
 }
 
-# Pin the runtime image to its digest from the registry's manifest alone: an anonymous pull from ECR
-# Public on a hosted runner can exceed the registry's data limit. The benchmark host checks the contents.
+# Pin the runtime image to a digest without pulling it: ECR Public's anonymous data limit can refuse a
+# hosted runner even a manifest read. A reference that names its digest is pinned as given; only a tag
+# is resolved from the registry's manifest. The benchmark host pulls the image and checks the contents.
 check_runtime() {
     local image=$1 repository digest attempt
     [[ "$image" == public.ecr.aws/* ]] || { echo 'The runtime image must come from AWS ECR Public' >&2; return 1; }
-    for attempt in 1 2 3; do
-        digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$image" | jq -er .digest) && break
-        ((attempt < 3)) || { echo "Cannot read the manifest of $image" >&2; return 1; }
-        sleep $((attempt * 10))
-    done
-    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "$image has no sha256 manifest digest" >&2; return 1; }
-    # A reference that names a digest must be served under it.
-    [[ "$image" != *@* || "${image##*@}" == "$digest" ]] || { echo "$image is served as $digest" >&2; return 1; }
+    if [[ "$image" == *@* ]]; then
+        digest=${image##*@}
+    else
+        for attempt in 1 2 3; do
+            digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$image" | jq -er .digest) && break
+            ((attempt < 3)) || { echo "Cannot read the manifest of $image" >&2; return 1; }
+            sleep $((attempt * 10))
+        done
+    fi
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "$image has no sha256 digest" >&2; return 1; }
     repository=${image%@*}
     [[ "${repository##*/}" != *:* ]] || repository=${repository%:*}
     printf 'runtime_image=%s@%s\n' "$repository" "$digest" >> "${GITHUB_OUTPUT:-/dev/stdout}"
