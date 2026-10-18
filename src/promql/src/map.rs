@@ -71,25 +71,24 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Se
         .map(|samples| map_samples(samples, op))
         .collect::<Result<Vec<_>>>()?;
     let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
-    let mut metric = series.metric.clone();
-    drop_metric_name(&mut metric);
+    let metric = drop_metric_name(&series.metric)?;
     Series::try_new(schema, metric, series.time.clone(), fields).map_err(series_error)
 }
 
 /// Prometheus `DropReserved(schema.IsMetadataLabel)` drops the type and unit labels with the
 /// name. Empty values are dropped too: Prometheus has no empty labels, and keeping them would
 /// hide a same-labelset collision from the caller.
-pub(crate) fn drop_metric_name(metric: &mut MetricName) {
-    metric.remove_all(&["__name__", "__type__", "__unit__"]);
-    let empty: Vec<_> = metric
+pub(crate) fn drop_metric_name(metric: &MetricName) -> Result<MetricName> {
+    // One rebuild: removing labels one by one copies the label array each time.
+    let tags = metric
         .tags()
         .iter()
-        .filter(|label| label.value.is_empty())
-        .map(|label| label.name.clone())
+        .filter(|label| {
+            !label.value.is_empty() && !matches!(label.name.as_ref(), "__type__" | "__unit__")
+        })
+        .cloned()
         .collect();
-    for name in empty {
-        metric.remove(&name);
-    }
+    MetricName::try_new(None, tags).map_err(series_error)
 }
 
 impl MathOp {
