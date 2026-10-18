@@ -67,7 +67,7 @@ pub fn aggregate_float(
     validate_input(schema, input, grouping)?;
     let mut groups = BTreeMap::new();
     for series in input {
-        let metric = grouping.apply(&series.metric);
+        let metric = grouping.apply(&series.metric)?;
         let group = groups.entry(label_key(&metric)).or_insert_with(|| Group {
             metric,
             blocks: BTreeMap::new(),
@@ -124,7 +124,7 @@ impl Grouping<'_> {
     }
 
     /// Prometheus `generateGroupingLabels`; empty values are dropped as absent labels.
-    fn apply(self, input: &MetricName) -> MetricName {
+    fn apply(self, input: &MetricName) -> Result<MetricName> {
         let mut metric = input.clone();
         match self {
             Self::By(labels) => metric.keep_only(labels),
@@ -133,11 +133,7 @@ impl Grouping<'_> {
                 metric.remove("__name__");
             }
         }
-        if metric.name() == Some("") {
-            metric.remove("__name__");
-        }
-        drop_empty_labels(&mut metric);
-        metric
+        drop_empty_labels(&metric)
     }
 }
 

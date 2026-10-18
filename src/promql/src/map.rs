@@ -27,6 +27,7 @@ pub use broadcast::{ScalarSeriesOperand, map_arithmetic_series, map_compare_seri
 pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
 
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::arrow::array::Float64Array;
@@ -127,7 +128,7 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
         return Ok(None);
     }
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
-    drop_metric_name(&mut output.metric);
+    output.metric = drop_metric_name(&output.metric)?;
     Ok(Some(output))
 }
 
@@ -137,7 +138,7 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 /// [`map_math`].
 pub fn map_negate(schema: &SeriesSchema, series: &Series) -> Result<Series> {
     let mut output = map_float_fields(schema, series, |floats| floats.unary(|v| -v))?;
-    drop_metric_name(&mut output.metric);
+    output.metric = drop_metric_name(&output.metric)?;
     Ok(output)
 }
 
@@ -153,7 +154,7 @@ pub fn map_arithmetic(
     scalar: ScalarOperand,
 ) -> Result<Series> {
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats, scalar))?;
-    drop_metric_name(&mut output.metric);
+    output.metric = drop_metric_name(&output.metric)?;
     Ok(output)
 }
 
@@ -198,22 +199,31 @@ fn map_float_fields(
 /// Prometheus `DropReserved(schema.IsMetadataLabel)` drops the type and unit labels with the
 /// name. Empty values are dropped too: Prometheus has no empty labels, and keeping them would
 /// hide a same-labelset collision from the caller.
-pub(crate) fn drop_metric_name(metric: &mut MetricName) {
-    metric.remove_all(&["__name__", "__type__", "__unit__"]);
-    drop_empty_labels(metric);
+pub(crate) fn drop_metric_name(metric: &MetricName) -> Result<MetricName> {
+    rebuild_labels(metric, None, |name| {
+        !matches!(name, "__type__" | "__unit__")
+    })
 }
 
 /// Drops labels with empty values, which Prometheus treats as absent.
-pub(crate) fn drop_empty_labels(metric: &mut MetricName) {
-    let empty: Vec<_> = metric
+pub(crate) fn drop_empty_labels(metric: &MetricName) -> Result<MetricName> {
+    let name = metric.name().filter(|name| !name.is_empty()).map(Arc::from);
+    rebuild_labels(metric, name, |_| true)
+}
+
+/// One rebuild: removing labels one by one copies the label array each time.
+fn rebuild_labels(
+    metric: &MetricName,
+    name: Option<Arc<str>>,
+    keep: impl Fn(&str) -> bool,
+) -> Result<MetricName> {
+    let tags = metric
         .tags()
         .iter()
-        .filter(|label| label.value.is_empty())
-        .map(|label| label.name.clone())
+        .filter(|label| !label.value.is_empty() && keep(&label.name))
+        .cloned()
         .collect();
-    for name in empty {
-        metric.remove(&name);
-    }
+    MetricName::try_new(name, tags).map_err(series_error)
 }
 
 impl MathOp {

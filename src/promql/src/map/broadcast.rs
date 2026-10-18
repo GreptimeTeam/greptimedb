@@ -46,8 +46,7 @@ pub fn map_arithmetic_series(
     op: ArithmeticOp,
     scalar: ScalarSeriesOperand<'_>,
 ) -> Result<Option<Series>> {
-    let mut metric = vector.metric.clone();
-    drop_metric_name(&mut metric);
+    let metric = drop_metric_name(&vector.metric)?;
     map_grid_scalar(schema, vector, scalar, metric, |left, right, _| {
         Some(op.calculate(left, right))
     })
@@ -64,10 +63,11 @@ pub fn map_compare_series(
     comparison: Comparison,
     scalar: ScalarSeriesOperand<'_>,
 ) -> Result<Option<Series>> {
-    let mut metric = vector.metric.clone();
-    if matches!(comparison, Comparison::Bool(_)) {
-        drop_metric_name(&mut metric);
-    }
+    let metric = if matches!(comparison, Comparison::Bool(_)) {
+        drop_metric_name(&vector.metric)?
+    } else {
+        vector.metric.clone()
+    };
     map_grid_scalar(schema, vector, scalar, metric, |left, right, sample| {
         comparison.apply(left, right, sample)
     })

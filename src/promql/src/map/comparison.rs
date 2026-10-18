@@ -75,10 +75,11 @@ pub fn map_compare(
         }
         builder.push(index, &row)?;
     }
-    let mut metric = series.metric.clone();
-    if matches!(comparison, Comparison::Bool(_)) {
-        drop_metric_name(&mut metric);
-    }
+    let metric = if matches!(comparison, Comparison::Bool(_)) {
+        drop_metric_name(&series.metric)?
+    } else {
+        series.metric.clone()
+    };
     builder.finish(metric)
 }
 
