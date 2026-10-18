@@ -506,6 +506,102 @@ fn functions_match_range_udfs() {
     }
 }
 
+/// `rate` over a float-only series takes the batch path. The per-window path produces the same
+/// output, so a test comparing values alone could not tell which one ran.
+#[test]
+fn rate_over_floats_is_evaluated_in_batches() {
+    let rows: Vec<Row> = (0..20)
+        .map(|index| (index as i64 * 10_000, vec![Some(index as f64)]))
+        .collect();
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 10_000, 20),
+        RangeWindow {
+            range_ms: 30_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+    )
+    .unwrap();
+    evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
+    assert!(
+        evaluator.batch_call_count() > 0,
+        "rate over floats must reach the batch kernel"
+    );
+}
+
+/// A window holding a native histogram sample keeps its grid point on the per-window path, since
+/// the batch kernel reads the floats alone and cannot reproduce the mixed-window rules.
+///
+/// The series is laid out so every grid point's window contains the histogram: one point fewer
+/// than the first test, so no point can fall before it.
+#[test]
+fn a_histogram_window_keeps_rate_on_the_per_window_path() {
+    let histogram = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder
+        .push(OwnedHistogram::parse(histogram).view())
+        .unwrap();
+    let histograms = HistogramSamples::try_new(
+        UInt32Array::from(vec![Some(index), None, None]),
+        builder.finish().unwrap(),
+    )
+    .unwrap();
+    let samples = Samples::try_from_mixed(
+        Float64Array::from(vec![None, Some(1.0), Some(3.0)]),
+        histograms,
+    )
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &raw_schema(1),
+        Buffer::from(0u64.to_le_bytes().to_vec()),
+        Some(metric(0)),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![0, 10_000, 20_000])).unwrap(),
+        SeriesFields::try_from_vec(vec![samples]).unwrap(),
+        true,
+    )
+    .unwrap();
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 10_000, 3),
+        RangeWindow {
+            range_ms: 30_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+    )
+    .unwrap();
+    evaluator.push(&chunk).unwrap();
+    assert_eq!(
+        evaluator.batch_call_count(),
+        0,
+        "every window holds the histogram, so none may reach the batch kernel"
+    );
+}
+
+/// A function without a batch form never reaches the batch kernel.
+#[test]
+fn a_function_without_a_batch_form_stays_on_the_per_window_path() {
+    let rows: Vec<Row> = (0..10)
+        .map(|index| (index as i64 * 10_000, vec![Some(index as f64)]))
+        .collect();
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 10_000, 10),
+        RangeWindow {
+            range_ms: 30_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::SumOverTime,
+    )
+    .unwrap();
+    evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
+    assert_eq!(evaluator.batch_call_count(), 0);
+}
+
 #[test]
 fn empty_input_and_series_without_results() {
     let window = RangeWindow {
