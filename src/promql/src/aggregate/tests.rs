@@ -470,6 +470,44 @@ fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
 }
 
 #[test]
+fn grouping_keeps_type_and_unit_labels() {
+    // Unlike math and arithmetic, Prometheus `generateGroupingLabels` drops only the name.
+    let schema = schema(&["value"]);
+    let series = [input(
+        &schema,
+        metric(
+            "a",
+            &[("__type__", "gauge"), ("__unit__", "seconds"), ("job", "x")],
+        ),
+        0,
+        &[vec![Some(1.0)]],
+    )];
+    let labels = |grouping| {
+        aggregate_float(&schema, &series, AggregateOp::Sum, grouping).unwrap()[0]
+            .metric
+            .clone()
+    };
+    assert_eq!(
+        labels(Grouping::Without(&["job"])),
+        MetricName::try_new(
+            None,
+            metric("a", &[("__type__", "gauge"), ("__unit__", "seconds")])
+                .tags()
+                .to_vec()
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        labels(Grouping::By(&["__unit__"])),
+        MetricName::try_new(
+            None,
+            metric("a", &[("__unit__", "seconds")]).tags().to_vec()
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn empty_inputs_produce_no_groups() {
     let schema = schema(&["a", "b"]);
     let empty = input(&schema, metric("m", &[]), 127, &[vec![None], vec![None]]);
