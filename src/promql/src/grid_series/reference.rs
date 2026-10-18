@@ -18,12 +18,19 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datafusion::arrow::array::{Float64Array, UInt32Array};
+use datatypes::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
+};
+use datatypes::series::samples::{
+    HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::Rng;
 
 use crate::grid_series::GridSeriesBuilder;
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 /// Values by absolute grid index, then by field; `None` is missing.
 pub(crate) type Dense = Vec<Vec<Option<f64>>>;
@@ -304,4 +311,167 @@ pub(crate) fn canonical_bits(value: f64) -> u64 {
     } else {
         value.to_bits()
     }
+}
+
+/// Prometheus `almost.Equal`, treating results below 1e-10 as equal and any NaN as equal to NaN,
+/// as promql-compat compares engines.
+pub(crate) fn close(a: f64, b: f64, epsilon: f64) -> bool {
+    if a.is_nan() || b.is_nan() {
+        return a.is_nan() && b.is_nan();
+    }
+    if a == b {
+        return true;
+    }
+    let (diff, sum) = ((a - b).abs(), a.abs() + b.abs());
+    let equal = if a == 0.0 || b == 0.0 || sum < f64::MIN_POSITIVE {
+        diff < epsilon * f64::MIN_POSITIVE
+    } else {
+        diff / sum.min(f64::MAX) < epsilon
+    };
+    equal || (a.abs() < 1e-10 && b.abs() < 1e-10)
+}
+
+/// A native histogram written by the generator as `/`-separated fields.
+pub(crate) struct OwnedHistogram {
+    schema: i32,
+    zero_threshold: f64,
+    zero_count: f64,
+    count: f64,
+    sum: f64,
+    reset_hint: i32,
+    positive: (Vec<i32>, Vec<i32>, Vec<f64>),
+    negative: (Vec<i32>, Vec<i32>, Vec<f64>),
+    custom_values: Vec<f64>,
+}
+
+impl OwnedHistogram {
+    pub(crate) fn parse(text: &str) -> Self {
+        let fields: Vec<&str> = text.split('/').collect();
+        let float = |text: &str| f64::from_bits(u64::from_str_radix(text, 16).unwrap());
+        let floats = |text: &str| -> Vec<f64> {
+            text.split(',')
+                .filter(|v| !v.is_empty())
+                .map(float)
+                .collect()
+        };
+        let spans = |text: &str| -> (Vec<i32>, Vec<i32>) {
+            text.split(',')
+                .filter(|v| !v.is_empty())
+                .map(|span| {
+                    let (offset, length) = span.split_once('_').unwrap();
+                    (
+                        offset.parse::<i32>().unwrap(),
+                        length.parse::<i32>().unwrap(),
+                    )
+                })
+                .unzip()
+        };
+        let (positive_offsets, positive_lengths) = spans(fields[6]);
+        let (negative_offsets, negative_lengths) = spans(fields[8]);
+        Self {
+            schema: fields[0].parse().unwrap(),
+            zero_threshold: float(fields[1]),
+            zero_count: float(fields[2]),
+            count: float(fields[3]),
+            sum: float(fields[4]),
+            reset_hint: fields[5].parse().unwrap(),
+            positive: (positive_offsets, positive_lengths, floats(fields[7])),
+            negative: (negative_offsets, negative_lengths, floats(fields[9])),
+            custom_values: floats(fields[10]),
+        }
+    }
+
+    pub(crate) fn view(&self) -> HistogramView<'_> {
+        fn side(
+            (offsets, lengths, buckets): &(Vec<i32>, Vec<i32>, Vec<f64>),
+        ) -> BucketSideView<'_> {
+            BucketSideView {
+                span_offsets: offsets,
+                span_lengths: lengths,
+                buckets,
+            }
+        }
+        HistogramView {
+            schema: self.schema,
+            zero_threshold: self.zero_threshold,
+            sum: self.sum,
+            count: self.count,
+            zero_count: self.zero_count,
+            reset_hint: CounterResetHint::from(self.reset_hint),
+            start_timestamp: None,
+            custom_values: &self.custom_values,
+            positive: side(&self.positive),
+            negative: side(&self.negative),
+        }
+    }
+}
+
+/// A single-field series holding float and native histogram points.
+pub(crate) fn mixed_series(
+    schema: &Arc<SeriesSchema>,
+    labels: &Labels,
+    floats: &Points,
+    histograms: &BTreeMap<usize, String>,
+) -> Option<Series> {
+    let points = floats.keys().chain(histograms.keys());
+    let start = *points.clone().min()?;
+    let end = *points.max()? + 1;
+    let float_values: Float64Array = (start..end)
+        .map(|point| floats.get(&point).map(|bits| f64::from_bits(*bits)))
+        .collect();
+    let samples = if histograms.is_empty() {
+        Samples::from_float(float_values)
+    } else {
+        let mut builder = HistogramBatchBuilder::new();
+        let indices: Vec<_> = (start..end)
+            .map(|point| {
+                let text = histograms.get(&point)?;
+                Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
+            })
+            .collect();
+        let histograms =
+            HistogramSamples::try_new(UInt32Array::from(indices), builder.finish().unwrap())
+                .unwrap();
+        Samples::try_from_mixed(float_values, histograms).unwrap()
+    };
+    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, end - start).unwrap();
+    Some(
+        Series::try_new(
+            schema,
+            metric_of(labels),
+            TimeAxis::Grid(range),
+            SeriesFields::one(samples),
+        )
+        .unwrap(),
+    )
+}
+
+/// Asserts `got` equals `want` with values within `epsilon`, bucket by bucket.
+pub(crate) fn assert_histogram_close(
+    got: &FloatHistogram,
+    want: &FloatHistogram,
+    epsilon: f64,
+    context: &str,
+) {
+    let scalars = |h: &FloatHistogram| [h.zero_count, h.count, h.sum];
+    let ok = got.schema == want.schema
+        && got.reset_hint == want.reset_hint
+        && got.zero_threshold.to_bits() == want.zero_threshold.to_bits()
+        && got.custom_values == want.custom_values
+        && scalars(got)
+            .iter()
+            .zip(scalars(want))
+            .all(|(a, b)| close(*a, b, epsilon))
+        && [
+            (&got.positive, &want.positive),
+            (&got.negative, &want.negative),
+        ]
+        .iter()
+        .all(|(a, b)| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((i, x), (j, y))| i == j && close(*x, *y, epsilon))
+        });
+    assert!(ok, "{context}: {got:?} vs {want:?}");
 }

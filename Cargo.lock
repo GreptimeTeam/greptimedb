@@ -11353,6 +11353,7 @@ name = "promql"
 version = "1.4.0-alpha.0"
 dependencies = [
  "ahash 0.8.12",
+ "api",
  "async-trait",
  "bytemuck",
  "common-error",
@@ -11368,11 +11369,13 @@ dependencies = [
  "futures",
  "greptime-proto",
  "lazy_static",
+ "mito-codec",
  "prometheus 0.14.0",
  "prost 0.14.1",
  "rand 0.9.4",
  "regex",
  "snafu 0.8.6",
+ "store-api",
  "tokio",
 ]
 

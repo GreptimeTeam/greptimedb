@@ -20,13 +20,16 @@ use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::arrow::buffer::Buffer;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
+use datatypes::series::histogram::CounterResetHint;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS};
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 mod function;
+mod histogram;
 #[cfg(test)]
 mod tests;
 
@@ -59,18 +62,20 @@ pub(crate) struct FloatWindow<'a> {
 /// Computes one window result; `None` means the window has no result.
 pub(crate) type WindowKernel = Box<dyn FnMut(FloatWindow<'_>) -> Option<f64> + Send>;
 
-/// Evaluates range windows over raw float series, one series at a time.
+/// Evaluates range windows over raw series, one series at a time.
 ///
 /// Each series is pushed as its chunks in order and completes on the chunk marked `is_last`.
 /// Fields are evaluated independently over their own valid samples; a row holding a stale
 /// marker in any field is dropped, as the ordinary range selector does. Only the samples later
-/// windows can still use are retained.
+/// windows can still use are retained. Native histogram samples need a [`RangeFunction`]; an
+/// evaluator built from a bare kernel rejects them.
 pub struct RangeEvaluator {
     grid: Arc<EvalGrid>,
     /// The window with `offset_ms` replaced by the offset samples are shifted by.
     window: RangeWindow,
     replay: Replay,
     kernel: WindowKernel,
+    function: Option<RangeFunction>,
     output_schema: Arc<SeriesSchema>,
     output: GridSeriesBuilder,
     /// The grid of evaluated input series, such as the inner result of a subquery; `None` for
@@ -78,14 +83,11 @@ pub struct RangeEvaluator {
     input_grid: Option<GridSpec>,
     series: Option<SeriesState>,
     fields: Vec<FieldSamples>,
-    row: Vec<Option<f64>>,
+    row: Vec<Option<GridSample>>,
     drops_metric_name: bool,
     /// Raised by the first non-empty window, where Prometheus validates function arguments.
     window_error: Option<String>,
 }
-
-/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
-const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 struct SeriesState {
     /// `None` for evaluated input, which arrives as one complete series.
@@ -116,10 +118,13 @@ struct FieldSamples {
     values: Vec<f64>,
     /// Samples before `head` are behind every remaining window.
     head: usize,
+    /// Native histogram samples, kept apart from the floats as Prometheus does.
+    histograms: Vec<(i64, FloatHistogram)>,
+    histogram_head: usize,
 }
 
 impl RangeEvaluator {
-    /// Creates an evaluator of `function` for raw series of `input` onto `grid`.
+    /// Creates an evaluator of `function` for the series of `input` onto `grid`.
     pub fn try_new(
         input: &SeriesSchema,
         grid: Arc<EvalGrid>,
@@ -159,6 +164,7 @@ impl RangeEvaluator {
         )?;
         evaluator.drops_metric_name = function.drops_metric_name();
         evaluator.window_error = window_error;
+        evaluator.function = Some(function);
         Ok(evaluator)
     }
 
@@ -191,6 +197,7 @@ impl RangeEvaluator {
             window,
             replay,
             kernel,
+            function: None,
             output: GridSeriesBuilder::try_new(output_schema.clone())?,
             input_grid: input.eval_grid.as_ref().map(|grid| grid.spec()),
             output_schema,
@@ -271,11 +278,6 @@ impl RangeEvaluator {
     fn finish_series(&mut self) -> Result<Option<Series>> {
         self.evaluate(None)?;
         let mut state = self.series.take().expect("set by the caller");
-        for field in &mut self.fields {
-            field.timestamps.clear();
-            field.values.clear();
-            field.head = 0;
-        }
         if self.drops_metric_name {
             state.metric.remove_all(&METADATA_LABELS);
         }
@@ -340,33 +342,31 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    /// Retains the samples of `fields` at `timestamps`; with `drop_stale`, a row holding a stale
-    /// marker in any field is dropped.
-    fn ingest(
-        &mut self,
-        timestamps: &[i64],
-        fields: &SeriesFields,
-        drop_stale: bool,
-    ) -> Result<()> {
+    /// Retains the samples of `fields` at `timestamps`. From `raw` input a row holding a stale
+    /// marker in any field is dropped; evaluated input keeps it as a value.
+    fn ingest(&mut self, timestamps: &[i64], fields: &SeriesFields, raw: bool) -> Result<()> {
         let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();
+        let mut row = Vec::with_capacity(samples.len());
         for &timestamp in timestamps {
-            self.row.clear();
+            row.clear();
             let mut stale = false;
             for field in &mut samples {
-                match field.next().expect("field length checked by the caller") {
-                    SampleRef::Missing => self.row.push(None),
-                    SampleRef::Float(value) => {
-                        stale |= is_prometheus_stale_nan(value);
-                        self.row.push(Some(value));
-                    }
-                    SampleRef::Histogram(_) => {
-                        return Err(DataFusionError::NotImplemented(
-                            "range evaluation of histogram samples".into(),
-                        ));
+                let sample = field.next().expect("field length checked by the caller");
+                match &sample {
+                    SampleRef::Missing => {}
+                    SampleRef::Float(value) => stale |= is_prometheus_stale_nan(*value),
+                    SampleRef::Histogram(view) => {
+                        if self.function.is_none() {
+                            return Err(DataFusionError::NotImplemented(
+                                "range evaluation of histogram samples".into(),
+                            ));
+                        }
+                        stale |= is_prometheus_stale_nan(view.sum);
                     }
                 }
+                row.push(sample);
             }
-            if stale && drop_stale {
+            if stale && raw {
                 continue;
             }
             // Like RangeManipulate, any kept sample whose shifted time leaves i64 fails the series.
@@ -378,10 +378,22 @@ impl RangeEvaluator {
                         self.window.offset_ms
                     ))
                 })?;
-            for (field, value) in self.fields.iter_mut().zip(&self.row) {
-                if let Some(value) = value {
-                    field.timestamps.push(shifted);
-                    field.values.push(*value);
+            for (field, sample) in self.fields.iter_mut().zip(&row) {
+                match sample {
+                    SampleRef::Missing => {}
+                    SampleRef::Float(value) => {
+                        field.timestamps.push(shifted);
+                        field.values.push(*value);
+                    }
+                    SampleRef::Histogram(view) => {
+                        let mut h = FloatHistogram::try_from_view(view)?;
+                        // Like Prometheus' `evalSubquery`: an explicit counter reset hint
+                        // describes the sample's raw neighbours, not its evaluated ones.
+                        if !raw && h.reset_hint != CounterResetHint::Gauge {
+                            h.reset_hint = CounterResetHint::Unknown;
+                        }
+                        field.histograms.push((shifted, h));
+                    }
                 }
             }
         }
@@ -405,7 +417,15 @@ impl RangeEvaluator {
             for field in &mut self.fields {
                 field.head += field.timestamps[field.head..]
                     .partition_point(|&timestamp| i128::from(timestamp) <= lower);
-                if let Some(&timestamp) = field.timestamps.get(field.head) {
+                field.histogram_head += field.histograms[field.histogram_head..]
+                    .partition_point(|(timestamp, _)| i128::from(*timestamp) <= lower);
+                let first_histogram = field.histograms.get(field.histogram_head);
+                for &timestamp in field
+                    .timestamps
+                    .get(field.head)
+                    .into_iter()
+                    .chain(first_histogram.map(|(timestamp, _)| timestamp))
+                {
                     earliest = Some(earliest.map_or(timestamp, |min: i64| min.min(timestamp)));
                 }
             }
@@ -427,42 +447,28 @@ impl RangeEvaluator {
                 return Err(DataFusionError::Execution(error.clone()));
             }
 
+            let mut evaluator = RowEvaluator {
+                fields: &self.fields,
+                kernel: &mut self.kernel,
+                function: self.function,
+                range_ms: self.window.range_ms,
+                offset_ms: self.window.offset_ms,
+            };
             match self.replay {
                 Replay::PerPoint => {
-                    evaluate_row(
-                        &self.fields,
-                        &mut self.kernel,
-                        self.window.range_ms,
-                        eval_ts,
-                        eval_ts,
-                        &mut self.row,
-                    );
-                    self.output.push(state.cursor, &self.row)?;
+                    evaluator.evaluate(eval_ts, eval_ts, &mut self.row)?;
+                    self.output.push_samples(state.cursor, &self.row)?;
                 }
                 Replay::Once => {
-                    evaluate_row(
-                        &self.fields,
-                        &mut self.kernel,
-                        self.window.range_ms,
-                        eval_ts,
-                        eval_ts,
-                        &mut self.row,
-                    );
+                    evaluator.evaluate(eval_ts, eval_ts, &mut self.row)?;
                     for index in 0..grid.len() {
-                        self.output.push(index, &self.row)?;
+                        self.output.push_samples(index, &self.row)?;
                     }
                 }
                 Replay::EveryPoint => {
                     for (index, &point) in grid.iter().enumerate() {
-                        evaluate_row(
-                            &self.fields,
-                            &mut self.kernel,
-                            self.window.range_ms,
-                            eval_ts,
-                            point,
-                            &mut self.row,
-                        );
-                        self.output.push(index, &self.row)?;
+                        evaluator.evaluate(eval_ts, point, &mut self.row)?;
+                        self.output.push_samples(index, &self.row)?;
                     }
                 }
             }
@@ -471,12 +477,16 @@ impl RangeEvaluator {
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.
-            if state.cursor == points_read {
+            // An anchored selector can skip past the one point it reads.
+            if state.cursor >= points_read {
                 field.head = field.timestamps.len();
+                field.histogram_head = field.histograms.len();
             }
             field.timestamps.drain(..field.head);
             field.values.drain(..field.head);
             field.head = 0;
+            field.histograms.drain(..field.histogram_head);
+            field.histogram_head = 0;
         }
         Ok(())
     }
@@ -491,30 +501,51 @@ impl RangeEvaluator {
     }
 }
 
-/// Fills `row` with the kernel results over each field's window ending at `window_end`,
-/// evaluated at `eval_ts`.
-fn evaluate_row(
-    fields: &[FieldSamples],
-    kernel: &mut WindowKernel,
+/// Computes the result of every field's window at one grid point.
+struct RowEvaluator<'a> {
+    fields: &'a [FieldSamples],
+    kernel: &'a mut WindowKernel,
+    function: Option<RangeFunction>,
     range_ms: i64,
-    window_end: i64,
-    eval_ts: i64,
-    row: &mut Vec<Option<f64>>,
-) {
-    row.clear();
-    for field in fields {
-        let timestamps = &field.timestamps[field.head..];
-        let len = timestamps.partition_point(|&timestamp| timestamp <= window_end);
-        row.push(if len == 0 {
-            None
-        } else {
-            kernel(FloatWindow {
+    offset_ms: i64,
+}
+
+impl RowEvaluator<'_> {
+    /// Fills `row` with the result over each field's window ending at `window_end`, evaluated
+    /// at `eval_ts`.
+    fn evaluate(
+        &mut self,
+        window_end: i64,
+        eval_ts: i64,
+        row: &mut Vec<Option<GridSample>>,
+    ) -> Result<()> {
+        row.clear();
+        for field in self.fields {
+            let timestamps = &field.timestamps[field.head..];
+            let len = timestamps.partition_point(|&timestamp| timestamp <= window_end);
+            let floats = (len > 0).then(|| FloatWindow {
                 timestamps: &timestamps[..len],
                 values: &field.values[field.head..field.head + len],
                 eval_ts,
-                range_ms,
-            })
-        });
+                range_ms: self.range_ms,
+            });
+            let histograms = &field.histograms[field.histogram_head..];
+            let histograms = &histograms
+                [..histograms.partition_point(|(timestamp, _)| *timestamp <= window_end)];
+            row.push(match self.function {
+                Some(function) if !histograms.is_empty() => histogram::evaluate(
+                    function,
+                    floats,
+                    histograms,
+                    eval_ts,
+                    self.range_ms,
+                    self.offset_ms,
+                    &mut *self.kernel,
+                )?,
+                _ => floats.and_then(|window| (self.kernel)(window).map(GridSample::Float)),
+            });
+        }
+        Ok(())
     }
 }
 

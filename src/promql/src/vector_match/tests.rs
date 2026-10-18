@@ -26,7 +26,11 @@ use super::{
     BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp, binary_vectors, set_vectors,
 };
 use crate::grid_series::GridSeriesBuilder;
-use crate::grid_series::reference::{Dense, assert_series_eq, random_dense};
+use crate::grid_series::reference::{
+    Dense, OwnedHistogram, assert_histogram_close, assert_series_eq, golden_cases, mixed_series,
+    random_dense,
+};
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 /// Labels with `__name__` as an ordinary entry, the way Prometheus holds them.
 type Labels = BTreeMap<String, String>;
@@ -902,4 +906,194 @@ fn pow_and_atan2_match_go() {
         checked += 1;
     }
     assert_eq!(checked, 452);
+}
+
+/// Binary and set operators between vectors of floats and native histograms, evaluated by the
+/// Prometheus v3.15.0 engine (`histogram_cases.txt`, promql-compat
+/// `cmd/narthex-golden-native -binary`). Floats compare within 1e-10, histograms bucket by
+/// bucket.
+#[test]
+fn histogram_operators_match_prometheus() {
+    let (mut matched, mut failed, mut histograms) = (0, 0, 0);
+    for case in golden_cases(include_str!("histogram_cases.txt")) {
+        let schema = Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("value"),
+            }]
+            .into(),
+            eval_grid: Some(case.grid.clone()),
+        });
+        let (mut lhs, mut rhs) = (Vec::new(), Vec::new());
+        for ((labels, floats), texts) in case.inputs.iter().zip(&case.histograms) {
+            let Some(series) = mixed_series(&schema, labels, floats, texts) else {
+                continue;
+            };
+            if labels["__name__"] == "a" {
+                lhs.push(series);
+            } else {
+                rhs.push(series);
+            }
+        }
+        let spec: Vec<&str> = case.spec.iter().map(String::as_str).collect();
+        let names: Vec<Arc<str>> = spec[3]
+            .split(',')
+            .filter(|name| *name != "-")
+            .map(Arc::from)
+            .collect();
+        let labels = match spec[2] {
+            "on" => MatchingLabels::On(names),
+            _ => MatchingLabels::Ignoring(names),
+        };
+        let set_op = match spec[0] {
+            "and" => Some(SetOp::And),
+            "or" => Some(SetOp::Or),
+            "unless" => Some(SetOp::Unless),
+            _ => None,
+        };
+        let actual = match set_op {
+            Some(op) => set_vectors(op, &labels, &schema, &lhs, &schema, &rhs),
+            None => {
+                let op = match spec[0] {
+                    "+" => BinaryOp::Add,
+                    "-" => BinaryOp::Sub,
+                    "*" => BinaryOp::Mul,
+                    "/" => BinaryOp::Div,
+                    "%" => BinaryOp::Mod,
+                    "^" => BinaryOp::Pow,
+                    "atan2" => BinaryOp::Atan2,
+                    "==" => BinaryOp::Eq,
+                    "!=" => BinaryOp::Ne,
+                    ">" => BinaryOp::Gt,
+                    "<=" => BinaryOp::Le,
+                    other => panic!("unknown operator {other}"),
+                };
+                let matching = BinaryMatching {
+                    op,
+                    return_bool: spec[1] == "bool",
+                    labels,
+                    cardinality: match spec[4] {
+                        "left" => Cardinality::ManyToOne(Vec::new()),
+                        "right" => Cardinality::OneToMany(Vec::new()),
+                        _ => Cardinality::OneToOne,
+                    },
+                };
+                binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
+            }
+        };
+        let context = format!("{:?}", case.spec);
+        let expected = match (&case.outcome, actual) {
+            (Err(expected), Err(actual)) => {
+                let class = |message: &str| {
+                    [
+                        "found duplicate series for the match group",
+                        "many-to-one matching must be explicit",
+                        "grouping labels must ensure unique matches",
+                        "same labelset",
+                    ]
+                    .into_iter()
+                    .find(|class| message.contains(class))
+                };
+                assert_eq!(class(&actual.to_string()), class(expected), "{context}");
+                failed += 1;
+                continue;
+            }
+            (Ok(expected), Ok(actual)) => (expected, actual),
+            (expected, actual) => panic!("{context}: got {actual:?}, expected {expected:?}"),
+        };
+        let (expected, actual) = expected;
+        let actual: BTreeMap<Labels, Series> = actual
+            .into_iter()
+            .map(|series| (labels_of(&series.metric), series))
+            .collect();
+        assert_eq!(
+            actual.keys().collect::<Vec<_>>(),
+            expected.keys().collect::<Vec<_>>(),
+            "{context}"
+        );
+        let no_histograms = BTreeMap::new();
+        for (labels, series) in &actual {
+            let TimeAxis::Grid(range) = &series.time else {
+                panic!("expected a grid series");
+            };
+            let floats = &expected[labels];
+            let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
+            let mut points = 0;
+            for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
+                let point = range.start() + row;
+                match sample {
+                    SampleRef::Missing => continue,
+                    SampleRef::Float(value) => {
+                        let want = f64::from_bits(floats[&point]);
+                        assert!(
+                            crate::grid_series::reference::close(value, want, 1e-10),
+                            "{context} at {point}: {value} vs {want}"
+                        );
+                    }
+                    SampleRef::Histogram(view) => {
+                        let want = OwnedHistogram::parse(&texts[&point]);
+                        assert_histogram_close(
+                            &FloatHistogram::try_from_view(&view).unwrap(),
+                            &FloatHistogram::try_from_view(&want.view()).unwrap(),
+                            1e-10,
+                            &format!("{context} at {point}"),
+                        );
+                        histograms += 1;
+                    }
+                }
+                points += 1;
+            }
+            assert_eq!(points, floats.len() + texts.len(), "{context}");
+        }
+        matched += 1;
+    }
+    assert!(
+        matched > 150 && failed > 30 && histograms > 100,
+        "{matched} matched, {failed} failed, {histograms} histograms"
+    );
+}
+
+/// Prometheus skips a histogram `+` or `-` whose counter reset hints collide, before counting
+/// the match: the colliding pair gives nothing and does not make the other pair of its group a
+/// second match.
+#[test]
+fn colliding_reset_hints_skip_the_pair() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let series = |labels: &[(&str, &str)], hint: u8| {
+        let labels: Labels = labels
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        let text =
+            format!("0/0/0/4014000000000000/4014000000000000/{hint}/0_1/4014000000000000///");
+        mixed_series(
+            &schema,
+            &labels,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, text)]),
+        )
+        .unwrap()
+    };
+    // Hints: 0 unknown, 1 counter reset, 2 not a counter reset.
+    let lhs = [
+        series(&[("__name__", "a"), ("instance", "1"), ("job", "x")], 1),
+        series(&[("__name__", "a"), ("instance", "2"), ("job", "x")], 0),
+    ];
+    let rhs = [series(&[("__name__", "b"), ("job", "x")], 2)];
+    for op in [BinaryOp::Add, BinaryOp::Sub] {
+        let matching = BinaryMatching {
+            op,
+            return_bool: false,
+            labels: MatchingLabels::On(vec![Arc::from("job")]),
+            cardinality: Cardinality::OneToOne,
+        };
+        let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
+        assert_eq!(result.len(), 1, "{op:?}");
+    }
 }
