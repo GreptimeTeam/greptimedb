@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, hash_map};
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_stream::stream;
@@ -46,13 +46,10 @@ pub struct RaftEngineLogStore {
     sync_write: bool,
     sync_period: Option<Duration>,
     read_batch_size: usize,
-    /// `None` once the log store is stopped. raft-engine only trims the space it
-    /// preallocated at the tail of the active log file when the [Engine] is dropped,
-    /// so `stop` releases it instead of relying on the last reference going away
-    /// (which may never happen before the process exits).
-    engine: RwLock<Option<Arc<Engine>>>,
+    engine: Arc<Engine>,
     /// Tasks feeding the streams returned by [LogStore::read]. Each holds the engine until its
-    /// stream is drained, so `stop` cancels them and waits for them before closing it.
+    /// stream is drained, so `stop` cancels them and waits for them before [Self::close] can
+    /// release it.
     readers: TaskTracker,
     readers_cancel: CancellationToken,
     gc_task: RepeatedTask<Error>,
@@ -160,7 +157,7 @@ impl RaftEngineLogStore {
             sync_write: config.sync_write,
             sync_period: config.sync_period,
             read_batch_size: config.read_batch_size,
-            engine: RwLock::new(Some(engine)),
+            engine,
             readers: TaskTracker::new(),
             readers_cancel: CancellationToken::new(),
             gc_task,
@@ -174,14 +171,15 @@ impl RaftEngineLogStore {
         self.gc_task.started()
     }
 
-    /// Returns the underlying engine, or an [IllegalState](crate::error::Error::IllegalState)
-    /// error once the log store has been stopped.
-    fn engine(&self) -> Result<Arc<Engine>> {
-        self.engine
-            .read()
-            .unwrap()
-            .clone()
-            .context(IllegalStateSnafu)
+    /// Stops the log store and closes the engine.
+    ///
+    /// raft-engine only trims the space it preallocated at the tail of the active log file when
+    /// the [Engine] is dropped. Consuming the log store makes this the last reference, so the
+    /// file is closed here instead of whenever the engine happens to be dropped, which may not
+    /// happen before the process exits.
+    pub async fn close(self) -> Result<()> {
+        self.stop().await?;
+        close_engine(self.engine).await
     }
 
     fn start(&self) -> Result<()> {
@@ -194,12 +192,9 @@ impl RaftEngineLogStore {
     }
 
     pub fn span(&self, provider: &RaftEngineProvider) -> (Option<u64>, Option<u64>) {
-        let Ok(engine) = self.engine() else {
-            return (None, None);
-        };
         (
-            engine.first_index(provider.id),
-            engine.last_index(provider.id),
+            self.engine.first_index(provider.id),
+            self.engine.last_index(provider.id),
         )
     }
 
@@ -305,13 +300,7 @@ impl LogStore for RaftEngineLogStore {
         self.readers.close();
         self.readers.wait().await;
 
-        // With the tasks and readers stopped, this is the last reference to the engine;
-        // dropping it closes the active log file.
-        let engine = self.engine.write().unwrap().take();
-        match engine {
-            Some(engine) => close_engine(engine).await,
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// Appends a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
@@ -330,9 +319,9 @@ impl LogStore for RaftEngineLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
-        let engine = self.engine()?;
-        let (mut batch, last_entry_ids) = Self::entries_to_batch(&engine, entries)?;
-        let _ = engine
+        let (mut batch, last_entry_ids) = Self::entries_to_batch(&self.engine, entries)?;
+        let _ = self
+            .engine
             .write(&mut batch, self.sync_write)
             .context(RaftEngineSnafu)?;
 
@@ -357,7 +346,7 @@ impl LogStore for RaftEngineLogStore {
         let _timer = metrics::METRIC_RAFT_ENGINE_READ_ELAPSED.start_timer();
 
         ensure!(self.started(), IllegalStateSnafu);
-        let engine = self.engine()?;
+        let engine = self.engine.clone();
 
         let last_index = engine.last_index(namespace_id).unwrap_or(0);
         let mut start_index =
@@ -451,7 +440,7 @@ impl LogStore for RaftEngineLogStore {
             )
             .context(RaftEngineSnafu)?;
         let _ = self
-            .engine()?
+            .engine
             .write(&mut batch, true)
             .context(RaftEngineSnafu)?;
         Ok(())
@@ -476,7 +465,7 @@ impl LogStore for RaftEngineLogStore {
         let mut batch = LogBatch::with_capacity(1);
         batch.delete(SYSTEM_NAMESPACE, key);
         let _ = self
-            .engine()?
+            .engine
             .write(&mut batch, true)
             .context(RaftEngineSnafu)?;
         Ok(())
@@ -485,7 +474,7 @@ impl LogStore for RaftEngineLogStore {
     async fn list_namespaces(&self) -> Result<Vec<Provider>> {
         ensure!(self.started(), IllegalStateSnafu);
         let mut namespaces: Vec<Provider> = vec![];
-        self.engine()?
+        self.engine
             .scan_messages::<NamespaceImpl, _>(
                 SYSTEM_NAMESPACE,
                 Some(NAMESPACE_PREFIX.as_bytes()),
@@ -533,7 +522,7 @@ impl LogStore for RaftEngineLogStore {
             })?;
         let namespace_id = ns.id;
         ensure!(self.started(), IllegalStateSnafu);
-        let obsoleted = self.engine()?.compact_to(namespace_id, entry_id + 1);
+        let obsoleted = self.engine.compact_to(namespace_id, entry_id + 1);
         info!(
             "Namespace {} obsoleted {} entries, compacted index: {}, span: {:?}",
             namespace_id,
@@ -558,7 +547,7 @@ impl LogStore for RaftEngineLogStore {
                 actual: provider.type_name(),
             })?;
         let namespace_id = ns.id;
-        let last_index = self.engine()?.last_index(namespace_id).unwrap_or(0);
+        let last_index = self.engine.last_index(namespace_id).unwrap_or(0);
         Ok(last_index)
     }
 }
@@ -717,7 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stop_with_retained_read_stream() {
+    async fn test_close_with_retained_read_stream() {
         let dir = create_temp_dir("raft-engine-logstore-retained-reader-test");
         // One entry per batch and a one-batch channel: the reader blocks on its second send.
         let config = RaftEngineConfig {
@@ -741,9 +730,9 @@ mod tests {
             .unwrap();
         let preallocated = log_files_size(dir.path()) >= PREALLOCATION_THRESHOLD;
 
-        tokio::time::timeout(Duration::from_secs(10), logstore.stop())
+        tokio::time::timeout(Duration::from_secs(10), logstore.close())
             .await
-            .expect("stop must not wait for the stream to be consumed")
+            .expect("close must not wait for the stream to be consumed")
             .unwrap();
         if preallocated {
             assert!(log_files_size(dir.path()) < PREALLOCATION_THRESHOLD);
@@ -763,12 +752,12 @@ mod tests {
         .await;
         assert_eq!(4, entries.len());
         drop(stream);
-        reopened.stop().await.unwrap();
+        reopened.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_stop_closes_active_log_file() {
-        let dir = create_temp_dir("raft-engine-logstore-stop-test");
+    async fn test_close_closes_active_log_file() {
+        let dir = create_temp_dir("raft-engine-logstore-close-test");
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
             &RaftEngineConfig::default(),
@@ -781,20 +770,12 @@ mod tests {
             .unwrap();
         let preallocated = log_files_size(dir.path()) >= PREALLOCATION_THRESHOLD;
 
-        // The log store is still referenced, as regions do at shutdown: stop alone has
-        // to close the engine so the preallocated tail is trimmed.
-        logstore.stop().await.unwrap();
+        logstore.close().await.unwrap();
         if preallocated {
             assert!(log_files_size(dir.path()) < PREALLOCATION_THRESHOLD);
         }
-        assert!(
-            logstore
-                .append(EntryImpl::create(2, 1, "2".as_bytes().to_vec()).into())
-                .await
-                .is_err()
-        );
 
-        // Stopping released the engine, so the directory can be reopened with the entry intact.
+        // Closing released the engine, so the directory can be reopened with the entry intact.
         let reopened = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
             &RaftEngineConfig::default(),
@@ -810,7 +791,7 @@ mod tests {
         .await;
         assert_eq!(1, entries.len());
         assert_eq!(1, entries[0].entry_id());
-        reopened.stop().await.unwrap();
+        reopened.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -932,14 +913,7 @@ mod tests {
         }
 
         logstore.obsolete(&namespace, region_id, 100).await.unwrap();
-        assert_eq!(
-            101,
-            logstore
-                .engine()
-                .unwrap()
-                .first_index(namespace_id)
-                .unwrap()
-        );
+        assert_eq!(101, logstore.engine.first_index(namespace_id).unwrap());
 
         let res = logstore.read(&namespace, 100, None).await.unwrap();
         let mut vec = collect_entries(res).await;

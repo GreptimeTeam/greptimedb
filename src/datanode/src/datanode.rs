@@ -174,16 +174,11 @@ impl Datanode {
                     .context(ShutdownInstanceSnafu),
             );
         }
-        // Regions keep references to the WAL that may outlive shutdown, so it has to be
-        // stopped explicitly for raft-engine to close its active log file.
-        if let Some(log_store) = &self.raft_engine_log_store {
+        // The stopped engines no longer hold the raft-engine WAL, so it can be closed.
+        if let Some(log_store) = self.raft_engine_log_store.take() {
             record_shutdown_error(
                 &mut first_error,
-                log_store
-                    .stop()
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ShutdownInstanceSnafu),
+                close_raft_engine_log_store(log_store).await,
             );
         }
         first_error.map_or(Ok(()), Err)
@@ -215,11 +210,15 @@ pub struct DatanodeBuilder {
     topic_stats_reporter: Option<Box<dyn TopicStatsReporter>>,
     open_regions_writable_override: Option<bool>,
     local_file_access: LocalFileAccess,
+    /// Set as soon as the raft-engine log store exists so that a failed build can close it.
     raft_engine_log_store: Option<Arc<RaftEngineLogStore>>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
     /// Set as soon as the object store log store exists so that a failed build can stop it.
     object_store_log_store: Option<Arc<ObjectStoreLogStore>>,
+    /// Set as soon as the region server exists so that a failed build can stop its engines,
+    /// which hold the log stores.
+    region_server: Option<RegionServer>,
 }
 
 impl DatanodeBuilder {
@@ -234,6 +233,7 @@ impl DatanodeBuilder {
             open_regions_writable_override: None,
             local_file_access: LocalFileAccess::Disabled,
             raft_engine_log_store: None,
+            region_server: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
             topic_stats_reporter: None,
@@ -308,19 +308,25 @@ impl DatanodeBuilder {
         self.try_build().await
     }
 
-    /// Builds the datanode and stops the log stores it opened if a later step fails.
+    /// Builds the datanode and, if a later step fails, stops the engines and the log stores it
+    /// opened.
     async fn try_build(&mut self) -> Result<Datanode> {
         let result = self.build_inner().await;
         if result.is_err() {
+            if let Some(region_server) = self.region_server.take()
+                && let Err(err) = region_server.stop().await
+            {
+                warn!(err; "Failed to stop the region server after a failed build");
+            }
             if let Some(log_store) = &self.object_store_log_store
                 && let Err(err) = log_store.stop().await
             {
                 warn!(err; "Failed to stop the object store log store after a failed build");
             }
-            if let Some(log_store) = &self.raft_engine_log_store
-                && let Err(err) = log_store.stop().await
+            if let Some(log_store) = self.raft_engine_log_store.take()
+                && let Err(err) = close_raft_engine_log_store(log_store).await
             {
-                warn!(err; "Failed to stop the raft-engine log store after a failed build");
+                warn!(err; "Failed to close the raft-engine log store after a failed build");
             }
         }
         result
@@ -381,6 +387,7 @@ impl DatanodeBuilder {
                 file_ref_manager,
             )
             .await?;
+        self.region_server = Some(region_server.clone());
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.
         let runtime_switch_manager = RuntimeSwitchManager::new(self.kv_backend.clone());
@@ -436,6 +443,7 @@ impl DatanodeBuilder {
             None
         };
 
+        self.region_server = None;
         Ok(Datanode {
             services: ServerHandlers::default(),
             heartbeat_task,
@@ -844,6 +852,25 @@ pub(crate) fn record_shutdown_error(first_error: &mut Option<error::Error>, resu
             warn!(err; "Ignored a later shutdown error");
         }
     }
+}
+
+/// Closes the raft-engine WAL, which takes its last reference: raft-engine only closes the
+/// active log file when its engine is dropped. If something else still holds the WAL, it is
+/// stopped instead and the file stays open until that reference is dropped.
+async fn close_raft_engine_log_store(log_store: Arc<RaftEngineLogStore>) -> Result<()> {
+    let result = match Arc::try_unwrap(log_store) {
+        Ok(log_store) => log_store.close().await,
+        Err(log_store) => {
+            warn!(
+                "The raft-engine WAL is still referenced elsewhere ({} references), stopping it without closing its active log file",
+                Arc::strong_count(&log_store) - 1
+            );
+            log_store.stop().await
+        }
+    };
+    result
+        .map_err(BoxedError::new)
+        .context(ShutdownInstanceSnafu)
 }
 
 /// Returns the object store that holds the WAL objects: the default one for an
@@ -1613,7 +1640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_build_stops_raft_engine_log_store() {
+    async fn test_failed_build_closes_raft_engine_log_store() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("raft-engine-wal-failed-build");
         let kv_backend = Arc::new(MemoryKvBackend::new());
@@ -1628,8 +1655,8 @@ mod tests {
 
         assert!(builder.try_build().await.is_err());
 
-        let log_store = builder.raft_engine_log_store.as_ref().unwrap();
-        assert!(!log_store.started());
+        assert!(builder.region_server.is_none());
+        assert!(builder.raft_engine_log_store.is_none());
         assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
     }
 

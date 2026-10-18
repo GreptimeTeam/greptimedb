@@ -159,6 +159,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Engine is stopped"))]
+    EngineStopped {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to recv result"))]
     Recv {
         #[snafu(source)]
@@ -1502,6 +1508,7 @@ impl ErrorExt for Error {
             | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
+            | EngineStopped { .. }
             | Recv { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
