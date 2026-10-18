@@ -346,6 +346,67 @@ fn fields_are_aggregated_independently() {
 }
 
 #[test]
+fn state_blocks_keep_absolute_indices_across_boundaries_and_gaps() {
+    // A 512-point grid spans eight state blocks; inputs straddle a block edge, leave whole
+    // blocks empty and land in a far block, in both fields.
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![
+            FieldSpec { name: "a".into() },
+            FieldSpec { name: "b".into() },
+        ]
+        .into(),
+        eval_grid: Some(Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(0, 1, 512).unwrap()).unwrap(),
+        )),
+    });
+    let mut gap = vec![None; 200];
+    gap[0] = Some(1.0);
+    gap[199] = Some(2.0);
+    let inputs = [
+        input(
+            &schema,
+            metric("m", &[("i", "0")]),
+            60,
+            &[vec![Some(1.0); 8], vec![Some(10.0); 8]],
+        ),
+        input(
+            &schema,
+            metric("m", &[("i", "1")]),
+            100,
+            &[gap.clone(), vec![None; 200]],
+        ),
+        input(
+            &schema,
+            metric("m", &[("i", "2")]),
+            62,
+            &[vec![Some(3.0); 4], vec![None, None, Some(5.0), None]],
+        ),
+        input(
+            &schema,
+            metric("m", &[("i", "3")]),
+            509,
+            &[vec![Some(4.0); 3], vec![Some(6.0); 3]],
+        ),
+    ];
+    let output = aggregate_float(&schema, &inputs, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    assert_eq!(output.len(), 1);
+    let mut a = vec![None; 452];
+    let mut b = vec![None; 452];
+    for i in 60..68 {
+        a[i - 60] = Some(if (62..66).contains(&i) { 4.0 } else { 1.0 });
+        b[i - 60] = Some(if i == 64 { 15.0 } else { 10.0 });
+    }
+    a[100 - 60] = Some(1.0);
+    a[299 - 60] = Some(2.0);
+    for i in 509..512 {
+        a[i - 60] = Some(4.0);
+        b[i - 60] = Some(6.0);
+    }
+    assert_eq!(values(&output[0], 0), (60, a));
+    assert_eq!(values(&output[0], 1), (60, b));
+}
+
+#[test]
 fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
     let schema = schema(&["value"]);
     let series = [

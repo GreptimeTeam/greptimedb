@@ -70,7 +70,7 @@ pub fn aggregate_float(
         let metric = grouping.apply(&series.metric);
         let group = groups.entry(label_key(&metric)).or_insert_with(|| Group {
             metric,
-            points: BTreeMap::new(),
+            blocks: BTreeMap::new(),
         });
         group.accumulate(series, op)?;
     }
@@ -78,10 +78,16 @@ pub fn aggregate_float(
     let mut output = Vec::with_capacity(groups.len());
     let mut row = Vec::with_capacity(schema.fields.len());
     for group in groups.into_values() {
-        for (&index, states) in &group.points {
-            row.clear();
-            row.extend(states.iter().map(|state| state.finish(op)));
-            builder.push(index, &row)?;
+        for (&block, states) in &group.blocks {
+            // The last block can extend past the grid; only points with a sample are pushed.
+            for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
+                if !point.iter().any(|state| state.seen) {
+                    continue;
+                }
+                row.clear();
+                row.extend(point.iter().map(|state| state.finish(op)));
+                builder.push(block * BLOCK_POINTS + offset, &row)?;
+            }
         }
         output.extend(builder.finish(group.metric)?);
     }
@@ -149,9 +155,15 @@ fn label_key(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
     labels
 }
 
+/// Grid points per state block. A block is allocated only once a sample falls in it, so sparse
+/// input never expands to the full grid and dense input costs one allocation per block.
+const BLOCK_POINTS: usize = 64;
+
 struct Group {
     metric: MetricName,
-    points: BTreeMap<usize, Vec<FloatState>>,
+    /// Keyed by absolute grid index / `BLOCK_POINTS`; each block holds one state per field for
+    /// each of its points, point by point.
+    blocks: BTreeMap<usize, Box<[FloatState]>>,
 }
 
 impl Group {
@@ -161,18 +173,43 @@ impl Group {
                 "Aggregate requires an evaluated grid".into(),
             ));
         };
+        let width = series.fields.len();
+        let mut pending = Vec::with_capacity(BLOCK_POINTS);
         for (field_index, field) in series.fields.iter().enumerate() {
+            let mut block = range.start() / BLOCK_POINTS;
             for (offset, sample) in field.iter().enumerate() {
+                let index = range.start() + offset;
+                if index / BLOCK_POINTS != block {
+                    self.update_block(block, width, field_index, op, &mut pending);
+                    block = index / BLOCK_POINTS;
+                }
                 if let SampleRef::Float(sample) = sample {
-                    let states = self
-                        .points
-                        .entry(range.start() + offset)
-                        .or_insert_with(|| vec![FloatState::default(); series.fields.len()]);
-                    states[field_index].update(op, sample);
+                    pending.push((index % BLOCK_POINTS, sample));
                 }
             }
+            self.update_block(block, width, field_index, op, &mut pending);
         }
         Ok(())
+    }
+
+    /// Applies one field's samples within a block, so a block costs one lookup per field run.
+    fn update_block(
+        &mut self,
+        block: usize,
+        width: usize,
+        field_index: usize,
+        op: AggregateOp,
+        pending: &mut Vec<(usize, f64)>,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        let states = self.blocks.entry(block).or_insert_with(|| {
+            vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice()
+        });
+        for (offset, sample) in pending.drain(..) {
+            states[offset * width + field_index].update(op, sample);
+        }
     }
 }
 
