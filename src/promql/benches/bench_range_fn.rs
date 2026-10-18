@@ -18,12 +18,17 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
 use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::buffer::Buffer;
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::physical_plan::ColumnarValue;
 use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::arrow::datatypes::{DataType, Field};
+use datatypes::series::MetricName;
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec};
 use promql::extension_plan::RangeManipulateStream;
 use promql::functions::{
     AbsentOverTime, Changes, CountOverTime, Delta, DoubleExponentialSmoothing, IDelta, Increase,
@@ -31,6 +36,7 @@ use promql::functions::{
     Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
+use promql::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 
 /// A `window_step` below `window_size` makes consecutive windows overlap, which is the normal
 /// PromQL range query shape.
@@ -1248,8 +1254,91 @@ fn bench_cursor_scan_carriers(c: &mut Criterion) {
     group.finish();
 }
 
+/// The native evaluator's own cost, on the input the fused node feeds it.
+///
+/// One series of 2 880 samples at 15 s, evaluated on a 7 200-point 1 s grid, with a 5 min
+/// window (20 samples per window) and a 1 h window (240). The value shapes separate the
+/// counter-reset work from the rest: `rising` never resets, `resetting` restarts every 240
+/// samples so a 1 h window holds at most one, and `max_over_time` runs over the same windows
+/// but never corrects counters, which is the floor this work sits on.
+///
+/// **Timed scope, identical in every case:** `RangeEvaluator::try_new` + one `push` per
+/// prepared chunk + `finish`. The chunks, schema and grid are built once before timing and
+/// `push` borrows them, so no case pays for input construction inside the measurement.
+fn bench_native_range_eval(c: &mut Criterion) {
+    let mut group = c.benchmark_group("native_range_eval");
+    const SAMPLES: usize = 2_880;
+    const SAMPLE_INTERVAL_MS: i64 = 15_000;
+    const GRID_POINTS: u64 = 7_200;
+    const START_MS: i64 = 1_700_000_000_000;
+
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: None,
+    });
+    let grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(START_MS, 1_000, GRID_POINTS).unwrap()).unwrap(),
+    );
+
+    let rising: Vec<f64> = (0..SAMPLES).map(|i| i as f64 * 15.0).collect();
+    let resetting: Vec<f64> = (0..SAMPLES).map(|i| (i % 240) as f64 * 15.0).collect();
+
+    for (shape, values) in [("rising", &rising), ("resetting", &resetting)] {
+        let timestamps: Vec<i64> = (0..SAMPLES)
+            .map(|i| START_MS + i as i64 * SAMPLE_INTERVAL_MS)
+            .collect();
+        let time = RawTimestamps::try_new(timestamps.into()).unwrap();
+        let fields = SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+            values.clone(),
+        ))])
+        .unwrap();
+        let chunk = RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(vec![0u8]),
+            Some(MetricName::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+            time,
+            fields,
+            true,
+        )
+        .unwrap();
+
+        for (function, name) in [
+            (RangeFunction::Rate, "rate"),
+            (RangeFunction::MaxOverTime, "max_over_time"),
+        ] {
+            for (range_ms, window) in [(300_000i64, "5m"), (3_600_000, "1h")] {
+                let range = RangeWindow {
+                    range_ms,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                };
+                group.bench_with_input(
+                    BenchmarkId::new(name, format!("{shape}_w{window}")),
+                    &(),
+                    |b, _| {
+                        b.iter(|| {
+                            let mut evaluator =
+                                RangeEvaluator::try_new(&schema, grid.clone(), range, function)
+                                    .unwrap();
+                            let series = evaluator.push(&chunk).unwrap();
+                            evaluator.finish().unwrap();
+                            series
+                        })
+                    },
+                );
+            }
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_native_range_eval,
     bench_range_functions,
     bench_presence_range_functions,
     bench_delta_rate_comparison,
