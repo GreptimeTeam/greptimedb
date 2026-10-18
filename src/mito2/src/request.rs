@@ -25,6 +25,9 @@ use api::helper::{
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
 use common_telemetry::info;
+use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use partition::expr::PartitionExpr;
 use prometheus::HistogramTimer;
@@ -44,6 +47,7 @@ use store_api::region_request::{
     RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
     StagingPartitionDirective,
 };
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
@@ -194,85 +198,22 @@ impl WriteRequest {
 
         let region_id = self.region_id;
         // Index all columns in rows.
-        let mut rows_columns: HashMap<_, _> = self
+        let rows_columns = self
             .rows
             .schema
             .iter()
-            .map(|column| (&column.column_name, column))
+            .map(|schema| {
+                let column = RowColumn {
+                    request: self,
+                    schema,
+                };
+                (schema.column_name.as_str(), column)
+            })
             .collect();
-
-        let mut need_fill_default = false;
-        // Checks all columns in this region.
-        for column in &metadata.column_metadatas {
-            if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
-                // Check data type.
-                ensure!(
-                    is_column_type_value_eq(
-                        input_col.datatype,
-                        input_col.datatype_extension.clone(),
-                        &column.column_schema.data_type
-                    ),
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: format!(
-                            "column {} expect type {:?}, given: {}({})",
-                            column.column_schema.name,
-                            column.column_schema.data_type,
-                            ColumnDataType::try_from(input_col.datatype)
-                                .map(|v| v.as_str_name())
-                                .unwrap_or("Unknown"),
-                            input_col.datatype,
-                        )
-                    }
-                );
-
-                // Check semantic type.
-                ensure!(
-                    is_semantic_type_eq(input_col.semantic_type, column.semantic_type),
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: format!(
-                            "column {} has semantic type {:?}, given: {}({})",
-                            column.column_schema.name,
-                            column.semantic_type,
-                            api::v1::SemanticType::try_from(input_col.semantic_type)
-                                .map(|v| v.as_str_name())
-                                .unwrap_or("Unknown"),
-                            input_col.semantic_type
-                        ),
-                    }
-                );
-
-                // Check nullable.
-                // Safety: `rows_columns` ensures this column exists.
-                let has_null = self.has_null[self.name_to_index[&column.column_schema.name]];
-                ensure!(
-                    !has_null || column.column_schema.is_nullable(),
-                    InvalidRequestSnafu {
-                        region_id,
-                        reason: format!(
-                            "column {} is not null but input has null",
-                            column.column_schema.name
-                        ),
-                    }
-                );
-            } else {
-                // Rows don't have this column.
-                self.check_missing_column(column)?;
-
-                need_fill_default = true;
-            }
-        }
-
-        // Checks all columns in rows exist in the region.
-        if !rows_columns.is_empty() {
-            let names: Vec<_> = rows_columns.into_keys().collect();
-            return InvalidRequestSnafu {
-                region_id,
-                reason: format!("unknown columns: {:?}", names),
-            }
-            .fail();
-        }
+        let need_fill_default =
+            check_request_columns(region_id, metadata, rows_columns, |column| {
+                self.check_missing_column(column)
+            })?;
 
         // If we need to fill default values, return a special error.
         ensure!(!need_fill_default, FillDefaultSnafu { region_id });
@@ -369,16 +310,7 @@ impl WriteRequest {
         }
 
         // Not a delete request. Checks whether they have default value.
-        ensure!(
-            column.column_schema.is_nullable()
-                || column.column_schema.default_constraint().is_some(),
-            InvalidRequestSnafu {
-                region_id: self.region_id,
-                reason: format!("missing column {}", column.column_schema.name),
-            }
-        );
-
-        Ok(())
+        check_column_can_be_filled(self.region_id, column)
     }
 
     /// Returns the default value for specific column.
@@ -440,6 +372,242 @@ impl WriteRequest {
         // Convert default value into proto's value.
         Ok(api::helper::to_grpc_value(default_value))
     }
+}
+
+/// A column of a write request, as [check_request_columns] sees it.
+trait RequestColumn {
+    /// Returns whether the column has the data type of `column`.
+    fn has_type_of(&self, column: &ColumnMetadata) -> bool;
+
+    /// Describes the data type of the column in errors.
+    fn type_name(&self) -> String;
+
+    /// Returns the semantic type of the column if the request carries one.
+    fn semantic_type(&self) -> Option<i32>;
+
+    /// Returns whether the column contains nulls.
+    fn has_null(&self) -> bool;
+}
+
+/// Checks the columns of a write request against the region schema. Each column
+/// must be a column of the region, have its data type and, if the request carries
+/// one, its semantic type, and contain nulls only if the region column is
+/// nullable. `check_missing` checks the region columns that the request doesn't
+/// have. Returns whether there are such columns.
+fn check_request_columns<C: RequestColumn>(
+    region_id: RegionId,
+    metadata: &RegionMetadata,
+    mut columns: HashMap<&str, C>,
+    mut check_missing: impl FnMut(&ColumnMetadata) -> Result<()>,
+) -> Result<bool> {
+    let mut has_missing = false;
+    for column in &metadata.column_metadatas {
+        let Some(input_col) = columns.remove(column.column_schema.name.as_str()) else {
+            check_missing(column)?;
+            has_missing = true;
+            continue;
+        };
+        // Check data type.
+        ensure!(
+            input_col.has_type_of(column),
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {} expect type {:?}, given: {}",
+                    column.column_schema.name,
+                    column.column_schema.data_type,
+                    input_col.type_name(),
+                )
+            }
+        );
+
+        // Check semantic type.
+        if let Some(semantic_type) = input_col.semantic_type() {
+            ensure!(
+                is_semantic_type_eq(semantic_type, column.semantic_type),
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: format!(
+                        "column {} has semantic type {:?}, given: {}({})",
+                        column.column_schema.name,
+                        column.semantic_type,
+                        api::v1::SemanticType::try_from(semantic_type)
+                            .map(|v| v.as_str_name())
+                            .unwrap_or("Unknown"),
+                        semantic_type
+                    ),
+                }
+            );
+        }
+
+        // Check nullable.
+        ensure!(
+            !input_col.has_null() || column.column_schema.is_nullable(),
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {} is not null but input has null",
+                    column.column_schema.name
+                ),
+            }
+        );
+    }
+
+    // Checks all columns in the request exist in the region.
+    if !columns.is_empty() {
+        let names: Vec<_> = columns.into_keys().collect();
+        return InvalidRequestSnafu {
+            region_id,
+            reason: format!("unknown columns: {:?}", names),
+        }
+        .fail();
+    }
+
+    Ok(has_missing)
+}
+
+/// Checks that a write may leave out `column`, which is then filled with its
+/// default value or null.
+fn check_column_can_be_filled(region_id: RegionId, column: &ColumnMetadata) -> Result<()> {
+    ensure!(
+        column.column_schema.is_nullable() || column.column_schema.default_constraint().is_some(),
+        InvalidRequestSnafu {
+            region_id,
+            reason: format!("missing column {}", column.column_schema.name),
+        }
+    );
+    Ok(())
+}
+
+/// A column of the rows of a [WriteRequest].
+struct RowColumn<'a> {
+    request: &'a WriteRequest,
+    schema: &'a ColumnSchema,
+}
+
+impl RequestColumn for RowColumn<'_> {
+    fn has_type_of(&self, column: &ColumnMetadata) -> bool {
+        is_column_type_value_eq(
+            self.schema.datatype,
+            self.schema.datatype_extension.clone(),
+            &column.column_schema.data_type,
+        )
+    }
+
+    fn type_name(&self) -> String {
+        format!(
+            "{}({})",
+            ColumnDataType::try_from(self.schema.datatype)
+                .map(|v| v.as_str_name())
+                .unwrap_or("Unknown"),
+            self.schema.datatype,
+        )
+    }
+
+    fn semantic_type(&self) -> Option<i32> {
+        Some(self.schema.semantic_type)
+    }
+
+    fn has_null(&self) -> bool {
+        // Safety: `name_to_index` has every column of the request.
+        self.request.has_null[self.request.name_to_index[&self.schema.column_name]]
+    }
+}
+
+/// A column of the batch of a bulk insert.
+struct BulkColumn<'a> {
+    array: &'a ArrayRef,
+}
+
+impl RequestColumn for BulkColumn<'_> {
+    fn has_type_of(&self, column: &ColumnMetadata) -> bool {
+        let actual = self.array.data_type();
+        let data_type = &column.column_schema.data_type;
+        // The memtables convert tags of any string encoding.
+        if column.semantic_type == SemanticType::Tag && data_type.is_string() {
+            return match actual {
+                ArrowDataType::Dictionary(key, value) => key.is_integer() && value.is_string(),
+                actual => actual.is_string(),
+            };
+        }
+        *actual == data_type.as_arrow_type()
+    }
+
+    fn type_name(&self) -> String {
+        self.array.data_type().to_string()
+    }
+
+    fn semantic_type(&self) -> Option<i32> {
+        None
+    }
+
+    fn has_null(&self) -> bool {
+        self.array.logical_null_count() > 0
+    }
+}
+
+/// Checks the batch of a bulk insert against the region schema with the rules
+/// [WriteRequest::check_schema] applies to rows: column names are unique, every
+/// column is a column of the region with its Arrow type and contains nulls only
+/// if the region column is nullable, and a missing column is nullable or has a
+/// default value. Tags may use any string encoding. Sparse batches carry the
+/// tags in one encoded primary key column instead. Returns whether the batch
+/// misses columns that the writer fills.
+pub fn check_bulk_insert_batch(metadata: &RegionMetadata, batch: &RecordBatch) -> Result<bool> {
+    let region_id = metadata.region_id;
+    let sparse = metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
+    let mut primary_key = None;
+    let mut columns = HashMap::with_capacity(batch.num_columns());
+    for (field, array) in batch.schema_ref().fields().iter().zip(batch.columns()) {
+        let duplicate = if sparse && field.name() == PRIMARY_KEY_COLUMN_NAME {
+            primary_key.replace(array).is_some()
+        } else {
+            columns
+                .insert(field.name().as_str(), BulkColumn { array })
+                .is_some()
+        };
+        ensure!(
+            !duplicate,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!("duplicate column {}", field.name()),
+            }
+        );
+    }
+    if sparse {
+        let primary_key = primary_key.with_context(|| InvalidRequestSnafu {
+            region_id,
+            reason: format!("missing column {PRIMARY_KEY_COLUMN_NAME}"),
+        })?;
+        // The writer casts the encoded primary key to a dictionary of binary.
+        let type_matches = match primary_key.data_type() {
+            ArrowDataType::Binary => true,
+            ArrowDataType::Dictionary(key, value) => {
+                key.is_integer() && **value == ArrowDataType::Binary
+            }
+            _ => false,
+        };
+        ensure!(
+            type_matches && primary_key.logical_null_count() == 0,
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!(
+                    "column {PRIMARY_KEY_COLUMN_NAME} must be binary without nulls, given: {}",
+                    primary_key.data_type()
+                ),
+            }
+        );
+    }
+    let mut needs_fill = false;
+    check_request_columns(region_id, metadata, columns, |column| {
+        if sparse && column.semantic_type == SemanticType::Tag {
+            Ok(())
+        } else {
+            needs_fill = true;
+            check_column_can_be_filled(region_id, column)
+        }
+    })?;
+    Ok(needs_fill)
 }
 
 /// Validate proto value schema.
@@ -762,7 +930,18 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::EnterStaging(v),
             }),
-            RegionRequest::BulkInserts(region_bulk_inserts_request) => {
+            RegionRequest::BulkInserts(mut region_bulk_inserts_request) => {
+                // The worker answers empty batches without writing them.
+                if let Some(region_metadata) = &region_metadata
+                    && region_bulk_inserts_request.payload.num_rows() > 0
+                    && check_bulk_insert_batch(
+                        region_metadata,
+                        &region_bulk_inserts_request.payload,
+                    )?
+                {
+                    // Lets the worker fill the missing columns.
+                    region_bulk_inserts_request.aligned_schema_version = None;
+                }
                 WorkerRequest::BulkInserts(BulkInsertRequest {
                     metadata: region_metadata,
                     sender: sender.into(),
