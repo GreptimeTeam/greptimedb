@@ -165,6 +165,10 @@ pub(crate) struct ClosedMergeOptions {
     /// Whether merges may rewrite conflicting files. Otherwise only
     /// conflict-free intervals are merged.
     pub(crate) allow_conflicts: bool,
+    /// Whether overlap merges may rewrite a dominant sorted run for a small
+    /// peer. Otherwise such a merge would be repeated whenever late data adds
+    /// another small peer.
+    pub(crate) allow_unbalanced: bool,
 }
 
 /// Picks a closed interval of units among all files of an inactive window.
@@ -174,8 +178,8 @@ pub(crate) struct ClosedMergeOptions {
 /// eligible if it
 ///
 /// - removes files within the rewrite budget, or
-/// - resolves conflicts without rewriting a dominant sorted run, and adds at
-///   most one tail file.
+/// - resolves conflicts without rewriting a dominant sorted run (unless
+///   [`ClosedMergeOptions::allow_unbalanced`]), and adds at most one tail file.
 ///
 /// The pick maximizes resolved conflicts plus removed files per rewritten byte.
 pub(crate) fn pick_closed_merge(
@@ -219,6 +223,7 @@ pub(crate) fn pick_closed_merge(
         // Overlap merges must not rewrite a dominant run for a small peer. A
         // file-reducing merge is already bounded by its rewrite budget.
         if !reduces_files
+            && !options.allow_unbalanced
             && !has_balanced_runs(unit_files(), files, &extents, limits.run_tolerance())
         {
             return;
@@ -665,6 +670,7 @@ mod tests {
                 limits: limits(max_output_file_size),
                 allow_file_reduction: true,
                 allow_conflicts: true,
+                allow_unbalanced: false,
             },
         )
     }

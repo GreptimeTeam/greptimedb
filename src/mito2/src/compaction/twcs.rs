@@ -145,6 +145,13 @@ impl TwcsPicker {
             max_outputs,
             primary_key_mapper,
         } = context;
+        let region_sequence = time_windows
+            .values()
+            .flat_map(|window| window.files())
+            .filter_map(|file| file.meta_ref().sequence)
+            .map(|sequence| sequence.get())
+            .max()
+            .unwrap_or(0);
         let windows = time_windows
             .values()
             .rev()
@@ -181,6 +188,7 @@ impl TwcsPicker {
                             files,
                             active_window,
                             time_window_size,
+                            region_sequence,
                             &primary_key_mapper,
                         )
                     });
@@ -251,9 +259,11 @@ impl TwcsPicker {
         window: &Window,
         active_window: Option<i64>,
         time_window_size: Option<i64>,
+        region_sequence: u64,
         mapper: &PrimaryKeyRangeMapper,
     ) -> Option<WindowPick> {
         let mut files: Vec<_> = window.files().cloned().collect();
+        let quiet = is_quiet_window(&files, region_sequence);
 
         // Filter out large files in append mode - they won't benefit from compaction
         if self.append_mode
@@ -288,7 +298,7 @@ impl TwcsPicker {
                     .is_some_and(|(active, size)| {
                         (1..=size).contains(&(active - window.time_window))
                     });
-            self.pick_inactive_window(l0_files, l1_files, mapper, settling)
+            self.pick_inactive_window(l0_files, l1_files, mapper, settling, quiet)
         }
     }
 
@@ -349,6 +359,12 @@ impl TwcsPicker {
     /// themselves and conflict-free files, and leaves overlaps for when the
     /// window is older.
     ///
+    /// Late data can also land in older windows. Resolving such an overlap
+    /// rewrites a dominant sorted run for a small peer, which would repeat for
+    /// every late flush, so it waits until the window is `quiet`: the region
+    /// has written a window's worth of rows elsewhere since the window last
+    /// received data. Each quiet period then pays for at most one such rewrite.
+    ///
     /// Without new writes each pick consumes an L0 file or makes progress on
     /// the closed merge's termination measure, so the window stops compacting.
     fn pick_inactive_window(
@@ -357,6 +373,7 @@ impl TwcsPicker {
         l1_files: Vec<FileHandle>,
         mapper: &PrimaryKeyRangeMapper,
         settling: bool,
+        quiet: bool,
     ) -> Option<WindowPick> {
         let num_l1_files = l1_files.len();
         if !l0_files.is_empty()
@@ -384,6 +401,7 @@ impl TwcsPicker {
                 limits: self.closed_merge_limits(),
                 allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
                 allow_conflicts: !settling,
+                allow_unbalanced: quiet && !settling,
             },
         )?;
         let (class, branch) = if pick.reduces_files {
@@ -1028,6 +1046,22 @@ impl Window {
     fn files(&self) -> impl Iterator<Item = &FileHandle> {
         self.files.iter()
     }
+}
+
+/// Whether the region has written at least as many rows as `files` hold, and at
+/// least one row, since the newest of them was written. Sequences are assigned
+/// per row and compaction keeps the inputs' maximum, so this needs no state.
+fn is_quiet_window(files: &[FileHandle], region_sequence: u64) -> bool {
+    let Some(window_sequence) = files
+        .iter()
+        .filter_map(|file| file.meta_ref().sequence)
+        .map(|sequence| sequence.get())
+        .max()
+    else {
+        return false;
+    };
+    let rows: u64 = files.iter().map(|file| file.num_rows() as u64).sum();
+    region_sequence.saturating_sub(window_sequence) >= rows.max(1)
 }
 
 /// Assigns files to windows with predefined window size (in seconds) by their max timestamps.
@@ -4092,6 +4126,85 @@ mod tests {
                     .flat_map(|output| output.inputs.iter().map(FileHandle::file_id))
                     .collect::<HashSet<_>>();
                 assert_eq!(expected, actual, "{case}, active window: {active_window:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quiet_window_resolves_dominant_run_overlap() {
+        let file_size = 512 * 1024 * 1024;
+        // A run of eight key-sliced files and one small file overlapping all of
+        // them: resolving the overlap rewrites the run for its small peer.
+        let mut window_files = (0..8)
+            .map(|idx| {
+                let key = b'a' + idx as u8;
+                new_file_handle_with_size_sequence_and_primary_key_range(
+                    FileId::random(),
+                    idx,
+                    10_000,
+                    1,
+                    100,
+                    file_size,
+                    pk_range(&[key, b'0'], &[key, b'9']),
+                )
+            })
+            .collect::<Vec<_>>();
+        window_files.push(new_file_handle_with_size_sequence_and_primary_key_range(
+            FileId::random(),
+            1_000,
+            1_999,
+            1,
+            100,
+            file_size / 8,
+            pk_range(b"a0", b"h9"),
+        ));
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            active_window_l1_merge_trigger: 4,
+            inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 16,
+            time_window_seconds: Some(60),
+            max_output_file_size: Some(file_size),
+            append_mode: false,
+            max_background_tasks: Some(1),
+            time_range: None,
+            all_windows_inactive: false,
+        };
+        let expected = window_files
+            .iter()
+            .map(FileHandle::file_id)
+            .collect::<HashSet<_>>();
+
+        // The newest file of the region is written after the window (quiet) or
+        // with it (still receiving data).
+        for (newer_sequence, quiet) in [(100, false), (101, true)] {
+            let mut files = window_files.clone();
+            files.push(new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                120_000,
+                120_999,
+                1,
+                newer_sequence,
+                file_size,
+                pk_range(b"a0", b"h9"),
+            ));
+            let outputs = picker
+                .build_output_with_time_range(
+                    RegionId::from_u64(0),
+                    assign_to_windows(files.iter(), 60),
+                    None,
+                    Some(60),
+                )
+                .await
+                .unwrap();
+            let actual = outputs
+                .iter()
+                .flat_map(|output| output.inputs.iter().map(FileHandle::file_id))
+                .collect::<HashSet<_>>();
+            if quiet {
+                assert_eq!(expected, actual);
+            } else {
+                assert!(actual.is_empty(), "{actual:?}");
             }
         }
     }
