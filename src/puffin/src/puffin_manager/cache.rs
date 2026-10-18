@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use moka::notification::RemovalCause;
 use prometheus::IntGaugeVec;
 
 use crate::file_metadata::FileMetadata;
@@ -39,7 +40,10 @@ impl PuffinMetadataCache {
             cache: moka::sync::CacheBuilder::new(capacity)
                 .name("puffin_metadata")
                 .weigher(|k: &String, v| puffin_metadata_weight(k, v))
-                .eviction_listener(move |k, v, _cause| {
+                .eviction_listener(move |k, v, cause| {
+                    if cause == RemovalCause::Replaced {
+                        return;
+                    }
                     let size = puffin_metadata_weight(&k, &v);
                     cache_bytes
                         .with_label_values(&[PUFFIN_METADATA_TYPE])
@@ -57,6 +61,12 @@ impl PuffinMetadataCache {
 
     /// Puts the metadata into the cache.
     pub fn put_metadata(&self, file_id: String, metadata: Arc<FileMetadata>) {
+        if let Some(old) = self.cache.get(&file_id) {
+            let old_size = puffin_metadata_weight(&file_id, &old);
+            self.cache_bytes
+                .with_label_values(&[PUFFIN_METADATA_TYPE])
+                .sub(old_size.into());
+        }
         let size = puffin_metadata_weight(&file_id, &metadata);
         self.cache_bytes
             .with_label_values(&[PUFFIN_METADATA_TYPE])
