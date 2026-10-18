@@ -726,8 +726,9 @@ impl RegionServer {
         }
     }
 
-    /// Puts into several ready mito regions together, so that each mito worker gets the puts of
-    /// the request to its regions at once and writes them in one batch. As on the per-region path,
+    /// Puts into several ready mito regions together through
+    /// [`RegionEngine::handle_batch_put_requests`], so that each mito worker gets the puts of the
+    /// request to its regions at once and writes them in one batch. As on the per-region path,
     /// every region's put is awaited and accounted on its own ingest task.
     ///
     /// Returns Either::Right(original_requests) unless
@@ -736,7 +737,7 @@ impl RegionServer {
         &self,
         requests: Vec<(RegionId, RegionRequest)>,
     ) -> Result<Either<RegionResponse, Vec<(RegionId, RegionRequest)>>> {
-        let Some(mito) = self.mito_engine_for_batch_puts(&requests) else {
+        let Some(engine) = self.mito_engine_for_batch_puts(&requests) else {
             return Ok(Either::Right(requests));
         };
 
@@ -752,21 +753,21 @@ impl RegionServer {
         // The accounting tasks are spawned by the batch task, so a caller that goes away does not
         // lose them.
         let tasks = common_runtime::spawn_ingest(async move {
-            mito.put_regions_batch(puts)
+            engine
+                .handle_batch_put_requests(puts)
                 .into_iter()
-                .map(|(region_id, result)| {
+                .map(|(region_id, response)| {
                     common_runtime::spawn_ingest(async move {
-                        let result = result
+                        let result = response
                             .await
-                            .map_err(BoxedError::new)
                             .context(HandleRegionRequestSnafu { region_id });
                         crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
                             .with_label_values(&[request_type])
                             .observe(started.elapsed().as_secs_f64());
                         match &result {
-                            Ok(affected_rows) => crate::metrics::REGION_CHANGED_ROW_COUNT
+                            Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
                                 .with_label_values(&[request_type])
-                                .inc_by(*affected_rows as u64),
+                                .inc_by(response.affected_rows as u64),
                             Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
                                 .with_label_values(&[request_type, err.status_code().as_ref()])
                                 .inc(),
@@ -778,16 +779,24 @@ impl RegionServer {
         })
         .await
         .context(RuntimeJoinSnafu { request_type })?;
-        let affected_rows = try_join_all(
+        let responses = try_join_all(
             tasks
                 .into_iter()
                 .map(|task| async move { task.await.context(RuntimeJoinSnafu { request_type })? }),
         )
-        .await?
-        .into_iter()
-        .sum();
+        .await?;
 
-        Ok(Either::Left(RegionResponse::new(affected_rows)))
+        let mut affected_rows = 0;
+        let mut extensions = HashMap::new();
+        for response in responses {
+            affected_rows += response.affected_rows;
+            extensions.extend(response.extensions);
+        }
+        Ok(Either::Left(RegionResponse {
+            affected_rows,
+            extensions,
+            metadata: Vec::new(),
+        }))
     }
 
     /// Returns the mito engine when the requests put into several regions, every one a ready mito
@@ -795,7 +804,7 @@ impl RegionServer {
     fn mito_engine_for_batch_puts(
         &self,
         requests: &[(RegionId, RegionRequest)],
-    ) -> Option<MitoEngine> {
+    ) -> Option<RegionEngineRef> {
         let first_region_id = requests.first()?.0;
         if requests
             .iter()
@@ -814,9 +823,7 @@ impl RegionServer {
             return None;
         }
         match self.inner.region_map.get(&first_region_id).as_deref() {
-            Some(RegionEngineWithStatus::Ready(engine)) => {
-                engine.as_any().downcast_ref::<MitoEngine>().cloned()
-            }
+            Some(RegionEngineWithStatus::Ready(engine)) => Some(engine.clone()),
             _ => None,
         }
     }
@@ -3295,6 +3302,49 @@ mod tests {
 
         assert_eq!(StatusCode::RegionNotFound, err.status_code());
         log_store.release_creates();
+    }
+
+    #[tokio::test]
+    async fn test_default_batch_puts_handle_each_put_as_a_request() {
+        let failing = RegionId::new(1, 2);
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+            "mock",
+            Box::new(move |region_id, request| {
+                assert!(matches!(request, RegionRequest::Put(_)));
+                if region_id == failing {
+                    return error::UnexpectedSnafu {
+                        violated: "test".to_string(),
+                    }
+                    .fail();
+                }
+                Ok(region_id.region_number() as usize)
+            }),
+        );
+        let region_ids = [1, 2, 3].map(|n| RegionId::new(1, n));
+        let puts = region_ids
+            .iter()
+            .map(|region_id| {
+                let request = RegionPutRequest {
+                    rows: Rows {
+                        schema: Vec::new(),
+                        rows: Vec::new(),
+                    },
+                    hint: None,
+                    skip_wal: false,
+                    partition_expr_version: None,
+                };
+                (*region_id, request)
+            })
+            .collect();
+
+        let (answered, responses): (Vec<_>, Vec<_>) =
+            engine.handle_batch_put_requests(puts).into_iter().unzip();
+        let responses = futures_util::future::join_all(responses).await;
+
+        assert_eq!(region_ids.to_vec(), answered);
+        assert_eq!(1, responses[0].as_ref().unwrap().affected_rows);
+        assert!(responses[1].is_err());
+        assert_eq!(3, responses[2].as_ref().unwrap().affected_rows);
     }
 
     #[tokio::test]

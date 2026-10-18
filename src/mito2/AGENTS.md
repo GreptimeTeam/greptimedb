@@ -38,8 +38,8 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 
 ## Write path
 
-`MitoEngine::handle_request` (`engine.rs`), or `MitoEngine::put_regions_batch` for the
-puts of one request to several regions (one message per worker) → worker loop
+`MitoEngine::handle_request` (`engine.rs`), or `handle_batch_put_requests` for the puts
+of one request to several regions (one message per worker) → worker loop
 (`worker/handle_write.rs`) → sequence + WAL assembly (`region_write_ctx.rs`) →
 `wal.rs` → memtable (`memtable/`) → when buffer pressure trips, `flush.rs`
 writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest

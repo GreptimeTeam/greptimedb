@@ -44,10 +44,7 @@ The workspace is layered; dependencies point downward only.
 - `store-api` defines the engine contract (e.g. `RegionEngine` in
   `src/store-api/src/region_engine.rs`). Engines (`mito2`, `metric-engine`,
   `file-engine`) implement it; `datanode` drives engines **through the trait**,
-  not through engine internals. The one exception in request dispatch is the
-  region server's batched puts: a request that puts into several regions of the
-  metric or mito engine goes to that engine's public `put_regions_batch`, and
-  every other request goes through the trait.
+  not through engine internals.
 - `frontend` reaches storage through `operator` / `query` / `catalog`, not by
   depending on `datanode` internals. Standalone mode is the one bridge, via the
   `RegionServer` adapter in `src/standalone/src/datanode_manager.rs`.

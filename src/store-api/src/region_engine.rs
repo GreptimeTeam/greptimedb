@@ -30,14 +30,15 @@ use datafusion_execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
-use futures::future::join_all;
+use futures::FutureExt;
+use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
-    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
@@ -979,6 +980,35 @@ pub trait RegionEngine: Send + Sync {
         }
 
         Ok(join_all(tasks).await)
+    }
+
+    /// Handles the puts of one request to several regions of this engine and returns each
+    /// region's response, to be awaited on its own.
+    ///
+    /// The default handles each put with [`handle_request`](Self::handle_request).
+    fn handle_batch_put_requests(
+        self: Arc<Self>,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<(
+        RegionId,
+        BoxFuture<'static, Result<RegionResponse, BoxedError>>,
+    )>
+    where
+        Self: 'static,
+    {
+        requests
+            .into_iter()
+            .map(|(region_id, request)| {
+                let engine = self.clone();
+                let response = async move {
+                    engine
+                        .handle_request(region_id, RegionRequest::Put(request))
+                        .await
+                }
+                .boxed();
+                (region_id, response)
+            })
+            .collect()
     }
 
     async fn handle_batch_ddl_requests(

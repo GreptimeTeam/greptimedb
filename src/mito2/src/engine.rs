@@ -489,42 +489,6 @@ impl MitoEngine {
         rx.await.context(RecvSnafu)?
     }
 
-    /// Puts rows into several regions for one request and returns the result of each region's
-    /// put. The puts to regions of the same worker reach it in one message, so the worker writes
-    /// them in one batch and one WAL append. The messages are sent on their own task, so every
-    /// result can be awaited at once.
-    pub fn put_regions_batch(
-        &self,
-        requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Vec<(RegionId, BoxFuture<'static, Result<AffectedRows>>)> {
-        let mut writes = Vec::with_capacity(requests.len());
-        let mut results = Vec::with_capacity(requests.len());
-        for (region_id, request) in requests {
-            let request = RegionRequest::Put(request);
-            let timer = HANDLE_REQUEST_ELAPSED
-                .with_label_values(&[request.request_type()])
-                .start_timer();
-            let region_metadata = self.inner.get_metadata(region_id).ok();
-            let result =
-                match WorkerRequest::try_from_region_request(region_id, request, region_metadata) {
-                    Ok((WorkerRequest::Write(write), receiver)) => {
-                        writes.push(write);
-                        async move {
-                            let _timer = timer;
-                            receiver.await.context(RecvSnafu)?
-                        }
-                        .boxed()
-                    }
-                    Ok(_) => unreachable!("a put converts to a write"),
-                    Err(e) => future::ready(Err(e)).boxed(),
-                };
-            results.push((region_id, result));
-        }
-        let inner = self.inner.clone();
-        common_runtime::spawn_global(async move { inner.workers.submit_writes(writes).await });
-        results
-    }
-
     /// Handles copy region from request.
     ///
     /// This method is only supported for internal use and is not exposed in the trait implementation.
@@ -1442,6 +1406,49 @@ impl RegionEngine for MitoEngine {
             .await
             .map(map_batch_responses)
             .map_err(BoxedError::new)
+    }
+
+    /// Sends the puts to regions of the same worker in one message, so that the worker writes
+    /// them in one batch and one WAL append. The messages are sent on their own task, so every
+    /// response can be awaited at once.
+    fn handle_batch_put_requests(
+        self: Arc<Self>,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<(
+        RegionId,
+        BoxFuture<'static, Result<RegionResponse, BoxedError>>,
+    )> {
+        let mut writes = Vec::with_capacity(requests.len());
+        let mut responses = Vec::with_capacity(requests.len());
+        for (region_id, request) in requests {
+            let request = RegionRequest::Put(request);
+            let timer = HANDLE_REQUEST_ELAPSED
+                .with_label_values(&[request.request_type()])
+                .start_timer();
+            let region_metadata = self.inner.get_metadata(region_id).ok();
+            let response =
+                match WorkerRequest::try_from_region_request(region_id, request, region_metadata) {
+                    Ok((WorkerRequest::Write(write), receiver)) => {
+                        writes.push(write);
+                        async move {
+                            let _timer = timer;
+                            receiver
+                                .await
+                                .context(RecvSnafu)
+                                .flatten()
+                                .map(RegionResponse::new)
+                                .map_err(BoxedError::new)
+                        }
+                        .boxed()
+                    }
+                    Ok(_) => unreachable!("a put converts to a write"),
+                    Err(e) => future::ready(Err(BoxedError::new(e))).boxed(),
+                };
+            responses.push((region_id, response));
+        }
+        let inner = self.inner.clone();
+        common_runtime::spawn_global(async move { inner.workers.submit_writes(writes).await });
+        responses
     }
 
     #[tracing::instrument(skip_all)]
