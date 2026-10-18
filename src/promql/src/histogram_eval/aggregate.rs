@@ -107,32 +107,44 @@ fn aggregate_point<'a>(
     op: HistogramAggregate,
     samples: impl Iterator<Item = SampleRef<'a>>,
 ) -> Result<Option<FloatHistogram>> {
+    let (mut histograms, mut has_float) = (Vec::new(), false);
+    for sample in samples {
+        match sample {
+            SampleRef::Missing => {}
+            SampleRef::Float(_) => has_float = true,
+            SampleRef::Histogram(view) => histograms.push(FloatHistogram::try_from_view(&view)?),
+        }
+    }
+    let Some(mut value) = sum_or_avg(op, histograms)? else {
+        return Ok(None);
+    };
+    if has_float {
+        return Ok(None);
+    }
+    value.compact();
+    Ok(Some(value))
+}
+
+/// The Kahan sum or the mean of `histograms` in order, without compaction; `None` when there is
+/// none or they mix exponential and custom buckets. Prometheus `sum_over_time` and
+/// `avg_over_time` run the same steps as the aggregations.
+pub(crate) fn sum_or_avg(
+    op: HistogramAggregate,
+    histograms: impl IntoIterator<Item = FloatHistogram>,
+) -> Result<Option<FloatHistogram>> {
     let mut value: Option<FloatHistogram> = None;
     let mut compensation: Option<FloatHistogram> = None;
     let mut mean: Option<FloatHistogram> = None;
-    let (mut has_float, mut incompatible) = (false, false);
     let mut count = 0.0;
-    for sample in samples {
-        let h = match sample {
-            SampleRef::Missing => continue,
-            SampleRef::Float(_) => {
-                has_float = true;
-                continue;
-            }
-            SampleRef::Histogram(view) => FloatHistogram::try_from_view(&view)?,
-        };
+    for h in histograms {
         count += 1.0;
         let Some(current) = value.as_mut() else {
             value = Some(h);
             continue;
         };
-        if incompatible {
-            continue;
-        }
-        // The only addition error Go's `handleAggregationError` absorbs; others propagate.
+        // Go drops the result with a warning for this addition error only; others propagate.
         if current.uses_custom_buckets() != h.uses_custom_buckets() {
-            incompatible = true;
-            continue;
+            return Ok(None);
         }
         match op {
             HistogramAggregate::Sum => {
@@ -172,9 +184,6 @@ fn aggregate_point<'a>(
     let Some(mut value) = value else {
         return Ok(None);
     };
-    if has_float || incompatible {
-        return Ok(None);
-    }
     match op {
         HistogramAggregate::Sum => {
             if let Some(c) = compensation {
@@ -197,6 +206,5 @@ fn aggregate_point<'a>(
             }
         },
     }
-    value.compact();
     Ok(Some(value))
 }

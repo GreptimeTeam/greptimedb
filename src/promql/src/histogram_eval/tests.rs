@@ -17,9 +17,7 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{Float64Array, UInt32Array};
 use datafusion::error::DataFusionError;
-use datatypes::series::histogram::{
-    BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
-};
+use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{
     FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
@@ -32,7 +30,8 @@ use super::{
 };
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
-    GoldenCase, Labels, Points, canonical_bits, golden_cases, labels_of, metric_of, points_of,
+    GoldenCase, Labels, OwnedHistogram, Points, canonical_bits, close, golden_cases, labels_of,
+    metric_of, points_of,
 };
 
 fn schema(case: &GoldenCase) -> Arc<SeriesSchema> {
@@ -47,81 +46,6 @@ fn schema(case: &GoldenCase) -> Arc<SeriesSchema> {
 
 fn bits_argument(case: &GoldenCase, index: usize) -> f64 {
     f64::from_bits(u64::from_str_radix(&case.spec[index], 16).unwrap())
-}
-
-/// A native histogram written by the generator as `/`-separated fields.
-struct OwnedHistogram {
-    schema: i32,
-    zero_threshold: f64,
-    zero_count: f64,
-    count: f64,
-    sum: f64,
-    reset_hint: i32,
-    positive: (Vec<i32>, Vec<i32>, Vec<f64>),
-    negative: (Vec<i32>, Vec<i32>, Vec<f64>),
-    custom_values: Vec<f64>,
-}
-
-impl OwnedHistogram {
-    fn parse(text: &str) -> Self {
-        let fields: Vec<&str> = text.split('/').collect();
-        let float = |text: &str| f64::from_bits(u64::from_str_radix(text, 16).unwrap());
-        let floats = |text: &str| -> Vec<f64> {
-            text.split(',')
-                .filter(|v| !v.is_empty())
-                .map(float)
-                .collect()
-        };
-        let spans = |text: &str| -> (Vec<i32>, Vec<i32>) {
-            text.split(',')
-                .filter(|v| !v.is_empty())
-                .map(|span| {
-                    let (offset, length) = span.split_once('_').unwrap();
-                    (
-                        offset.parse::<i32>().unwrap(),
-                        length.parse::<i32>().unwrap(),
-                    )
-                })
-                .unzip()
-        };
-        let (positive_offsets, positive_lengths) = spans(fields[6]);
-        let (negative_offsets, negative_lengths) = spans(fields[8]);
-        Self {
-            schema: fields[0].parse().unwrap(),
-            zero_threshold: float(fields[1]),
-            zero_count: float(fields[2]),
-            count: float(fields[3]),
-            sum: float(fields[4]),
-            reset_hint: fields[5].parse().unwrap(),
-            positive: (positive_offsets, positive_lengths, floats(fields[7])),
-            negative: (negative_offsets, negative_lengths, floats(fields[9])),
-            custom_values: floats(fields[10]),
-        }
-    }
-
-    fn view(&self) -> HistogramView<'_> {
-        fn side(
-            (offsets, lengths, buckets): &(Vec<i32>, Vec<i32>, Vec<f64>),
-        ) -> BucketSideView<'_> {
-            BucketSideView {
-                span_offsets: offsets,
-                span_lengths: lengths,
-                buckets,
-            }
-        }
-        HistogramView {
-            schema: self.schema,
-            zero_threshold: self.zero_threshold,
-            sum: self.sum,
-            count: self.count,
-            zero_count: self.zero_count,
-            reset_hint: CounterResetHint::from(self.reset_hint),
-            start_timestamp: None,
-            custom_values: &self.custom_values,
-            positive: side(&self.positive),
-            negative: side(&self.negative),
-        }
-    }
 }
 
 /// A single-field series holding float and native histogram points.
@@ -557,24 +481,6 @@ fn histogram_functions_drop_metadata_labels() {
     let mut expected = labels(&[]);
     expected.remove("__name__");
     assert_eq!(labels_of(&count.metric), expected);
-}
-
-/// Prometheus `almost.Equal`, treating results below 1e-10 as equal and any NaN as equal to NaN,
-/// as promql-compat compares engines.
-fn close(a: f64, b: f64, epsilon: f64) -> bool {
-    if a.is_nan() || b.is_nan() {
-        return a.is_nan() && b.is_nan();
-    }
-    if a == b {
-        return true;
-    }
-    let (diff, sum) = ((a - b).abs(), a.abs() + b.abs());
-    let equal = if a == 0.0 || b == 0.0 || sum < f64::MIN_POSITIVE {
-        diff < epsilon * f64::MIN_POSITIVE
-    } else {
-        diff / sum.min(f64::MAX) < epsilon
-    };
-    equal || (a.abs() < 1e-10 && b.abs() < 1e-10)
 }
 
 /// Bounds +0 and -0 compare equal and keep input order, so coalescing keeps the first one:

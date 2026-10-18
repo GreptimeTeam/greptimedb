@@ -120,6 +120,23 @@ impl FloatHistogram {
             .map_err(|error| DataFusionError::External(Box::new(error)))
     }
 
+    /// A histogram with no observations and the bucket layout of `self`, like Go's
+    /// `&FloatHistogram{Schema: h.Schema, CustomValues: h.CustomValues}`.
+    pub(crate) fn empty_like(&self) -> Self {
+        Self {
+            reset_hint: CounterResetHint::Unknown,
+            schema: self.schema,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: 0.0,
+            sum: 0.0,
+            positive: Vec::new(),
+            negative: Vec::new(),
+            custom_values: self.custom_values.clone(),
+            layout: None,
+        }
+    }
+
     pub(crate) fn uses_custom_buckets(&self) -> bool {
         self.schema == CUSTOM_BUCKETS_SCHEMA
     }

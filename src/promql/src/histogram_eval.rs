@@ -37,6 +37,7 @@ use datatypes::series::histogram::HistogramView;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
+pub(crate) use aggregate::sum_or_avg;
 pub use aggregate::{HistogramAggregate, aggregate_histograms};
 
 use crate::go_sort;
