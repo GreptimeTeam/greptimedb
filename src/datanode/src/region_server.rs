@@ -726,7 +726,7 @@ impl RegionServer {
         }
     }
 
-    /// Puts into several ready mito regions together through
+    /// Puts into ready mito regions together through
     /// [`RegionEngine::handle_batch_put_requests`], so that each mito worker gets the puts of the
     /// request to its regions at once and writes them in one batch. As on the per-region path,
     /// every response is awaited and accounted, for the regions it answers, on its own ingest
@@ -812,19 +812,16 @@ impl RegionServer {
         }))
     }
 
-    /// Returns the mito engine when the requests put into several regions, every one a ready mito
-    /// region.
+    /// Returns the mito engine when there are at least two requests, every one a put into a ready
+    /// mito region.
     fn mito_engine_for_batch_puts(
         &self,
         requests: &[(RegionId, RegionRequest)],
     ) -> Option<RegionEngineRef> {
-        let first_region_id = requests.first()?.0;
-        if requests
-            .iter()
-            .all(|(region_id, _)| *region_id == first_region_id)
-        {
+        if requests.len() < 2 {
             return None;
         }
+        let first_region_id = requests[0].0;
         let all_puts_to_ready_mito_regions = requests.iter().all(|(region_id, request)| {
             matches!(request, RegionRequest::Put(_))
                 && matches!(
@@ -3272,6 +3269,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mito_puts_to_one_region_share_a_wal_append() {
+        // As above: only puts that arrive in one message share a WAL append.
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-one-region").await;
+        let config = MitoConfig {
+            num_workers: 1,
+            worker_request_batch_size: 1,
+            ..Default::default()
+        };
+        let (region_server, log_store, wal_options) =
+            region_server_on_object_store_wal(&mut env, config).await;
+        let insert = create_region(&region_server, RegionId::new(1, 1), &wal_options).await;
+        let requests = vec![insert.clone(), insert];
+
+        let response = region_server
+            .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests { requests }))
+            .await
+            .unwrap();
+
+        assert_eq!(6, response.affected_rows);
+        log_store.wait_for_admitted_appends(1).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::ZERO, log_store.wait_for_admitted_appends(2))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn test_mito_batch_puts_fail_without_waiting_for_other_regions() {
         let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-error").await;
         let config = MitoConfig {
@@ -3362,7 +3387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_only_puts_into_several_ready_mito_regions_are_batched() {
+    async fn test_only_several_puts_into_ready_mito_regions_are_batched() {
         let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-guard").await;
         let mito: RegionEngineRef = Arc::new(env.create_engine(MitoConfig::default()).await);
         let (other, _receiver) = MockRegionEngine::new("mock");
@@ -3395,14 +3420,18 @@ mod tests {
             (region_id, RegionRequest::Delete(request))
         };
 
-        assert!(
-            region_server
-                .mito_engine_for_batch_puts(&[put(mito_a), put(mito_b)])
-                .is_some()
-        );
+        for requests in [
+            vec![put(mito_a), put(mito_b)],
+            vec![put(mito_a), put(mito_a)],
+        ] {
+            assert!(
+                region_server
+                    .mito_engine_for_batch_puts(&requests)
+                    .is_some()
+            );
+        }
         for requests in [
             vec![put(mito_a)],
-            vec![put(mito_a), put(mito_a)],
             vec![put(mito_a), delete(mito_b)],
             vec![put(mito_a), put(registering)],
             vec![put(mito_a), put(other_region)],
