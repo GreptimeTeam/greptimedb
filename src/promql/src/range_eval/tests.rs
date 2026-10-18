@@ -42,8 +42,9 @@ use crate::functions::{
 };
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
-    Dense, GoldenCase, OwnedHistogram, assert_series_eq, assert_series_eq_any_nan, close,
-    golden_cases, labels_of, metric_of, random_dense, special_value,
+    Dense, GoldenCase, OwnedHistogram, assert_histogram_close, assert_series_eq,
+    assert_series_eq_any_nan, close, golden_cases, labels_of, metric_of, random_dense,
+    special_value,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::range_array::RangeArray;
@@ -1467,33 +1468,4 @@ fn histogram_range_functions_match_prometheus() {
         floats_checked > 500 && histograms_checked > 150,
         "{floats_checked} floats, {histograms_checked} histograms"
     );
-}
-
-fn assert_histogram_close(
-    got: &FloatHistogram,
-    want: &FloatHistogram,
-    epsilon: f64,
-    context: &str,
-) {
-    let scalars = |h: &FloatHistogram| [h.zero_count, h.count, h.sum];
-    let ok = got.schema == want.schema
-        && got.reset_hint == want.reset_hint
-        && got.zero_threshold.to_bits() == want.zero_threshold.to_bits()
-        && got.custom_values == want.custom_values
-        && scalars(got)
-            .iter()
-            .zip(scalars(want))
-            .all(|(a, b)| close(*a, b, epsilon))
-        && [
-            (&got.positive, &want.positive),
-            (&got.negative, &want.negative),
-        ]
-        .iter()
-        .all(|(a, b)| {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|((i, x), (j, y))| i == j && close(*x, *y, epsilon))
-        });
-    assert!(ok, "{context}: {got:?} vs {want:?}");
 }
