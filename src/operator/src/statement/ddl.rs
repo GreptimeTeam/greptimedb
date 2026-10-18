@@ -3091,6 +3091,13 @@ mod test {
         ) -> common_meta::error::Result<MigrateRegionResponse> {
             unimplemented!()
         }
+        async fn drain_node(
+            &self,
+            _: &ExecutorContext,
+            _: u64,
+        ) -> common_meta::error::Result<String> {
+            unimplemented!()
+        }
         async fn reconcile(
             &self,
             _: &ExecutorContext,

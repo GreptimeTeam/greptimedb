@@ -73,6 +73,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Procedure RPC is unsupported: {}", operation))]
+    UnsupportedProcedureRpc {
+        operation: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to send heartbeat: {}", err_msg))]
     SendHeartbeat {
         err_msg: String,
@@ -164,7 +171,9 @@ impl ErrorExt for Error {
             | Error::RetryTimesExceeded { .. }
             | Error::ConvertMetaConfig { .. } => StatusCode::Internal,
 
-            Error::ReadOnlyKvBackend { .. } => StatusCode::Unsupported,
+            Error::ReadOnlyKvBackend { .. } | Error::UnsupportedProcedureRpc { .. } => {
+                StatusCode::Unsupported
+            }
 
             Error::MetaServer { code, .. } => *code,
 
