@@ -1051,3 +1051,49 @@ fn histogram_operators_match_prometheus() {
         "{matched} matched, {failed} failed, {histograms} histograms"
     );
 }
+
+/// Prometheus skips a histogram `+` or `-` whose counter reset hints collide, before counting
+/// the match: the colliding pair gives nothing and does not make the other pair of its group a
+/// second match.
+#[test]
+fn colliding_reset_hints_skip_the_pair() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let series = |labels: &[(&str, &str)], hint: u8| {
+        let labels: Labels = labels
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        let text =
+            format!("0/0/0/4014000000000000/4014000000000000/{hint}/0_1/4014000000000000///");
+        mixed_series(
+            &schema,
+            &labels,
+            &BTreeMap::new(),
+            &BTreeMap::from([(0, text)]),
+        )
+        .unwrap()
+    };
+    // Hints: 0 unknown, 1 counter reset, 2 not a counter reset.
+    let lhs = [
+        series(&[("__name__", "a"), ("instance", "1"), ("job", "x")], 1),
+        series(&[("__name__", "a"), ("instance", "2"), ("job", "x")], 0),
+    ];
+    let rhs = [series(&[("__name__", "b"), ("job", "x")], 2)];
+    for op in [BinaryOp::Add, BinaryOp::Sub] {
+        let matching = BinaryMatching {
+            op,
+            return_bool: false,
+            labels: MatchingLabels::On(vec![Arc::from("job")]),
+            cardinality: Cardinality::OneToOne,
+        };
+        let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
+        assert_eq!(result.len(), 1, "{op:?}");
+    }
+}

@@ -67,11 +67,11 @@ pub(super) fn evaluate(
             Some(window) if last_ts < window.timestamps.last().expect("not empty") => {
                 float(window.values[window.values.len() - 1])
             }
-            _ => Some(GridSample::Histogram(last.clone())),
+            _ => Some(GridSample::Histogram(Box::new(last.clone()))),
         },
         FirstOverTime => match floats {
             Some(window) if window.timestamps[0] < *first_ts => float(window.values[0]),
-            _ => Some(GridSample::Histogram(first.clone())),
+            _ => Some(GridSample::Histogram(Box::new(first.clone()))),
         },
         TsOfFirstOverTime => {
             let ts = floats.map_or(*first_ts, |window| window.timestamps[0].min(*first_ts));
@@ -96,7 +96,8 @@ pub(super) fn evaluate(
             } else {
                 HistogramAggregate::Avg
             };
-            sum_or_avg(op, histograms.iter().map(|(_, h)| h.clone()))?.map(GridSample::Histogram)
+            sum_or_avg(op, histograms.iter().map(|(_, h)| Ok(h.clone())))?
+                .map(|h| GridSample::Histogram(Box::new(h)))
         }
         Rate | Increase | Delta if floats.is_none() && histograms.len() > 1 => {
             let is_counter = function != Delta;
@@ -114,7 +115,7 @@ pub(super) fn evaluate(
                 function == Rate,
                 zero_point,
             ));
-            Some(GridSample::Histogram(result))
+            Some(GridSample::Histogram(Box::new(result)))
         }
         Irate => last_two::<true>(floats, histograms)?,
         Idelta => last_two::<false>(floats, histograms)?,
@@ -210,7 +211,7 @@ fn last_two<const IS_RATE: bool>(
             if IS_RATE {
                 result.div(interval as f64 / 1000.0);
             }
-            Some(GridSample::Histogram(result))
+            Some(GridSample::Histogram(Box::new(result)))
         }
         _ => None,
     })

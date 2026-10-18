@@ -43,8 +43,8 @@ use crate::functions::{
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
     Dense, GoldenCase, OwnedHistogram, assert_histogram_close, assert_series_eq,
-    assert_series_eq_any_nan, close, golden_cases, labels_of, metric_of, random_dense,
-    special_value,
+    assert_series_eq_any_nan, close, golden_cases, labels_of, metric_of, mixed_series,
+    random_dense, special_value,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::range_array::RangeArray;
@@ -1295,7 +1295,15 @@ fn absent_over_time_is_absent_over_present_over_time() {
                 for (ts, value) in points {
                     dense[((ts - grid_spec[0]) / grid_spec[1]) as usize][0] = Some(value);
                 }
-                expected = Some(dense);
+                let labels = labels
+                    .split(',')
+                    .filter(|pair| *pair != "-")
+                    .map(|pair| {
+                        let (name, value) = pair.split_once('=').unwrap();
+                        (name.to_string(), value.to_string())
+                    })
+                    .collect();
+                expected = Some((dense, metric_of(&labels)));
                 continue;
             }
             let selected = matchers.iter().all(|matcher| {
@@ -1325,58 +1333,72 @@ fn absent_over_time_is_absent_over_present_over_time() {
             fields: raw_schema(1).fields,
             eval_grid: Some(grid.clone()),
         };
-        let labels = absent_labels(&matchers).unwrap();
-        let actual = absent(&schema, &present, labels.clone()).unwrap();
-        let expected = expected.unwrap_or_else(|| vec![vec![None]; grid_spec[2] as usize]);
+        let actual = absent(&schema, &present, absent_labels(&matchers).unwrap()).unwrap();
+        let (expected, labels) = expected.unwrap_or_else(|| {
+            let none = MetricName::try_new(None, Vec::new()).unwrap();
+            (vec![vec![None]; grid_spec[2] as usize], none)
+        });
         assert_series_eq(actual.as_ref(), &expected, &labels);
         checked += 1;
     }
     assert_eq!(checked, 120);
 }
 
-/// One series of a golden case as a single raw chunk of float and histogram samples.
-fn mixed_chunk(
-    case: &GoldenCase,
-    index: usize,
-    histograms: &mut Vec<OwnedHistogram>,
-) -> Option<RawSeriesChunk> {
+/// One series of a golden case as raw chunks of float and histogram samples: a single chunk, or
+/// with `split` one chunk per sample.
+fn mixed_chunks(case: &GoldenCase, index: usize, split: bool) -> Vec<RawSeriesChunk> {
     let (labels, floats) = &case.inputs[index];
     let texts = &case.histograms[index];
-    let points: BTreeSet<usize> = floats.keys().chain(texts.keys()).copied().collect();
-    if points.is_empty() {
-        return None;
-    }
+    let points: Vec<usize> = floats
+        .keys()
+        .chain(texts.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let groups: Vec<&[usize]> = if split {
+        points.chunks(1).collect()
+    } else {
+        vec![&points[..]]
+    };
     let spec = case.grid.spec();
-    let timestamps: Vec<i64> = points
-        .iter()
-        .map(|&point| spec.start_ms + point as i64 * spec.step_ms)
-        .collect();
-    let values: Float64Array = points
-        .iter()
-        .map(|point| floats.get(point).map(|bits| f64::from_bits(*bits)))
-        .collect();
-    histograms.clear();
-    let mut builder = HistogramBatchBuilder::new();
-    let indices: UInt32Array = points
-        .iter()
-        .map(|point| {
-            let text = texts.get(point)?;
-            Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
+    let count = groups.len();
+    groups
+        .into_iter()
+        .filter(|group| !group.is_empty())
+        .enumerate()
+        .map(|(position, group)| {
+            let timestamps: Vec<i64> = group
+                .iter()
+                .map(|&point| spec.start_ms + point as i64 * spec.step_ms)
+                .collect();
+            let values: Float64Array = group
+                .iter()
+                .map(|point| floats.get(point).map(|bits| f64::from_bits(*bits)))
+                .collect();
+            let mut builder = HistogramBatchBuilder::new();
+            let indices: UInt32Array = group
+                .iter()
+                .map(|point| {
+                    let text = texts.get(point)?;
+                    Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
+                })
+                .collect();
+            let histograms = HistogramSamples::try_new(indices, builder.finish().unwrap()).unwrap();
+            RawSeriesChunk::try_new(
+                &raw_schema(1),
+                Buffer::from((index as u64).to_le_bytes().to_vec()),
+                Some(metric_of(labels)),
+                RawTimestamps::try_new(ScalarBuffer::from(timestamps)).unwrap(),
+                SeriesFields::try_from_vec(vec![
+                    Samples::try_from_mixed(values, histograms).unwrap(),
+                ])
+                .unwrap(),
+                position + 1 == count,
+            )
+            .unwrap()
         })
-        .collect();
-    let histograms = HistogramSamples::try_new(indices, builder.finish().unwrap()).unwrap();
-    let samples = Samples::try_from_mixed(values, histograms).unwrap();
-    Some(
-        RawSeriesChunk::try_new(
-            &raw_schema(1),
-            Buffer::from((index as u64).to_le_bytes().to_vec()),
-            Some(metric_of(labels)),
-            RawTimestamps::try_new(ScalarBuffer::from(timestamps)).unwrap(),
-            SeriesFields::try_from_vec(vec![samples]).unwrap(),
-            true,
-        )
-        .unwrap(),
-    )
+        .collect()
 }
 
 /// Range functions over series mixing floats and native histograms, evaluated by the Prometheus
@@ -1384,7 +1406,6 @@ fn mixed_chunk(
 /// Values compare within the promql-compat tolerance; histograms bucket by bucket.
 #[test]
 fn histogram_range_functions_match_prometheus() {
-    let mut owned = Vec::new();
     let (mut floats_checked, mut histograms_checked) = (0, 0);
     for case in golden_cases(include_str!("histogram_cases.txt")) {
         let name = case.spec[0].as_str();
@@ -1405,67 +1426,97 @@ fn histogram_range_functions_match_prometheus() {
             offset_ms: case.spec[2].parse().unwrap(),
             anchor_ms: None,
         };
-        let mut actual = BTreeMap::new();
-        for index in 0..case.inputs.len() {
-            let Some(chunk) = mixed_chunk(&case, index, &mut owned) else {
-                continue;
-            };
-            let mut evaluator =
-                RangeEvaluator::try_new(&raw_schema(1), case.grid.clone(), window, function)
-                    .unwrap();
-            if let Some(series) = evaluator.push(&chunk).unwrap() {
-                actual.insert(labels_of(&series.metric), series);
-            }
-        }
-        let expected = case.outcome.as_ref().unwrap();
-        let context = format!("{:?}", case.spec);
-        assert_eq!(
-            actual.keys().collect::<Vec<_>>(),
-            expected.keys().collect::<Vec<_>>(),
-            "{context}"
-        );
-        for (labels, series) in &actual {
-            let TimeAxis::Grid(range) = &series.time else {
-                panic!("expected a grid series");
-            };
-            let floats = &expected[labels];
-            let no_histograms = BTreeMap::new();
-            let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
-            let mut points = 0;
-            for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
-                let point = range.start() + row;
-                match sample {
-                    SampleRef::Missing => continue,
-                    SampleRef::Float(value) => {
-                        let want = f64::from_bits(floats[&point]);
-                        assert!(
-                            close(value, want, epsilon),
-                            "{context} at {point}: {value} vs {want}"
-                        );
-                        floats_checked += 1;
-                    }
-                    SampleRef::Histogram(view) => {
-                        let got = FloatHistogram::try_from_view(&view).unwrap();
-                        let want = FloatHistogram::try_from_view(
-                            &OwnedHistogram::parse(&texts[&point]).view(),
-                        )
+        // One chunk per sample also checks that histograms survive across chunks.
+        for split in [false, true] {
+            let mut actual = BTreeMap::new();
+            for index in 0..case.inputs.len() {
+                let mut evaluator =
+                    RangeEvaluator::try_new(&raw_schema(1), case.grid.clone(), window, function)
                         .unwrap();
-                        assert_histogram_close(
-                            &got,
-                            &want,
-                            epsilon,
-                            &format!("{context} at {point}"),
-                        );
-                        histograms_checked += 1;
+                for chunk in mixed_chunks(&case, index, split) {
+                    if let Some(series) = evaluator.push(&chunk).unwrap() {
+                        actual.insert(labels_of(&series.metric), series);
                     }
                 }
-                points += 1;
             }
-            assert_eq!(points, floats.len() + texts.len(), "{context}");
+            let expected = case.outcome.as_ref().unwrap();
+            let context = format!("{:?} split {split}", case.spec);
+            assert_eq!(
+                actual.keys().collect::<Vec<_>>(),
+                expected.keys().collect::<Vec<_>>(),
+                "{context}"
+            );
+            for (labels, series) in &actual {
+                let TimeAxis::Grid(range) = &series.time else {
+                    panic!("expected a grid series");
+                };
+                let floats = &expected[labels];
+                let no_histograms = BTreeMap::new();
+                let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
+                let mut points = 0;
+                for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
+                    let point = range.start() + row;
+                    match sample {
+                        SampleRef::Missing => continue,
+                        SampleRef::Float(value) => {
+                            let want = f64::from_bits(floats[&point]);
+                            assert!(
+                                close(value, want, epsilon),
+                                "{context} at {point}: {value} vs {want}"
+                            );
+                            floats_checked += 1;
+                        }
+                        SampleRef::Histogram(view) => {
+                            let got = FloatHistogram::try_from_view(&view).unwrap();
+                            let want = FloatHistogram::try_from_view(
+                                &OwnedHistogram::parse(&texts[&point]).view(),
+                            )
+                            .unwrap();
+                            assert_histogram_close(
+                                &got,
+                                &want,
+                                epsilon,
+                                &format!("{context} at {point}"),
+                            );
+                            histograms_checked += 1;
+                        }
+                    }
+                    points += 1;
+                }
+                assert_eq!(points, floats.len() + texts.len(), "{context}");
+            }
         }
     }
     assert!(
         floats_checked > 500 && histograms_checked > 150,
         "{floats_checked} floats, {histograms_checked} histograms"
     );
+}
+
+/// Prometheus clears explicit counter reset hints of subquery results, which describe the raw
+/// neighbours of a sample: the same `CounterReset` histogram repeated at two evaluated points
+/// is no reset.
+#[test]
+fn evaluated_histograms_drop_counter_reset_hints() {
+    let inner = grid(0, 10, 2);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(inner),
+    });
+    let reset = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+    let histograms = BTreeMap::from([(0, reset.to_string()), (1, reset.to_string())]);
+    let labels = BTreeMap::from([("job".to_string(), "x".to_string())]);
+    let series = mixed_series(&schema, &labels, &BTreeMap::new(), &histograms).unwrap();
+    let window = RangeWindow {
+        range_ms: 30,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator =
+        RangeEvaluator::try_new(&schema, grid(10, 10, 1), window, RangeFunction::Resets).unwrap();
+    let result = evaluator.push_series(&series).unwrap().unwrap();
+    assert!(matches!(
+        result.fields.as_slice()[0].sample(0),
+        SampleRef::Float(resets) if resets == 0.0
+    ));
 }

@@ -107,36 +107,41 @@ fn aggregate_point<'a>(
     op: HistogramAggregate,
     samples: impl Iterator<Item = SampleRef<'a>>,
 ) -> Result<Option<FloatHistogram>> {
-    let (mut histograms, mut has_float) = (Vec::new(), false);
-    for sample in samples {
-        match sample {
-            SampleRef::Missing => {}
-            SampleRef::Float(_) => has_float = true,
-            SampleRef::Histogram(view) => histograms.push(FloatHistogram::try_from_view(&view)?),
+    let mut has_float = false;
+    let mut histograms = samples.filter_map(|sample| match sample {
+        SampleRef::Missing => None,
+        SampleRef::Float(_) => {
+            has_float = true;
+            None
         }
+        SampleRef::Histogram(view) => Some(FloatHistogram::try_from_view(&view)),
+    });
+    let value = sum_or_avg(op, histograms.by_ref())?;
+    // An early stop leaves samples whose floats and conversion errors still count.
+    for histogram in histograms {
+        histogram?;
     }
-    let Some(mut value) = sum_or_avg(op, histograms)? else {
+    let Some(mut value) = value.filter(|_| !has_float) else {
         return Ok(None);
     };
-    if has_float {
-        return Ok(None);
-    }
     value.compact();
     Ok(Some(value))
 }
 
 /// The Kahan sum or the mean of `histograms` in order, without compaction; `None` when there is
 /// none or they mix exponential and custom buckets. Prometheus `sum_over_time` and
-/// `avg_over_time` run the same steps as the aggregations.
+/// `avg_over_time` run the same steps as the aggregations. Histograms are consumed one at a
+/// time, so the first error ends the fold.
 pub(crate) fn sum_or_avg(
     op: HistogramAggregate,
-    histograms: impl IntoIterator<Item = FloatHistogram>,
+    histograms: impl IntoIterator<Item = Result<FloatHistogram>>,
 ) -> Result<Option<FloatHistogram>> {
     let mut value: Option<FloatHistogram> = None;
     let mut compensation: Option<FloatHistogram> = None;
     let mut mean: Option<FloatHistogram> = None;
     let mut count = 0.0;
     for h in histograms {
+        let h = h?;
         count += 1.0;
         let Some(current) = value.as_mut() else {
             value = Some(h);

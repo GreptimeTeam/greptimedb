@@ -643,16 +643,16 @@ fn owned(sample: SampleRef<'_>) -> Result<Option<GridSample>> {
     Ok(match sample {
         SampleRef::Missing => None,
         SampleRef::Float(value) => Some(GridSample::Float(value)),
-        SampleRef::Histogram(view) => {
-            Some(GridSample::Histogram(FloatHistogram::try_from_view(&view)?))
-        }
+        SampleRef::Histogram(view) => Some(GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&view)?,
+        ))),
     })
 }
 
 /// Prometheus `vectorElemBinop` over present samples: the value and whether to keep it, or
 /// `None` when Prometheus reports the pair as an annotation and skips it without counting the
-/// match: an operator the sample types do not support, or histograms mixing exponential and
-/// custom buckets in an addition or subtraction.
+/// match: an operator the sample types do not support, or an addition or subtraction of
+/// histograms that mix exponential and custom buckets or whose counter reset hints collide.
 fn elem_binop(
     op: BinaryOp,
     lhs: SampleRef<'_>,
@@ -682,16 +682,21 @@ fn elem_binop(
             match op {
                 BinaryOp::Eq | BinaryOp::Ne => {
                     let keep = lhs.equals(&rhs) == (op == BinaryOp::Eq);
-                    return Ok(Some((GridSample::Histogram(lhs), keep)));
+                    return Ok(Some((GridSample::Histogram(Box::new(lhs)), keep)));
                 }
                 BinaryOp::Add | BinaryOp::Sub => {
                     if lhs.uses_custom_buckets() != rhs.uses_custom_buckets() {
                         return Ok(None);
                     }
-                    if op == BinaryOp::Add {
-                        lhs.add(&rhs)?;
+                    let outcome = if op == BinaryOp::Add {
+                        lhs.add(&rhs)?
                     } else {
-                        lhs.sub(&rhs)?;
+                        lhs.sub(&rhs)?
+                    };
+                    if outcome.counter_reset_collision {
+                        return Ok(None);
+                    }
+                    if op == BinaryOp::Sub {
                         lhs.reset_hint = CounterResetHint::Gauge;
                     }
                     lhs
@@ -702,7 +707,7 @@ fn elem_binop(
         _ => return Ok(None),
     };
     result.compact();
-    Ok(Some((GridSample::Histogram(result), true)))
+    Ok(Some((GridSample::Histogram(Box::new(result)), true)))
 }
 
 /// The result rows of one field by result label set.

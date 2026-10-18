@@ -20,6 +20,7 @@ use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::arrow::buffer::Buffer;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
+use datatypes::series::histogram::CounterResetHint;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
@@ -341,14 +342,9 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    /// Retains the samples of `fields` at `timestamps`; with `drop_stale`, a row holding a stale
-    /// marker in any field is dropped.
-    fn ingest(
-        &mut self,
-        timestamps: &[i64],
-        fields: &SeriesFields,
-        drop_stale: bool,
-    ) -> Result<()> {
+    /// Retains the samples of `fields` at `timestamps`. From `raw` input a row holding a stale
+    /// marker in any field is dropped; evaluated input keeps it as a value.
+    fn ingest(&mut self, timestamps: &[i64], fields: &SeriesFields, raw: bool) -> Result<()> {
         let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();
         let mut row = Vec::with_capacity(samples.len());
         for &timestamp in timestamps {
@@ -370,7 +366,7 @@ impl RangeEvaluator {
                 }
                 row.push(sample);
             }
-            if stale && drop_stale {
+            if stale && raw {
                 continue;
             }
             // Like RangeManipulate, any kept sample whose shifted time leaves i64 fails the series.
@@ -389,9 +385,15 @@ impl RangeEvaluator {
                         field.timestamps.push(shifted);
                         field.values.push(*value);
                     }
-                    SampleRef::Histogram(view) => field
-                        .histograms
-                        .push((shifted, FloatHistogram::try_from_view(view)?)),
+                    SampleRef::Histogram(view) => {
+                        let mut h = FloatHistogram::try_from_view(view)?;
+                        // Like Prometheus' `evalSubquery`: an explicit counter reset hint
+                        // describes the sample's raw neighbours, not its evaluated ones.
+                        if !raw && h.reset_hint != CounterResetHint::Gauge {
+                            h.reset_hint = CounterResetHint::Unknown;
+                        }
+                        field.histograms.push((shifted, h));
+                    }
                 }
             }
         }

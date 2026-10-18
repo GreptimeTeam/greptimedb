@@ -164,8 +164,9 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
 
 /// `absent(v)`: 1 with `labels` at every point where no series is present.
 ///
-/// `absent_over_time(v[r])` is this over the result of `present_over_time(v[r])`, with `labels`
-/// from the matchers of `v`, as Prometheus derives them for both.
+/// `absent_over_time(v[r])` is this over the result of `present_over_time(v[r])`. When `v[r]` is
+/// a range selector, `labels` come from its matchers as for `absent(v)`; for a subquery
+/// Prometheus derives no labels.
 pub fn absent(
     schema: &SeriesSchema,
     series: &[Series],

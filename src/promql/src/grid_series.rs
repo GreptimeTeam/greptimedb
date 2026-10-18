@@ -67,8 +67,11 @@ struct HistogramColumn {
 /// A value of [`GridSeriesBuilder::push_samples`].
 pub(crate) enum GridSample {
     Float(f64),
-    Histogram(FloatHistogram),
+    /// Boxed so that buffered float results stay as small as `Option<f64>`.
+    Histogram(Box<FloatHistogram>),
 }
+
+const _: () = assert!(std::mem::size_of::<Option<GridSample>>() == 16);
 
 impl GridSeriesBuilder {
     /// Creates a builder for series of `schema`, which must have an evaluation grid.
