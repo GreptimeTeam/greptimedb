@@ -470,6 +470,29 @@ fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
 }
 
 #[test]
+fn groups_keep_first_seen_order_for_nested_aggregation() {
+    // `sum(sum by (g) (m))` from the Prometheus engine with series created as g=a, c, b: the
+    // outer sum folds 1e308, -1e308, 1e308 and gets 1e308; label order would overflow.
+    let schema = schema(&["value"]);
+    let series = [("0", "a", 1e308), ("1", "c", -1e308), ("2", "b", 1e308)].map(|(a, g, v)| {
+        input(
+            &schema,
+            metric("m", &[("a", a), ("g", g)]),
+            0,
+            &[vec![Some(v)]],
+        )
+    });
+    let inner = aggregate_float(&schema, &series, AggregateOp::Sum, Grouping::By(&["g"])).unwrap();
+    let order = inner
+        .iter()
+        .map(|s| s.metric.get("g").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(order, ["a", "c", "b"]);
+    let outer = aggregate_float(&schema, &inner, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    assert_eq!(values(&outer[0], 0), (0, vec![Some(1e308)]));
+}
+
+#[test]
 fn grouping_keeps_type_and_unit_labels() {
     // Unlike math and arithmetic, Prometheus `generateGroupingLabels` drops only the name.
     let schema = schema(&["value"]);

@@ -19,7 +19,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -55,6 +55,8 @@ pub enum Grouping<'a> {
 ///
 /// Inputs are folded in slice order. Prometheus folds them in storage postings order, and the
 /// compensated `sum`/`avg` depend on that order in the last bits, so callers must keep it.
+/// Groups are returned in the order their first input appears, as in Prometheus: a nested
+/// aggregation folds them in that order.
 ///
 /// Only float evaluated inputs on the shared schema/grid are admitted. `by` on a value field
 /// needs per-point labels and an output schema adapter, and is rejected. There is no fallback.
@@ -65,19 +67,23 @@ pub fn aggregate_float(
     grouping: Grouping<'_>,
 ) -> Result<Vec<Series>> {
     validate_input(schema, input, grouping)?;
-    let mut groups = BTreeMap::new();
+    let mut group_index = HashMap::new();
+    let mut groups = Vec::new();
     for series in input {
         let metric = grouping.apply(&series.metric)?;
-        let group = groups.entry(label_key(&metric)).or_insert_with(|| Group {
-            metric,
-            blocks: BTreeMap::new(),
+        let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
+            groups.push(Group {
+                metric,
+                blocks: BTreeMap::new(),
+            });
+            groups.len() - 1
         });
-        group.accumulate(series, op)?;
+        groups[index].accumulate(series, op)?;
     }
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut output = Vec::with_capacity(groups.len());
     let mut row = Vec::with_capacity(schema.fields.len());
-    for group in groups.into_values() {
+    for group in groups {
         for (&block, states) in &group.blocks {
             // The last block can extend past the grid; only points with a sample are pushed.
             for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
