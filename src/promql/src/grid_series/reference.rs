@@ -18,13 +18,19 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use datatypes::series::histogram::{BucketSideView, CounterResetHint, HistogramView};
-use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datafusion::arrow::array::{Float64Array, UInt32Array};
+use datatypes::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
+};
+use datatypes::series::samples::{
+    HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::Rng;
 
 use crate::grid_series::GridSeriesBuilder;
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 /// Values by absolute grid index, then by field; `None` is missing.
 pub(crate) type Dense = Vec<Vec<Option<f64>>>;
@@ -398,4 +404,74 @@ impl OwnedHistogram {
             negative: side(&self.negative),
         }
     }
+}
+
+/// A single-field series holding float and native histogram points.
+pub(crate) fn mixed_series(
+    schema: &Arc<SeriesSchema>,
+    labels: &Labels,
+    floats: &Points,
+    histograms: &BTreeMap<usize, String>,
+) -> Option<Series> {
+    let points = floats.keys().chain(histograms.keys());
+    let start = *points.clone().min()?;
+    let end = *points.max()? + 1;
+    let float_values: Float64Array = (start..end)
+        .map(|point| floats.get(&point).map(|bits| f64::from_bits(*bits)))
+        .collect();
+    let samples = if histograms.is_empty() {
+        Samples::from_float(float_values)
+    } else {
+        let mut builder = HistogramBatchBuilder::new();
+        let indices: Vec<_> = (start..end)
+            .map(|point| {
+                let text = histograms.get(&point)?;
+                Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
+            })
+            .collect();
+        let histograms =
+            HistogramSamples::try_new(UInt32Array::from(indices), builder.finish().unwrap())
+                .unwrap();
+        Samples::try_from_mixed(float_values, histograms).unwrap()
+    };
+    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, end - start).unwrap();
+    Some(
+        Series::try_new(
+            schema,
+            metric_of(labels),
+            TimeAxis::Grid(range),
+            SeriesFields::one(samples),
+        )
+        .unwrap(),
+    )
+}
+
+/// Asserts `got` equals `want` with values within `epsilon`, bucket by bucket.
+pub(crate) fn assert_histogram_close(
+    got: &FloatHistogram,
+    want: &FloatHistogram,
+    epsilon: f64,
+    context: &str,
+) {
+    let scalars = |h: &FloatHistogram| [h.zero_count, h.count, h.sum];
+    let ok = got.schema == want.schema
+        && got.reset_hint == want.reset_hint
+        && got.zero_threshold.to_bits() == want.zero_threshold.to_bits()
+        && got.custom_values == want.custom_values
+        && scalars(got)
+            .iter()
+            .zip(scalars(want))
+            .all(|(a, b)| close(*a, b, epsilon))
+        && [
+            (&got.positive, &want.positive),
+            (&got.negative, &want.negative),
+        ]
+        .iter()
+        .all(|(a, b)| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((i, x), (j, y))| i == j && close(*x, *y, epsilon))
+        });
+    assert!(ok, "{context}: {got:?} vs {want:?}");
 }

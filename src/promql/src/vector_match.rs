@@ -20,17 +20,19 @@
 //! points where both are present. Each field is matched on its own, as if the operands held
 //! only that field; the results of all fields with one label set form one series.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, Float64Array};
+use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
+use datatypes::series::histogram::{CounterResetHint, HistogramView};
+use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, TimeAxis};
 
-use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
+use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS};
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 #[cfg(test)]
 mod tests;
@@ -132,7 +134,9 @@ pub fn binary_output_schema(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Ar
 /// Applies `matching` to every pair of matched series at every grid point.
 ///
 /// Fields are paired by position. Arithmetic and `bool` comparisons drop `__name__`, `__type__`
-/// and `__unit__`; comparisons without `bool` keep the left value where they hold.
+/// and `__unit__`; comparisons without `bool` keep the left value where they hold. Native
+/// histograms support `+`, `-`, `==` and `!=` with each other, `*` with a float on either side
+/// and `/` by a float; Prometheus skips any other pairing of a histogram.
 pub fn binary_vectors(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -173,16 +177,16 @@ fn binary_field(
     let points = grid.timestamps().len();
     // Prometheus short-circuits a point where either side is empty, before any check.
     let both_present: Vec<bool> = lhs
-        .presence(points)?
+        .presence(points)
         .into_iter()
-        .zip(rhs.presence(points)?)
+        .zip(rhs.presence(points))
         .map(|(lhs, rhs)| lhs && rhs)
         .collect();
 
     let one_groups = group(one, &matching.labels);
     let mut one_duplicate: Option<(usize, &GroupKey)> = None;
     for (key, members) in &one_groups {
-        if let Some(point) = overlap(one, members, |point| Ok(both_present[point]))?
+        if let Some(point) = overlap(one, members, |point| both_present[point])
             && one_duplicate.is_none_or(|(first, _)| point < first)
         {
             one_duplicate = Some((point, key));
@@ -191,21 +195,22 @@ fn binary_field(
 
     let drop_name = !matching.op.is_comparison() || matching.return_bool;
     let mut results = Results::default();
-    let group_ids: HashMap<&GroupKey, usize> = one_groups
-        .keys()
+    let group_keys: Vec<&GroupKey> = one_groups.keys().collect();
+    let group_ids: HashMap<&GroupKey, usize> = group_keys
+        .iter()
         .enumerate()
-        .map(|(id, key)| (key, id))
+        .map(|(id, key)| (*key, id))
         .collect();
-    let mut matched_groups: HashMap<GroupKey, Vec<usize>> = HashMap::new();
+    // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
+    // comparison as a match too, but not an operation that failed.
+    let mut matched: HashSet<(usize, usize)> = HashSet::new();
+    let mut implicit_many_to_one: Option<(usize, &GroupKey)> = None;
     for (many_index, many_series) in many.series.iter().enumerate() {
         let key = group_key(&many_series.metric, &matching.labels);
         let Some(candidates) = one_groups.get(&key) else {
             continue;
         };
         let group_id = group_ids[&key];
-        if matches!(matching.cardinality, Cardinality::OneToOne) {
-            matched_groups.entry(key).or_default().push(many_index);
-        }
         for &one_index in candidates {
             let metric = result_metric(
                 &many_series.metric,
@@ -216,49 +221,32 @@ fn binary_field(
             )?;
             let (start, end) = one.overlap_range(many, one_index, many_index);
             for point in start..end {
-                if !(many.present(many_index, point)? && one.present(one_index, point)?) {
+                if !(many.present(many_index, point) && one.present(one_index, point)) {
                     continue;
                 }
-                let (many_value, one_value) = (
-                    many.value(many_index, point)?.expect("present"),
-                    one.value(one_index, point)?.expect("present"),
-                );
+                let (many_value, one_value) =
+                    (many.value(many_index, point), one.value(one_index, point));
                 let (lhs_value, rhs_value) = if one_is_left {
                     (one_value, many_value)
                 } else {
                     (many_value, one_value)
                 };
-                let (result, holds) = matching.op.apply(lhs_value, rhs_value);
-                let value = if !matching.op.is_comparison() {
-                    Some(result)
-                } else if matching.return_bool {
-                    Some(if holds { 1.0 } else { 0.0 })
+                let Some((result, keep)) = elem_binop(matching.op, lhs_value, rhs_value)? else {
+                    continue;
+                };
+                if matching.cardinality == Cardinality::OneToOne
+                    && !matched.insert((group_id, point))
+                    && implicit_many_to_one.is_none_or(|(first, _)| point < first)
+                {
+                    implicit_many_to_one = Some((point, group_keys[group_id]));
+                }
+                let value = if matching.return_bool {
+                    Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
                 } else {
-                    holds.then_some(result)
+                    keep.then_some(result)
                 };
                 results.insert(&metric, group_id, point, value);
             }
-        }
-    }
-    // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
-    // comparison as a match too.
-    let mut implicit_many_to_one: Option<(usize, &GroupKey)> = None;
-    for (key, members) in &matched_groups {
-        let matched = |point: usize| -> Result<bool> {
-            let Some(candidates) = one_groups.get(key) else {
-                return Ok(false);
-            };
-            for &candidate in candidates {
-                if one.covers(candidate, point) && one.present(candidate, point)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        };
-        if let Some(point) = overlap(many, members, matched)?
-            && implicit_many_to_one.is_none_or(|(first, _)| point < first)
-        {
-            implicit_many_to_one = Some((point, key));
         }
     }
     // Prometheus fails at the first failing step. Within a step it checks the one side, then
@@ -375,7 +363,7 @@ fn set_field(
     if op == SetOp::Or {
         for index in 0..lhs.series.len() {
             for point in lhs.range(index) {
-                if let Some(value) = lhs.value(index, point)? {
+                if let Some(value) = owned(lhs.value(index, point))? {
                     results.insert(&lhs.series[index].metric, 0, point, Some(value));
                 }
             }
@@ -384,18 +372,18 @@ fn set_field(
     for (index, series) in kept.series.iter().enumerate() {
         let candidates = filter_groups.get(&group_key(&series.metric, labels));
         for point in kept.range(index) {
-            let Some(value) = kept.value(index, point)? else {
+            if !kept.present(index, point) {
                 continue;
-            };
+            }
             let mut matched = false;
             for &candidate in candidates.into_iter().flatten() {
-                if filter.covers(candidate, point) && filter.present(candidate, point)? {
+                if filter.covers(candidate, point) && filter.present(candidate, point) {
                     matched = true;
                     break;
                 }
             }
             if matched == keep_matched {
-                results.insert(&series.metric, 0, point, Some(value));
+                results.insert(&series.metric, 0, point, owned(kept.value(index, point))?);
             }
         }
     }
@@ -406,7 +394,7 @@ fn set_field(
 fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<Series>> {
     let width = schema.fields.len();
     // Per label set: the metric and its `(point, field, value)` samples.
-    type Merged = (MetricName, Vec<(usize, usize, f64)>);
+    type Merged = (MetricName, Vec<(usize, usize, GridSample)>);
     let mut merged: HashMap<GroupKey, Merged> = HashMap::new();
     for (field, results) in fields.into_iter().enumerate() {
         for (key, rows) in results.series {
@@ -421,16 +409,19 @@ fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<S
         }
     }
     let mut builder = GridSeriesBuilder::try_new(schema)?;
-    let mut row = vec![None; width];
+    let mut row: Vec<Option<GridSample>> = Vec::with_capacity(width);
     let mut output = Vec::with_capacity(merged.len());
     for (metric, mut samples) in merged.into_values() {
-        samples.sort_unstable_by_key(|&(point, field, _)| (point, field));
-        for chunk in samples.chunk_by(|a, b| a.0 == b.0) {
-            row.fill(None);
-            for &(_, field, value) in chunk {
+        samples.sort_unstable_by_key(|(point, field, _)| (*point, *field));
+        let mut samples = samples.into_iter().peekable();
+        while let Some((point, field, value)) = samples.next() {
+            row.clear();
+            row.resize_with(width, || None);
+            row[field] = Some(value);
+            while let Some((_, field, value)) = samples.next_if(|next| next.0 == point) {
                 row[field] = Some(value);
             }
-            builder.push(chunk[0].0, &row)?;
+            builder.push_samples(point, &row)?;
         }
         if let Some(series) = builder.finish(metric)? {
             output.push(series);
@@ -505,27 +496,27 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
 fn overlap(
     operand: &Operand<'_>,
     members: &[usize],
-    mut relevant: impl FnMut(usize) -> Result<bool>,
-) -> Result<Option<usize>> {
+    relevant: impl Fn(usize) -> bool,
+) -> Option<usize> {
     if members.len() < 2 {
-        return Ok(None);
+        return None;
     }
     // Sorting the present points keeps the cost proportional to them, not to the span.
     let mut points = Vec::new();
     for &member in members {
         for point in operand.range(member) {
-            if operand.present(member, point)? {
+            if operand.present(member, point) {
                 points.push(point);
             }
         }
     }
     points.sort_unstable();
     for pair in points.windows(2) {
-        if pair[0] == pair[1] && relevant(pair[0])? {
-            return Ok(Some(pair[0]));
+        if pair[0] == pair[1] && relevant(pair[0]) {
+            return Some(pair[0]);
         }
     }
-    Ok(None)
+    None
 }
 
 fn result_metric(
@@ -617,44 +608,101 @@ impl<'a> Operand<'a> {
         (start, end.max(start))
     }
 
-    fn value(&self, index: usize, point: usize) -> Result<Option<f64>> {
+    fn value(&self, index: usize, point: usize) -> SampleRef<'a> {
         let samples = &self.series[index].fields.as_slice()[self.field];
-        sample(samples, point - self.starts[index])
+        let row = point - self.starts[index];
+        if let Some(DenseSamplesRef::Float(values)) = samples.dense() {
+            return match values.is_valid(row) {
+                true => SampleRef::Float(values.value(row)),
+                false => SampleRef::Missing,
+            };
+        }
+        samples.sample(row)
     }
 
-    fn present(&self, index: usize, point: usize) -> Result<bool> {
-        Ok(self.value(index, point)?.is_some())
+    fn present(&self, index: usize, point: usize) -> bool {
+        !matches!(self.value(index, point), SampleRef::Missing)
     }
 
     /// Whether any series is present at each grid point.
-    fn presence(&self, points: usize) -> Result<Vec<bool>> {
+    fn presence(&self, points: usize) -> Vec<bool> {
         let mut presence = vec![false; points];
         for index in 0..self.series.len() {
             for point in self.range(index) {
-                if !presence[point] && self.present(index, point)? {
+                if !presence[point] && self.present(index, point) {
                     presence[point] = true;
                 }
             }
         }
-        Ok(presence)
+        presence
     }
 }
 
-fn sample(samples: &Samples, row: usize) -> Result<Option<f64>> {
-    if let Some(DenseSamplesRef::Float(values)) = samples.dense() {
-        return Ok(float_at(values, row));
-    }
-    match samples.sample(row) {
-        SampleRef::Missing => Ok(None),
-        SampleRef::Float(value) => Ok(Some(value)),
-        SampleRef::Histogram(_) => Err(DataFusionError::NotImplemented(
-            "vector matching of histogram samples".into(),
-        )),
-    }
+/// `sample` as an owned value; `None` when missing.
+fn owned(sample: SampleRef<'_>) -> Result<Option<GridSample>> {
+    Ok(match sample {
+        SampleRef::Missing => None,
+        SampleRef::Float(value) => Some(GridSample::Float(value)),
+        SampleRef::Histogram(view) => {
+            Some(GridSample::Histogram(FloatHistogram::try_from_view(&view)?))
+        }
+    })
 }
 
-fn float_at(values: &Float64Array, row: usize) -> Option<f64> {
-    values.is_valid(row).then(|| values.value(row))
+/// Prometheus `vectorElemBinop` over present samples: the value and whether to keep it, or
+/// `None` when Prometheus reports the pair as an annotation and skips it without counting the
+/// match: an operator the sample types do not support, or histograms mixing exponential and
+/// custom buckets in an addition or subtraction.
+fn elem_binop(
+    op: BinaryOp,
+    lhs: SampleRef<'_>,
+    rhs: SampleRef<'_>,
+) -> Result<Option<(GridSample, bool)>> {
+    let histogram = |view: &HistogramView<'_>| FloatHistogram::try_from_view(view);
+    let mut result = match (lhs, rhs) {
+        (SampleRef::Float(lhs), SampleRef::Float(rhs)) => {
+            let (value, keep) = op.apply(lhs, rhs);
+            return Ok(Some((GridSample::Float(value), keep)));
+        }
+        (SampleRef::Float(factor), SampleRef::Histogram(h))
+        | (SampleRef::Histogram(h), SampleRef::Float(factor))
+            if op == BinaryOp::Mul =>
+        {
+            let mut h = histogram(&h)?;
+            h.mul(factor);
+            h
+        }
+        (SampleRef::Histogram(h), SampleRef::Float(divisor)) if op == BinaryOp::Div => {
+            let mut h = histogram(&h)?;
+            h.div(divisor);
+            h
+        }
+        (SampleRef::Histogram(lhs), SampleRef::Histogram(rhs)) => {
+            let (mut lhs, rhs) = (histogram(&lhs)?, histogram(&rhs)?);
+            match op {
+                BinaryOp::Eq | BinaryOp::Ne => {
+                    let keep = lhs.equals(&rhs) == (op == BinaryOp::Eq);
+                    return Ok(Some((GridSample::Histogram(lhs), keep)));
+                }
+                BinaryOp::Add | BinaryOp::Sub => {
+                    if lhs.uses_custom_buckets() != rhs.uses_custom_buckets() {
+                        return Ok(None);
+                    }
+                    if op == BinaryOp::Add {
+                        lhs.add(&rhs)?;
+                    } else {
+                        lhs.sub(&rhs)?;
+                        lhs.reset_hint = CounterResetHint::Gauge;
+                    }
+                    lhs
+                }
+                _ => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    result.compact();
+    Ok(Some((GridSample::Histogram(result), true)))
 }
 
 /// The result rows of one field by result label set.
@@ -664,12 +712,12 @@ struct Results {
 }
 
 /// Rows in arrival order: their points, the match group each came from, and their values;
-/// `None` is a comparison that filtered the match.
+/// `None` is a match the operator filtered.
 struct ResultRows {
     metric: MetricName,
     points: Vec<usize>,
     groups: Vec<usize>,
-    values: Vec<Option<f64>>,
+    values: Vec<Option<GridSample>>,
 }
 
 /// Two rows of one result label set at one point.
@@ -688,7 +736,13 @@ fn same_labelset(key: &GroupKey, timestamp: i64) -> String {
 }
 
 impl Results {
-    fn insert(&mut self, metric: &MetricName, group: usize, point: usize, value: Option<f64>) {
+    fn insert(
+        &mut self,
+        metric: &MetricName,
+        group: usize,
+        point: usize,
+        value: Option<GridSample>,
+    ) {
         let rows = match self.series.entry(key_of(metric)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(ResultRows {
@@ -714,7 +768,8 @@ impl Results {
                 order.sort_by_key(|&row| rows.points[row]);
                 rows.points = order.iter().map(|&row| rows.points[row]).collect();
                 rows.groups = order.iter().map(|&row| rows.groups[row]).collect();
-                rows.values = order.iter().map(|&row| rows.values[row]).collect();
+                let mut values = std::mem::take(&mut rows.values);
+                rows.values = order.iter().map(|&row| values[row].take()).collect();
             }
             let mut start = 0;
             while start < rows.points.len() {

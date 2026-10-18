@@ -15,13 +15,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Float64Array, UInt32Array};
 use datafusion::error::DataFusionError;
-use datatypes::series::histogram::HistogramBatchBuilder;
-use datatypes::series::samples::{
-    FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
-};
-use datatypes::series::time::{GridRange, TimeAxis};
+use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
+use datatypes::series::time::TimeAxis;
 
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
@@ -31,7 +27,7 @@ use super::{
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
     GoldenCase, Labels, OwnedHistogram, Points, canonical_bits, close, golden_cases, labels_of,
-    metric_of, points_of,
+    metric_of, mixed_series, points_of,
 };
 
 fn schema(case: &GoldenCase) -> Arc<SeriesSchema> {
@@ -46,46 +42,6 @@ fn schema(case: &GoldenCase) -> Arc<SeriesSchema> {
 
 fn bits_argument(case: &GoldenCase, index: usize) -> f64 {
     f64::from_bits(u64::from_str_radix(&case.spec[index], 16).unwrap())
-}
-
-/// A single-field series holding float and native histogram points.
-fn mixed_series(
-    schema: &Arc<SeriesSchema>,
-    labels: &Labels,
-    floats: &Points,
-    histograms: &BTreeMap<usize, String>,
-) -> Option<Series> {
-    let points = floats.keys().chain(histograms.keys());
-    let start = *points.clone().min()?;
-    let end = *points.max()? + 1;
-    let float_values: Float64Array = (start..end)
-        .map(|point| floats.get(&point).map(|bits| f64::from_bits(*bits)))
-        .collect();
-    let samples = if histograms.is_empty() {
-        Samples::from_float(float_values)
-    } else {
-        let mut builder = HistogramBatchBuilder::new();
-        let indices: Vec<_> = (start..end)
-            .map(|point| {
-                let text = histograms.get(&point)?;
-                Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
-            })
-            .collect();
-        let histograms =
-            HistogramSamples::try_new(UInt32Array::from(indices), builder.finish().unwrap())
-                .unwrap();
-        Samples::try_from_mixed(float_values, histograms).unwrap()
-    };
-    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, end - start).unwrap();
-    Some(
-        Series::try_new(
-            schema,
-            metric_of(labels),
-            TimeAxis::Grid(range),
-            SeriesFields::one(samples),
-        )
-        .unwrap(),
-    )
 }
 
 /// Compares a kernel outcome with a fixture outcome; returns whether it was an error.
