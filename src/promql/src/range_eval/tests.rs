@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -28,9 +29,9 @@ use datatypes::series::histogram::{
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -41,8 +42,10 @@ use crate::functions::{
 };
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
-    Dense, assert_series_eq, assert_series_eq_any_nan, random_dense, special_value,
+    Dense, GoldenCase, OwnedHistogram, assert_series_eq, assert_series_eq_any_nan, close,
+    golden_cases, labels_of, metric_of, random_dense, special_value,
 };
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::range_array::RangeArray;
 use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
@@ -612,30 +615,33 @@ fn offset_overflow_fails_unless_the_sample_is_stale() {
 }
 
 #[test]
-fn rejects_histogram_samples() {
+fn histogram_samples_need_a_function_and_drop_stale_markers() {
     let empty = BucketSideView {
         span_offsets: &[],
         span_lengths: &[],
         buckets: &[],
     };
     let mut builder = HistogramBatchBuilder::new();
-    builder
-        .push(HistogramView {
-            schema: 0,
-            zero_threshold: 0.0,
-            sum: 1.0,
-            count: 1.0,
-            zero_count: 1.0,
-            reset_hint: CounterResetHint::Unknown,
-            start_timestamp: None,
-            custom_values: &[],
-            positive: empty,
-            negative: empty,
-        })
-        .unwrap();
+    for sum in [1.0, stale()] {
+        builder
+            .push(HistogramView {
+                schema: 0,
+                zero_threshold: 0.0,
+                sum,
+                count: 1.0,
+                zero_count: 1.0,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: None,
+                custom_values: &[],
+                positive: empty,
+                negative: empty,
+            })
+            .unwrap();
+    }
     let histograms =
-        Samples::try_from_histogram(UInt32Array::from(vec![0]), builder.finish().unwrap()).unwrap();
-    let mut piece = chunk(&[(1, vec![Some(1.0)])], 1, 0, true);
+        Samples::try_from_histogram(UInt32Array::from(vec![0, 1]), builder.finish().unwrap())
+            .unwrap();
+    let mut piece = chunk(&[(1, vec![Some(1.0)]), (2, vec![Some(1.0)])], 1, 0, true);
     piece.fields = SeriesFields::one(histograms);
 
     let window = RangeWindow {
@@ -646,6 +652,19 @@ fn rejects_histogram_samples() {
     assert!(matches!(
         probe_evaluator(1, grid(0, 10, 4), window).push(&piece),
         Err(DataFusionError::NotImplemented(_))
+    ));
+    // A histogram whose sum is the stale marker ends the series like a stale float.
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(2, 10, 1),
+        window,
+        RangeFunction::CountOverTime,
+    )
+    .unwrap();
+    let series = evaluator.push(&piece).unwrap().unwrap();
+    assert!(matches!(
+        series.fields.as_slice()[0].sample(0),
+        SampleRef::Float(count) if count == 1.0
     ));
 }
 
@@ -785,6 +804,42 @@ fn rejects_input_of_the_other_kind() {
     execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
 }
 
+/// The range function a golden fixture names, with its constant arguments.
+fn range_function(name: &str, params: &[f64]) -> RangeFunction {
+    match name {
+        "rate" => RangeFunction::Rate,
+        "increase" => RangeFunction::Increase,
+        "delta" => RangeFunction::Delta,
+        "irate" => RangeFunction::Irate,
+        "idelta" => RangeFunction::Idelta,
+        "avg_over_time" => RangeFunction::AvgOverTime,
+        "min_over_time" => RangeFunction::MinOverTime,
+        "max_over_time" => RangeFunction::MaxOverTime,
+        "sum_over_time" => RangeFunction::SumOverTime,
+        "count_over_time" => RangeFunction::CountOverTime,
+        "last_over_time" => RangeFunction::LastOverTime,
+        "present_over_time" => RangeFunction::PresentOverTime,
+        "stddev_over_time" => RangeFunction::StddevOverTime,
+        "stdvar_over_time" => RangeFunction::StdvarOverTime,
+        "quantile_over_time" => RangeFunction::QuantileOverTime(params[0]),
+        "resets" => RangeFunction::Resets,
+        "changes" => RangeFunction::Changes,
+        "deriv" => RangeFunction::Deriv,
+        "predict_linear" => RangeFunction::PredictLinear(params[0]),
+        "double_exponential_smoothing" => RangeFunction::DoubleExponentialSmoothing {
+            smoothing: params[0],
+            trend: params[1],
+        },
+        "first_over_time" => RangeFunction::FirstOverTime,
+        "mad_over_time" => RangeFunction::MadOverTime,
+        "ts_of_first_over_time" => RangeFunction::TsOfFirstOverTime,
+        "ts_of_last_over_time" => RangeFunction::TsOfLastOverTime,
+        "ts_of_min_over_time" => RangeFunction::TsOfMinOverTime,
+        "ts_of_max_over_time" => RangeFunction::TsOfMaxOverTime,
+        other => panic!("unknown function {other}"),
+    }
+}
+
 /// Range functions evaluated by the Prometheus v3.15.0 engine over random single series; see
 /// the header of `prometheus_cases.txt`.
 #[test]
@@ -818,38 +873,7 @@ fn range_functions_match_prometheus() {
             "-" => Vec::new(),
             params => params.split(',').map(|p| p.parse().unwrap()).collect(),
         };
-        let function = match header[0] {
-            "rate" => RangeFunction::Rate,
-            "increase" => RangeFunction::Increase,
-            "delta" => RangeFunction::Delta,
-            "irate" => RangeFunction::Irate,
-            "idelta" => RangeFunction::Idelta,
-            "avg_over_time" => RangeFunction::AvgOverTime,
-            "min_over_time" => RangeFunction::MinOverTime,
-            "max_over_time" => RangeFunction::MaxOverTime,
-            "sum_over_time" => RangeFunction::SumOverTime,
-            "count_over_time" => RangeFunction::CountOverTime,
-            "last_over_time" => RangeFunction::LastOverTime,
-            "present_over_time" => RangeFunction::PresentOverTime,
-            "stddev_over_time" => RangeFunction::StddevOverTime,
-            "stdvar_over_time" => RangeFunction::StdvarOverTime,
-            "quantile_over_time" => RangeFunction::QuantileOverTime(params[0]),
-            "resets" => RangeFunction::Resets,
-            "changes" => RangeFunction::Changes,
-            "deriv" => RangeFunction::Deriv,
-            "predict_linear" => RangeFunction::PredictLinear(params[0]),
-            "double_exponential_smoothing" => RangeFunction::DoubleExponentialSmoothing {
-                smoothing: params[0],
-                trend: params[1],
-            },
-            "first_over_time" => RangeFunction::FirstOverTime,
-            "mad_over_time" => RangeFunction::MadOverTime,
-            "ts_of_first_over_time" => RangeFunction::TsOfFirstOverTime,
-            "ts_of_last_over_time" => RangeFunction::TsOfLastOverTime,
-            "ts_of_min_over_time" => RangeFunction::TsOfMinOverTime,
-            "ts_of_max_over_time" => RangeFunction::TsOfMaxOverTime,
-            other => panic!("unknown function {other}"),
-        };
+        let function = range_function(header[0], &params);
         let numbers: Vec<i64> = header[2..].iter().map(|n| n.parse().unwrap()).collect();
         let anchor_ms = numbers.get(5).copied();
         let [range_ms, offset_ms, start_ms, step_ms, points] = numbers[..5] else {
@@ -1307,4 +1331,169 @@ fn absent_over_time_is_absent_over_present_over_time() {
         checked += 1;
     }
     assert_eq!(checked, 120);
+}
+
+/// One series of a golden case as a single raw chunk of float and histogram samples.
+fn mixed_chunk(
+    case: &GoldenCase,
+    index: usize,
+    histograms: &mut Vec<OwnedHistogram>,
+) -> Option<RawSeriesChunk> {
+    let (labels, floats) = &case.inputs[index];
+    let texts = &case.histograms[index];
+    let points: BTreeSet<usize> = floats.keys().chain(texts.keys()).copied().collect();
+    if points.is_empty() {
+        return None;
+    }
+    let spec = case.grid.spec();
+    let timestamps: Vec<i64> = points
+        .iter()
+        .map(|&point| spec.start_ms + point as i64 * spec.step_ms)
+        .collect();
+    let values: Float64Array = points
+        .iter()
+        .map(|point| floats.get(point).map(|bits| f64::from_bits(*bits)))
+        .collect();
+    histograms.clear();
+    let mut builder = HistogramBatchBuilder::new();
+    let indices: UInt32Array = points
+        .iter()
+        .map(|point| {
+            let text = texts.get(point)?;
+            Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
+        })
+        .collect();
+    let histograms = HistogramSamples::try_new(indices, builder.finish().unwrap()).unwrap();
+    let samples = Samples::try_from_mixed(values, histograms).unwrap();
+    Some(
+        RawSeriesChunk::try_new(
+            &raw_schema(1),
+            Buffer::from((index as u64).to_le_bytes().to_vec()),
+            Some(metric_of(labels)),
+            RawTimestamps::try_new(ScalarBuffer::from(timestamps)).unwrap(),
+            SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            true,
+        )
+        .unwrap(),
+    )
+}
+
+/// Range functions over series mixing floats and native histograms, evaluated by the Prometheus
+/// v3.15.0 engine (`histogram_cases.txt`, promql-compat `cmd/narthex-golden-native -range`).
+/// Values compare within the promql-compat tolerance; histograms bucket by bucket.
+#[test]
+fn histogram_range_functions_match_prometheus() {
+    let mut owned = Vec::new();
+    let (mut floats_checked, mut histograms_checked) = (0, 0);
+    for case in golden_cases(include_str!("histogram_cases.txt")) {
+        let name = case.spec[0].as_str();
+        let function = range_function(name, &[0.5, 0.5]);
+        let function = match function {
+            RangeFunction::PredictLinear(_) => RangeFunction::PredictLinear(10.0),
+            other => other,
+        };
+        let epsilon = match function {
+            RangeFunction::Deriv
+            | RangeFunction::PredictLinear(_)
+            | RangeFunction::StddevOverTime
+            | RangeFunction::StdvarOverTime => 1e-6,
+            _ => 1e-10,
+        };
+        let window = RangeWindow {
+            range_ms: case.spec[1].parse().unwrap(),
+            offset_ms: case.spec[2].parse().unwrap(),
+            anchor_ms: None,
+        };
+        let mut actual = BTreeMap::new();
+        for index in 0..case.inputs.len() {
+            let Some(chunk) = mixed_chunk(&case, index, &mut owned) else {
+                continue;
+            };
+            let mut evaluator =
+                RangeEvaluator::try_new(&raw_schema(1), case.grid.clone(), window, function)
+                    .unwrap();
+            if let Some(series) = evaluator.push(&chunk).unwrap() {
+                actual.insert(labels_of(&series.metric), series);
+            }
+        }
+        let expected = case.outcome.as_ref().unwrap();
+        let context = format!("{:?}", case.spec);
+        assert_eq!(
+            actual.keys().collect::<Vec<_>>(),
+            expected.keys().collect::<Vec<_>>(),
+            "{context}"
+        );
+        for (labels, series) in &actual {
+            let TimeAxis::Grid(range) = &series.time else {
+                panic!("expected a grid series");
+            };
+            let floats = &expected[labels];
+            let no_histograms = BTreeMap::new();
+            let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
+            let mut points = 0;
+            for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
+                let point = range.start() + row;
+                match sample {
+                    SampleRef::Missing => continue,
+                    SampleRef::Float(value) => {
+                        let want = f64::from_bits(floats[&point]);
+                        assert!(
+                            close(value, want, epsilon),
+                            "{context} at {point}: {value} vs {want}"
+                        );
+                        floats_checked += 1;
+                    }
+                    SampleRef::Histogram(view) => {
+                        let got = FloatHistogram::try_from_view(&view).unwrap();
+                        let want = FloatHistogram::try_from_view(
+                            &OwnedHistogram::parse(&texts[&point]).view(),
+                        )
+                        .unwrap();
+                        assert_histogram_close(
+                            &got,
+                            &want,
+                            epsilon,
+                            &format!("{context} at {point}"),
+                        );
+                        histograms_checked += 1;
+                    }
+                }
+                points += 1;
+            }
+            assert_eq!(points, floats.len() + texts.len(), "{context}");
+        }
+    }
+    assert!(
+        floats_checked > 500 && histograms_checked > 150,
+        "{floats_checked} floats, {histograms_checked} histograms"
+    );
+}
+
+fn assert_histogram_close(
+    got: &FloatHistogram,
+    want: &FloatHistogram,
+    epsilon: f64,
+    context: &str,
+) {
+    let scalars = |h: &FloatHistogram| [h.zero_count, h.count, h.sum];
+    let ok = got.schema == want.schema
+        && got.reset_hint == want.reset_hint
+        && got.zero_threshold.to_bits() == want.zero_threshold.to_bits()
+        && got.custom_values == want.custom_values
+        && scalars(got)
+            .iter()
+            .zip(scalars(want))
+            .all(|(a, b)| close(*a, b, epsilon))
+        && [
+            (&got.positive, &want.positive),
+            (&got.negative, &want.negative),
+        ]
+        .iter()
+        .all(|(a, b)| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((i, x), (j, y))| i == j && close(*x, *y, epsilon))
+        });
+    assert!(ok, "{context}: {got:?} vs {want:?}");
 }
