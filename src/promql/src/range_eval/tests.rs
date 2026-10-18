@@ -510,6 +510,112 @@ fn functions_match_range_udfs() {
     }
 }
 
+/// A chunk of entirely present float columns is appended in bulk, and that is the path the test
+/// asserts: the per-sample loop produces the same output, so comparing values alone could not
+/// tell whether the bulk path ran.
+#[test]
+fn an_ordinary_float_chunk_is_appended_in_bulk() {
+    let rows: Vec<Row> = (0..5)
+        .map(|index| (index as i64 * 10_000, vec![Some(index as f64), Some(1.0)]))
+        .collect();
+    let mut evaluator = probe_evaluator(
+        2,
+        grid(0, 10_000, 5),
+        RangeWindow {
+            range_ms: 20_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+    );
+    assert!(evaluator.push(&chunk(&rows, 2, 0, true)).unwrap().is_some());
+    assert_eq!(evaluator.bulk_ingest_count(), 1);
+}
+
+/// A field holding native histogram samples keeps its windows on the histogram path, where the
+/// mixed-window rules decide the result. Letting such a chunk take the bulk path would drop the
+/// histograms and read the floats alone, so the chunk has to fall back to the per-sample loop.
+#[test]
+fn a_chunk_with_histograms_is_not_appended_in_bulk() {
+    let histogram = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder
+        .push(OwnedHistogram::parse(histogram).view())
+        .unwrap();
+    let histograms = HistogramSamples::try_new(
+        UInt32Array::from(vec![None, Some(index), None]),
+        builder.finish().unwrap(),
+    )
+    .unwrap();
+    let samples = Samples::try_from_mixed(
+        Float64Array::from(vec![Some(1.0), None, Some(2.0)]),
+        histograms,
+    )
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &raw_schema(1),
+        Buffer::from(0u64.to_le_bytes().to_vec()),
+        Some(metric(0)),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![0, 10_000, 20_000])).unwrap(),
+        SeriesFields::try_from_vec(vec![samples]).unwrap(),
+        true,
+    )
+    .unwrap();
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 10_000, 3),
+        RangeWindow {
+            range_ms: 20_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::PresentOverTime,
+    )
+    .unwrap();
+    evaluator.push(&chunk).unwrap();
+    assert_eq!(evaluator.bulk_ingest_count(), 0);
+}
+
+/// A chunk with a stale marker drops its whole row, which the bulk path cannot reproduce without
+/// the same scan, so it takes the per-sample loop instead.
+#[test]
+fn a_chunk_with_a_stale_marker_is_not_appended_in_bulk() {
+    let rows = vec![
+        (0, vec![Some(1.0)]),
+        (10_000, vec![Some(stale())]),
+        (20_000, vec![Some(3.0)]),
+    ];
+    let mut evaluator = probe_evaluator(
+        1,
+        grid(0, 10_000, 3),
+        RangeWindow {
+            range_ms: 20_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+    );
+    evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
+    assert_eq!(evaluator.bulk_ingest_count(), 0);
+}
+
+/// An offset shifts every timestamp, so the source timestamps cannot be appended as they are.
+#[test]
+fn a_shifted_chunk_is_not_appended_in_bulk() {
+    let rows: Vec<Row> = (0..3)
+        .map(|index| (index as i64 * 10_000, vec![Some(index as f64)]))
+        .collect();
+    let mut evaluator = probe_evaluator(
+        1,
+        grid(0, 10_000, 3),
+        RangeWindow {
+            range_ms: 20_000,
+            offset_ms: 5_000,
+            anchor_ms: None,
+        },
+    );
+    evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
+    assert_eq!(evaluator.bulk_ingest_count(), 0);
+}
+
 #[test]
 fn overlapping_window_spans_chunks() {
     let window = RangeWindow {
