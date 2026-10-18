@@ -18,12 +18,17 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
 use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::buffer::Buffer;
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::physical_plan::ColumnarValue;
 use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::arrow::datatypes::{DataType, Field};
+use datatypes::series::MetricName;
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec};
 use promql::extension_plan::RangeManipulateStream;
 use promql::functions::{
     AbsentOverTime, Changes, CountOverTime, Delta, DoubleExponentialSmoothing, IDelta, Increase,
@@ -31,6 +36,7 @@ use promql::functions::{
     Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
+use promql::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 
 /// A `window_step` below `window_size` makes consecutive windows overlap, which is the normal
 /// PromQL range query shape.
@@ -1248,8 +1254,349 @@ fn bench_cursor_scan_carriers(c: &mut Criterion) {
     group.finish();
 }
 
+/// The native evaluator's own cost, on the input the fused node feeds it.
+///
+/// One series of 2 880 samples at 15 s, evaluated on a 7 200-point 1 s grid, with a 5 min
+/// window (20 samples per window) and a 1 h window (240). The value shapes separate the
+/// counter-reset work from the rest: `rising` never resets, `resetting` restarts every 240
+/// samples so a 1 h window holds at most one, and `max_over_time` runs over the same windows
+/// but never corrects counters, which is the floor this work sits on.
+///
+/// **Timed scope, identical in every case:** `RangeEvaluator::try_new` + one `push` per
+/// prepared chunk + `finish`. The chunks, schema and grid are built once before timing and
+/// `push` borrows them, so no case pays for input construction inside the measurement.
+fn bench_native_range_eval(c: &mut Criterion) {
+    let mut group = c.benchmark_group("native_range_eval");
+    const SAMPLES: usize = 2_880;
+    const SAMPLE_INTERVAL_MS: i64 = 15_000;
+    const GRID_POINTS: u64 = 7_200;
+    const START_MS: i64 = 1_700_000_000_000;
+
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: None,
+    });
+    let grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(START_MS, 1_000, GRID_POINTS).unwrap()).unwrap(),
+    );
+
+    let rising: Vec<f64> = (0..SAMPLES).map(|i| i as f64 * 15.0).collect();
+    let resetting: Vec<f64> = (0..SAMPLES).map(|i| (i % 240) as f64 * 15.0).collect();
+
+    for (shape, values) in [("rising", &rising), ("resetting", &resetting)] {
+        let timestamps: Vec<i64> = (0..SAMPLES)
+            .map(|i| START_MS + i as i64 * SAMPLE_INTERVAL_MS)
+            .collect();
+        let time = RawTimestamps::try_new(timestamps.into()).unwrap();
+        let fields = SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+            values.clone(),
+        ))])
+        .unwrap();
+        let chunk = RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(vec![0u8]),
+            Some(MetricName::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+            time,
+            fields,
+            true,
+        )
+        .unwrap();
+
+        // `present_over_time` ignores the window contents and returns a constant, so it isolates
+        // the per-point bookkeeping -- the two binary searches, the `FloatWindow` construction,
+        // and `GridSeriesBuilder::push` -- from any kernel arithmetic. Subtracting it from `rate`
+        // gives the kernel's own share.
+        for (function, name) in [
+            (RangeFunction::Rate, "rate"),
+            (RangeFunction::MaxOverTime, "max_over_time"),
+            (RangeFunction::PresentOverTime, "present_over_time"),
+        ] {
+            for (range_ms, window) in [(300_000i64, "5m"), (3_600_000, "1h")] {
+                let range = RangeWindow {
+                    range_ms,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                };
+                group.bench_with_input(
+                    BenchmarkId::new(name, format!("{shape}_w{window}")),
+                    &(),
+                    |b, _| {
+                        b.iter(|| {
+                            let mut evaluator =
+                                RangeEvaluator::try_new(&schema, grid.clone(), range, function)
+                                    .unwrap();
+                            let series = evaluator.push(&chunk).unwrap();
+                            evaluator.finish().unwrap();
+                            series
+                        })
+                    },
+                );
+            }
+        }
+    }
+
+    group.finish();
+}
+
+/// Builds the legacy input for one series: `grid_points` 1 s evaluation timestamps over
+/// `samples` raw values taken every 15 s, each window holding the samples of the last
+/// `window_ms`, exactly what `PromRangeManipulate` hands the rate UDF in the real plan.
+fn make_legacy_grid_input(
+    values: &[f64],
+    grid_points: usize,
+    window_ms: i64,
+) -> Vec<ColumnarValue> {
+    const SAMPLE_INTERVAL_MS: i64 = 15_000;
+    const STEP_MS: i64 = 1_000;
+    let sample_ts: Vec<i64> = (0..values.len())
+        .map(|k| k as i64 * SAMPLE_INTERVAL_MS)
+        .collect();
+    let ts_array = Arc::new(TimestampMillisecondArray::from(sample_ts));
+    let val_array = Arc::new(Float64Array::from(values.to_vec()));
+
+    let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(grid_points);
+    let mut eval_ts: Vec<i64> = Vec::with_capacity(grid_points);
+    for i in 0..grid_points {
+        let now = i as i64 * STEP_MS;
+        let first = now - window_ms;
+        // Samples are aligned to the grid origin, so the index bounds are exact division.
+        let lo = if first <= 0 {
+            0
+        } else {
+            ((first + SAMPLE_INTERVAL_MS - 1) / SAMPLE_INTERVAL_MS) as usize
+        };
+        let hi = now / SAMPLE_INTERVAL_MS;
+        let hi = (hi as usize).min(values.len().saturating_sub(1));
+        if lo > hi {
+            continue;
+        }
+        ranges.push((lo as u32, (hi - lo + 1) as u32));
+        eval_ts.push(now);
+    }
+
+    let ts_range = RangeArray::from_ranges(ts_array, ranges.clone()).unwrap();
+    let val_range = RangeArray::from_ranges(val_array, ranges).unwrap();
+    vec![
+        ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+        ColumnarValue::Array(Arc::new(val_range.into_dict())),
+        ColumnarValue::Array(Arc::new(TimestampMillisecondArray::from(eval_ts))),
+        ColumnarValue::Scalar(ScalarValue::Int64(Some(window_ms))),
+    ]
+}
+
+/// The two implementations of the same range function on identical input.
+///
+/// The fused node evaluates raw samples through [`RangeEvaluator`]; the ordinary plan expands
+/// each grid point into a sliding range and calls the UDF. Their difference is the only place
+/// the fused path can win or lose against the plan it replaces, and it is invisible in
+/// `EXPLAIN VERBOSE` because `FusedSeriesExec` reports no metrics.
+///
+/// **Three timed scopes, deliberately unequal:**
+///
+/// | case | scope | compares against |
+/// | --- | --- | --- |
+/// | `native/` | `RangeEvaluator::try_new` + `push` + `finish` | — |
+/// | `legacy_udf_only/` | the UDF call, input prepared outside | a lower bound, not a rival |
+/// | `legacy_full/` | `prom_range_manipulate` + the UDF call | `native/` |
+///
+/// `RangeEvaluator::push` both ingests raw samples and assembles every window, which in the
+/// ordinary plan is split between `PromRangeManipulate` and the UDF. Comparing `native/` against
+/// `legacy_udf_only/` therefore compares one side's whole job with the other's half of it.
+/// `legacy_full/` exists so the two arms are charged for the same work.
+///
+/// Input is one series of 2 880 samples at 15 s — 12 h of data, so a 2 h grid reads 480 of
+/// them — evaluated on the same 7 201-point 1 s grid for both, over a 5 min and a 1 h window.
+fn bench_native_vs_legacy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("native_vs_legacy");
+    const SAMPLES: usize = 2_880;
+    const GRID_POINTS: usize = 7_201;
+    const SAMPLE_INTERVAL_MS: i64 = 15_000;
+
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: None,
+    });
+    let grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(0, 1_000, GRID_POINTS as u64).unwrap()).unwrap(),
+    );
+    let timestamps: Vec<i64> = (0..SAMPLES)
+        .map(|k| k as i64 * SAMPLE_INTERVAL_MS)
+        .collect();
+    let rising: Vec<f64> = (0..SAMPLES).map(|i| i as f64 * 15.0).collect();
+    let rate_udf = Rate::scalar_udf();
+
+    for (range_ms, window) in [(300_000i64, "5m"), (3_600_000, "1h")] {
+        let time = RawTimestamps::try_new(timestamps.clone().into()).unwrap();
+        let chunk = RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(vec![0u8]),
+            Some(MetricName::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+            time,
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+                rising.clone(),
+            ))])
+            .unwrap(),
+            true,
+        )
+        .unwrap();
+        // The legacy input is built *after* the native case, not before both: a 1 h window holds
+        // 7 201 x 241 range indices (~1.7 M usizes), and holding that allocation alive during the
+        // native measurement would charge the native arm for allocator and cache pressure it does
+        // not cause.
+        group.bench_with_input(BenchmarkId::new("native/rate", window), &(), |b, _| {
+            b.iter(|| {
+                let mut evaluator = RangeEvaluator::try_new(
+                    &schema,
+                    grid.clone(),
+                    RangeWindow {
+                        range_ms,
+                        offset_ms: 0,
+                        anchor_ms: None,
+                    },
+                    RangeFunction::Rate,
+                )
+                .unwrap();
+                let series = evaluator.push(&chunk).unwrap();
+                evaluator.finish().unwrap();
+                series
+            })
+        });
+        // The UDF alone, with its input prepared outside the loop. This is what
+        // `ProjectionExec` pays, not what the whole legacy range-function path pays, so it is a
+        // lower bound rather than the number to compare against the evaluator.
+        let legacy = PreparedUdfCall::new(make_legacy_grid_input(&rising, GRID_POINTS, range_ms));
+        group.bench_with_input(
+            BenchmarkId::new("legacy_udf_only/rate", window),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&rate_udf, &legacy)),
+        );
+        drop(legacy);
+
+        // The legacy path's whole range-function cost: build the sliding ranges the way
+        // `PromRangeManipulate` does, then call the UDF. `RangeEvaluator::push` does both for the
+        // native arm -- it ingests raw samples and assembles each window -- so only this scope is
+        // comparable with the `native/` case above.
+        group.bench_with_input(BenchmarkId::new("legacy_full/rate", window), &(), |b, _| {
+            b.iter(|| {
+                let prepared =
+                    PreparedUdfCall::new(make_legacy_grid_input(&rising, GRID_POINTS, range_ms));
+                invoke_prepared(&rate_udf, &prepared)
+            })
+        });
+    }
+
+    group.finish();
+}
+
+/// The evaluator's per-sample work, isolated from its per-grid-point work.
+///
+/// `RangeEvaluator::push` copies every input sample into growable `Vec<i64>` / `Vec<f64>`, even
+/// though `RawSeriesChunk` hands it Arrow buffers it could keep. With a one-point grid the
+/// evaluation is a single window and the rest of the time is that copy, so this measures the
+/// cost per input sample on its own.
+///
+/// The comparison is against a path that reads the same Arrow buffer without copying it: the
+/// window times one sequential pass over the values, which is what a zero-copy evaluator would
+/// pay per sample. Both use the same input and the same grid.
+fn bench_ingest(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ingest");
+    const SAMPLES: usize = 200_000;
+    const SAMPLE_INTERVAL_MS: i64 = 15_000;
+
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: None,
+    });
+    // One grid point: every sample is ingested, almost none are evaluated.
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 1).unwrap()).unwrap());
+    let timestamps: Vec<i64> = (0..SAMPLES as i64)
+        .map(|k| k * SAMPLE_INTERVAL_MS)
+        .collect();
+    let values: Vec<f64> = (0..SAMPLES).map(|i| i as f64 * 15.0).collect();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0u8]),
+        Some(MetricName::try_new(Some(Arc::from("metric")), vec![]).unwrap()),
+        RawTimestamps::try_new(timestamps.clone().into()).unwrap(),
+        SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+            values.clone(),
+        ))])
+        .unwrap(),
+        true,
+    )
+    .unwrap();
+
+    group.bench_function(BenchmarkId::new("evaluator_push", SAMPLES), |b| {
+        b.iter(|| {
+            let mut evaluator = RangeEvaluator::try_new(
+                &schema,
+                grid.clone(),
+                RangeWindow {
+                    // A window covering the whole series, so nothing is dropped early and every
+                    // sample is retained.
+                    range_ms: SAMPLE_INTERVAL_MS * SAMPLES as i64,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                },
+                RangeFunction::PresentOverTime,
+            )
+            .unwrap();
+            let series = evaluator.push(&chunk).unwrap();
+            evaluator.finish().unwrap();
+            series
+        })
+    });
+
+    // The floor: what touching every sample costs when it is only read, not copied.
+    let arrow = Float64Array::from(values);
+    group.bench_function(BenchmarkId::new("read_only", SAMPLES), |b| {
+        b.iter(|| {
+            let mut sum = 0.0f64;
+            for index in 0..arrow.len() {
+                sum += arrow.value(index);
+            }
+            std::hint::black_box(sum)
+        })
+    });
+
+    // What `ingest` could cost if it kept the `Vec` representation -- which the contiguous
+    // `&[i64]` / `&[f64]` windows require -- but filled it in bulk instead of one sample at a
+    // time: two `extend_from_slice` copies plus one branchless pass rejecting stale markers
+    // before the copy. This is the achievable floor for a fast path that handles the dense,
+    // null-free, zero-offset shape and falls back to the current loop otherwise.
+    group.bench_function(BenchmarkId::new("bulk_copy", SAMPLES), |b| {
+        b.iter(|| {
+            let mut out_timestamps: Vec<i64> = Vec::with_capacity(arrow.len());
+            let mut out_values: Vec<f64> = Vec::with_capacity(arrow.len());
+            let stale = arrow
+                .values()
+                .iter()
+                .any(|value| common_query::prometheus::is_prometheus_stale_nan(*value));
+            if !stale {
+                out_timestamps.extend_from_slice(&timestamps);
+                out_values.extend_from_slice(arrow.values());
+            }
+            std::hint::black_box((out_timestamps, out_values))
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_native_range_eval,
+    bench_ingest,
+    bench_native_vs_legacy,
     bench_range_functions,
     bench_presence_range_functions,
     bench_delta_rate_comparison,
