@@ -24,8 +24,9 @@ use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridRange, TimeAxis};
 
-use super::float_histogram::FloatHistogram;
-use super::grid_range;
+use crate::grid_series::external;
+use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::histogram_eval::grid_range;
 
 /// A native histogram aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,32 +107,49 @@ fn aggregate_point<'a>(
     op: HistogramAggregate,
     samples: impl Iterator<Item = SampleRef<'a>>,
 ) -> Result<Option<FloatHistogram>> {
+    let mut has_float = false;
+    let mut histograms = samples.filter_map(|sample| match sample {
+        SampleRef::Missing => None,
+        SampleRef::Float(_) => {
+            has_float = true;
+            None
+        }
+        SampleRef::Histogram(view) => Some(FloatHistogram::try_from_view(&view)),
+    });
+    let value = sum_or_avg(op, histograms.by_ref())?;
+    // A fold stopped by mixed bucket kinds still reports conversion errors of later samples.
+    for histogram in histograms {
+        histogram?;
+    }
+    let Some(mut value) = value.filter(|_| !has_float) else {
+        return Ok(None);
+    };
+    value.compact();
+    Ok(Some(value))
+}
+
+/// The Kahan sum or the mean of `histograms` in order, without compaction; `None` when there is
+/// none or they mix exponential and custom buckets. Prometheus `sum_over_time` and
+/// `avg_over_time` run the same steps as the aggregations. Histograms are consumed one at a
+/// time, so the first error ends the fold.
+pub(crate) fn sum_or_avg(
+    op: HistogramAggregate,
+    histograms: impl IntoIterator<Item = Result<FloatHistogram>>,
+) -> Result<Option<FloatHistogram>> {
     let mut value: Option<FloatHistogram> = None;
     let mut compensation: Option<FloatHistogram> = None;
     let mut mean: Option<FloatHistogram> = None;
-    let (mut has_float, mut incompatible) = (false, false);
     let mut count = 0.0;
-    for sample in samples {
-        let h = match sample {
-            SampleRef::Missing => continue,
-            SampleRef::Float(_) => {
-                has_float = true;
-                continue;
-            }
-            SampleRef::Histogram(view) => FloatHistogram::try_from_view(&view)?,
-        };
+    for h in histograms {
+        let h = h?;
         count += 1.0;
         let Some(current) = value.as_mut() else {
             value = Some(h);
             continue;
         };
-        if incompatible {
-            continue;
-        }
-        // The only addition error Go's `handleAggregationError` absorbs; others propagate.
+        // Go drops the result with a warning for this addition error only; others propagate.
         if current.uses_custom_buckets() != h.uses_custom_buckets() {
-            incompatible = true;
-            continue;
+            return Ok(None);
         }
         match op {
             HistogramAggregate::Sum => {
@@ -171,9 +189,6 @@ fn aggregate_point<'a>(
     let Some(mut value) = value else {
         return Ok(None);
     };
-    if has_float || incompatible {
-        return Ok(None);
-    }
     match op {
         HistogramAggregate::Sum => {
             if let Some(c) = compensation {
@@ -196,10 +211,5 @@ fn aggregate_point<'a>(
             }
         },
     }
-    value.compact();
     Ok(Some(value))
-}
-
-fn external(error: datatypes::error::Error) -> DataFusionError {
-    DataFusionError::External(Box::new(error))
 }

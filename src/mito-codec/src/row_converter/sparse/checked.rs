@@ -67,24 +67,51 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
         if let Some(offset) = self.cache.get(column_id) {
             return encoded_label(&self.pk[offset..]).map(Some);
         }
-        while !self.cache.finished && self.cache.cursor < self.pk.len() {
-            let bytes = &self.pk[self.cache.cursor..];
-            let id = bytes.first_chunk::<COLUMN_ID_ENCODE_SIZE>().context(
-                InvalidSparsePrimaryKeySnafu {
-                    reason: "truncated label column id",
-                },
-            )?;
-            let id = u32::from_be_bytes(*id);
-            let offset = self.cache.cursor + COLUMN_ID_ENCODE_SIZE;
-            let value = encoded_label(&self.pk[offset..])?;
-            self.cache.insert(id, offset);
-            self.cache.cursor = offset + value.len();
+        while let Some((id, value)) = self.next_label()? {
             if id == column_id {
                 return Ok(Some(value));
             }
         }
-        self.cache.finished = true;
         Ok(None)
+    }
+
+    /// Visits every ordinary label id in encoded order, validating the complete tail.
+    /// Resets offset discovery for this key before traversing it.
+    pub fn visit_label_ids(&mut self, mut visit: impl FnMut(ColumnId) -> Result<()>) -> Result<()> {
+        self.cache.clear();
+        while let Some((id, _)) = self.next_label()? {
+            visit(id)?;
+        }
+        Ok(())
+    }
+
+    /// Parses and caches the next ordinary label, advancing the per-key cursor.
+    fn next_label(&mut self) -> Result<Option<(ColumnId, &'a [u8])>> {
+        if self.cache.finished || self.cache.cursor == self.pk.len() {
+            self.cache.finished = true;
+            return Ok(None);
+        }
+        let bytes = &self.pk[self.cache.cursor..];
+        let id =
+            bytes
+                .first_chunk::<COLUMN_ID_ENCODE_SIZE>()
+                .context(InvalidSparsePrimaryKeySnafu {
+                    reason: "truncated label column id",
+                })?;
+        let id = u32::from_be_bytes(*id);
+        let offset = self.cache.cursor + COLUMN_ID_ENCODE_SIZE;
+        ensure!(
+            id != RESERVED_COLUMN_ID_TABLE_ID
+                && id != RESERVED_COLUMN_ID_TSID
+                && self.cache.get(id).is_none(),
+            InvalidSparsePrimaryKeySnafu {
+                reason: "duplicate or reserved label column id"
+            }
+        );
+        let value = encoded_label(&self.pk[offset..])?;
+        self.cache.insert(id, offset);
+        self.cache.cursor = offset + value.len();
+        Ok(Some((id, value)))
     }
 
     /// Extracts a UTF-8 label into a reusable buffer, validating it once.
@@ -228,6 +255,144 @@ mod tests {
                 assert!(view.encoded_value(999).unwrap().is_none());
             }
         }
+    }
+
+    #[test]
+    fn visits_all_label_ids_in_order_and_resets_cache_for_each_key() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut cache = SparseOffsetsCache::new();
+        let mut first = Vec::new();
+        codec.encode_internal(1, 2, &mut first).unwrap();
+        codec
+            .encode_raw_tag_value(
+                [(8, b"a".as_slice()), (3, b"b"), (12, b"c")].into_iter(),
+                &mut first,
+            )
+            .unwrap();
+        let mut second = Vec::new();
+        codec.encode_internal(1, 2, &mut second).unwrap();
+        codec
+            .encode_raw_tag_value([(99, b"z".as_slice())].into_iter(), &mut second)
+            .unwrap();
+
+        let mut view = SparsePrimaryKeyView::new(&first, &mut cache).unwrap();
+        assert!(view.encoded_value(8).unwrap().is_some());
+        let mut visited = Vec::new();
+        view.visit_label_ids(|id| {
+            visited.push(id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visited, [8, 3, 12]);
+        let mut view = SparsePrimaryKeyView::new(&second, &mut cache).unwrap();
+        visited.clear();
+        view.visit_label_ids(|id| {
+            visited.push(id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visited, [99]);
+    }
+
+    #[test]
+    fn visits_unknown_ids_before_and_after_known_lookup() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut pk = Vec::new();
+        codec.encode_internal(1, 2, &mut pk).unwrap();
+        codec
+            .encode_raw_tag_value(
+                [(1, b"one".as_slice()), (5, b"five"), (9, b"nine")].into_iter(),
+                &mut pk,
+            )
+            .unwrap();
+        let mut cache = SparseOffsetsCache::new();
+        let mut view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+        assert!(view.encoded_value(5).unwrap().is_some());
+        let mut visited = Vec::new();
+        view.visit_label_ids(|id| {
+            visited.push(id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visited, [1, 5, 9]);
+        assert!(view.encoded_value(100).unwrap().is_none());
+    }
+
+    #[test]
+    fn full_visit_catches_malformed_tail_after_early_lookup() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut pk = Vec::new();
+        codec.encode_internal(1, 2, &mut pk).unwrap();
+        codec
+            .encode_raw_tag_value([(1, b"ok".as_slice())].into_iter(), &mut pk)
+            .unwrap();
+        pk.extend_from_slice(&2_u32.to_be_bytes());
+        pk.extend_from_slice(&[1, 1, 1]);
+        let mut cache = SparseOffsetsCache::new();
+        let mut view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+        assert!(view.encoded_value(1).unwrap().is_some());
+        assert!(view.visit_label_ids(|_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn visit_rejects_duplicate_reserved_truncated_and_bad_framing_tail() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut cache = SparseOffsetsCache::new();
+        let mut duplicate_tail = Vec::new();
+        codec
+            .encode_raw_tag_value(
+                [(1, b"duplicate".as_slice())].into_iter(),
+                &mut duplicate_tail,
+            )
+            .unwrap();
+        let cases = [
+            (duplicate_tail, "duplicate or reserved label column id"),
+            (
+                [
+                    RESERVED_COLUMN_ID_TABLE_ID.to_be_bytes().as_slice(),
+                    &[1, 1, b'x', 0],
+                ]
+                .concat(),
+                "duplicate or reserved label column id",
+            ),
+            (
+                [
+                    RESERVED_COLUMN_ID_TSID.to_be_bytes().as_slice(),
+                    &[1, 1, b'x', 0],
+                ]
+                .concat(),
+                "duplicate or reserved label column id",
+            ),
+            (
+                [2_u32.to_be_bytes().as_slice(), &[1, 1, b'x']].concat(),
+                "unexpected end of input",
+            ),
+            (
+                [2_u32.to_be_bytes().as_slice(), &[2]].concat(),
+                "invalid tag encoding: 2",
+            ),
+        ];
+        for (tail, expected_reason) in cases {
+            let mut pk = Vec::new();
+            codec.encode_internal(1, 2, &mut pk).unwrap();
+            codec
+                .encode_raw_tag_value([(1, b"ok".as_slice())].into_iter(), &mut pk)
+                .unwrap();
+            pk.extend_from_slice(&tail);
+            let mut view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+            let error = view.visit_label_ids(|_| Ok(())).unwrap_err();
+            assert!(
+                error.to_string().contains(expected_reason),
+                "expected {expected_reason:?}, got {error}"
+            );
+        }
+
+        let mut truncated_id = Vec::new();
+        codec.encode_internal(1, 2, &mut truncated_id).unwrap();
+        truncated_id.push(1);
+        let mut view = SparsePrimaryKeyView::new(&truncated_id, &mut cache).unwrap();
+        let error = view.visit_label_ids(|_| Ok(())).unwrap_err();
+        assert!(error.to_string().contains("truncated label column id"));
     }
 
     #[test]

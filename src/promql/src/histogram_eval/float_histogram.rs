@@ -26,7 +26,8 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
 
-use super::native::{CUSTOM_BUCKETS_SCHEMA, bound, kahan_inc};
+use crate::functions::kahan_inc;
+use crate::histogram_eval::native::{CUSTOM_BUCKETS_SCHEMA, bound};
 
 type Buckets = Vec<(i32, f64)>;
 
@@ -117,6 +118,23 @@ impl FloatHistogram {
                 },
             })
             .map_err(|error| DataFusionError::External(Box::new(error)))
+    }
+
+    /// A histogram with no observations and the bucket layout of `self`, like Go's
+    /// `&FloatHistogram{Schema: h.Schema, CustomValues: h.CustomValues}`.
+    pub(crate) fn empty_like(&self) -> Self {
+        Self {
+            reset_hint: CounterResetHint::Unknown,
+            schema: self.schema,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: 0.0,
+            sum: 0.0,
+            positive: Vec::new(),
+            negative: Vec::new(),
+            custom_values: self.custom_values.clone(),
+            layout: None,
+        }
     }
 
     pub(crate) fn uses_custom_buckets(&self) -> bool {

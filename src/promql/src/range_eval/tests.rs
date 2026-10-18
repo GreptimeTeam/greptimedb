@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -28,9 +29,9 @@ use datatypes::series::histogram::{
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -41,9 +42,13 @@ use crate::functions::{
 };
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
-    Dense, assert_series_eq, assert_series_eq_any_nan, random_dense, special_value,
+    Dense, GoldenCase, OwnedHistogram, assert_histogram_close, assert_series_eq,
+    assert_series_eq_any_nan, close, golden_cases, labels_of, metric_of, mixed_series,
+    random_dense, special_value,
 };
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::range_array::RangeArray;
+use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
 /// One raw row: source timestamp and a value per field, `None` when missing.
 type Row = (i64, Vec<Option<f64>>);
@@ -63,10 +68,6 @@ fn probe(window: FloatWindow<'_>) -> Option<f64> {
         mix(value.to_bits());
     }
     Some((hash >> 11) as f64)
-}
-
-fn sum(window: FloatWindow<'_>) -> Option<f64> {
-    Some(window.values.iter().sum())
 }
 
 fn raw_schema(fields: usize) -> SeriesSchema {
@@ -111,7 +112,6 @@ fn per_point_probe_evaluator(
     RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, false).unwrap()
 }
 
-/// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
 /// The metric of a result of `function` over the series of `metric(host)`.
 fn output_metric(function: RangeFunction, host: u64) -> MetricName {
     let mut metric = metric(host);
@@ -121,6 +121,7 @@ fn output_metric(function: RangeFunction, host: u64) -> MetricName {
     metric
 }
 
+/// Builds a chunk whose timestamp and value arrays are slices at a nonzero offset.
 fn chunk(rows: &[Row], fields: usize, host: u64, is_last: bool) -> RawSeriesChunk {
     let padding = 3;
     let timestamps: Vec<_> = (0..padding)
@@ -485,25 +486,6 @@ fn functions_match_range_udfs() {
 }
 
 #[test]
-fn overlapping_window_spans_chunks() {
-    let window = RangeWindow {
-        range_ms: 15,
-        offset_ms: 0,
-        anchor_ms: None,
-    };
-    let kernel: WindowKernel = Box::new(sum);
-    let mut evaluator =
-        RangeEvaluator::with_kernel(&raw_schema(1), grid(10, 10, 3), window, kernel, true).unwrap();
-    let first = chunk(&[(5, vec![Some(1.0)]), (12, vec![Some(2.0)])], 1, 0, false);
-    let second = chunk(&[(18, vec![Some(4.0)]), (25, vec![Some(8.0)])], 1, 0, true);
-    assert!(evaluator.push(&first).unwrap().is_none());
-    let series = evaluator.push(&second).unwrap();
-    // Windows (-5, 10], (5, 20] and (15, 30].
-    let expected = vec![vec![Some(1.0)], vec![Some(6.0)], vec![Some(12.0)]];
-    assert_series_eq(series.as_ref(), &expected, &metric(0));
-}
-
-#[test]
 fn empty_input_and_series_without_results() {
     let window = RangeWindow {
         range_ms: 10,
@@ -634,30 +616,33 @@ fn offset_overflow_fails_unless_the_sample_is_stale() {
 }
 
 #[test]
-fn rejects_histogram_samples() {
+fn histogram_samples_need_a_function_and_drop_stale_markers() {
     let empty = BucketSideView {
         span_offsets: &[],
         span_lengths: &[],
         buckets: &[],
     };
     let mut builder = HistogramBatchBuilder::new();
-    builder
-        .push(HistogramView {
-            schema: 0,
-            zero_threshold: 0.0,
-            sum: 1.0,
-            count: 1.0,
-            zero_count: 1.0,
-            reset_hint: CounterResetHint::Unknown,
-            start_timestamp: None,
-            custom_values: &[],
-            positive: empty,
-            negative: empty,
-        })
-        .unwrap();
+    for sum in [1.0, stale()] {
+        builder
+            .push(HistogramView {
+                schema: 0,
+                zero_threshold: 0.0,
+                sum,
+                count: 1.0,
+                zero_count: 1.0,
+                reset_hint: CounterResetHint::Unknown,
+                start_timestamp: None,
+                custom_values: &[],
+                positive: empty,
+                negative: empty,
+            })
+            .unwrap();
+    }
     let histograms =
-        Samples::try_from_histogram(UInt32Array::from(vec![0]), builder.finish().unwrap()).unwrap();
-    let mut piece = chunk(&[(1, vec![Some(1.0)])], 1, 0, true);
+        Samples::try_from_histogram(UInt32Array::from(vec![0, 1]), builder.finish().unwrap())
+            .unwrap();
+    let mut piece = chunk(&[(1, vec![Some(1.0)]), (2, vec![Some(1.0)])], 1, 0, true);
     piece.fields = SeriesFields::one(histograms);
 
     let window = RangeWindow {
@@ -668,6 +653,19 @@ fn rejects_histogram_samples() {
     assert!(matches!(
         probe_evaluator(1, grid(0, 10, 4), window).push(&piece),
         Err(DataFusionError::NotImplemented(_))
+    ));
+    // A histogram whose sum is the stale marker ends the series like a stale float.
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(2, 10, 1),
+        window,
+        RangeFunction::CountOverTime,
+    )
+    .unwrap();
+    let series = evaluator.push(&piece).unwrap().unwrap();
+    assert!(matches!(
+        series.fields.as_slice()[0].sample(0),
+        SampleRef::Float(count) if count == 1.0
     ));
 }
 
@@ -807,6 +805,42 @@ fn rejects_input_of_the_other_kind() {
     execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
 }
 
+/// The range function a golden fixture names, with its constant arguments.
+fn range_function(name: &str, params: &[f64]) -> RangeFunction {
+    match name {
+        "rate" => RangeFunction::Rate,
+        "increase" => RangeFunction::Increase,
+        "delta" => RangeFunction::Delta,
+        "irate" => RangeFunction::Irate,
+        "idelta" => RangeFunction::Idelta,
+        "avg_over_time" => RangeFunction::AvgOverTime,
+        "min_over_time" => RangeFunction::MinOverTime,
+        "max_over_time" => RangeFunction::MaxOverTime,
+        "sum_over_time" => RangeFunction::SumOverTime,
+        "count_over_time" => RangeFunction::CountOverTime,
+        "last_over_time" => RangeFunction::LastOverTime,
+        "present_over_time" => RangeFunction::PresentOverTime,
+        "stddev_over_time" => RangeFunction::StddevOverTime,
+        "stdvar_over_time" => RangeFunction::StdvarOverTime,
+        "quantile_over_time" => RangeFunction::QuantileOverTime(params[0]),
+        "resets" => RangeFunction::Resets,
+        "changes" => RangeFunction::Changes,
+        "deriv" => RangeFunction::Deriv,
+        "predict_linear" => RangeFunction::PredictLinear(params[0]),
+        "double_exponential_smoothing" => RangeFunction::DoubleExponentialSmoothing {
+            smoothing: params[0],
+            trend: params[1],
+        },
+        "first_over_time" => RangeFunction::FirstOverTime,
+        "mad_over_time" => RangeFunction::MadOverTime,
+        "ts_of_first_over_time" => RangeFunction::TsOfFirstOverTime,
+        "ts_of_last_over_time" => RangeFunction::TsOfLastOverTime,
+        "ts_of_min_over_time" => RangeFunction::TsOfMinOverTime,
+        "ts_of_max_over_time" => RangeFunction::TsOfMaxOverTime,
+        other => panic!("unknown function {other}"),
+    }
+}
+
 /// Range functions evaluated by the Prometheus v3.15.0 engine over random single series; see
 /// the header of `prometheus_cases.txt`.
 #[test]
@@ -840,38 +874,7 @@ fn range_functions_match_prometheus() {
             "-" => Vec::new(),
             params => params.split(',').map(|p| p.parse().unwrap()).collect(),
         };
-        let function = match header[0] {
-            "rate" => RangeFunction::Rate,
-            "increase" => RangeFunction::Increase,
-            "delta" => RangeFunction::Delta,
-            "irate" => RangeFunction::Irate,
-            "idelta" => RangeFunction::Idelta,
-            "avg_over_time" => RangeFunction::AvgOverTime,
-            "min_over_time" => RangeFunction::MinOverTime,
-            "max_over_time" => RangeFunction::MaxOverTime,
-            "sum_over_time" => RangeFunction::SumOverTime,
-            "count_over_time" => RangeFunction::CountOverTime,
-            "last_over_time" => RangeFunction::LastOverTime,
-            "present_over_time" => RangeFunction::PresentOverTime,
-            "stddev_over_time" => RangeFunction::StddevOverTime,
-            "stdvar_over_time" => RangeFunction::StdvarOverTime,
-            "quantile_over_time" => RangeFunction::QuantileOverTime(params[0]),
-            "resets" => RangeFunction::Resets,
-            "changes" => RangeFunction::Changes,
-            "deriv" => RangeFunction::Deriv,
-            "predict_linear" => RangeFunction::PredictLinear(params[0]),
-            "double_exponential_smoothing" => RangeFunction::DoubleExponentialSmoothing {
-                smoothing: params[0],
-                trend: params[1],
-            },
-            "first_over_time" => RangeFunction::FirstOverTime,
-            "mad_over_time" => RangeFunction::MadOverTime,
-            "ts_of_first_over_time" => RangeFunction::TsOfFirstOverTime,
-            "ts_of_last_over_time" => RangeFunction::TsOfLastOverTime,
-            "ts_of_min_over_time" => RangeFunction::TsOfMinOverTime,
-            "ts_of_max_over_time" => RangeFunction::TsOfMaxOverTime,
-            other => panic!("unknown function {other}"),
-        };
+        let function = range_function(header[0], &params);
         let numbers: Vec<i64> = header[2..].iter().map(|n| n.parse().unwrap()).collect();
         let anchor_ms = numbers.get(5).copied();
         let [range_ms, offset_ms, start_ms, step_ms, points] = numbers[..5] else {
@@ -1067,30 +1070,59 @@ fn ts_of_last_over_time_reports_zero_for_negative_timestamps() {
     }
 }
 
-/// Equal values keep window order in `quantile_over_time`, so the zero a quantile lands on is
-/// the one Prometheus picks: `1 / quantile_over_time(1, m[3s])` over +0, -0, -0 is -Inf.
+/// `quantile_over_time` sorts the window as Go's `sort.Sort` does, so the zero a rank lands on,
+/// and the sign of the result, match Prometheus over windows longer than its insertion sort.
 #[test]
-fn quantile_keeps_the_window_order_of_signed_zeros() {
+fn quantile_picks_the_signed_zero_go_picks() {
     let window = RangeWindow {
-        range_ms: 3_000,
+        range_ms: 20_000,
         offset_ms: 0,
         anchor_ms: None,
     };
-    let rows: Vec<Row> = [(0, 0.0), (1_000, -0.0), (2_000, -0.0)]
-        .map(|(ts, value)| (ts, vec![Some(value)]))
-        .to_vec();
-    let mut evaluator = RangeEvaluator::try_new(
-        &raw_schema(1),
-        grid(2_000, 1_000, 1),
-        window,
-        RangeFunction::QuantileOverTime(1.0),
-    )
-    .unwrap();
-    let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
-    let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
-        panic!("expected a float");
-    };
-    assert_eq!(1.0 / value, f64::NEG_INFINITY);
+    let (z, n) = (0.0, -0.0);
+    let values = [
+        z,
+        n,
+        n,
+        z,
+        1.0,
+        n,
+        z,
+        z,
+        n,
+        f64::NAN,
+        n,
+        z,
+        -1.0,
+        z,
+        n,
+        n,
+        z,
+        2.0,
+        n,
+        z,
+    ];
+    let rows: Vec<Row> = values
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| (i as i64 * 1_000, vec![Some(value)]))
+        .collect();
+    // Go's `sort.Sort` on amd64 gives a negative quantile for q = k / 19 only at these k.
+    let go_negative = |k: i32| matches!(k, 1 | 8 | 14);
+    for k in 1..=19 {
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid(19_000, 1_000, 1),
+            window,
+            RangeFunction::QuantileOverTime(f64::from(k) / 19.0),
+        )
+        .unwrap();
+        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
+            panic!("expected a float");
+        };
+        assert_eq!(value.is_sign_negative(), go_negative(k), "k = {k}: {value}");
+    }
 }
 
 /// Chunks after the last grid point are only validated, so nothing accumulates and the outcome
@@ -1180,5 +1212,311 @@ fn rejects_a_subquery_grid_longer_than_u64() {
     assert!(matches!(
         subquery_grid(outer, window, 1),
         Err(DataFusionError::Plan(_))
+    ));
+}
+
+/// An anchored window that ends before the series starts skips past the one point it reads;
+/// later chunks must not pile up either.
+#[test]
+fn anchored_window_before_the_series_retains_nothing() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: Some(5),
+    };
+    let mut evaluator = probe_evaluator(1, grid(100, 10, 3), window);
+    for chunk_index in 0..100 {
+        let rows: Vec<Row> = (0..100)
+            .map(|row| (50 + chunk_index * 100 + row, vec![Some(1.0)]))
+            .collect();
+        evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
+        assert!(evaluator.fields[0].timestamps.len() <= 100);
+    }
+}
+
+/// `absent_over_time(v[r])` is `absent` over the series of `present_over_time(v[r])`, with the
+/// labels derived from the selector's matchers. Checked against 120 cases from the Prometheus
+/// v3.15.0 engine (`absent_over_time_cases.txt`, promql-compat `cmd/narthex-golden-vector
+/// -absent-over-time`); samples sit on grid points.
+#[test]
+fn absent_over_time_is_absent_over_present_over_time() {
+    let text = include_str!("absent_over_time_cases.txt");
+    let mut checked = 0;
+    for case in text.split("end\n").filter(|case| case.contains("case ")) {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let spec: Vec<&str> = lines[0].split_whitespace().collect();
+        let range_ms: i64 = spec[2].parse().unwrap();
+        let matchers: Vec<LabelMatcher> = spec[3]
+            .split(',')
+            .filter(|matcher| *matcher != "-")
+            .map(|matcher| {
+                let (name, op, value) = match matcher.split_once("!=") {
+                    Some((name, value)) => (name, MatchOp::NotEqual, value),
+                    None => {
+                        let (name, value) = matcher.split_once('=').unwrap();
+                        (name, MatchOp::Equal, value)
+                    }
+                };
+                let value = value.trim_matches('"');
+                LabelMatcher {
+                    name: Arc::from(name),
+                    op,
+                    value: Arc::from(value),
+                    matches_empty: (op == MatchOp::Equal) == value.is_empty(),
+                }
+            })
+            .collect();
+        let grid_spec: Vec<i64> = lines[1]
+            .split_whitespace()
+            .skip(1)
+            .map(|field| field.parse().unwrap())
+            .collect();
+        let grid = grid(grid_spec[0], grid_spec[1], grid_spec[2] as u64);
+        let window = RangeWindow {
+            range_ms,
+            offset_ms: 0,
+            anchor_ms: None,
+        };
+        let mut present = Vec::new();
+        let mut expected = None;
+        for (host, line) in lines[2..].iter().enumerate() {
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (labels, points) = rest.split_once(" ;").unwrap();
+            let points: Vec<(i64, f64)> = points
+                .split_whitespace()
+                .map(|point| {
+                    let (index, bits) = point.split_once(':').unwrap();
+                    let ts = grid_spec[0] + index.parse::<i64>().unwrap() * grid_spec[1];
+                    (ts, f64::from_bits(u64::from_str_radix(bits, 16).unwrap()))
+                })
+                .collect();
+            if kind == "result" {
+                let mut dense = vec![vec![None]; grid_spec[2] as usize];
+                for (ts, value) in points {
+                    dense[((ts - grid_spec[0]) / grid_spec[1]) as usize][0] = Some(value);
+                }
+                let labels = labels
+                    .split(',')
+                    .filter(|pair| *pair != "-")
+                    .map(|pair| {
+                        let (name, value) = pair.split_once('=').unwrap();
+                        (name.to_string(), value.to_string())
+                    })
+                    .collect();
+                expected = Some((dense, metric_of(&labels)));
+                continue;
+            }
+            let selected = matchers.iter().all(|matcher| {
+                let value = labels
+                    .split(',')
+                    .find_map(|pair| pair.strip_prefix(&format!("{}=", matcher.name)))
+                    .unwrap_or("");
+                (value == &*matcher.value) == (matcher.op == MatchOp::Equal)
+            });
+            if !selected || points.is_empty() {
+                continue;
+            }
+            let rows: Vec<Row> = points
+                .into_iter()
+                .map(|(ts, value)| (ts, vec![Some(value)]))
+                .collect();
+            let mut evaluator = RangeEvaluator::try_new(
+                &raw_schema(1),
+                grid.clone(),
+                window,
+                RangeFunction::PresentOverTime,
+            )
+            .unwrap();
+            present.extend(evaluator.push(&chunk(&rows, 1, host as u64, true)).unwrap());
+        }
+        let schema = SeriesSchema {
+            fields: raw_schema(1).fields,
+            eval_grid: Some(grid.clone()),
+        };
+        let actual = absent(&schema, &present, absent_labels(&matchers).unwrap()).unwrap();
+        let (expected, labels) = expected.unwrap_or_else(|| {
+            let none = MetricName::try_new(None, Vec::new()).unwrap();
+            (vec![vec![None]; grid_spec[2] as usize], none)
+        });
+        assert_series_eq(actual.as_ref(), &expected, &labels);
+        checked += 1;
+    }
+    assert_eq!(checked, 120);
+}
+
+/// One series of a golden case as raw chunks of float and histogram samples: a single chunk, or
+/// with `split` one chunk per sample.
+fn mixed_chunks(case: &GoldenCase, index: usize, split: bool) -> Vec<RawSeriesChunk> {
+    let (labels, floats) = &case.inputs[index];
+    let texts = &case.histograms[index];
+    let points: Vec<usize> = floats
+        .keys()
+        .chain(texts.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let groups: Vec<&[usize]> = if split {
+        points.chunks(1).collect()
+    } else {
+        vec![&points[..]]
+    };
+    let spec = case.grid.spec();
+    let count = groups.len();
+    groups
+        .into_iter()
+        .filter(|group| !group.is_empty())
+        .enumerate()
+        .map(|(position, group)| {
+            let timestamps: Vec<i64> = group
+                .iter()
+                .map(|&point| spec.start_ms + point as i64 * spec.step_ms)
+                .collect();
+            let values: Float64Array = group
+                .iter()
+                .map(|point| floats.get(point).map(|bits| f64::from_bits(*bits)))
+                .collect();
+            let mut builder = HistogramBatchBuilder::new();
+            let indices: UInt32Array = group
+                .iter()
+                .map(|point| {
+                    let text = texts.get(point)?;
+                    Some(builder.push(OwnedHistogram::parse(text).view()).unwrap())
+                })
+                .collect();
+            let histograms = HistogramSamples::try_new(indices, builder.finish().unwrap()).unwrap();
+            RawSeriesChunk::try_new(
+                &raw_schema(1),
+                Buffer::from((index as u64).to_le_bytes().to_vec()),
+                Some(metric_of(labels)),
+                RawTimestamps::try_new(ScalarBuffer::from(timestamps)).unwrap(),
+                SeriesFields::try_from_vec(vec![
+                    Samples::try_from_mixed(values, histograms).unwrap(),
+                ])
+                .unwrap(),
+                position + 1 == count,
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// Range functions over series mixing floats and native histograms, evaluated by the Prometheus
+/// v3.15.0 engine (`histogram_cases.txt`, promql-compat `cmd/narthex-golden-native -range`).
+/// Values compare within the promql-compat tolerance; histograms bucket by bucket.
+#[test]
+fn histogram_range_functions_match_prometheus() {
+    let (mut floats_checked, mut histograms_checked) = (0, 0);
+    for case in golden_cases(include_str!("histogram_cases.txt")) {
+        let name = case.spec[0].as_str();
+        let function = range_function(name, &[0.5, 0.5]);
+        let function = match function {
+            RangeFunction::PredictLinear(_) => RangeFunction::PredictLinear(10.0),
+            other => other,
+        };
+        let epsilon = match function {
+            RangeFunction::Deriv
+            | RangeFunction::PredictLinear(_)
+            | RangeFunction::StddevOverTime
+            | RangeFunction::StdvarOverTime => 1e-6,
+            _ => 1e-10,
+        };
+        let window = RangeWindow {
+            range_ms: case.spec[1].parse().unwrap(),
+            offset_ms: case.spec[2].parse().unwrap(),
+            anchor_ms: None,
+        };
+        // One chunk per sample also checks that histograms survive across chunks.
+        for split in [false, true] {
+            let mut actual = BTreeMap::new();
+            for index in 0..case.inputs.len() {
+                let mut evaluator =
+                    RangeEvaluator::try_new(&raw_schema(1), case.grid.clone(), window, function)
+                        .unwrap();
+                for chunk in mixed_chunks(&case, index, split) {
+                    if let Some(series) = evaluator.push(&chunk).unwrap() {
+                        actual.insert(labels_of(&series.metric), series);
+                    }
+                }
+            }
+            let expected = case.outcome.as_ref().unwrap();
+            let context = format!("{:?} split {split}", case.spec);
+            assert_eq!(
+                actual.keys().collect::<Vec<_>>(),
+                expected.keys().collect::<Vec<_>>(),
+                "{context}"
+            );
+            for (labels, series) in &actual {
+                let TimeAxis::Grid(range) = &series.time else {
+                    panic!("expected a grid series");
+                };
+                let floats = &expected[labels];
+                let no_histograms = BTreeMap::new();
+                let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
+                let mut points = 0;
+                for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
+                    let point = range.start() + row;
+                    match sample {
+                        SampleRef::Missing => continue,
+                        SampleRef::Float(value) => {
+                            let want = f64::from_bits(floats[&point]);
+                            assert!(
+                                close(value, want, epsilon),
+                                "{context} at {point}: {value} vs {want}"
+                            );
+                            floats_checked += 1;
+                        }
+                        SampleRef::Histogram(view) => {
+                            let got = FloatHistogram::try_from_view(&view).unwrap();
+                            let want = FloatHistogram::try_from_view(
+                                &OwnedHistogram::parse(&texts[&point]).view(),
+                            )
+                            .unwrap();
+                            assert_histogram_close(
+                                &got,
+                                &want,
+                                epsilon,
+                                &format!("{context} at {point}"),
+                            );
+                            histograms_checked += 1;
+                        }
+                    }
+                    points += 1;
+                }
+                assert_eq!(points, floats.len() + texts.len(), "{context}");
+            }
+        }
+    }
+    assert!(
+        floats_checked > 500 && histograms_checked > 150,
+        "{floats_checked} floats, {histograms_checked} histograms"
+    );
+}
+
+/// Prometheus clears explicit counter reset hints of subquery results, which describe the raw
+/// neighbours of a sample: the same `CounterReset` histogram repeated at two evaluated points
+/// is no reset.
+#[test]
+fn evaluated_histograms_drop_counter_reset_hints() {
+    let inner = grid(0, 10, 2);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(inner),
+    });
+    let reset = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+    let histograms = BTreeMap::from([(0, reset.to_string()), (1, reset.to_string())]);
+    let labels = BTreeMap::from([("job".to_string(), "x".to_string())]);
+    let series = mixed_series(&schema, &labels, &BTreeMap::new(), &histograms).unwrap();
+    let window = RangeWindow {
+        range_ms: 30,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator =
+        RangeEvaluator::try_new(&schema, grid(10, 10, 1), window, RangeFunction::Resets).unwrap();
+    let result = evaluator.push_series(&series).unwrap().unwrap();
+    assert!(matches!(
+        result.fields.as_slice()[0].sample(0),
+        SampleRef::Float(resets) if resets == 0.0
     ));
 }

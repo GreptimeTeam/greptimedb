@@ -12,26 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Building evaluated float series that cover only their result range on a shared grid.
+//! Building evaluated series that cover only their result range on a shared grid.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
-use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::array::builder::NullBufferBuilder;
+use datafusion::arrow::array::{Float64Array, UInt32Array};
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::histogram::HistogramBatchBuilder;
+use datatypes::series::samples::{
+    HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::{EvalGrid, GridRange, TimeAxis};
+
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 #[cfg(test)]
 pub(crate) mod reference;
 #[cfg(test)]
 mod tests;
 
-/// Builds one float series on the schema's evaluation grid from rows pushed at absolute grid
-/// indices.
+/// Builds one series on the schema's evaluation grid from rows pushed at absolute grid indices.
 ///
 /// The output starts at the first row with a valid value in any field and ends at the last such
 /// row, so a short-lived series never holds values for the whole grid. Missing rows between
@@ -51,7 +55,23 @@ pub struct GridSeriesBuilder {
 struct FieldBuilder {
     values: Vec<f64>,
     nulls: NullBufferBuilder,
+    /// Created at the first histogram value; holds an index per row from then on.
+    histograms: Option<HistogramColumn>,
 }
+
+struct HistogramColumn {
+    batch: HistogramBatchBuilder,
+    indices: Vec<Option<u32>>,
+}
+
+/// A value of [`GridSeriesBuilder::push_samples`].
+pub(crate) enum GridSample {
+    Float(f64),
+    /// Boxed so that buffered float results stay as small as `Option<f64>`.
+    Histogram(Box<FloatHistogram>),
+}
+
+const _: () = assert!(std::mem::size_of::<Option<GridSample>>() == 16);
 
 impl GridSeriesBuilder {
     /// Creates a builder for series of `schema`, which must have an evaluation grid.
@@ -73,10 +93,48 @@ impl GridSeriesBuilder {
     ///
     /// Indices must be strictly increasing; skipped indices are missing rows.
     pub fn push(&mut self, index: usize, values: &[Option<f64>]) -> Result<()> {
-        if values.len() != self.schema.fields.len() {
+        if !self.start_row(index, values.len(), values.iter().all(Option::is_none))? {
+            return Ok(());
+        }
+        for (field, value) in self.fields.iter_mut().zip(values) {
+            field.push_float(*value);
+        }
+        Ok(())
+    }
+
+    /// Like [`GridSeriesBuilder::push`], with native histogram values.
+    pub(crate) fn push_samples(
+        &mut self,
+        index: usize,
+        values: &[Option<GridSample>],
+    ) -> Result<()> {
+        if !self.start_row(index, values.len(), values.iter().all(Option::is_none))? {
+            return Ok(());
+        }
+        for (field, value) in self.fields.iter_mut().zip(values) {
+            match value {
+                Some(GridSample::Histogram(h)) => {
+                    field.values.push(0.0);
+                    field.nulls.append(false);
+                    let rows = field.values.len() - 1;
+                    let column = field.histograms.get_or_insert_with(|| HistogramColumn {
+                        batch: HistogramBatchBuilder::new(),
+                        indices: vec![None; rows],
+                    });
+                    column.indices.push(Some(h.push_to(&mut column.batch)?));
+                }
+                Some(GridSample::Float(value)) => field.push_float(Some(*value)),
+                None => field.push_float(None),
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks the row and pads the gap before it; returns whether the row has a value to write.
+    fn start_row(&mut self, index: usize, len: usize, empty: bool) -> Result<bool> {
+        if len != self.schema.fields.len() {
             return Err(DataFusionError::Execution(format!(
-                "grid series row has {} fields, schema has {}",
-                values.len(),
+                "grid series row has {len} fields, schema has {}",
                 self.schema.fields.len()
             )));
         }
@@ -87,17 +145,17 @@ impl GridSeriesBuilder {
             )));
         }
         self.next = index + 1;
-        if values.iter().all(Option::is_none) {
-            return Ok(());
+        if empty {
+            return Ok(false);
         }
 
         if self.start.is_none() {
             self.start = Some(index);
-            self.fields = values
-                .iter()
+            self.fields = (0..len)
                 .map(|_| FieldBuilder {
                     values: Vec::new(),
                     nulls: NullBufferBuilder::new(0),
+                    histograms: None,
                 })
                 .collect();
         } else {
@@ -105,14 +163,13 @@ impl GridSeriesBuilder {
             for field in &mut self.fields {
                 field.values.resize(field.values.len() + gap, 0.0);
                 field.nulls.append_n_nulls(gap);
+                if let Some(column) = &mut field.histograms {
+                    column.indices.resize(column.indices.len() + gap, None);
+                }
             }
         }
-        for (field, value) in self.fields.iter_mut().zip(values) {
-            field.values.push(value.unwrap_or_default());
-            field.nulls.append(value.is_some());
-        }
         self.valid_end = index + 1;
-        Ok(())
+        Ok(true)
     }
 
     /// Finishes the current series and resets the builder for the next one.
@@ -130,9 +187,17 @@ impl GridSeriesBuilder {
         let samples = fields
             .into_iter()
             .map(|mut field| {
-                Samples::from_float(Float64Array::new(field.values.into(), field.nulls.finish()))
+                let floats = Float64Array::new(field.values.into(), field.nulls.finish());
+                let Some(column) = field.histograms else {
+                    return Ok(Samples::from_float(floats));
+                };
+                let batch = column.batch.finish().map_err(external)?;
+                let histograms =
+                    HistogramSamples::try_new(UInt32Array::from(column.indices), batch)
+                        .map_err(external)?;
+                Samples::try_from_mixed(floats, histograms).map_err(external)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let time =
             GridRange::try_new(self.grid.clone(), start, valid_end - start).map_err(external)?;
         let fields = SeriesFields::try_from_vec(samples).map_err(external)?;
@@ -141,6 +206,19 @@ impl GridSeriesBuilder {
             .map_err(external)
     }
 }
+
+impl FieldBuilder {
+    fn push_float(&mut self, value: Option<f64>) {
+        self.values.push(value.unwrap_or_default());
+        self.nulls.append(value.is_some());
+        if let Some(column) = &mut self.histograms {
+            column.indices.push(None);
+        }
+    }
+}
+
+/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
+pub(crate) const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 pub(crate) type LabelSet = Vec<(Arc<str>, Arc<str>)>;
 
@@ -260,6 +338,6 @@ fn read_row(series: &Series, row: usize, values: &mut [Option<f64>]) -> Result<b
     Ok(present)
 }
 
-fn external(error: datatypes::error::Error) -> DataFusionError {
+pub(crate) fn external(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
 }

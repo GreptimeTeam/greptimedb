@@ -18,7 +18,8 @@
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::histogram::{BucketSideView, HistogramView};
 
-use super::bounds::EXPONENTIAL_BOUNDS;
+use crate::functions::kahan_inc;
+use crate::histogram_eval::bounds::EXPONENTIAL_BOUNDS;
 
 pub(super) const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 
@@ -379,20 +380,6 @@ pub(super) fn variance(h: &HistogramView<'_>, buckets: &mut Vec<NativeBucket>) -
         (variance, compensation) = kahan_inc(bucket.count * delta * delta, variance, compensation);
     }
     Ok((variance + compensation) / h.count)
-}
-
-/// Prometheus `kahansum.Inc`.
-pub(super) fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
-    let t = sum + inc;
-    if t.is_infinite() {
-        return (t, 0.0);
-    }
-    let c = if sum.abs() >= inc.abs() {
-        c + ((sum - t) + inc)
-    } else {
-        c + ((inc - t) + sum)
-    };
-    (t, c)
 }
 
 #[cfg(test)]

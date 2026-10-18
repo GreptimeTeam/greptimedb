@@ -18,10 +18,13 @@
 //! operation order. Arithmetic that GreptimeDB's range UDFs compute the same way is shared with
 //! them.
 
-use super::{FloatWindow, WindowKernel};
-use crate::functions::{EdgeKind, add_counter_resets, count_edges, extremum, instant_delta};
+use crate::functions::{
+    EdgeKind, add_counter_resets, count_edges, extremum, instant_delta, kahan_inc,
+};
+use crate::go_sort;
+use crate::range_eval::{FloatWindow, WindowKernel};
 
-/// A PromQL range-vector function over float samples.
+/// A PromQL range-vector function over float and native histogram samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RangeFunction {
     Rate,
@@ -141,20 +144,6 @@ impl RangeFunction {
     }
 }
 
-/// Prometheus `kahansum.Inc`: Kahan–Neumaier summation that drops the compensation once the
-/// sum is infinite.
-fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
-    let t = sum + inc;
-    let c = if t.is_infinite() {
-        0.0
-    } else if sum.abs() >= inc.abs() {
-        c + ((sum - t) + inc)
-    } else {
-        c + ((inc - t) + sum)
-    };
-    (t, c)
-}
-
 /// Prometheus `funcSumOverTime`.
 fn sum(values: &[f64]) -> f64 {
     let (sum, c) = values
@@ -218,15 +207,9 @@ fn quantile(q: f64, values: &[f64], sorted: &mut Vec<f64>) -> f64 {
     }
     sorted.clear();
     sorted.extend_from_slice(values);
-    // Go's `vectorByValueHeap` puts NaN first and treats +0 and -0 as equal; Go sorts short
-    // inputs by insertion, which keeps equal values in window order, and which zero is picked
-    // decides the sign of the result.
-    sorted.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        (false, false) => a.partial_cmp(b).expect("neither is NaN"),
-    });
+    // `sort.Sort` with `vectorByValueHeap.Less`: NaN first, +0 and -0 tie, and which zero
+    // lands at the rank decides the sign of the result.
+    go_sort::sort_by(sorted, |a, b| a.is_nan() || a < b);
     let n = sorted.len() as f64;
     let rank = q * (n - 1.0);
     let lower = rank.floor().max(0.0);
@@ -246,12 +229,35 @@ fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
         range_ms,
     } = window;
     let samples_minus_one = values.len().checked_sub(1).filter(|n| *n > 0)?;
-    let (first_t, last_t) = (timestamps[0], timestamps[samples_minus_one]);
     let first = values[0];
     let mut result = values[samples_minus_one] - first;
     if IS_COUNTER {
         result = add_counter_resets(result, values);
     }
+    let zero_point = (IS_COUNTER && result > 0.0 && first >= 0.0).then(|| first / result);
+    let factor = extrapolation_factor(
+        (timestamps[0], timestamps[samples_minus_one]),
+        samples_minus_one,
+        eval_ts,
+        range_ms,
+        IS_COUNTER,
+        IS_RATE,
+        zero_point,
+    );
+    Some(result * factor)
+}
+
+/// The factor `extrapolatedRate` scales the sampled increase by. `zero_point` is the first
+/// value over the increase, given only when Prometheus extrapolates a counter to zero.
+pub(super) fn extrapolation_factor(
+    (first_t, last_t): (i64, i64),
+    samples_minus_one: usize,
+    eval_ts: i64,
+    range_ms: i64,
+    is_counter: bool,
+    is_rate: bool,
+    zero_point: Option<f64>,
+) -> f64 {
     let range_start = i128::from(eval_ts) - i128::from(range_ms);
     let mut duration_to_start = (i128::from(first_t) - range_start) as f64 / 1000.0;
     let mut duration_to_end = (i128::from(eval_ts) - i128::from(last_t)) as f64 / 1000.0;
@@ -261,10 +267,10 @@ fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
     if duration_to_start >= threshold {
         duration_to_start = average_interval / 2.0;
     }
-    if IS_COUNTER {
+    if is_counter {
         let mut duration_to_zero = duration_to_start;
-        if result > 0.0 && first >= 0.0 {
-            duration_to_zero = sampled_interval * (first / result);
+        if let Some(zero_point) = zero_point {
+            duration_to_zero = sampled_interval * zero_point;
         }
         if duration_to_zero < duration_to_start {
             duration_to_start = duration_to_zero;
@@ -277,10 +283,10 @@ fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
     if sampled_interval != 0.0 {
         factor = (sampled_interval + duration_to_start + duration_to_end) / sampled_interval;
     }
-    if IS_RATE {
+    if is_rate {
         factor /= range_ms as f64 / 1000.0;
     }
-    Some(result * factor)
+    factor
 }
 
 fn last_two<const IS_RATE: bool>(window: FloatWindow<'_>) -> Option<f64> {
@@ -331,8 +337,7 @@ fn linear_regression(window: &FloatWindow<'_>, intercept_time: i64) -> (f64, f64
     (slope, intercept)
 }
 
-/// Prometheus `funcDoubleExponentialSmoothing`; the factors are checked by
-/// `RangeEvaluator::try_new`.
+/// Prometheus `funcDoubleExponentialSmoothing`; `RangeEvaluator` checks the factors.
 fn double_exponential_smoothing(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
     if values.len() < 2 {
         return None;
@@ -352,7 +357,7 @@ fn double_exponential_smoothing(values: &[f64], sf: f64, tf: f64) -> Option<f64>
     Some(s1)
 }
 
-fn seconds(timestamp_ms: i64) -> f64 {
+pub(super) fn seconds(timestamp_ms: i64) -> f64 {
     timestamp_ms as f64 / 1000.0
 }
 

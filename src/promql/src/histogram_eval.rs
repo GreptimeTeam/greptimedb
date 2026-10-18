@@ -37,14 +37,15 @@ use datatypes::series::histogram::HistogramView;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
+pub(crate) use aggregate::sum_or_avg;
 pub use aggregate::{HistogramAggregate, aggregate_histograms};
 
 use crate::go_sort;
-use crate::grid_series::{GridSeriesBuilder, LabelSet, label_set, merge_same_labelset};
+use crate::grid_series::{
+    GridSeriesBuilder, LabelSet, METADATA_LABELS, label_set, merge_same_labelset,
+};
 
 const BUCKET_LABEL: &str = "le";
-/// Prometheus `schema.IsMetadataLabel`: the labels removed with the metric name.
-const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 /// `histogram_quantile` or `histogram_fraction` with its constant arguments.
 #[derive(Debug, Clone, Copy, PartialEq)]

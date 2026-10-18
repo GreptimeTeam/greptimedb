@@ -352,7 +352,7 @@ order by src_id;
 select src_id from greptime_private.semantic_relationships
 where observed_at < '2001-01-02 00:00:00';
 
-Error: 3001(EngineExecuteQuery), Invalid SQL, error: the observed_at filter has no lower bound; the graph cannot derive over unbounded history — add e.g. observed_at >= '2026-01-01 00:00:00'
+Error: 1004(InvalidArguments), Invalid SQL, error: the observed_at filter has no lower bound; the graph cannot derive over unbounded history — add e.g. observed_at >= '2026-01-01 00:00:00'
 
 -- The declared-edge table's definition is system-owned: user CREATE/ALTER are
 -- rejected, while plain DML stays allowed.
