@@ -1173,11 +1173,21 @@ async fn construction_rejects_unsupported_inputs() {
         vec![],
     );
 
+    // The node runs one evaluator per input partition, so its partition count follows the child's
+    // instead of being pinned to one.
     let two_partitions: Arc<dyn ExecutionPlan> =
         Arc::new(TestMemoryExec::try_new(&[vec![], vec![]], frame_schema(), None).unwrap());
-    let error = case.fused(two_partitions).err().unwrap();
-    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
-    assert!(error.to_string().contains("single-partition"), "{error}");
+    let partitions = two_partitions.properties().partitioning.partition_count();
+    assert_eq!(
+        partitions, 2,
+        "this test needs a two-partition child to check the count follows it"
+    );
+    let fused = case.fused(two_partitions).unwrap();
+    assert_eq!(
+        fused.properties().output_partitioning().partition_count(),
+        partitions,
+        "the fused node must run the partitions its child has"
+    );
 
     let mut fields = output_schema(&["host"])
         .fields()
@@ -1285,7 +1295,7 @@ async fn construction_accepts_a_non_nullable_tag_column() {
 }
 
 #[tokio::test]
-async fn execute_rejects_a_nonzero_partition() {
+async fn execute_rejects_a_partition_out_of_bounds() {
     let case = Case::new(
         &["host"],
         RangeWindow {
@@ -1297,8 +1307,9 @@ async fn execute_rejects_a_nonzero_partition() {
         vec![],
     );
     let exec = case.fused(memory_child(&[])).unwrap();
+    let partitions = exec.properties().output_partitioning().partition_count();
     let error = exec
-        .execute(1, Arc::new(TaskContext::default()))
+        .execute(partitions, Arc::new(TaskContext::default()))
         .err()
         .unwrap();
     assert!(matches!(error, DataFusionError::Execution(_)), "{error}");

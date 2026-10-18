@@ -475,10 +475,9 @@ impl RegionScanExec {
         }
         let scanner = self.scanner.lock().unwrap();
         let metadata = scanner.metadata();
-        if scanner.properties().num_partitions().max(1) != 1 {
-            return None;
-        }
-
+        // Resolving names reads only the metadata snapshot, which every partition of a prepared
+        // scan shares, so a multi-partition preparation resolves the same binding as a single one.
+        // Execution is what needs the partitions, and it reads them from the prepared scanner.
         let primary_key_ids = metadata
             .primary_key_columns()
             .map(|column| column.column_id)

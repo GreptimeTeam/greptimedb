@@ -53,7 +53,7 @@ use std::collections::hash_map::Entry;
 use std::fmt::{self, Formatter};
 use std::mem::size_of;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_query::series_frame::unpack_raw_series;
@@ -113,6 +113,8 @@ pub struct FusedSeriesExec {
     time_column: String,
     /// One entry per output column, in output column order.
     classification: Arc<[OutputColumn]>,
+    /// Shared by every partition's stream, so a duplicate label set is caught across partitions.
+    labels: SharedLabelSets,
     properties: Arc<PlanProperties>,
 }
 
@@ -132,11 +134,16 @@ impl FusedSeriesExec {
         tags: Vec<String>,
         time_column: String,
     ) -> Result<Self> {
+        // One evaluator runs per input partition, so the node's partition count is the child's.
+        // The child must therefore be a raw-series scan that assigns every series whole to one
+        // partition: `PerSeries` distribution is what makes a per-partition evaluation equivalent
+        // to evaluating the whole series, because no series is split across partitions and no
+        // series appears in two of them.
         let partition_count = input.properties().partitioning.partition_count();
-        if partition_count != 1 {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeriesExec requires a single-partition input, got {partition_count} partitions"
-            )));
+        if partition_count == 0 {
+            return Err(DataFusionError::Plan(
+                "FusedSeriesExec input has no partitions".into(),
+            ));
         }
         if series_schema.eval_grid.is_some() {
             return Err(DataFusionError::Plan(
@@ -163,10 +170,13 @@ impl FusedSeriesExec {
         let classification = classify_output(&output_schema, &series_schema, &tags, &time_column)?;
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(partition_count),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
+        // Shared by every partition's stream. Creating it needs no memory pool; each stream
+        // accounts its own additions in its own reservation.
+        let labels: SharedLabelSets = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self {
             input,
             series_schema,
@@ -180,6 +190,7 @@ impl FusedSeriesExec {
             tags,
             time_column,
             classification: classification.into(),
+            labels,
             properties,
         })
     }
@@ -265,13 +276,14 @@ impl ExecutionPlan for FusedSeriesExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        if partition != 0 {
+        let partitions = self.properties.output_partitioning().partition_count();
+        if partition >= partitions {
             return Err(DataFusionError::Execution(format!(
-                "FusedSeriesExec has a single partition, got partition {partition}"
+                "partition {partition} out of bounds for {partitions} partitions"
             )));
         }
         let memory_pool = Arc::clone(&context.runtime_env().memory_pool);
-        let frame = self.input.execute(0, context)?;
+        let frame = self.input.execute(partition, context)?;
         let input = unpack_raw_series(
             frame,
             self.series_schema.clone(),
@@ -297,8 +309,9 @@ impl ExecutionPlan for FusedSeriesExec {
             tags: self.tags.clone().into(),
             output_schema: self.output_schema.clone(),
             classification: self.classification.clone(),
-            // Fresh per stream: two streams must never share duplicate-label-set state.
-            seen: HashMap::new(),
+            // Shared with every other partition's stream: a duplicate label set is a property of
+            // the whole output, not of one partition.
+            labels: Arc::clone(&self.labels),
             reservation: MemoryConsumer::new("FusedSeriesStream").register(&memory_pool),
             finished: false,
         }))
@@ -788,6 +801,15 @@ fn merge_runs(stored: &mut Vec<(usize, usize)>, new: &[(usize, usize)]) {
 }
 
 /// Turns raw series chunks into one output batch per completed series.
+/// The grid positions each final label set already occupies, as merged, sorted runs.
+///
+/// Shared by every partition's stream, because a label-set collision is a property of the whole
+/// output vector and not of one partition. `PerSeries` distribution keeps each series whole inside
+/// one partition, but two series that carry the same labels after the range function and its maps
+/// drop a label can still land in different partitions. Checking only within a partition would
+/// miss exactly those collisions.
+type SharedLabelSets = Arc<Mutex<HashMap<LabelsKey, Vec<(usize, usize)>>>>;
+
 struct FusedSeriesStream {
     input: SendableRawSeriesStream,
     /// `None` once the stream is finished; `finish(self)` consumes the evaluator.
@@ -796,10 +818,9 @@ struct FusedSeriesStream {
     tags: Arc<[String]>,
     output_schema: SchemaRef,
     classification: Arc<[OutputColumn]>,
-    /// The grid positions each final label set already occupies, as merged, sorted runs.
-    seen: HashMap<LabelsKey, Vec<(usize, usize)>>,
-    /// Accounts for `seen`; batches already handed downstream are not reserved. Released at
-    /// [`Self::abort`] on every error path, and by [`MemoryReservation`]'s own `Drop` otherwise.
+    /// Shared with the other partitions' streams; this stream holds one reference.
+    labels: SharedLabelSets,
+    /// Accounts for what this stream adds to `labels`; freed when the stream ends.
     reservation: MemoryReservation,
     finished: bool,
 }
@@ -809,7 +830,9 @@ impl FusedSeriesStream {
     fn abort(&mut self) {
         self.finished = true;
         self.evaluator = None;
-        self.seen = HashMap::new();
+        // The label-set map is shared, so one partition finishing early must not clear entries
+        // another partition is still checking against. Its own reservation is what this stream
+        // owns, and that is what it gives back.
         self.reservation.free();
     }
 
@@ -822,7 +845,8 @@ impl FusedSeriesStream {
     fn claim_label_set(&mut self, series: &Series) -> Result<()> {
         let runs = occupied_runs(series)?;
         let key = LabelsKey::new(&series.metric);
-        match self.seen.entry(key) {
+        let mut seen = self.labels.lock().unwrap_or_else(|e| e.into_inner());
+        match seen.entry(key) {
             Entry::Occupied(mut entry) => {
                 let stored = entry.get_mut();
                 if runs_overlap(stored, &runs) {

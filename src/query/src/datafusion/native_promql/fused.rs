@@ -251,30 +251,16 @@ impl FusedShape {
         // Relaxing this to several fields would make that claim positional and ambiguous.
         let field_names = vec![self.field.clone()];
 
-        // The fused node runs a single partition: `RangeEvaluator` requires a series' chunks to
-        // arrive consecutively and it tracks the label set of the series it is reading, so it
-        // needs one sequential stream.
+        // The scan keeps the partitions it was planned with, so the fused node runs one evaluator
+        // per partition instead of serializing the whole scan through one. The physical optimizer
+        // has already run by the time this selection does, so a scan that `ParallelizeScan` split
+        // across `target_partitions` arrives here partitioned, and reading it as it is keeps the
+        // region read and merge concurrency that goes with those partitions.
         //
-        // The physical optimizer has already run by the time this selection does, so a scan that
-        // `ParallelizeScan` split across `target_partitions` arrives here partitioned, and reading
-        // it as one merges those ranges back into a single partition. That gives up the scan
-        // parallelism the ordinary plan would have had, including the region read and merge
-        // concurrency that goes with it. Reading the scan per partition is the follow-up that
-        // removes that limit; it needs the node to run the partition it is given and to keep one
-        // evaluator per partition, together with the binding's own single-partition requirement.
-        // Until then the scan is prepared once, as one partition, and used as it is when it
-        // already is.
-        let collapsed = if scan.properties().output_partitioning().partition_count() == 1
-            && scan.is_partition_set()
-        {
-            scan.clone()
-        } else {
-            Arc::new(
-                scan.with_new_partitions(vec![scan.get_partition_ranges()], 1)
-                    .map_err(|_| "scan cannot be prepared as one partition")?,
-            )
-        };
-        let binding = match collapsed.clone().try_to_named_series_binding(
+        // A `PerSeries`-distributed raw-series scan hands every partition whole series, so those
+        // streams stay independent of each other and no series is split across partitions.
+        let partition_count = scan.properties().output_partitioning().partition_count();
+        let binding = match scan.clone().try_to_named_series_binding(
             &metric_name,
             &logical_tags,
             &field_names,
@@ -284,17 +270,17 @@ impl FusedShape {
             Ok(None) => return Err("scan offers no named raw-series leaf"),
             Err(_) => return Err("scan refused the named raw-series leaf"),
         };
-        let prepared = collapsed;
-        let native = match prepared.try_to_bound_series_scan(&binding) {
+        let native = match scan.clone().try_to_bound_series_scan(&binding) {
             Ok(Some(native)) => native,
             // A leaf this shape cannot use, or one the scanner refuses, is a fallback.
             Ok(None) => return Err("scan offers no named raw-series leaf"),
             Err(_) => return Err("scan refused the named raw-series leaf"),
         };
-        // The leaf is what the fused node reads, and the fused node has one partition, so the
-        // leaf must have one too.
-        if native.properties().output_partitioning().partition_count() != 1 {
-            return Err("raw-series leaf is not a single partition");
+        // The fused node inherits the leaf's partition count, so the leaf must be the prepared
+        // scan's count and not something else that preparation produced.
+        let leaf_partitions = native.properties().output_partitioning().partition_count();
+        if leaf_partitions != partition_count {
+            return Err("raw-series leaf does not cover the prepared partitions");
         }
         // The leaf must read exactly the value column the pattern matched, and the scan it came
         // from must still declare the columns the fused output claims, so that the output the
@@ -1479,12 +1465,14 @@ mod e2e {
             "the selected plan has no FusedSeriesExec:\n{}",
             describe(&fused)
         );
-        // This fixture has one storage partition, so the collapse is a no-op here; the aggregated
-        // test below is the one that plans the scan with two and proves they are merged.
+        // The node runs the partitions its child has, so it keeps the scan's instead of
+        // collapsing them. This fixture has one, so the count is one; the aggregated test below
+        // is the one that plans the scan with two and checks they are both executed.
+        let scan_partitions = scan.properties().output_partitioning().partition_count();
         assert_eq!(
             fused_partition_count(&fused),
-            Some(1),
-            "the fused node reads the scan as one partition:\n{}",
+            Some(scan_partitions),
+            "the fused node must run the scan's {scan_partitions} partitions:\n{}",
             describe(&fused)
         );
 
@@ -1592,13 +1580,16 @@ mod e2e {
             describe(&fused)
         );
         // Each instance owns one series in each storage partition, with slopes 1 and 2 per second
-        // for `x` and 3 and 4 for `y`. Merged, `sum by (instance)` sees 3 and 7. Read per partition
-        // it would see 1 and 3 in the first and 2 and 4 in the second, so a scan that did not merge
-        // both partitions cannot produce 3 and 7.
+        // for `x` and 3 and 4 for `y`. `x` sums to 1 + 2 = 3 and `y` to 3 + 4 = 7 only if both
+        // storage partitions reach the aggregate. A fused node that ran one partition twice, or
+        // skipped one, would report 2 or 4 for `x` and 6 or 8 for `y`.
+        //
+        // The node runs one partition per input partition, so it has the fixture's two.
         assert_eq!(
             fused_partition_count(&fused),
-            Some(1),
-            "the fused node must read both storage partitions as one:\n{}",
+            Some(fixture.partitions),
+            "the fused node must run the fixture's {} partitions:\n{}",
+            fixture.partitions,
             describe(&fused)
         );
 
