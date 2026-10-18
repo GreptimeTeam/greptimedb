@@ -162,8 +162,9 @@ pub(crate) struct ClosedMergeOptions {
     pub(crate) limits: PickLimits,
     /// Whether merges that only remove files are allowed.
     pub(crate) allow_file_reduction: bool,
-    /// Whether merges that only resolve overlaps are allowed.
-    pub(crate) allow_overlap_resolution: bool,
+    /// Whether merges may rewrite conflicting files. Otherwise only
+    /// conflict-free intervals are merged.
+    pub(crate) allow_conflicts: bool,
 }
 
 /// Picks a closed interval of units among all files of an inactive window.
@@ -201,7 +202,9 @@ pub(crate) fn pick_closed_merge(
         let reduces_files = reduction > 0
             && (options.allow_file_reduction || stats.conflicts > 0)
             && limits.within_reduction_cost(stats.size, reduction);
-        if !reduces_files && (stats.conflicts == 0 || !options.allow_overlap_resolution) {
+        if (stats.conflicts > 0 && !options.allow_conflicts)
+            || (!reduces_files && stats.conflicts == 0)
+        {
             return;
         }
         let benefit = (reduction + stats.conflicts) as u64;
@@ -661,7 +664,7 @@ mod tests {
             ClosedMergeOptions {
                 limits: limits(max_output_file_size),
                 allow_file_reduction: true,
-                allow_overlap_resolution: true,
+                allow_conflicts: true,
             },
         )
     }

@@ -344,9 +344,10 @@ impl TwcsPicker {
     ///    waits for the L1 trigger; overlap resolution does not.
     ///
     /// A `settling` window is the one right before the active window. Late data
-    /// still lands there, and resolving its overlaps now would rewrite the
-    /// window again once the late data arrives, so overlap resolution waits
-    /// until the window is older.
+    /// still lands there, and any rewrite of its overlapping files would be
+    /// repeated once more late data arrives. It only merges L0 files among
+    /// themselves and conflict-free files, and leaves overlaps for when the
+    /// window is older.
     ///
     /// Without new writes each pick consumes an L0 file or makes progress on
     /// the closed merge's termination measure, so the window stops compacting.
@@ -361,7 +362,7 @@ impl TwcsPicker {
         if !l0_files.is_empty()
             && let Some((inputs, found_runs, branch)) = pick_inactive_l0(
                 l0_files.clone(),
-                &l1_files,
+                (!settling).then_some(l1_files.as_slice()),
                 self.max_output_file_size,
                 mapper,
             )
@@ -382,7 +383,7 @@ impl TwcsPicker {
             ClosedMergeOptions {
                 limits: self.closed_merge_limits(),
                 allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
-                allow_overlap_resolution: !settling,
+                allow_conflicts: !settling,
             },
         )?;
         let (class, branch) = if pick.reduces_files {
@@ -418,13 +419,14 @@ impl TwcsPicker {
 /// 1. Balanced merges of L0 files, which leave L1 files untouched.
 /// 2. Mixed merges that bypass the balance checks, but only when the total
 ///    rewrite fits in the output file budget, bounding write amplification.
+///    Skipped without `l1_files`.
 /// 3. Merges of L0 files among themselves regardless of balance. The rewrite
 ///    is bounded by the L0 bytes and leaves large compacted files untouched.
 ///
 /// Every pick consumes L0 files.
 fn pick_inactive_l0(
     l0_files: Vec<FileHandle>,
-    l1_files: &[FileHandle],
+    l1_files: Option<&[FileHandle]>,
     max_output_file_size: Option<u64>,
     mapper: &PrimaryKeyRangeMapper,
 ) -> Option<(Vec<FileHandle>, usize, &'static str)> {
@@ -437,16 +439,18 @@ fn pick_inactive_l0(
     if !inputs.is_empty() {
         return Some((inputs, found_runs, "inactive:pick_count_first"));
     }
-    let mut all_files = l0_files.clone();
-    all_files.extend_from_slice(l1_files);
-    let (inputs, found_runs) = pick_candidate_files(
-        all_files,
-        max_output_file_size,
-        pick_mixed_within_budget,
-        mapper,
-    );
-    if !inputs.is_empty() {
-        return Some((inputs, found_runs, "inactive:pick_mixed_within_budget"));
+    if let Some(l1_files) = l1_files {
+        let mut all_files = l0_files.clone();
+        all_files.extend_from_slice(l1_files);
+        let (inputs, found_runs) = pick_candidate_files(
+            all_files,
+            max_output_file_size,
+            pick_mixed_within_budget,
+            mapper,
+        );
+        if !inputs.is_empty() {
+            return Some((inputs, found_runs, "inactive:pick_mixed_within_budget"));
+        }
     }
     let (inputs, found_runs) = pick_candidate_files(
         l0_files,
@@ -3449,6 +3453,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_settling_window_does_not_rewrite_l1_for_late_data() {
+        // A late L0 file overlapping both L1 files, which a mixed merge absorbs.
+        let mut files = priority_test_files(3, 1, 40, false).to_vec();
+        files.push(new_file_handle_with_size_and_sequence(
+            FileId::random(),
+            3_000,
+            3_299,
+            0,
+            10,
+            10,
+        ));
+        for (active_window, expected) in [(4, 0), (5, 1)] {
+            let output = priority_test_picker(1)
+                .build_output_with_time_range(
+                    RegionId::from_u64(1),
+                    assign_to_windows(files.iter(), 1),
+                    Some(active_window),
+                    Some(1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(expected, output.len(), "active: {active_window}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_older_l0_candidate_has_priority_over_newer_pure_l1_candidate() {
         let files = priority_test_files(0, 0, 40, false)
             .into_iter()
@@ -3900,7 +3930,7 @@ mod tests {
     #[rstest::rstest]
     #[case::active_filtered(Some(0), false, 1000, &[0, 2])]
     #[case::inactive_filtered(None, false, 1000, &[0, 2])]
-    #[case::older_reduction_before_newer_overlap(Some(1), true, 1000, &[0, 2])]
+    #[case::older_reduction_before_newer_overlap(Some(3), true, 1000, &[0, 2])]
     #[case::contiguous_has_more_reduction(Some(0), false, 90, &[0, 1, 2, 3])]
     #[case::filtered_has_equal_reduction_with_less_io(Some(0), false, 600, &[0, 2])]
     #[tokio::test]
