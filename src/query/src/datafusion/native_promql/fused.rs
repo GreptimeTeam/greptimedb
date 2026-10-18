@@ -253,11 +253,17 @@ impl FusedShape {
 
         // The fused node runs a single partition: `RangeEvaluator` requires a series' chunks to
         // arrive consecutively and it tracks the label set of the series it is reading, so it
-        // needs one sequential stream. A scan that was planned with several partitions is
-        // therefore read as one, which merges their ranges. That is what the leaf supports --
-        // `try_to_named_series_binding` resolves the named binding only against a scanner prepared
-        // as one partition -- so the scan is prepared once, as one partition, and used as it is
-        // when it already is.
+        // needs one sequential stream.
+        //
+        // The physical optimizer has already run by the time this selection does, so a scan that
+        // `ParallelizeScan` split across `target_partitions` arrives here partitioned, and reading
+        // it as one merges those ranges back into a single partition. That gives up the scan
+        // parallelism the ordinary plan would have had, including the region read and merge
+        // concurrency that goes with it. Reading the scan per partition is the follow-up that
+        // removes that limit; it needs the node to run the partition it is given and to keep one
+        // evaluator per partition, together with the binding's own single-partition requirement.
+        // Until then the scan is prepared once, as one partition, and used as it is when it
+        // already is.
         let collapsed = if scan.properties().output_partitioning().partition_count() == 1
             && scan.is_partition_set()
         {
