@@ -18,9 +18,7 @@
 //! operation order. Arithmetic that GreptimeDB's range UDFs compute the same way is shared with
 //! them.
 
-use crate::functions::{
-    EdgeKind, add_counter_resets, count_edges, extremum, instant_delta, kahan_inc,
-};
+use crate::functions::{EdgeKind, count_edges, extremum, instant_delta, kahan_inc};
 use crate::go_sort;
 use crate::range_eval::{FloatWindow, WindowKernel};
 
@@ -67,6 +65,16 @@ impl RangeFunction {
     /// except `last_over_time` and `first_over_time`.
     pub(crate) fn drops_metric_name(self) -> bool {
         !matches!(self, Self::LastOverTime | Self::FirstOverTime)
+    }
+
+    /// Whether the evaluator has to index counter resets for this function.
+    ///
+    /// This must hold for exactly the kernels that read [`FloatWindow::counter_resets`], which is
+    /// the same as saying `IS_COUNTER` in `extrapolated_rate`: `rate` and `increase`. A kernel
+    /// that corrects counters without the index being maintained would silently drop every
+    /// correction, so a new counter function has to be added here as well.
+    pub(crate) fn indexes_counter_resets(self) -> bool {
+        matches!(self, Self::Rate | Self::Increase)
     }
 
     /// Returns the kernel computing this function over windows read with `offset_ms`.
@@ -225,6 +233,7 @@ fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
     let FloatWindow {
         timestamps,
         values,
+        counter_resets,
         eval_ts,
         range_ms,
     } = window;
@@ -232,7 +241,11 @@ fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
     let first = values[0];
     let mut result = values[samples_minus_one] - first;
     if IS_COUNTER {
-        result = add_counter_resets(result, values);
+        // The same additions in the same order as scanning the window for resets, reached
+        // through the evaluator's per-field reset index instead of the whole window.
+        result = counter_resets
+            .iter()
+            .fold(result, |result, reset| result + reset.previous_value);
     }
     let zero_point = (IS_COUNTER && result > 0.0 && first >= 0.0).then(|| first / result);
     let factor = extrapolation_factor(
