@@ -1303,7 +1303,10 @@ printf '{{"mediaType": "application/vnd.oci.image.index.v1+json", "digest": "{di
             for image, expected, asks in ((f"{repository}:77a84e1c8136", f"{repository}@{digest}", True),
                                           (f"{repository}:77a84e1c8136@{named}", f"{repository}@{named}", False),
                                           (f"{repository}@{named}", f"{repository}@{named}", False),
-                                          (f"{repository}:77a84e1c8136@sha256:abc", "has no sha256 digest", False),
+                                          (f"{repository}:77a84e1c8136@sha256:abc", "not a full ECR Public", False),
+                                          (f"public.ecr.aws/@{named}", "not a full ECR Public", False),
+                                          (f"{repository}@@{named}", "not a full ECR Public", False),
+                                          (f"{repository}:bad tag", "not a full ECR Public", False),
                                           ("docker.io/greptime/o11ybenchruntime:1", "must come from AWS ECR Public", False)):
                 with self.subTest(image=image):
                     (root / "output").write_text("")
@@ -1316,6 +1319,7 @@ printf '{{"mediaType": "application/vnd.oci.image.index.v1+json", "digest": "{di
                     else:
                         self.assertNotEqual(done.returncode, 0)
                         self.assertIn(expected, done.stderr)
+                        self.assertEqual((root / "output").read_text(), "")
                     calls = (root / "fake.log").read_text().splitlines()
                     self.assertEqual(calls, [f"docker buildx imagetools inspect --format {{{{json .Manifest}}}} {image}"]
                                      if asks else [])

@@ -14,8 +14,11 @@ runtime() {
 # hosted runner even a manifest read. A reference that names its digest is pinned as given; only a tag
 # is resolved from the registry's manifest. The benchmark host pulls the image and checks the contents.
 check_runtime() {
-    local image=$1 repository digest attempt
+    local image=$1 repository digest attempt component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
     [[ "$image" == public.ecr.aws/* ]] || { echo 'The runtime image must come from AWS ECR Public' >&2; return 1; }
+    # Docker's reference grammar, checked here because a named digest never reaches the registry.
+    local grammar="^public\.ecr\.aws(/$component)+(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[0-9a-f]{64})?\$"
+    [[ "$image" =~ $grammar ]] || { echo "$image is not a full ECR Public image reference" >&2; return 1; }
     if [[ "$image" == *@* ]]; then
         digest=${image##*@}
     else
