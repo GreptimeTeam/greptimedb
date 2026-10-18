@@ -470,6 +470,26 @@ fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
 }
 
 #[test]
+fn min_and_max_keep_the_first_of_equal_zeros() {
+    // Prometheus replaces the accumulator only on a strict comparison; the tolerance treats
+    // the zeros as equal, but their sign shows through a later `1 / x`.
+    let schema = schema(&["value"]);
+    for (first, second) in [(0.0, -0.0), (-0.0, 0.0)] {
+        let series = [("0", first), ("1", second)]
+            .map(|(i, v)| input(&schema, metric("m", &[("i", i)]), 0, &[vec![Some(v)]]));
+        for op in [AggregateOp::Min, AggregateOp::Max] {
+            let output = aggregate_float(&schema, &series, op, Grouping::By(&[])).unwrap();
+            let value = values(&output[0], 0).1[0].unwrap();
+            assert_eq!(
+                value.to_bits(),
+                f64::to_bits(first),
+                "{op:?} {first} {second}"
+            );
+        }
+    }
+}
+
+#[test]
 fn groups_keep_first_seen_order_for_nested_aggregation() {
     // `sum(sum by (g) (m))` from the Prometheus engine with series created as g=a, c, b: the
     // outer sum folds 1e308, -1e308, 1e308 and gets 1e308; label order would overflow.
