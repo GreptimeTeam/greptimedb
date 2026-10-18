@@ -117,7 +117,7 @@ fn aggregate_point<'a>(
         SampleRef::Histogram(view) => Some(FloatHistogram::try_from_view(&view)),
     });
     let value = sum_or_avg(op, histograms.by_ref())?;
-    // An early stop leaves samples whose floats and conversion errors still count.
+    // A fold stopped by mixed bucket kinds still reports conversion errors of later samples.
     for histogram in histograms {
         histogram?;
     }
