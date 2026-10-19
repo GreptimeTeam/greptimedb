@@ -38,10 +38,18 @@ fn raw_schema() -> Arc<SeriesSchema> {
 
 /// A statement over 100 seconds in 5-second steps, which is 21 grid points.
 fn eval_stmt(query: &str) -> EvalStmt {
+    eval_stmt_over(query, Duration::from_secs(100))
+}
+
+/// The statement `query` over `UNIX_EPOCH..=end`, on a 5s grid.
+///
+/// The end is a parameter because a grid stops before an end it does not land on, which is the only
+/// way `end()` and the last grid point can be told apart.
+fn eval_stmt_over(query: &str, end: Duration) -> EvalStmt {
     EvalStmt {
         expr: promql_parser::parser::parse(query).unwrap(),
         start: UNIX_EPOCH,
-        end: UNIX_EPOCH + Duration::from_secs(100),
+        end: UNIX_EPOCH + end,
         interval: Duration::from_secs(5),
         lookback_delta: Duration::from_secs(5),
     }
@@ -276,6 +284,36 @@ fn an_anchor_on_a_window_resolves_to_absolute_milliseconds() {
         );
         assert_eq!(op.window.offset_ms, 0, "`{query}` invented an offset");
     }
+}
+
+/// `end()` is the statement's end, not the last grid point.
+///
+/// The grid stops before an end it does not land on, so an end of 103s over a 5s step has its last
+/// point at 100s. Binding `end()` to that point instead of to the statement's own end would pass a
+/// test whose end is a multiple of the step; here the two numbers differ.
+#[test]
+fn end_resolves_to_the_statement_end_not_the_last_grid_point() {
+    let stmt = eval_stmt_over("rate(x[5m] @ end())", Duration::from_secs(103));
+    let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+    let (_, op) = root_window(&tree);
+    assert_eq!(
+        op.window.anchor_ms,
+        Some(103_000),
+        "`@ end()` bound something other than the statement's end"
+    );
+
+    // The grid the same statement compiles onto ends at 100s, so the two are not the same number.
+    let spec = op.output_grid.spec();
+    let last_point = spec.start_ms + (spec.len as i64 - 1) * spec.step_ms;
+    assert_eq!(
+        last_point, 100_000,
+        "the test's own grid does not stop before the statement end"
+    );
+    assert_ne!(
+        op.window.anchor_ms,
+        Some(last_point),
+        "`@ end()` bound the last grid point rather than the statement's end"
+    );
 }
 
 /// An anchor and an offset are bound apart: the window ends at `anchor - offset`, which the
