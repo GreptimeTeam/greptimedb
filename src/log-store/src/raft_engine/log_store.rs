@@ -82,6 +82,24 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
     }
 }
 
+/// Key used by the periodic WAL sync task. Overwritten each period so the
+/// write stays non-empty on raft-engine 0.4.2 (see [`durable_sync`]).
+const PERIODIC_SYNC_MARKER_KEY: &[u8] = b"$wal_periodic_sync";
+
+/// Force an fsync of previously appended WAL data on raft-engine 0.4.2.
+///
+/// `Engine::sync()` writes an empty [`LogBatch`] with `sync = true`, but
+/// 0.4.2's `Engine::write` returns early for empty batches *before* the
+/// fsync (tikv/raft-engine#395). Upstream fixed this in tikv/raft-engine#400,
+/// which is not on crates.io yet. Issuing a minimal non-empty put with
+/// `sync = true` reaches the fsync path on 0.4.2.
+fn durable_sync(engine: &Engine) -> raft_engine::Result<usize> {
+    let mut batch = LogBatch::with_capacity(1);
+    // Value is unused; overwriting the same key keeps the marker bounded.
+    batch.put(SYSTEM_NAMESPACE, PERIODIC_SYNC_MARKER_KEY.to_vec(), vec![0])?;
+    engine.write(&mut batch, true)
+}
+
 pub struct SyncWalTaskFunction {
     engine: Arc<Engine>,
 }
@@ -90,9 +108,15 @@ pub struct SyncWalTaskFunction {
 impl TaskFunction<Error> for SyncWalTaskFunction {
     async fn call(&mut self) -> std::result::Result<(), Error> {
         let engine = self.engine.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || engine.sync()).await {
-            error!(e; "Failed to sync raft engine log files");
-        };
+        match tokio::task::spawn_blocking(move || durable_sync(&engine)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                error!(e; "Failed to sync raft engine log files");
+            }
+            Err(e) => {
+                error!(e; "Failed to sync raft engine log files");
+            }
+        }
         Ok(())
     }
 
@@ -553,6 +577,40 @@ mod tests {
         .unwrap();
         let namespaces = logstore.list_namespaces().await.unwrap();
         assert_eq!(0, namespaces.len());
+    }
+
+    /// Regression for #9712: periodic sync must write a non-empty batch so
+    /// raft-engine 0.4.2 actually fsyncs (empty `Engine::sync()` is a no-op).
+    #[tokio::test]
+    async fn test_durable_sync_writes_non_empty_batch() {
+        let dir = create_temp_dir("raft-engine-durable-sync-test");
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_string(),
+            recovery_mode: RecoveryMode::TolerateTailCorruption,
+            ..Default::default()
+        };
+        let engine = Engine::open(cfg).unwrap();
+
+        // Control: empty sync leaves no marker and returns Ok without fsync
+        // on 0.4.2 (we cannot count fsyncs here, but we can show the empty
+        // path writes nothing).
+        engine.sync().unwrap();
+        assert!(
+            engine.get(SYSTEM_NAMESPACE, PERIODIC_SYNC_MARKER_KEY).is_none(),
+            "Engine::sync must not create the periodic sync marker"
+        );
+
+        let written = durable_sync(&engine).unwrap();
+        assert!(written > 0, "durable_sync must write a non-empty batch");
+        assert_eq!(
+            engine.get(SYSTEM_NAMESPACE, PERIODIC_SYNC_MARKER_KEY).as_deref(),
+            Some(&[0][..]),
+            "durable_sync must persist the periodic sync marker"
+        );
+
+        // Second call overwrites the same key and still returns written bytes.
+        let written_again = durable_sync(&engine).unwrap();
+        assert!(written_again > 0);
     }
 
     #[tokio::test]
