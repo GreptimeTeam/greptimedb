@@ -2602,7 +2602,7 @@ WITH(
             .await;
         let instance = standalone.fe_instance();
         let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "public"));
-        instance.do_query("CREATE TABLE defaulted (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL DEFAULT 'unknown' PRIMARY KEY) WITH ('otlp_metric_compat'='prom')",ctx.clone()).await.remove(0).unwrap();
+        instance.do_query("CREATE TABLE defaulted (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL DEFAULT 'unknown' PRIMARY KEY)",ctx.clone()).await.remove(0).unwrap();
         let outcome = instance
             .metrics(
                 metric_request(vec![gauge_metric(
@@ -2631,7 +2631,7 @@ WITH(
             }
             assert_trace_v2_query(instance,"SELECT COUNT(*)=1 AND MIN(greptime_value)=30 AND MIN(host)='unknown' FROM defaulted",ctx.clone()).await.unwrap();
         }
-        instance.do_query("CREATE TABLE required (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL PRIMARY KEY) WITH ('otlp_metric_compat'='prom')",ctx.clone()).await.remove(0).unwrap();
+        instance.do_query("CREATE TABLE required (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL PRIMARY KEY)",ctx.clone()).await.remove(0).unwrap();
         for (name, points, expected) in [
             (
                 "defaulted",
@@ -2893,10 +2893,6 @@ WITH(
             .await;
         let instance = standalone.fe_instance();
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
-        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
-            with_metric_engine: true,
-            ..Default::default()
-        }));
         for (physical, logical, precision) in [
             ("greptime_physical_table", "millis", 3),
             ("custom_physical", "nanos", 9),
@@ -2906,7 +2902,7 @@ WITH(
                     "CREATE TABLE {physical} (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true')"
                 ),
                 format!(
-                    "CREATE TABLE {logical} (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL PRIMARY KEY) ENGINE=metric WITH ('on_physical_table'='{physical}', 'otlp_metric_compat'='prom')"
+                    "CREATE TABLE {logical} (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL PRIMARY KEY) ENGINE=metric WITH ('on_physical_table'='{physical}')"
                 ),
             ] {
                 instance
@@ -2916,35 +2912,46 @@ WITH(
                     .unwrap();
             }
         }
-        for batching in [false, true] {
-            ctx.set_logical_batching_enabled(batching);
-            for reverse in [false, true] {
-                let mut points = vec![
-                    (60_000_000_123, 10.0, None),
-                    (120_000_000_456, 20.0, Some("present")),
-                ];
-                if reverse {
-                    points.reverse();
-                }
-                // The default-backed target remains eligible when sent alone;
-                // custom-backed targets retain the established fallback.
-                for names in [vec!["millis"], vec!["millis", "nanos"]] {
-                    let outcome = instance
-                        .metrics(
-                            metric_request(
-                                names
-                                    .iter()
-                                    .map(|name| gauge_metric(name, &points))
-                                    .collect(),
-                            ),
-                            Arc::new(ctx.clone()),
-                        )
-                        .await
-                        .unwrap();
-                    assert_eq!(
-                        (outcome.accepted_data_points, outcome.rejected_data_points),
-                        (names.len() as i64 * 2, 0)
-                    );
+        for with_metric_engine in [false, true] {
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine,
+                ..Default::default()
+            }));
+            for batching in [false, true] {
+                ctx.set_logical_batching_enabled(batching);
+                for reverse in [false, true] {
+                    let mut points = vec![
+                        (60_000_000_123, 10.0, None),
+                        (120_000_000_456, 20.0, Some("present")),
+                    ];
+                    if reverse {
+                        points.reverse();
+                    }
+                    // The default-backed target remains eligible when sent alone;
+                    // custom-backed targets retain the established fallback.
+                    for names in [vec!["millis"], vec!["millis", "nanos"]] {
+                        // Ordinary ingestion emits milliseconds; test it against the
+                        // matching existing logical table without auto-creation.
+                        if !with_metric_engine && names.contains(&"nanos") {
+                            continue;
+                        }
+                        let outcome = instance
+                            .metrics(
+                                metric_request(
+                                    names
+                                        .iter()
+                                        .map(|name| gauge_metric(name, &points))
+                                        .collect(),
+                                ),
+                                Arc::new(ctx.clone()),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            (outcome.accepted_data_points, outcome.rejected_data_points),
+                            (names.len() as i64 * 2, 0)
+                        );
+                    }
                 }
             }
         }
@@ -3080,50 +3087,55 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_otlp_preflight_caches_only_surviving_original_names() {
-        let standalone = GreptimeDbStandaloneBuilder::new("otlp_survivor_cache")
+    async fn test_otlp_metrics_ignore_compat_option() {
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_compat_metadata")
             .build()
             .await;
         let instance = standalone.fe_instance();
         let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "public"));
-        let mut rejected = gauge_metric("rejected", &[(60_000_000_000, 1.0, None)]);
-        if let Some(metric::Data::Gauge(data)) = rejected.data.as_mut() {
-            data.data_points[0]
-                .attributes
-                .push(keyvalue("otlp_aggregation_temporality", "bad"));
+        let tables = [
+            ("without_option", ""),
+            ("with_prom_option", "WITH ('otlp_metric_compat'='prom')"),
+            ("with_old_option", "WITH ('otlp_metric_compat'='legacy')"),
+        ];
+        for (name, options) in tables {
+            instance
+                .do_query(
+                    &format!("CREATE TABLE {name} (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE) {options}"),
+                    ctx.clone(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
         }
-        let empty = gauge_metric("empty", &[]);
-        let outcome = instance
-            .metrics(
-                metric_request(vec![
-                    rejected,
-                    empty,
-                    gauge_metric("valid", &[(60_000_000_000, 2.0, None)]),
-                ]),
-                ctx.clone(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            (outcome.accepted_data_points, outcome.rejected_data_points),
-            (1, 1)
-        );
-        for name in ["rejected", "empty"] {
-            // A subsequent request for this name alone must resolve the newly
-            // created legacy table, rather than a cached rejected-only mode.
-            instance.do_query(&format!("CREATE TABLE {name} (greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE)"),ctx.clone()).await.remove(0).unwrap();
+        // Neither absent nor retained option values select a different conversion
+        // or make tables incompatible within the same request.
+        for timestamp in [60_000_000_123, 120_000_000_456] {
             let outcome = instance
                 .metrics(
-                    metric_request(vec![gauge_metric(name, &[(60_000_000_123, 7.0, None)])]),
+                    metric_request(
+                        tables
+                            .iter()
+                            .map(|(name, _)| gauge_metric(name, &[(timestamp, 7.0, None)]))
+                            .collect(),
+                    ),
                     ctx.clone(),
                 )
                 .await
                 .unwrap();
             assert_eq!(
                 (outcome.accepted_data_points, outcome.rejected_data_points),
-                (1, 0),
-                "{name}: {outcome:?}"
+                (3, 0)
             );
+        }
+        for (name, _) in tables {
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*)=2 AND MIN(greptime_value)=7 AND MIN(greptime_timestamp)='1970-01-01 00:01:00'::TIMESTAMP FROM {name}"),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
         }
     }
 

@@ -399,75 +399,72 @@ fn test_delta_exponential_interval_encoding() {
     use common_query::native_histogram::{COUNT_I64_FIELD, RESET_HINT_FIELD, SUM_FIELD};
     use common_query::prelude::greptime_native_histogram;
 
-    for is_legacy in [false, true] {
-        for with_metric_engine in [false, true] {
-            let count = (1u64 << 53) + 1;
-            let point = ExponentialHistogramDataPoint {
-                start_time_unix_nano: 1_000_000_123,
-                time_unix_nano: 2_000_000_987,
-                count,
-                zero_count: count,
-                sum: Some(12.0),
-                zero_threshold: 0.1,
+    for with_metric_engine in [false, true] {
+        let count = (1u64 << 53) + 1;
+        let point = ExponentialHistogramDataPoint {
+            start_time_unix_nano: 1_000_000_123,
+            time_unix_nano: 2_000_000_987,
+            count,
+            zero_count: count,
+            sum: Some(12.0),
+            zero_threshold: 0.1,
+            ..Default::default()
+        };
+        let mut stale = point.clone();
+        stale.flags = DataPointFlags::NoRecordedValueMask as u32;
+        let conversion = to_grpc_insert_requests(
+            metrics_request(vec![exponential_metric(
+                "interval",
+                vec![point, stale],
+                AggregationTemporality::Delta,
+            )]),
+            &mut OtlpMetricCtx {
+                with_metric_engine,
                 ..Default::default()
-            };
-            let mut stale = point.clone();
-            stale.flags = DataPointFlags::NoRecordedValueMask as u32;
-            let conversion = to_grpc_insert_requests(
-                metrics_request(vec![exponential_metric(
-                    "interval",
-                    vec![point, stale],
-                    AggregationTemporality::Delta,
-                )]),
-                &mut OtlpMetricCtx {
-                    is_legacy,
-                    with_metric_engine,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            assert_eq!(conversion.outcome.accepted_data_points, 2);
-            assert_eq!(conversion.outcome.rejected_data_points, 0);
-            let rows = table_rows(&conversion.requests, "interval");
-            let field = column_index(rows, greptime_native_histogram());
-            let tag = column_index(rows, OTLP_AGGREGATION_TEMPORALITY_LABEL);
-            let ts = column_index(rows, greptime_timestamp());
+            },
+        )
+        .unwrap();
+        assert_eq!(conversion.outcome.accepted_data_points, 2);
+        assert_eq!(conversion.outcome.rejected_data_points, 0);
+        let rows = table_rows(&conversion.requests, "interval");
+        let field = column_index(rows, greptime_native_histogram());
+        let tag = column_index(rows, OTLP_AGGREGATION_TEMPORALITY_LABEL);
+        let ts = column_index(rows, greptime_timestamp());
+        assert_eq!(
+            rows.schema[ts].datatype,
+            if with_metric_engine {
+                ColumnDataType::TimestampNanosecond
+            } else {
+                ColumnDataType::TimestampMillisecond
+            } as i32
+        );
+        for row in &rows.rows {
             assert_eq!(
-                rows.schema[ts].datatype,
-                if is_legacy || with_metric_engine {
-                    ColumnDataType::TimestampNanosecond
-                } else {
-                    ColumnDataType::TimestampMillisecond
-                } as i32
+                row.values[tag].value_data,
+                Some(ValueData::StringValue("delta".into()))
             );
-            for row in &rows.rows {
-                assert_eq!(
-                    row.values[tag].value_data,
-                    Some(ValueData::StringValue("delta".into()))
-                );
-                assert_eq!(
-                    native_field(
-                        row.values[field].value_data.as_ref().unwrap(),
-                        RESET_HINT_FIELD
-                    ),
-                    Some(ValueData::I32Value(ResetHint::Gauge as i32))
-                );
-            }
             assert_eq!(
                 native_field(
-                    rows.rows[0].values[field].value_data.as_ref().unwrap(),
-                    COUNT_I64_FIELD
+                    row.values[field].value_data.as_ref().unwrap(),
+                    RESET_HINT_FIELD
                 ),
-                Some(ValueData::I64Value(count as i64))
+                Some(ValueData::I32Value(ResetHint::Gauge as i32))
             );
-            let Some(ValueData::F64Value(stale)) = native_field(
-                rows.rows[1].values[field].value_data.as_ref().unwrap(),
-                SUM_FIELD,
-            ) else {
-                panic!("missing sum")
-            };
-            assert_eq!(stale.to_bits(), PROMETHEUS_STALE_NAN_BITS);
         }
+        assert_eq!(
+            native_field(
+                rows.rows[0].values[field].value_data.as_ref().unwrap(),
+                COUNT_I64_FIELD
+            ),
+            Some(ValueData::I64Value(count as i64))
+        );
+        let Some(ValueData::F64Value(stale)) = native_field(
+            rows.rows[1].values[field].value_data.as_ref().unwrap(),
+            SUM_FIELD,
+        ) else {
+            panic!("missing sum")
+        };
+        assert_eq!(stale.to_bits(), PROMETHEUS_STALE_NAN_BITS);
     }
 }
 
@@ -486,9 +483,9 @@ fn gauge(name: &str) -> Metric {
 
 #[test]
 fn test_gauge_ignores_start_time_but_validates_timestamp() {
-    for is_legacy in [false, true] {
+    for with_metric_engine in [false, true] {
         let mut ctx = OtlpMetricCtx {
-            is_legacy,
+            with_metric_engine,
             ..Default::default()
         };
         let point = NumberDataPoint {
@@ -621,7 +618,6 @@ fn test_all_metric_families_isolate_invalid_attributes_and_fanout() {
                     .iter()
                     .all(|c| c.column_name != "rejected_only")
             }));
-            assert_eq!(conversion.input_names.len(), 2);
         }
     }
 }

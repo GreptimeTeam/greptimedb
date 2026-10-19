@@ -29,9 +29,9 @@ use crate::error::{self, Result};
 use crate::metrics::OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS;
 use crate::otlp::metrics::{
     MetricsConversion, OTEL_RESOURCE_INFO_TABLE_NAME, ResourceInfoData, add_accepted_data_points,
-    emitted_semantic_tables, encode_metrics, from_metric_type, legacy_normalize_otlp_name,
-    process_resource_attrs, process_scope_attrs, record_metric_semantics, reject_data_points,
-    translate_metric_name, validate_sample_kinds,
+    emitted_semantic_tables, encode_metrics, from_metric_type, process_resource_attrs,
+    process_scope_attrs, record_metric_semantics, reject_data_points, translate_metric_name,
+    validate_sample_kinds,
 };
 use crate::query_handler::MetricsIngestOutcome;
 use crate::row_writer::{self, MultiTableData};
@@ -69,13 +69,11 @@ pub fn prepare_metrics(
         let mut attrs = raw_attrs.clone();
         process_resource_attrs(&mut attrs, metric_ctx);
         let resource_index = prepared.resources.len();
-        prepared
-            .resources
-            .push(if metric_ctx.resource_info && !metric_ctx.is_legacy {
-                raw_attrs
-            } else {
-                Vec::new()
-            });
+        prepared.resources.push(if metric_ctx.resource_info {
+            raw_attrs
+        } else {
+            Vec::new()
+        });
         for scope in resource.scope_metrics {
             let scope_attrs = process_scope_attrs(&scope, metric_ctx);
             for mut metric in scope.metrics {
@@ -193,12 +191,8 @@ impl PreparedMetrics {
             return Ok(());
         }
         validate_sample_kinds(&requests)?;
-        let name = if ctx.is_legacy {
-            legacy_normalize_otlp_name(&metric.name)
-        } else {
-            translate_metric_name(metric, &ctx.metric_type, ctx.metric_translation_strategy)
-        };
-        let mut emitted = emitted_semantic_tables(&ctx.metric_type, ctx.is_legacy, &name);
+        let name = translate_metric_name(metric, &ctx.metric_type, ctx.metric_translation_strategy);
+        let mut emitted = emitted_semantic_tables(&ctx.metric_type, &name);
         emitted.retain(|(name, _)| requests.inserts.iter().any(|r| &r.table_name == name));
         let mut semantics = SemanticIndex::default();
         record_metric_semantics(&mut semantics, metric, &name, &emitted);
@@ -244,7 +238,6 @@ impl PreparedMetrics {
         let mut writer = MultiTableData::default();
         let mut semantic_index = SemanticIndex::default();
         let mut resource_info = ResourceInfoData::default();
-        let mut input_names = HashSet::new();
         for ((requests, point), rejection) in std::mem::take(&mut self.requests)
             .into_iter()
             .zip(std::mem::take(&mut self.points))
@@ -278,7 +271,6 @@ impl PreparedMetrics {
                 }
             }
             add_accepted_data_points(&mut self.outcome, 1)?;
-            input_names.insert(point.original_name);
             semantic_index.merge_from(&point.semantics);
             resource_info.observe_times(&self.resources[point.resource], [point.timestamp]);
         }
@@ -314,7 +306,6 @@ impl PreparedMetrics {
             semantic_index,
             resource_info,
             outcome: self.outcome,
-            input_names: input_names.into_iter().collect(),
         })
     }
 }

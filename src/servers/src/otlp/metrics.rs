@@ -24,8 +24,8 @@ use common_query::native_histogram::{
     encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
 };
 use common_query::prelude::{
-    GREPTIME_COUNT, GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL,
-    greptime_timestamp, greptime_value,
+    GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL, greptime_timestamp,
+    greptime_value,
 };
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use lazy_static::lazy_static;
@@ -58,7 +58,6 @@ mod translator;
 
 pub use resource_info::OTEL_RESOURCE_INFO_TABLE_NAME;
 use resource_info::ResourceInfoData;
-pub use translator::legacy_normalize_otlp_name;
 pub(crate) use translator::ucum_to_openmetrics_unit;
 use translator::{translate_label_name, translate_metric_name};
 
@@ -120,8 +119,6 @@ pub struct MetricsConversion {
     /// metric data. See [`resource_info`].
     pub resource_info: Option<RowInsertRequests>,
     pub outcome: MetricsIngestOutcome,
-    /// Original input names with surviving points, for compatibility-mode caching.
-    pub input_names: Vec<String>,
 }
 
 /// Converts OpenTelemetry metrics without validating destination table schemas.
@@ -173,13 +170,8 @@ fn validate_sample_kinds(requests: &RowInsertRequests) -> Result<()> {
 
 /// The tables a metric emits and their per-table `metric.type`. Histogram fans
 /// out into `_bucket` (the histogram) plus `_sum`/`_count` counters; summary
-/// fans out into the quantile table plus `_count`/`_sum` counters (legacy
-/// summary stays a single table).
-fn emitted_semantic_tables(
-    metric_type: &MetricType,
-    is_legacy: bool,
-    base: &str,
-) -> Vec<(String, &'static str)> {
+/// fans out into the quantile table plus `_count`/`_sum` counters.
+fn emitted_semantic_tables(metric_type: &MetricType, base: &str) -> Vec<(String, &'static str)> {
     match metric_type {
         MetricType::Gauge => vec![(base.to_string(), METRIC_TYPE_GAUGE)],
         MetricType::MonotonicSum => vec![(base.to_string(), METRIC_TYPE_COUNTER)],
@@ -192,7 +184,6 @@ fn emitted_semantic_tables(
             (format!("{base}{SUM_TABLE_SUFFIX}"), METRIC_TYPE_COUNTER),
             (format!("{base}{COUNT_TABLE_SUFFIX}"), METRIC_TYPE_COUNTER),
         ],
-        MetricType::Summary if is_legacy => vec![(base.to_string(), METRIC_TYPE_SUMMARY)],
         MetricType::Summary => vec![
             (base.to_string(), METRIC_TYPE_SUMMARY),
             (format!("{base}{COUNT_TABLE_SUFFIX}"), METRIC_TYPE_COUNTER),
@@ -323,10 +314,6 @@ fn string_key_value(key: &str, value: String) -> KeyValue {
 }
 
 fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx) {
-    if metric_ctx.is_legacy {
-        return;
-    }
-
     // remap the service identity attributes to job and instance
     let ServiceIdentity { job, instance } = service_identity(attrs);
 
@@ -349,10 +336,6 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
 }
 
 fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Option<Vec<KeyValue>> {
-    if metric_ctx.is_legacy {
-        return scope.scope.as_ref().map(|s| s.attributes.clone());
-    };
-
     if !metric_ctx.promote_scope_attrs {
         return None;
     }
@@ -390,15 +373,11 @@ fn encode_metrics(
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<()> {
-    let name = if metric_ctx.is_legacy {
-        legacy_normalize_otlp_name(&metric.name)
-    } else {
-        translate_metric_name(
-            metric,
-            &metric_ctx.metric_type,
-            metric_ctx.metric_translation_strategy,
-        )
-    };
+    let name = translate_metric_name(
+        metric,
+        &metric_ctx.metric_type,
+        metric_ctx.metric_translation_strategy,
+    );
 
     if let Some(data) = &metric.data {
         match data {
@@ -865,7 +844,6 @@ enum AttributeType {
     Resource,
     Scope,
     DataPoint,
-    Legacy,
 }
 
 fn write_attributes(
@@ -895,7 +873,6 @@ fn write_attributes(
                     translate_label_name(&attr.key, metric_ctx.metric_translation_strategy)
                 )
             }
-            AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
         };
         if key == OTLP_AGGREGATION_TEMPORALITY_LABEL {
             return Err(error::InvalidOtlpMetricInputSnafu {
@@ -925,7 +902,7 @@ fn write_timestamp(
     // micro/nanosecond). Only the non-metric prometheus-compatible path is
     // fixed to milliseconds, to keep auto-created mito tables on the
     // millisecond time index.
-    if metric_ctx.is_legacy || metric_ctx.with_metric_engine {
+    if metric_ctx.with_metric_engine {
         row_writer::write_ts_to_nanos(
             table,
             greptime_timestamp(),
@@ -992,40 +969,22 @@ fn write_tags_and_timestamp(
     timestamp_nanos: i64,
     metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    if metric_ctx.is_legacy {
-        write_attributes(
-            table,
-            row,
-            resource_attrs,
-            AttributeType::Legacy,
-            metric_ctx,
-        )?;
-        write_attributes(table, row, scope_attrs, AttributeType::Legacy, metric_ctx)?;
-        write_attributes(
-            table,
-            row,
-            data_point_attrs,
-            AttributeType::Legacy,
-            metric_ctx,
-        )?;
-    } else {
-        // TODO(shuiyisong): check `__type__` and `__unit__` tags in prometheus
-        write_attributes(
-            table,
-            row,
-            resource_attrs,
-            AttributeType::Resource,
-            metric_ctx,
-        )?;
-        write_attributes(table, row, scope_attrs, AttributeType::Scope, metric_ctx)?;
-        write_attributes(
-            table,
-            row,
-            data_point_attrs,
-            AttributeType::DataPoint,
-            metric_ctx,
-        )?;
-    }
+    // TODO(shuiyisong): check `__type__` and `__unit__` tags in prometheus
+    write_attributes(
+        table,
+        row,
+        resource_attrs,
+        AttributeType::Resource,
+        metric_ctx,
+    )?;
+    write_attributes(table, row, scope_attrs, AttributeType::Scope, metric_ctx)?;
+    write_attributes(
+        table,
+        row,
+        data_point_attrs,
+        AttributeType::DataPoint,
+        metric_ctx,
+    )?;
 
     write_timestamp(table, row, timestamp_nanos, metric_ctx)?;
 
@@ -1339,17 +1298,47 @@ fn encode_summary(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    if metric_ctx.is_legacy {
-        let table = table_writer.get_or_default_table_data(
-            name,
-            APPROXIMATE_COLUMN_COUNT,
-            summary.data_points.len(),
-        );
+    // 1. quantile table
+    // 2. count table
+    // 3. sum table
 
-        for data_point in &summary.data_points {
-            let mut row = table.alloc_one_row();
+    let metric_name = name;
+    let count_name = format!("{}{}", metric_name, COUNT_TABLE_SUFFIX);
+    let sum_name = format!("{}{}", metric_name, SUM_TABLE_SUFFIX);
+
+    for data_point in &summary.data_points {
+        {
+            let quantile_table = table_writer.get_or_default_table_data(
+                metric_name,
+                APPROXIMATE_COLUMN_COUNT,
+                summary.data_points.len(),
+            );
+
+            for quantile in &data_point.quantile_values {
+                let mut row = quantile_table.alloc_one_row();
+                write_tags_and_timestamp(
+                    quantile_table,
+                    &mut row,
+                    resource_attrs,
+                    scope_attrs,
+                    Some(data_point.attributes.as_ref()),
+                    data_point.time_unix_nano as i64,
+                    metric_ctx,
+                )?;
+                row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
+                row_writer::write_f64(quantile_table, greptime_value(), quantile.value, &mut row)?;
+                quantile_table.add_row(row);
+            }
+        }
+        {
+            let count_table = table_writer.get_or_default_table_data(
+                &count_name,
+                APPROXIMATE_COLUMN_COUNT,
+                summary.data_points.len(),
+            );
+            let mut row = count_table.alloc_one_row();
             write_tags_and_timestamp(
-                table,
+                count_table,
                 &mut row,
                 resource_attrs,
                 scope_attrs,
@@ -1358,104 +1347,36 @@ fn encode_summary(
                 metric_ctx,
             )?;
 
-            for quantile in &data_point.quantile_values {
-                row_writer::write_f64(
-                    table,
-                    format!("greptime_p{:02}", quantile.quantile * 100f64),
-                    quantile.value,
-                    &mut row,
-                )?;
-            }
+            row_writer::write_f64(
+                count_table,
+                greptime_value(),
+                data_point.count as f64,
+                &mut row,
+            )?;
 
-            row_writer::write_f64(table, GREPTIME_COUNT, data_point.count as f64, &mut row)?;
-            table.add_row(row);
+            count_table.add_row(row);
         }
-    } else {
-        // 1. quantile table
-        // 2. count table
-        // 3. sum table
+        {
+            let sum_table = table_writer.get_or_default_table_data(
+                &sum_name,
+                APPROXIMATE_COLUMN_COUNT,
+                summary.data_points.len(),
+            );
 
-        let metric_name = name;
-        let count_name = format!("{}{}", metric_name, COUNT_TABLE_SUFFIX);
-        let sum_name = format!("{}{}", metric_name, SUM_TABLE_SUFFIX);
+            let mut row = sum_table.alloc_one_row();
+            write_tags_and_timestamp(
+                sum_table,
+                &mut row,
+                resource_attrs,
+                scope_attrs,
+                Some(data_point.attributes.as_ref()),
+                data_point.time_unix_nano as i64,
+                metric_ctx,
+            )?;
 
-        for data_point in &summary.data_points {
-            {
-                let quantile_table = table_writer.get_or_default_table_data(
-                    metric_name,
-                    APPROXIMATE_COLUMN_COUNT,
-                    summary.data_points.len(),
-                );
+            row_writer::write_f64(sum_table, greptime_value(), data_point.sum, &mut row)?;
 
-                for quantile in &data_point.quantile_values {
-                    let mut row = quantile_table.alloc_one_row();
-                    write_tags_and_timestamp(
-                        quantile_table,
-                        &mut row,
-                        resource_attrs,
-                        scope_attrs,
-                        Some(data_point.attributes.as_ref()),
-                        data_point.time_unix_nano as i64,
-                        metric_ctx,
-                    )?;
-                    row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
-                    row_writer::write_f64(
-                        quantile_table,
-                        greptime_value(),
-                        quantile.value,
-                        &mut row,
-                    )?;
-                    quantile_table.add_row(row);
-                }
-            }
-            {
-                let count_table = table_writer.get_or_default_table_data(
-                    &count_name,
-                    APPROXIMATE_COLUMN_COUNT,
-                    summary.data_points.len(),
-                );
-                let mut row = count_table.alloc_one_row();
-                write_tags_and_timestamp(
-                    count_table,
-                    &mut row,
-                    resource_attrs,
-                    scope_attrs,
-                    Some(data_point.attributes.as_ref()),
-                    data_point.time_unix_nano as i64,
-                    metric_ctx,
-                )?;
-
-                row_writer::write_f64(
-                    count_table,
-                    greptime_value(),
-                    data_point.count as f64,
-                    &mut row,
-                )?;
-
-                count_table.add_row(row);
-            }
-            {
-                let sum_table = table_writer.get_or_default_table_data(
-                    &sum_name,
-                    APPROXIMATE_COLUMN_COUNT,
-                    summary.data_points.len(),
-                );
-
-                let mut row = sum_table.alloc_one_row();
-                write_tags_and_timestamp(
-                    sum_table,
-                    &mut row,
-                    resource_attrs,
-                    scope_attrs,
-                    Some(data_point.attributes.as_ref()),
-                    data_point.time_unix_nano as i64,
-                    metric_ctx,
-                )?;
-
-                row_writer::write_f64(sum_table, greptime_value(), data_point.sum, &mut row)?;
-
-                sum_table.add_row(row);
-            }
+            sum_table.add_row(row);
         }
     }
 
@@ -1616,7 +1537,6 @@ mod tests {
             ),
             (1, 1)
         );
-        assert_eq!(conversion.input_names, vec!["accepted"]);
         let descriptors = conversion.resource_info.unwrap();
         let rows = descriptors.inserts[0].rows.as_ref().unwrap();
         assert_eq!(rows.rows.len(), 1);
@@ -1645,27 +1565,6 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, error::Error::Internal { .. }));
         }
-    }
-
-    #[test]
-    fn test_conversion_skips_descriptor_for_legacy_mode() {
-        set_default_prefix(None).unwrap();
-        let request = gauge_request(
-            vec![keyvalue("service.name", "api"), keyvalue("host.id", "h-1")],
-            "my_gauge",
-        );
-        let mut ctx = OtlpMetricCtx {
-            is_legacy: true,
-            ..descriptor_ctx()
-        };
-        let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
-        assert!(conversion.resource_info.is_none());
-
-        // legacy tables predate job/instance and the promote filter; adding
-        // either would alter the schema of tables already in use
-        let cols = column_names(&conversion.requests, "my_gauge");
-        assert!(!cols.contains(&"job".to_string()));
-        assert!(cols.contains(&"host_id".to_string()));
     }
 
     #[test]
@@ -1979,47 +1878,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_legacy_summary_keeps_legacy_column_names() {
-        set_default_prefix(Some("custom")).unwrap();
-        let mut tables = MultiTableData::default();
-        let summary = Summary {
-            data_points: vec![SummaryDataPoint {
-                attributes: vec![keyvalue("host", "testserver")],
-                time_unix_nano: 100,
-                count: 25,
-                quantile_values: vec![ValueAtQuantile {
-                    quantile: 0.90,
-                    value: 1000.0,
-                }],
-                ..Default::default()
-            }],
-        };
-
-        encode_summary(
-            &mut tables,
-            "datamon",
-            &summary,
-            None,
-            None,
-            &OtlpMetricCtx {
-                is_legacy: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let table = tables.get_or_default_table_data("datamon", 0, 0);
-        assert_eq!(
-            table
-                .columns()
-                .iter()
-                .map(|column| column.column_name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["host", "custom_timestamp", "greptime_p90", GREPTIME_COUNT,]
-        );
-    }
-
-    #[test]
     fn test_encode_histogram() {
         let mut tables = MultiTableData::default();
         let mut outcome = MetricsIngestOutcome::default();
@@ -2132,7 +1990,7 @@ mod tests {
             &mut index,
             metric,
             name,
-            &emitted_semantic_tables(&ctx.metric_type, ctx.is_legacy, name),
+            &emitted_semantic_tables(&ctx.metric_type, name),
         );
         index
     }
@@ -3028,7 +2886,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exponential_histogram_legacy_and_new_modes_share_struct() {
+    fn test_exponential_histogram_storage_paths_share_struct() {
         use common_query::prelude::greptime_native_histogram;
 
         let mut point = exponential_point();
@@ -3038,40 +2896,40 @@ mod tests {
             vec![point],
             AggregationTemporality::Cumulative,
         )]);
-        let mut new_ctx = OtlpMetricCtx::default();
-        let new_requests = to_grpc_insert_requests(request.clone(), &mut new_ctx)
+        let mut ordinary_ctx = OtlpMetricCtx::default();
+        let ordinary_requests = to_grpc_insert_requests(request.clone(), &mut ordinary_ctx)
             .unwrap()
             .requests;
-        let mut legacy_ctx = OtlpMetricCtx {
-            is_legacy: true,
+        let mut metric_ctx = OtlpMetricCtx {
+            with_metric_engine: true,
             ..Default::default()
         };
-        let legacy_requests = to_grpc_insert_requests(request, &mut legacy_ctx)
+        let metric_requests = to_grpc_insert_requests(request, &mut metric_ctx)
             .unwrap()
             .requests;
 
-        let new_insert = &new_requests.inserts[0];
-        let legacy_insert = &legacy_requests.inserts[0];
-        assert_eq!(new_insert.table_name, "request_duration");
-        assert_eq!(legacy_insert.table_name, "request_duration");
-        let new_rows = new_insert.rows.as_ref().unwrap();
-        let legacy_rows = legacy_insert.rows.as_ref().unwrap();
+        let ordinary_insert = &ordinary_requests.inserts[0];
+        let metric_insert = &metric_requests.inserts[0];
+        assert_eq!(ordinary_insert.table_name, "request_duration");
+        assert_eq!(metric_insert.table_name, "request_duration");
+        let ordinary_rows = ordinary_insert.rows.as_ref().unwrap();
+        let metric_rows = metric_insert.rows.as_ref().unwrap();
         let field = greptime_native_histogram();
-        let new_histogram = new_rows.rows[0].values[new_rows
+        let ordinary_histogram = ordinary_rows.rows[0].values[ordinary_rows
             .schema
             .iter()
             .position(|column| column.column_name == field)
             .unwrap()]
         .clone();
-        let legacy_histogram = legacy_rows.rows[0].values[legacy_rows
+        let metric_histogram = metric_rows.rows[0].values[metric_rows
             .schema
             .iter()
             .position(|column| column.column_name == field)
             .unwrap()]
         .clone();
-        assert_eq!(new_histogram, legacy_histogram);
+        assert_eq!(ordinary_histogram, metric_histogram);
         assert!(matches!(
-            new_rows.rows[0].values[new_rows
+            ordinary_rows.rows[0].values[ordinary_rows
                 .schema
                 .iter()
                 .position(|column| column.column_name == greptime_timestamp())
@@ -3080,7 +2938,7 @@ mod tests {
             Some(ValueData::TimestampMillisecondValue(2))
         ));
         assert!(matches!(
-            legacy_rows.rows[0].values[legacy_rows
+            metric_rows.rows[0].values[metric_rows
                 .schema
                 .iter()
                 .position(|column| column.column_name == greptime_timestamp())

@@ -109,22 +109,11 @@ impl OpenTelemetryProtocolHandler for Instance {
         interceptor_ref.pre_execute(ctx.clone())?;
         let ctx = Arc::new(ctx.fork());
 
-        let input_names = request
-            .resource_metrics
-            .iter()
-            .flat_map(|r| r.scope_metrics.iter())
-            .flat_map(|s| s.metrics.iter().map(|m| m.name.clone()))
-            .collect::<Vec<_>>();
-
-        // See [`OtlpMetricCtx`] for details
-        let is_legacy = self.check_otlp_legacy(&input_names, &ctx).await?;
-
         let mut metric_ctx = ctx
             .protocol_ctx()
             .get_otlp_metric_ctx()
             .cloned()
             .unwrap_or_default();
-        metric_ctx.is_legacy = is_legacy;
         metric_ctx.resource_info = self.otlp_resource_info;
 
         let mut prepared = otlp::metrics::prepare_metrics(request, &mut metric_ctx)?;
@@ -153,7 +142,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .preflight_otlp_metrics(
                 &mut prepared.requests,
                 &ctx,
-                !is_legacy && metric_ctx.with_metric_engine,
+                metric_ctx.with_metric_engine,
                 ctx.extension(PHYSICAL_TABLE_PARAM)
                     .unwrap_or(GREPTIME_PHYSICAL_TABLE),
             )
@@ -166,7 +155,6 @@ impl OpenTelemetryProtocolHandler for Instance {
             semantic_index,
             resource_info,
             mut outcome,
-            input_names,
         } = prepared.finish(preflight.rejections, &preflight.physical_tables)?;
         if outcome.rejected_data_points > 0 {
             warn!(
@@ -183,7 +171,6 @@ impl OpenTelemetryProtocolHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
-        self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let ctx = {
@@ -196,9 +183,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             if let Some(index) = semantic_index.encode(&c.current_schema()) {
                 c.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
             }
-            if !is_legacy {
-                c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
-            }
+            c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
             Arc::new(c)
         };
 
@@ -366,9 +351,9 @@ impl Instance {
         // The bulk path converts each request's time index unit to the
         // destination table's unit during batch alignment, so no pre-gate
         // alignment is needed here.
-        let batcher = self.logical_batcher().filter(|_| {
-            ctx.logical_batching_enabled() && !metric_ctx.is_legacy && metric_ctx.with_metric_engine
-        });
+        let batcher = self
+            .logical_batcher()
+            .filter(|_| ctx.logical_batching_enabled() && metric_ctx.with_metric_engine);
         let batcher = if batcher.is_some()
             && self
                 .inserter
@@ -382,7 +367,7 @@ impl Instance {
             None
         };
 
-        // OTLP tables have one sample field in both the legacy and physical paths.
+        // OTLP tables have one sample field in both the ordinary and physical paths.
         if let Some(batcher) = batcher {
             let (rows, cost) = batcher
                 .submit_with(requests, ctx.clone(), |mut requests| {
@@ -399,7 +384,7 @@ impl Instance {
                 OutputData::AffectedRows(rows as usize),
                 OutputMeta::new_with_cost(cost as _),
             ))
-        } else if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+        } else if !metric_ctx.with_metric_engine {
             self.handle_row_inserts(requests, ctx.clone(), false, true)
                 .await
                 .map_err(BoxedError::new)

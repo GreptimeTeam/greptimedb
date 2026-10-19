@@ -67,20 +67,19 @@ impl Inserter {
                         .await?;
                     tables.insert(request.table_name.clone(), table);
                 }
-                if metric_engine {
-                    let backing = match tables[&request.table_name].as_ref() {
-                        Some(table) => table
-                            .table_info()
-                            .meta
-                            .options
-                            .extra_options
-                            .get(LOGICAL_TABLE_METADATA_KEY)
-                            .cloned(),
-                        None => Some(physical_table.to_string()),
-                    };
-                    if let Some(backing) = backing {
-                        physical_tables.insert(request.table_name.clone(), backing);
-                    }
+                let backing = match tables[&request.table_name].as_ref() {
+                    Some(table) => table
+                        .table_info()
+                        .meta
+                        .options
+                        .extra_options
+                        .get(LOGICAL_TABLE_METADATA_KEY)
+                        .cloned(),
+                    None if metric_engine => Some(physical_table.to_string()),
+                    None => None,
+                };
+                if let Some(backing) = backing {
+                    physical_tables.insert(request.table_name.clone(), backing);
                 }
             }
         }

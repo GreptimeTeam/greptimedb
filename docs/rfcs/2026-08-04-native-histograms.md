@@ -144,13 +144,13 @@ buckets that merge. Lower scales are rejected. OTLP counts always populate the
 integer histogram family. The transmitted non-negative finite zero threshold
 and zero count are preserved; the Struct start timestamp is stored in
 milliseconds. The reset hint is gauge for delta and unknown for cumulative samples.
-Point timestamps and attributes
-retain their existing mode-specific conversion rules. Legacy mode retains its
-normalized name, attribute rules, and nanosecond row timestamp. Nonlegacy metric-engine conversion retains nanoseconds until alignment to the
-destination time-index unit: seconds, milliseconds, microseconds, or nanoseconds.
+OTLP metrics always use Prometheus-compatible name and attribute conversion;
+`otlp_metric_compat` remains accepted as table metadata but does not select a
+conversion mode. Metric-engine conversion retains nanoseconds until alignment
+to the destination time-index unit: seconds, milliseconds, microseconds, or nanoseconds.
 New logical tables inherit their backing table's unit; auto-created physical
-tables default to milliseconds. Nonlegacy ordinary insertion uses milliseconds.
-Both modes write the same canonical Struct.
+tables default to milliseconds. Ordinary insertion uses milliseconds.
+Both storage paths write the same canonical Struct.
 
 An absent sum is stored as an ordinary quiet NaN, so the sample remains
 selectable while `histogram_sum` is unknown. Any NaN sum on a point without
@@ -214,13 +214,9 @@ logical/physical conflicts. Reject the union of contributors to all conflicts;
 remove every output of a rejected point. Defaults distinguish omitted columns
 from explicit nulls. Auto-DDL configuration and hints remain authoritative;
 metric-engine timestamp alignment remains permitted with auto-DDL disabled.
-Only surviving points contribute metadata, descriptor windows and original-name
-mode-cache entries. Metadata describes actual outputs, excluding absent sums
-and empty quantile outputs.
+Only surviving points contribute metadata and descriptor windows. Metadata
+describes actual outputs, excluding absent sums and empty quantile outputs.
 
-Detected request-wide legacy/nonlegacy conflicts still fail the request before
-conversion. The existing partial-cache-hit shortcut can skip catalog resolution
-for uncached names; survivor filtering does not resolve this limitation.
 Authentication, authorization, admission, catalog and primary-write failures
 retain their failure paths. Synchronous acceptance waits for writes; eligible
 asynchronous batching acknowledges enqueue, and later flush errors retain their

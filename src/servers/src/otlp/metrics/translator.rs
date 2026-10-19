@@ -286,16 +286,6 @@ pub fn normalize_label_name(name: &str) -> String {
     n.to_string()
 }
 
-/// Normalize otlp instrumentation, metric and attribute names
-///
-/// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
-/// - since the name are case-insensitive, we transform them to lowercase for
-///   better sql usability
-/// - replace `.` and `-` with `_`
-pub fn legacy_normalize_otlp_name(name: &str) -> String {
-    name.to_lowercase().replace(['.', '-'], "_")
-}
-
 #[cfg(test)]
 mod tests {
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::Metric;
@@ -305,30 +295,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[test]
-    fn test_legacy_normalize_otlp_name() {
-        assert_eq!(
-            legacy_normalize_otlp_name("jvm.memory.free"),
-            "jvm_memory_free"
-        );
-        assert_eq!(
-            legacy_normalize_otlp_name("jvm-memory-free"),
-            "jvm_memory_free"
-        );
-        assert_eq!(
-            legacy_normalize_otlp_name("jvm_memory_free"),
-            "jvm_memory_free"
-        );
-        assert_eq!(
-            legacy_normalize_otlp_name("JVM_MEMORY_FREE"),
-            "jvm_memory_free"
-        );
-        assert_eq!(
-            legacy_normalize_otlp_name("JVM_memory_FREE"),
-            "jvm_memory_free"
-        );
-    }
 
     #[test]
     fn test_translate_metric_name_strategies() {
