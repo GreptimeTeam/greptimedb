@@ -15,9 +15,6 @@
 //! This file contains code to find sorted runs in a set if ranged items and
 //! along with the best way to merge these items to satisfy the desired run count.
 
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-
 use bytes::{Buf, Bytes};
 use common_base::BitVec;
 use common_time::Timestamp;
@@ -258,70 +255,75 @@ where
     }
 }
 
-/// Finds sorted runs using the caller's overlap test within each active time range.
+/// Finds sorted runs using the caller's overlap test.
+///
+/// Items are visited in (start asc, end desc) order and each joins the first run
+/// with no overlapping item, which yields the same runs as repeatedly extracting
+/// a greedy run from the remaining items. Each run only compares an item with
+/// its items whose time ranges are still open: O(N log N + R · N + C) for R runs
+/// and C compared pairs.
 pub fn find_sorted_runs<T>(items: &mut [T], overlaps: impl Fn(&T, &T) -> bool) -> Vec<SortedRun<T>>
 where
     T: Item,
 {
-    if items.is_empty() {
-        return vec![];
-    }
-    // sort files
     sort_ranged_items(items);
 
-    let mut current_run = SortedRun::default();
-    let mut runs = vec![];
-    let mut active_run_item_indices = Vec::new();
-
-    let mut selection = BitVec::repeat(false, items.len());
-    while !selection.all() {
-        // until all items are assigned to some sorted run.
-        let mut last_pruned_start = None;
-        for (item, mut selected) in items.iter().zip(selection.iter_mut()) {
-            if *selected {
-                // item is already assigned.
-                continue;
-            }
-            if current_run.items.is_empty() {
-                // current run is empty, just add current_item
-                selected.set(true);
-                current_run.push_item(item.clone());
-                active_run_item_indices.push(current_run.items.len() - 1);
-            } else {
-                // the current item does not overlap with any item in current run,
-                // then it belongs to current run. Because now we introduced primary
-                // key range, we cannot simply use timestamps to check overlapping.
-                let (item_start, _) = item.range();
-                if last_pruned_start != Some(item_start) {
-                    active_run_item_indices.retain(|idx| {
-                        let (_, run_item_end) = current_run.items[*idx].range();
-                        run_item_end > item_start
-                    });
-                    last_pruned_start = Some(item_start);
-                }
-
-                let mut overlaps_any = false;
-                for idx in &active_run_item_indices {
-                    let run_item = &current_run.items[*idx];
-                    if overlaps(run_item, item) {
-                        overlaps_any = true;
-                        break;
-                    }
-                }
-                if !overlaps_any {
-                    // does not overlap, push to current run
-                    selected.set(true);
-                    let item_idx = current_run.items.len();
-                    current_run.push_item(item.clone());
-                    active_run_item_indices.push(item_idx);
-                }
-            }
-        }
-        // finished an iteration, we've found a new run.
-        runs.push(std::mem::take(&mut current_run));
-        active_run_item_indices.clear();
+    let mut runs: Vec<OpenRun<T>> = Vec::new();
+    for item in items.iter() {
+        let (start, _) = item.range();
+        let fit = runs
+            .iter_mut()
+            .position(|run| !run.overlaps_any(item, start, &overlaps));
+        let idx = fit.unwrap_or_else(|| {
+            runs.push(OpenRun::default());
+            runs.len() - 1
+        });
+        runs[idx].push(item);
     }
-    runs
+    runs.into_iter().map(|run| run.run).collect()
+}
+
+/// A sorted run with the indices of its items whose time ranges may still be
+/// open.
+struct OpenRun<T: Item> {
+    run: SortedRun<T>,
+    open: Vec<usize>,
+    /// The start that `open` was last pruned at. Items arrive in start order,
+    /// so pruning once per distinct start suffices.
+    pruned_at: Option<T::BoundType>,
+}
+
+impl<T: Item> Default for OpenRun<T> {
+    fn default() -> Self {
+        Self {
+            run: SortedRun::default(),
+            open: Vec::new(),
+            pruned_at: None,
+        }
+    }
+}
+
+impl<T: Item> OpenRun<T> {
+    fn overlaps_any(
+        &mut self,
+        item: &T,
+        start: T::BoundType,
+        overlaps: impl Fn(&T, &T) -> bool,
+    ) -> bool {
+        if self.pruned_at != Some(start) {
+            let items = &self.run.items;
+            self.open.retain(|&idx| items[idx].range().1 > start);
+            self.pruned_at = Some(start);
+        }
+        self.open
+            .iter()
+            .any(|&idx| overlaps(&self.run.items[idx], item))
+    }
+
+    fn push(&mut self, item: &T) {
+        self.open.push(self.run.items.len());
+        self.run.push_item(item.clone());
+    }
 }
 
 #[cfg(any(test, feature = "test", feature = "testing"))]
@@ -366,137 +368,6 @@ where
         runs.push(std::mem::take(&mut current_run));
     }
     runs
-}
-
-pub(crate) fn find_sorted_runs_by_time_range<T>(items: &mut [T]) -> Vec<SortedRun<T>>
-where
-    T: Item,
-{
-    if items.is_empty() {
-        return vec![];
-    }
-    sort_ranged_items(items);
-
-    use derive_more::{Eq, PartialEq};
-
-    /// `SortedRun` with a creation sequence `i`.
-    #[derive(PartialEq, Eq)]
-    struct Run<T: Item> {
-        i: usize,
-        #[partial_eq(skip)]
-        run: SortedRun<T>,
-    }
-
-    impl<T: Item> Run<T> {
-        fn new(i: usize, item: &T) -> Run<T> {
-            let mut run = SortedRun::default();
-            run.push_item(item.clone());
-            Run { i, run }
-        }
-
-        fn push_item(&mut self, item: &T) {
-            self.run.push_item(item.clone());
-        }
-    }
-
-    impl<T: Item> PartialOrd for Run<T> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    /// Sort by run's `end` desc then `start` asc.
-    impl<T: Item> Ord for Run<T> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            let l_run = &self.run;
-            let r_run = &other.run;
-
-            // Safety: `start` and `end` must both exist because it's guaranteed that whenever a
-            // `Run` is created, an item is pushed into it immediately (see its `new` method above).
-            // And there are no other ways to create a `Run` beyond its `new` method in this
-            // function's scope.
-            let l_end = l_run.end.unwrap();
-            let r_end = r_run.end.unwrap();
-            r_end
-                .cmp(&l_end)
-                .then_with(|| {
-                    let l_start = l_run.start.unwrap();
-                    let r_start = r_run.start.unwrap();
-                    l_start.cmp(&r_start)
-                })
-                .then_with(|| self.i.cmp(&other.i))
-        }
-    }
-
-    /// Wrapper around the `Run` above, to support sorting them by their creation sequence `i`.
-    #[derive(PartialEq, Eq)]
-    struct Wrapper<T: Item>(Run<T>);
-
-    impl<T: Item> PartialOrd for Wrapper<T> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    impl<T: Item> Ord for Wrapper<T> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            other.0.i.cmp(&self.0.i)
-        }
-    }
-
-    // Two heaps for finding a run that is both:
-    // 1. not overlapping with item's range,
-    // 2. and is created earliest,
-    // when iterating the items.
-    //
-    // Heap 1 (`runs_sorted_by_end`) is for storing the runs of which top has the minimal "end"
-    // just about to overlap with the current selected item.
-    //
-    // Heap 2 (`runs_sort_by_index`) is for storing the runs that all have "end"s non-overlap with
-    // the current selected item, and of which top is the earliest created run.
-    //
-    // The finding of a suitable run basically works like this:
-    // 1. moves the runs in heap 1 to heap 2, until the top is overlapping with the current item;
-    // 2. now heap 2 has all the runs that can accept the current item, pop its top;
-    // 3. the top is the earliest created run, push the current item;
-    // 4. because the run has changed, push it back to heap 1;
-    // 5. check the next item. Important: we don't need to push the runs in heap 2 to 1, because
-    //    the items are sorted by "start". When checking the next item, heap 2's runs must all have
-    //    "end"s smaller than next item's "start".
-    //
-    // Actually the heap 2 is only for aligning with the runs selection outcomes in the original
-    // `find_sorted_runs` implementation. If we just need the invariant that each run has the
-    // non-overlapping items, we can get rid of heap 2 and make the codes simpler.
-
-    let mut runs_sort_by_end = BinaryHeap::<Run<T>>::new();
-    let mut runs_sort_by_index = BinaryHeap::<Wrapper<T>>::new();
-    let mut i = 0;
-
-    for item in items {
-        let (start, _) = item.range();
-
-        while runs_sort_by_end
-            .peek()
-            .is_some_and(|x| x.run.end.unwrap() <= start)
-        {
-            let run = runs_sort_by_end.pop().unwrap();
-            runs_sort_by_index.push(Wrapper(run));
-        }
-
-        let Some(mut run) = runs_sort_by_index.pop() else {
-            i += 1;
-            runs_sort_by_end.push(Run::new(i, item));
-            continue;
-        };
-
-        run.0.push_item(item);
-        runs_sort_by_end.push(run.0);
-    }
-
-    let mut runs = runs_sort_by_end.into_vec();
-    runs.extend(runs_sort_by_index.into_vec().into_iter().map(|x| x.0));
-    runs.sort_unstable_by_key(|run| run.i);
-    runs.into_iter().map(|x| x.run).collect()
 }
 
 #[cfg(test)]
@@ -546,7 +417,6 @@ mod tests {
         expected_runs: &[Vec<(i64, i64)>],
     ) -> Vec<SortedRun<MockFile>> {
         let mut files = build_items(ranges);
-        let mut files_clone = files.clone();
 
         let runs = find_sorted_runs(&mut files, Ranged::overlap);
 
@@ -555,13 +425,6 @@ mod tests {
             .map(|r| r.items.iter().map(|f| f.range()).collect())
             .collect();
         assert_eq!(&expected_runs, &result_file_ranges);
-
-        let runs_by_time_range = find_sorted_runs_by_time_range(&mut files_clone);
-        let results: Vec<Vec<_>> = runs_by_time_range
-            .iter()
-            .map(|r| r.items.iter().map(|f| f.range()).collect())
-            .collect();
-        assert_eq!(&expected_runs, &results);
         runs
     }
 
@@ -638,6 +501,84 @@ mod tests {
                 vec![(21, 22), (31, 32), (32, 42)],
             ],
         );
+    }
+
+    /// Repeatedly extracts a greedy run from the remaining items.
+    fn find_sorted_runs_by_passes<T: Item>(
+        items: &mut [T],
+        overlaps: impl Fn(&T, &T) -> bool,
+    ) -> Vec<SortedRun<T>> {
+        sort_ranged_items(items);
+        let mut remaining = items.to_vec();
+        let mut runs = Vec::new();
+        while !remaining.is_empty() {
+            let mut run = SortedRun::default();
+            let mut rest = Vec::new();
+            for item in remaining {
+                if run.items.iter().any(|other| overlaps(other, &item)) {
+                    rest.push(item);
+                } else {
+                    run.push_item(item);
+                }
+            }
+            runs.push(run);
+            remaining = rest;
+        }
+        runs
+    }
+
+    #[test]
+    fn test_find_sorted_runs_matches_greedy_passes_with_key_ranges() {
+        // Time ranges paired with key ranges, overlapping only in both dimensions.
+        #[derive(Clone, Debug, PartialEq)]
+        struct Rect {
+            time: (i64, i64),
+            key: (i64, i64),
+        }
+        impl Ranged for Rect {
+            type BoundType = i64;
+
+            fn range(&self) -> (i64, i64) {
+                self.time
+            }
+        }
+        impl Item for Rect {
+            fn size(&self) -> usize {
+                1
+            }
+        }
+        let overlaps = |lhs: &Rect, rhs: &Rect| {
+            lhs.time.0 < rhs.time.1
+                && rhs.time.0 < lhs.time.1
+                && lhs.key.0 <= rhs.key.1
+                && rhs.key.0 <= lhs.key.1
+        };
+        let mut seed = 42u64;
+        let mut next = |bound: i64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) % bound as u64) as i64
+        };
+        for _ in 0..200 {
+            let len = next(40) as usize;
+            let mut rects = (0..len)
+                .map(|_| {
+                    let (start, key) = (next(100), next(100));
+                    Rect {
+                        time: (start, start + 1 + next(30)),
+                        key: (key, key + next(30)),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut expected = rects.clone();
+            let runs = find_sorted_runs(&mut rects, overlaps);
+            let expected = find_sorted_runs_by_passes(&mut expected, overlaps);
+            let items = |runs: &[SortedRun<Rect>]| {
+                runs.iter().map(|run| run.items.clone()).collect::<Vec<_>>()
+            };
+            assert_eq!(items(&expected), items(&runs));
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
     Ranged, SortedRun, files_overlap, files_overlap_inclusive, find_sorted_runs,
-    find_sorted_runs_by_time_range, merge_primary_key_ranges, primary_key_ranges_overlap,
+    merge_primary_key_ranges, primary_key_ranges_overlap,
 };
 use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, Level, overlaps};
@@ -442,11 +442,7 @@ fn pick_candidate_files(
     picker: CandidatePicker,
     mapper: &PrimaryKeyRangeMapper,
 ) -> (Vec<FileHandle>, usize) {
-    let sorted_runs = if files.len() < 1024 {
-        find_sorted_runs(&mut files, |lhs, rhs| files_overlap(lhs, rhs, mapper))
-    } else {
-        find_sorted_runs_by_time_range(&mut files)
-    };
+    let sorted_runs = find_sorted_runs(&mut files, |lhs, rhs| files_overlap(lhs, rhs, mapper));
     let found_runs = sorted_runs.len();
     (
         picker(sorted_runs, max_output_file_size, mapper),
