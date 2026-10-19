@@ -124,7 +124,9 @@ pub struct MetricsConversion {
     pub input_names: Vec<String>,
 }
 
-/// Convert OpenTelemetry metrics to GreptimeDB insert requests
+/// Converts OpenTelemetry metrics without validating destination table schemas.
+/// Ingestion callers use [`prepare_metrics`], run destination preflight, then call
+/// [`PreparedMetrics::finish`] to apply rejections and merge surviving points.
 ///
 /// See
 /// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto>
@@ -410,7 +412,6 @@ fn encode_metrics(
                     metric_ctx,
                 )?;
                 add_accepted_data_points(outcome, gauge.data_points.len())?;
-                !gauge.data_points.is_empty()
             }
             metric::Data::Sum(sum) => {
                 encode_sum(
@@ -422,7 +423,6 @@ fn encode_metrics(
                     metric_ctx,
                 )?;
                 add_accepted_data_points(outcome, sum.data_points.len())?;
-                !sum.data_points.is_empty()
             }
             metric::Data::Summary(summary) => {
                 encode_summary(
@@ -434,7 +434,6 @@ fn encode_metrics(
                     metric_ctx,
                 )?;
                 add_accepted_data_points(outcome, summary.data_points.len())?;
-                !summary.data_points.is_empty()
             }
             metric::Data::Histogram(hist) => encode_histogram(
                 table_writer,
@@ -455,9 +454,7 @@ fn encode_metrics(
                 outcome,
             )?,
         }
-    } else {
-        false
-    };
+    }
 
     Ok(())
 }
@@ -547,7 +544,7 @@ fn encode_exponential_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
-) -> Result<bool> {
+) -> Result<()> {
     let temporality = match exponential_histogram_gate(histogram) {
         Ok(temporality) => temporality,
         Err(rejection) => {
@@ -557,7 +554,7 @@ fn encode_exponential_histogram(
             OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS
                 .with_label_values(&[rejection.reason_label()])
                 .inc_by(histogram.data_points.len() as u64);
-            return Ok(false);
+            return Ok(());
         }
     };
 
@@ -567,7 +564,6 @@ fn encode_exponential_histogram(
         }
         .build()
     })?;
-    let mut emitted = false;
     for (index, data_point) in histogram.data_points.iter().enumerate() {
         let (value, timestamp_nanos) = match exponential_histogram_value(data_point, temporality) {
             Ok(value) => value,
@@ -609,10 +605,9 @@ fn encode_exponential_histogram(
         )?;
         table.add_row(row);
         add_accepted_data_points(outcome, 1)?;
-        emitted = true;
     }
 
-    Ok(emitted)
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1145,7 +1140,7 @@ fn encode_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
-) -> Result<bool> {
+) -> Result<()> {
     let normalized_name = name;
 
     let bucket_table_name = format!("{}{}", normalized_name, BUCKET_TABLE_SUFFIX);
@@ -1157,7 +1152,6 @@ fn encode_histogram(
         Ok(AggregationTemporality::Delta)
     );
     let stale_value = f64::from_bits(PROMETHEUS_STALE_NAN_BITS);
-    let mut emitted = false;
     for (index, data_point) in hist.data_points.iter().enumerate() {
         if let Some(reason) = histogram_data_point_rejection(data_point, is_delta) {
             reject_data_points(outcome, 1, || {
@@ -1280,10 +1274,9 @@ fn encode_histogram(
         )?;
         count_table.add_row(count_row);
         add_accepted_data_points(outcome, 1)?;
-        emitted = true;
     }
 
-    Ok(emitted)
+    Ok(())
 }
 
 pub(crate) fn histogram_data_point_rejection(
@@ -1639,6 +1632,22 @@ mod tests {
     }
 
     #[test]
+    fn test_finish_rejects_mismatched_point_counts() {
+        for (requests, rejections) in [(0, 1), (2, 1), (1, 0), (1, 2)] {
+            let mut prepared = prepare_metrics(
+                gauge_request(vec![], "gauge"),
+                &mut OtlpMetricCtx::default(),
+            )
+            .unwrap();
+            prepared.requests.resize(requests, Default::default());
+            let err = prepared
+                .finish(vec![None; rejections], &Default::default())
+                .unwrap_err();
+            assert!(matches!(err, error::Error::Internal { .. }));
+        }
+    }
+
+    #[test]
     fn test_conversion_skips_descriptor_for_legacy_mode() {
         set_default_prefix(None).unwrap();
         let request = gauge_request(
@@ -1662,20 +1671,41 @@ mod tests {
     #[test]
     fn test_conversion_skips_descriptor_on_metric_name_collision() {
         set_default_prefix(None).unwrap();
-        let request = gauge_request(
-            vec![keyvalue("service.name", "api")],
-            OTEL_RESOURCE_INFO_TABLE_NAME,
-        );
-        let conversion = to_grpc_insert_requests(request, &mut descriptor_ctx()).unwrap();
-        assert!(conversion.resource_info.is_none());
-        // the metric itself still goes through the main path
-        assert!(
-            conversion
-                .requests
-                .inserts
-                .iter()
-                .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)
-        );
+        for (enabled, attributes, warns) in [
+            (true, vec![keyvalue("service.name", "api")], true),
+            (false, vec![keyvalue("service.name", "api")], false),
+            (true, vec![keyvalue("unprojected", "value")], false),
+        ] {
+            let logs = tempfile::NamedTempFile::new().unwrap();
+            let writer = logs.reopen().unwrap();
+            let subscriber = common_telemetry::tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            let conversion = tracing::subscriber::with_default(subscriber, || {
+                let mut ctx = descriptor_ctx();
+                ctx.resource_info = enabled;
+                to_grpc_insert_requests(
+                    gauge_request(attributes, OTEL_RESOURCE_INFO_TABLE_NAME),
+                    &mut ctx,
+                )
+                .unwrap()
+            });
+            let diagnostics = std::fs::read_to_string(logs.path()).unwrap();
+            assert_eq!(
+                diagnostics.contains("Skipping OTLP resource descriptor"),
+                warns
+            );
+            assert!(conversion.resource_info.is_none());
+            assert!(
+                conversion
+                    .requests
+                    .inserts
+                    .iter()
+                    .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)
+            );
+        }
     }
 
     #[test]

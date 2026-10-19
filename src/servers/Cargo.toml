@@ -207,3 +207,11 @@ harness = false
 [[bench]]
 name = "flush_batch_physical"
 harness = false
+
+[[bench]]
+name = "otlp_metrics"
+harness = false
+
+[[bench]]
+name = "otlp_metrics_preflight"
+harness = false

@@ -83,6 +83,10 @@ pub struct ResourceInfoData {
 }
 
 impl ResourceInfoData {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
     pub(super) fn observe_times(
         &mut self,
         raw_attrs: &[KeyValue],

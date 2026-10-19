@@ -230,6 +230,12 @@ impl PreparedMetrics {
         mut rejections: Vec<Option<String>>,
         physical_tables: &HashMap<String, String>,
     ) -> Result<MetricsConversion> {
+        snafu::ensure!(
+            self.requests.len() == self.points.len() && rejections.len() == self.points.len(),
+            error::InternalSnafu {
+                err_msg: "OTLP prepared requests, points and rejections must have equal lengths",
+            }
+        );
         let conflicts = conflicting_points(&self.requests, &rejections, physical_tables);
         for index in conflicts {
             rejections[index] =
@@ -277,10 +283,11 @@ impl PreparedMetrics {
             resource_info.observe_times(&self.resources[point.resource], [point.timestamp]);
         }
         let (requests, rows) = writer.into_row_insert_requests();
-        let resource_info = if requests
-            .inserts
-            .iter()
-            .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)
+        let resource_info = if !resource_info.is_empty()
+            && requests
+                .inserts
+                .iter()
+                .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)
         {
             common_telemetry::warn!(
                 "Skipping OTLP resource descriptor synthesis: a metric uses its table name"
