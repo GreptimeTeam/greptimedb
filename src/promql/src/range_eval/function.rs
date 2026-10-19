@@ -20,7 +20,7 @@
 
 use crate::functions::{EdgeKind, count_edges, extremum, instant_delta, kahan_inc};
 use crate::go_sort;
-use crate::range_eval::{FloatWindow, WindowKernel};
+use crate::range_eval::{BatchKernel, FloatWindow, FloatWindows, WindowKernel};
 
 /// A PromQL range-vector function over float and native histogram samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,6 +75,19 @@ impl RangeFunction {
     /// correction, so a new counter function has to be added here as well.
     pub(crate) fn indexes_counter_resets(self) -> bool {
         matches!(self, Self::Rate | Self::Increase)
+    }
+
+    /// The batch form of this function, when it has one.
+    ///
+    /// Only the counter functions have one. The rest keep the per-window form, which the
+    /// evaluator falls back to, so adding a function here is what changes which shape its
+    /// evaluation takes.
+    pub(crate) fn batch_kernel(self) -> Option<BatchKernel> {
+        match self {
+            Self::Rate => Some(Box::new(extrapolated_rate_batch::<true, true>)),
+            Self::Increase => Some(Box::new(extrapolated_rate_batch::<true, false>)),
+            _ => None,
+        }
     }
 
     /// Returns the kernel computing this function over windows read with `offset_ms`.
@@ -237,27 +250,83 @@ fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
         eval_ts,
         range_ms,
     } = window;
-    let samples_minus_one = values.len().checked_sub(1).filter(|n| *n > 0)?;
-    let first = values[0];
-    let mut result = values[samples_minus_one] - first;
-    if IS_COUNTER {
+    let end = values.len().checked_sub(1).filter(|n| *n > 0)?;
+    extrapolated_rate_of(
+        (timestamps[0], timestamps[end]),
+        (values[0], values[end]),
+        end,
+        counter_resets.iter().map(|reset| reset.previous_value),
+        eval_ts,
+        range_ms,
+        (IS_COUNTER, IS_RATE),
+    )
+}
+
+/// The arithmetic of [`extrapolated_rate`], over a window's endpoints and the previous values of
+/// its resets.
+///
+/// Both callers reach it: the per-window form with a slice of the field, the batch form with the
+/// field's own arrays. Keeping it in one place is what holds their results equal; the two differ
+/// only in how they find the endpoints.
+fn extrapolated_rate_of(
+    (first_t, last_t): (i64, i64),
+    (first, last): (f64, f64),
+    samples_minus_one: usize,
+    resets: impl Iterator<Item = f64>,
+    eval_ts: i64,
+    range_ms: i64,
+    (is_counter, is_rate): (bool, bool),
+) -> Option<f64> {
+    let mut result = last - first;
+    if is_counter {
         // The same additions in the same order as scanning the window for resets, reached
         // through the evaluator's per-field reset index instead of the whole window.
-        result = counter_resets
-            .iter()
-            .fold(result, |result, reset| result + reset.previous_value);
+        result = resets.fold(result, |result, previous_value| result + previous_value);
     }
-    let zero_point = (IS_COUNTER && result > 0.0 && first >= 0.0).then(|| first / result);
+    let zero_point = (is_counter && result > 0.0 && first >= 0.0).then(|| first / result);
     let factor = extrapolation_factor(
-        (timestamps[0], timestamps[samples_minus_one]),
+        (first_t, last_t),
         samples_minus_one,
         eval_ts,
         range_ms,
-        IS_COUNTER,
-        IS_RATE,
+        is_counter,
+        is_rate,
         zero_point,
     );
     Some(result * factor)
+}
+
+/// The batch form of [`extrapolated_rate`], over consecutive windows of one field at once.
+///
+/// Computes exactly what calling the per-window form once per point computes -- same arithmetic,
+/// same order -- but reaches each window's endpoints straight out of the field's arrays. A rate
+/// needs only the first and last sample, the sample count and the resets, so no per-window slice
+/// is built and no window struct crosses a boxed call per grid point.
+pub(crate) fn extrapolated_rate_batch<const IS_COUNTER: bool, const IS_RATE: bool>(
+    batch: &FloatWindows<'_>,
+    out: &mut Vec<Option<f64>>,
+) {
+    out.clear();
+    out.reserve(batch.windows.len());
+    for (index, span) in batch.windows.iter().enumerate() {
+        let Some(samples_minus_one) = span.len().checked_sub(1).filter(|n| *n > 0) else {
+            out.push(None);
+            continue;
+        };
+        let (start, last) = (span.start, span.end - 1);
+        out.push(extrapolated_rate_of(
+            (batch.timestamps[start], batch.timestamps[last]),
+            (batch.values[start], batch.values[last]),
+            samples_minus_one,
+            batch
+                .resets_of(index)
+                .iter()
+                .map(|reset| reset.previous_value),
+            batch.eval_ts[index],
+            batch.range_ms,
+            (IS_COUNTER, IS_RATE),
+        ));
+    }
 }
 
 /// The factor `extrapolatedRate` scales the sampled increase by. `zero_point` is the first
