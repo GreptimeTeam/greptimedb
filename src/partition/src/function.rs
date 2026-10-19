@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Functions allowed on the column side of a partition rule.
+//! `iceberg_hash`, the hash allowed on the column side of a partition rule.
 //!
-//! A function's output decides which region a row is written to, and the
-//! function is persisted in partition metadata. Its result for a given input
-//! must therefore never change across versions. A different algorithm needs a
-//! new type.
+//! The hash decides which region a row is written to and is persisted in
+//! partition metadata, so its result for a given input must never change across
+//! versions. A different algorithm needs a new type.
 //!
-//! Partition rule simplification and coverage checks treat a function result
-//! as an independent dimension. This is sound only for deterministic functions
-//! defined for every value of their accepted input types.
+//! Rule simplification and coverage checks treat the hash as an independent
+//! dimension, which holds because it is defined for every value of the accepted
+//! column types.
 
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
