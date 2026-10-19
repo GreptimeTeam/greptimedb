@@ -23,8 +23,8 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 
 use crate::extension_plan::{
-    Absent, EmptyMetric, HistogramFold, InstantManipulate, RangeManipulate, ScalarCalculate,
-    SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
+    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 
 pub struct PromExtensionPlanner;
@@ -65,6 +65,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
             )))
         } else if let Some(node) = node.as_any().downcast_ref::<Absent>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
+        } else if let Some(node) = node.as_any().downcast_ref::<FusedSeries>() {
+            Ok(Some(node.to_execution_plan(physical_inputs[0].clone())?))
         } else {
             Ok(None)
         }
