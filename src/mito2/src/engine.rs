@@ -1444,7 +1444,7 @@ impl RegionEngine for MitoEngine {
             responses.push((vec![region_id], response));
         }
         let inner = self.inner.clone();
-        common_runtime::spawn_global(async move { inner.workers.submit_writes(writes).await });
+        common_runtime::spawn_ingest(async move { inner.workers.submit_writes(writes).await });
         responses
     }
 
