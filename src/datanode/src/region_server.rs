@@ -3339,6 +3339,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mito_batch_puts_to_a_stopped_worker_fail_as_a_single_put_does() {
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-stopped").await;
+        let (region_server, _log_store, wal_options) =
+            region_server_on_object_store_wal(&mut env, MitoConfig::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let insert = create_region(&region_server, region_id, &wal_options).await;
+        let mito = region_server
+            .inner
+            .region_map
+            .get(&region_id)
+            .unwrap()
+            .clone()
+            .into_engine();
+        mito.stop().await.unwrap();
+
+        // One put takes the per-region path and two take the batch path.
+        for requests in [vec![insert.clone()], vec![insert.clone(), insert]] {
+            let err = region_server
+                .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests {
+                    requests,
+                }))
+                .await
+                .unwrap_err();
+            assert!(format!("{err:?}").contains("is stopped"), "{err:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_default_batch_puts_handle_each_put_as_a_request() {
         let failing = RegionId::new(1, 2);
         let (engine, _receiver) = MockRegionEngine::with_mock_fn(

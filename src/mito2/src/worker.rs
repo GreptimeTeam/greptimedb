@@ -49,7 +49,7 @@ use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::{Histogram, IntGauge};
 use rand::{Rng, rng};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
@@ -320,17 +320,35 @@ impl WorkerGroup {
 
     /// Submits the writes of one request, those of each worker in one message, so that the
     /// worker handles them in one batch. The messages are sent concurrently, so a full worker
-    /// queue holds back no other worker. A write whose message cannot be sent is dropped, and its
-    /// caller receives an error.
+    /// queue holds back no other worker. A write whose worker has stopped receives the error a
+    /// write submitted on its own gets.
     pub(crate) async fn submit_writes(&self, writes: Vec<SenderWriteRequest>) {
         let mut writes_by_worker: HashMap<usize, Vec<SenderWriteRequest>> = HashMap::new();
         for write in writes {
             let index = region_id_to_index(write.request.region_id, self.workers.len());
             writes_by_worker.entry(index).or_default().push(write);
         }
-        join_all(writes_by_worker.into_iter().map(|(index, writes)| {
-            self.workers[index].submit_request(WorkerRequest::BatchWrite(writes))
-        }))
+        join_all(
+            writes_by_worker
+                .into_iter()
+                .map(|(index, writes)| async move {
+                    let worker = &self.workers[index];
+                    let Err(request) = worker
+                        .try_submit_request(WorkerRequest::BatchWrite(writes))
+                        .await
+                    else {
+                        return;
+                    };
+                    let WorkerRequest::BatchWrite(writes) = request else {
+                        unreachable!("the worker returns the request it was given");
+                    };
+                    for write in writes {
+                        write
+                            .sender
+                            .send(WorkerStoppedSnafu { id: worker.id }.fail());
+                    }
+                }),
+        )
         .await;
     }
 
@@ -754,9 +772,23 @@ pub(crate) struct RegionWorker {
 impl RegionWorker {
     /// Submits request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
-        ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
+        self.try_submit_request(request)
+            .await
+            .map_err(|_| WorkerStoppedSnafu { id: self.id }.build())
+    }
+
+    /// Submits request to background worker thread, or returns it if the worker is stopped.
+    async fn try_submit_request(
+        &self,
+        request: WorkerRequest,
+    ) -> std::result::Result<(), WorkerRequest> {
+        if !self.is_running() {
+            return Err(request);
+        }
         let request_with_time = WorkerRequestWithTime::new(request);
-        if self.sender.send(request_with_time).await.is_err() {
+        if let Err(mpsc::error::SendError(request_with_time)) =
+            self.sender.send(request_with_time).await
+        {
             warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
@@ -766,7 +798,7 @@ impl RegionWorker {
             if let Some(state) = &self.series_index_task_state {
                 state.stop();
             }
-            return WorkerStoppedSnafu { id: self.id }.fail();
+            return Err(request_with_time.request);
         }
 
         Ok(())
