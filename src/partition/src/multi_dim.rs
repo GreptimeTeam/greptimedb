@@ -21,8 +21,9 @@ use std::sync::{Arc, RwLock};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow;
-use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
+use datatypes::arrow::array::{Array, BooleanArray, BooleanBufferBuilder, RecordBatch};
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::compute::prep_null_mask_filter;
 use datatypes::arrow::datatypes::Schema;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
@@ -272,6 +273,9 @@ impl MultiDimPartitionRule {
                     }
                 };
                 let array = match columnar_value_to_boolean_array(col_val, num_rows) {
+                    // A NULL result means the row is not in this region. Masks are merged
+                    // with non-Kleene `or` below, where a NULL would drop the row.
+                    Ok(array) if array.null_count() > 0 => prep_null_mask_filter(&array),
                     Ok(array) => array,
                     Err(e) => {
                         return Some(Err(e));
@@ -1028,11 +1032,6 @@ mod test_split_record_batch {
                             continue;
                         }
                     };
-                    // `split_record_batch` merges masks with non-Kleene `or`, so a NULL
-                    // result drops the row instead of acting as false.
-                    if by_batch.null_count() > 0 {
-                        mismatches.push(format!("{expr}: batch result has NULLs"));
-                    }
                     for (row, input) in inputs.iter().enumerate() {
                         let value = input.map_or(Value::Null, Value::Int64);
                         let by_row = rule.evaluate_expr(&expr, &[value]).unwrap();

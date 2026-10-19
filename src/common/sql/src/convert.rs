@@ -134,11 +134,19 @@ pub fn sql_value_to_value(
     let column_name = &column_schema.name;
     let data_type = &column_schema.data_type;
     let mut value = match sql_val {
-        // Parse the sign with the digits, otherwise the minimum of a signed type
-        // overflows before it is negated. Unsigned types keep the negation below,
-        // which accepts `-0`.
+        // Parse the sign with the digits, otherwise the minimum of a signed integer
+        // or timestamp overflows before it is negated. Other types keep the negation
+        // below: it accepts unsigned `-0`, and the decimal parser depends on length.
         SqlValue::Number(n, _)
-            if unary_op == Some(UnaryOperator::Minus) && data_type.is_signed() =>
+            if unary_op == Some(UnaryOperator::Minus)
+                && matches!(
+                    data_type,
+                    ConcreteDataType::Int8(_)
+                        | ConcreteDataType::Int16(_)
+                        | ConcreteDataType::Int32(_)
+                        | ConcreteDataType::Int64(_)
+                        | ConcreteDataType::Timestamp(_)
+                ) =>
         {
             unary_op = None;
             sql_number_to_value(data_type, &format!("-{n}"))?
@@ -991,6 +999,17 @@ mod test {
         )
         .unwrap();
         assert_eq!(value, Value::UInt64(0));
+
+        // 28 characters without the sign, 29 with it: the sign must not move the
+        // literal to the other decimal parser.
+        let value = call_sql_value_to_value!(
+            "test",
+            ConcreteDataType::decimal128_datatype(38, 30),
+            &SqlValue::Number("0.01234567890123456789012345".into(), false),
+            unary_op = UnaryOperator::Minus
+        )
+        .unwrap();
+        assert_eq!(value.to_string(), "-0.012345678901234567890123450000");
     }
 
     #[test]
