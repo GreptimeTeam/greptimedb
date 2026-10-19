@@ -330,6 +330,7 @@ impl NativeNode {
                     }
                 }
                 ensure_samples(&self.output, "a window")?;
+                ensure_same_fields(&input.output, &self.output, "a window")?;
                 ensure_grid(&self.output, &op.output_grid, "a window")?;
             }
             NativeExpr::Map { input, op } => {
@@ -346,6 +347,7 @@ impl NativeNode {
                     return Err(invalid("a map holds no operation"));
                 }
                 ensure_samples(&self.output, "a map")?;
+                ensure_same_fields(&input.output, &self.output, "a map")?;
                 ensure_grid(&self.output, input_grid, "a map")?;
             }
             NativeExpr::Aggregate { input, op } => {
@@ -486,6 +488,26 @@ impl NativeNode {
 /// a scalar, and that those samples are stamped onto a grid, which rules out raw samples.
 fn evaluated_grid(ty: &NativeType) -> Option<&Arc<EvalGrid>> {
     ty.samples().and_then(|schema| schema.eval_grid.as_ref())
+}
+
+/// Checks that a node declares the field layout it consumes.
+///
+/// A window and a map both report one value per input field, so they keep the layout of their
+/// input. A node that declares a different number of fields than it consumes describes a
+/// computation this model has no meaning for, and letting it through would only surface at run
+/// time as a field count mismatch against a schema the tree was supposed to have validated.
+fn ensure_same_fields(input: &NativeType, output: &NativeType, what: &str) -> Result<()> {
+    let (NativeType::Samples(input), NativeType::Samples(output)) = (input, output) else {
+        return Ok(());
+    };
+    if input.fields.len() != output.fields.len() {
+        return Err(invalid(&format!(
+            "{what} declares {} field(s) and consumes {}",
+            output.fields.len(),
+            input.fields.len()
+        )));
+    }
+    Ok(())
 }
 
 fn ensure_samples(ty: &NativeType, what: &str) -> Result<()> {
