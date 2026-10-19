@@ -146,6 +146,13 @@ impl MetricNameMatchers {
     }
 }
 
+enum MetricNameMatcher {
+    Eq(String),
+    Neq(String),
+    Re(regex::Regex),
+    Nre(regex::Regex),
+}
+
 /// Extract database selector from a remote read query.
 pub fn extract_schema_from_query(query: &Query) -> Option<String> {
     query
@@ -264,6 +271,177 @@ pub fn query_to_plan(
     Ok(dataframe.into_parts().1)
 }
 
+/// Prometheus's NewFastRegexMatcher also wraps patterns in ^(?s:...)$:
+/// https://github.com/prometheus/prometheus/blob/main/model/labels/regexp.go
+fn anchored_label_regex(value: &str) -> String {
+    format!("^(?s:{value})$")
+}
+
+#[inline]
+fn new_label(name: String, value: String) -> Label {
+    Label { name, value }
+}
+
+fn lit_timestamp_millisecond(ts: i64) -> Expr {
+    Expr::Literal(ScalarValue::TimestampMillisecond(Some(ts), None), None)
+}
+
+/// Sort timeseries by labels, matching the former `BTreeMap` order.
+fn compare_timeseries_labels(left: &[Label], right: &[Label]) -> Ordering {
+    let ordering = left.len().cmp(&right.len());
+    if ordering != Ordering::Equal {
+        return ordering;
+    }
+
+    for (left, right) in left.iter().zip(right) {
+        let ordering = left.name.cmp(&right.name);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+
+        let ordering = left.value.cmp(&right.value);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+
+    Ordering::Equal
+}
+
+enum LabelValues<'a> {
+    Utf8(&'a StringArray),
+    LargeUtf8(&'a LargeStringArray),
+    Utf8View(&'a StringViewArray),
+    DictionaryUtf8 {
+        dictionary: &'a DictionaryArray<UInt32Type>,
+        values: &'a StringArray,
+    },
+    Other(Vec<Option<String>>),
+}
+
+impl LabelValues<'_> {
+    fn value(&self, row: usize) -> Option<&str> {
+        match self {
+            Self::Utf8(values) => values.is_valid(row).then(|| values.value(row)),
+            Self::LargeUtf8(values) => values.is_valid(row).then(|| values.value(row)),
+            Self::Utf8View(values) => values.is_valid(row).then(|| values.value(row)),
+            Self::DictionaryUtf8 { dictionary, values } => dictionary
+                .key(row)
+                .and_then(|key| values.is_valid(key).then(|| values.value(key))),
+            Self::Other(values) => values.get(row).and_then(Option::as_deref),
+        }
+    }
+}
+
+fn row_labels<'a>(
+    columns: &'a [LabelColumn<'a>],
+    row: usize,
+) -> impl Iterator<Item = (&'a str, &'a str)> {
+    columns
+        .iter()
+        .filter_map(move |column| column.values.value(row).map(|value| (column.name, value)))
+}
+
+struct LabelColumn<'a> {
+    name: &'a str,
+    values: LabelValues<'a>,
+}
+
+fn label_columns<'a>(
+    recordbatch: &'a RecordBatch,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+) -> Result<Vec<LabelColumn<'a>>> {
+    recordbatch
+        .schema
+        .column_schemas()
+        .iter()
+        .enumerate()
+        .filter(|(_, column_schema)| {
+            column_schema.name != timestamp_column_name && column_schema.name != value_column_name
+        })
+        .map(|(index, column_schema)| {
+            let array = recordbatch.column(index);
+            let values = match array.data_type() {
+                arrow::datatypes::DataType::Utf8 => LabelValues::Utf8(array.as_string::<i32>()),
+                arrow::datatypes::DataType::LargeUtf8 => {
+                    LabelValues::LargeUtf8(array.as_string::<i64>())
+                }
+                arrow::datatypes::DataType::Utf8View => {
+                    LabelValues::Utf8View(array.as_string_view())
+                }
+                arrow::datatypes::DataType::Dictionary(key, value)
+                    if key.as_ref() == &arrow::datatypes::DataType::UInt32
+                        && value.as_ref() == &arrow::datatypes::DataType::Utf8 =>
+                {
+                    let dictionary = array.as_dictionary::<UInt32Type>();
+                    LabelValues::DictionaryUtf8 {
+                        dictionary,
+                        values: dictionary.values().as_string::<i32>(),
+                    }
+                }
+                _ => {
+                    let values = recordbatch.iter_column_as_string(index).collect::<Vec<_>>();
+                    ensure!(
+                        values.len() == recordbatch.num_rows(),
+                        error::InvalidPromRemoteReadQueryResultSnafu {
+                            msg: format!(
+                                "Cannot convert label column '{}' of datatype {:?} to string",
+                                column_schema.name,
+                                array.data_type()
+                            ),
+                        }
+                    );
+                    LabelValues::Other(values)
+                }
+            };
+            Ok(LabelColumn {
+                name: &column_schema.name,
+                values,
+            })
+        })
+        .collect()
+}
+
+fn hash_timeseries(columns: &[LabelColumn<'_>], row: usize) -> u64 {
+    let mut hasher = DefaultHasher::new();
+
+    for (name, value) in row_labels(columns, row) {
+        name.hash(&mut hasher);
+        value.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
+fn matches_timeseries(labels: &[Label], columns: &[LabelColumn<'_>], row: usize) -> bool {
+    let mut labels = labels.iter().skip(1);
+    for (name, value) in row_labels(columns, row) {
+        let Some(label) = labels.next() else {
+            return false;
+        };
+        if label.name != name || label.value != value {
+            return false;
+        }
+    }
+
+    labels.next().is_none()
+}
+
+fn new_timeseries(table: &str, columns: &[LabelColumn<'_>], row: usize) -> TimeSeries {
+    let mut labels = Vec::with_capacity(columns.len() + 1);
+    labels.push(new_label(METRIC_NAME_LABEL.to_string(), table.to_string()));
+
+    for (name, value) in row_labels(columns, row) {
+        labels.push(new_label(name.to_string(), value.to_string()));
+    }
+
+    TimeSeries {
+        labels,
+        ..Default::default()
+    }
+}
+
 pub fn recordbatches_to_timeseries(
     table_name: &str,
     timestamp_column_name: &str,
@@ -291,6 +469,128 @@ pub fn recordbatches_to_timeseries(
     timeseries
         .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
     Ok(timeseries)
+}
+
+fn append_recordbatch_to_timeseries(
+    table: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+    recordbatch: RecordBatch,
+    timeseries: &mut Vec<TimeSeries>,
+    timeseries_by_hash: &mut HashMap<u64, Vec<usize>>,
+) -> Result<()> {
+    let ts_column = recordbatch
+        .column_by_name(timestamp_column_name)
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!("missing timestamp column '{timestamp_column_name}' in query result"),
+        })?;
+    // The Prometheus remote read wire format carries millisecond timestamps,
+    // while the table's time index can use any time unit (e.g. a metric
+    // physical table created with TIMESTAMP(6)). Narrowing floors towards
+    // negative infinity, consistent with `Timestamp::convert_to` on the
+    // ingestion path; arrow's cast would truncate towards zero, so a
+    // pre-epoch sample (e.g. -1001us) would round to -1ms instead of -2ms
+    // and disagree with what ingesting the same instant into a millisecond
+    // table would have stored.
+    let ts_column: ArrayRef = match ts_column.data_type() {
+        DataType::Timestamp(TimeUnit::Millisecond, _) => ts_column.clone(),
+        // Second -> millisecond is a widening (exact) conversion.
+        DataType::Timestamp(TimeUnit::Second, _) => casts::cast(
+            ts_column,
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+        .map_err(|e| {
+            error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "failed to cast timestamp column '{timestamp_column_name}' of datatype {:?} to millisecond: {e}",
+                    ts_column.data_type()
+                ),
+            }
+            .build()
+        })?,
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Arc::new(
+            ts_column
+                .as_primitive::<TimestampMicrosecondType>()
+                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000)),
+        ),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => Arc::new(
+            ts_column
+                .as_primitive::<TimestampNanosecondType>()
+                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000_000)),
+        ),
+        _ => {
+            return error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
+                    ts_column.data_type()
+                ),
+            }
+            .fail();
+        }
+    };
+    let ts_column = ts_column
+        .as_primitive_opt::<TimestampMillisecondType>()
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!(
+                "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
+                ts_column.data_type()
+            ),
+        })?;
+
+    // TODO: Add native-histogram encoding when Prometheus Remote Read support is prioritized.
+    // The current path intentionally returns scalar samples only.
+    let field_column = recordbatch
+        .column_by_name(value_column_name)
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!("missing value column '{value_column_name}' in query result"),
+        })?;
+    let field_column = field_column
+        .as_primitive_opt::<Float64Type>()
+        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!(
+                "Expect value column of datatype Float64, actual {:?}",
+                field_column.data_type()
+            ),
+        })?;
+
+    let columns = label_columns(&recordbatch, timestamp_column_name, value_column_name)?;
+    let mut previous_timeseries: Option<usize> = None;
+
+    for row in 0..recordbatch.num_rows() {
+        let timeseries_index = match previous_timeseries {
+            Some(index) if matches_timeseries(&timeseries[index].labels, &columns, row) => index,
+            _ => {
+                let hash = hash_timeseries(&columns, row);
+                let candidates = timeseries_by_hash.entry(hash).or_default();
+                match candidates
+                    .iter()
+                    .copied()
+                    .find(|index| matches_timeseries(&timeseries[*index].labels, &columns, row))
+                {
+                    Some(index) => index,
+                    None => {
+                        let index = timeseries.len();
+                        timeseries.push(new_timeseries(table, &columns, row));
+                        candidates.push(index);
+                        index
+                    }
+                }
+            }
+        };
+        previous_timeseries = Some(timeseries_index);
+
+        if ts_column.is_null(row) || field_column.is_null(row) {
+            continue;
+        }
+
+        let value = field_column.value(row);
+        let timestamp = ts_column.value(row);
+        let sample = Sample { value, timestamp };
+
+        timeseries[timeseries_index].samples.push(sample);
+    }
+
+    Ok(())
 }
 
 pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertRequests, usize)> {
@@ -667,13 +967,6 @@ pub fn mock_timeseries_special_labels() -> Vec<TimeSeries> {
     vec![idc3_schema, idc4_schema]
 }
 
-enum MetricNameMatcher {
-    Eq(String),
-    Neq(String),
-    Re(regex::Regex),
-    Nre(regex::Regex),
-}
-
 fn decode_matcher_type(value: i32) -> Result<MatcherType> {
     MatcherType::try_from(value).map_err(|e| {
         error::InvalidPromRemoteRequestSnafu {
@@ -694,299 +987,6 @@ fn compile_label_regex(matcher: &LabelMatcher) -> Result<regex::Regex> {
             }
             .build()
         })
-}
-
-/// Prometheus's NewFastRegexMatcher also wraps patterns in ^(?s:...)$:
-/// https://github.com/prometheus/prometheus/blob/main/model/labels/regexp.go
-fn anchored_label_regex(value: &str) -> String {
-    format!("^(?s:{value})$")
-}
-
-#[inline]
-fn new_label(name: String, value: String) -> Label {
-    Label { name, value }
-}
-
-fn lit_timestamp_millisecond(ts: i64) -> Expr {
-    Expr::Literal(ScalarValue::TimestampMillisecond(Some(ts), None), None)
-}
-
-/// Sort timeseries by labels, matching the former `BTreeMap` order.
-fn compare_timeseries_labels(left: &[Label], right: &[Label]) -> Ordering {
-    let ordering = left.len().cmp(&right.len());
-    if ordering != Ordering::Equal {
-        return ordering;
-    }
-
-    for (left, right) in left.iter().zip(right) {
-        let ordering = left.name.cmp(&right.name);
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-
-        let ordering = left.value.cmp(&right.value);
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-
-    Ordering::Equal
-}
-
-enum LabelValues<'a> {
-    Utf8(&'a StringArray),
-    LargeUtf8(&'a LargeStringArray),
-    Utf8View(&'a StringViewArray),
-    DictionaryUtf8 {
-        dictionary: &'a DictionaryArray<UInt32Type>,
-        values: &'a StringArray,
-    },
-    Other(Vec<Option<String>>),
-}
-
-impl LabelValues<'_> {
-    fn value(&self, row: usize) -> Option<&str> {
-        match self {
-            Self::Utf8(values) => values.is_valid(row).then(|| values.value(row)),
-            Self::LargeUtf8(values) => values.is_valid(row).then(|| values.value(row)),
-            Self::Utf8View(values) => values.is_valid(row).then(|| values.value(row)),
-            Self::DictionaryUtf8 { dictionary, values } => dictionary
-                .key(row)
-                .and_then(|key| values.is_valid(key).then(|| values.value(key))),
-            Self::Other(values) => values.get(row).and_then(Option::as_deref),
-        }
-    }
-}
-
-fn row_labels<'a>(
-    columns: &'a [LabelColumn<'a>],
-    row: usize,
-) -> impl Iterator<Item = (&'a str, &'a str)> {
-    columns
-        .iter()
-        .filter_map(move |column| column.values.value(row).map(|value| (column.name, value)))
-}
-
-struct LabelColumn<'a> {
-    name: &'a str,
-    values: LabelValues<'a>,
-}
-
-fn label_columns<'a>(
-    recordbatch: &'a RecordBatch,
-    timestamp_column_name: &str,
-    value_column_name: &str,
-) -> Result<Vec<LabelColumn<'a>>> {
-    recordbatch
-        .schema
-        .column_schemas()
-        .iter()
-        .enumerate()
-        .filter(|(_, column_schema)| {
-            column_schema.name != timestamp_column_name && column_schema.name != value_column_name
-        })
-        .map(|(index, column_schema)| {
-            let array = recordbatch.column(index);
-            let values = match array.data_type() {
-                arrow::datatypes::DataType::Utf8 => LabelValues::Utf8(array.as_string::<i32>()),
-                arrow::datatypes::DataType::LargeUtf8 => {
-                    LabelValues::LargeUtf8(array.as_string::<i64>())
-                }
-                arrow::datatypes::DataType::Utf8View => {
-                    LabelValues::Utf8View(array.as_string_view())
-                }
-                arrow::datatypes::DataType::Dictionary(key, value)
-                    if key.as_ref() == &arrow::datatypes::DataType::UInt32
-                        && value.as_ref() == &arrow::datatypes::DataType::Utf8 =>
-                {
-                    let dictionary = array.as_dictionary::<UInt32Type>();
-                    LabelValues::DictionaryUtf8 {
-                        dictionary,
-                        values: dictionary.values().as_string::<i32>(),
-                    }
-                }
-                _ => {
-                    let values = recordbatch.iter_column_as_string(index).collect::<Vec<_>>();
-                    ensure!(
-                        values.len() == recordbatch.num_rows(),
-                        error::InvalidPromRemoteReadQueryResultSnafu {
-                            msg: format!(
-                                "Cannot convert label column '{}' of datatype {:?} to string",
-                                column_schema.name,
-                                array.data_type()
-                            ),
-                        }
-                    );
-                    LabelValues::Other(values)
-                }
-            };
-            Ok(LabelColumn {
-                name: &column_schema.name,
-                values,
-            })
-        })
-        .collect()
-}
-
-fn hash_timeseries(columns: &[LabelColumn<'_>], row: usize) -> u64 {
-    let mut hasher = DefaultHasher::new();
-
-    for (name, value) in row_labels(columns, row) {
-        name.hash(&mut hasher);
-        value.hash(&mut hasher);
-    }
-
-    hasher.finish()
-}
-
-fn matches_timeseries(labels: &[Label], columns: &[LabelColumn<'_>], row: usize) -> bool {
-    let mut labels = labels.iter().skip(1);
-    for (name, value) in row_labels(columns, row) {
-        let Some(label) = labels.next() else {
-            return false;
-        };
-        if label.name != name || label.value != value {
-            return false;
-        }
-    }
-
-    labels.next().is_none()
-}
-
-fn new_timeseries(table: &str, columns: &[LabelColumn<'_>], row: usize) -> TimeSeries {
-    let mut labels = Vec::with_capacity(columns.len() + 1);
-    labels.push(new_label(METRIC_NAME_LABEL.to_string(), table.to_string()));
-
-    for (name, value) in row_labels(columns, row) {
-        labels.push(new_label(name.to_string(), value.to_string()));
-    }
-
-    TimeSeries {
-        labels,
-        ..Default::default()
-    }
-}
-
-fn append_recordbatch_to_timeseries(
-    table: &str,
-    timestamp_column_name: &str,
-    value_column_name: &str,
-    recordbatch: RecordBatch,
-    timeseries: &mut Vec<TimeSeries>,
-    timeseries_by_hash: &mut HashMap<u64, Vec<usize>>,
-) -> Result<()> {
-    let ts_column = recordbatch
-        .column_by_name(timestamp_column_name)
-        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: format!("missing timestamp column '{timestamp_column_name}' in query result"),
-        })?;
-    // The Prometheus remote read wire format carries millisecond timestamps,
-    // while the table's time index can use any time unit (e.g. a metric
-    // physical table created with TIMESTAMP(6)). Narrowing floors towards
-    // negative infinity, consistent with `Timestamp::convert_to` on the
-    // ingestion path; arrow's cast would truncate towards zero, so a
-    // pre-epoch sample (e.g. -1001us) would round to -1ms instead of -2ms
-    // and disagree with what ingesting the same instant into a millisecond
-    // table would have stored.
-    let ts_column: ArrayRef = match ts_column.data_type() {
-        DataType::Timestamp(TimeUnit::Millisecond, _) => ts_column.clone(),
-        // Second -> millisecond is a widening (exact) conversion.
-        DataType::Timestamp(TimeUnit::Second, _) => casts::cast(
-            ts_column,
-            &DataType::Timestamp(TimeUnit::Millisecond, None),
-        )
-        .map_err(|e| {
-            error::InvalidPromRemoteReadQueryResultSnafu {
-                msg: format!(
-                    "failed to cast timestamp column '{timestamp_column_name}' of datatype {:?} to millisecond: {e}",
-                    ts_column.data_type()
-                ),
-            }
-            .build()
-        })?,
-        DataType::Timestamp(TimeUnit::Microsecond, _) => Arc::new(
-            ts_column
-                .as_primitive::<TimestampMicrosecondType>()
-                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000)),
-        ),
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => Arc::new(
-            ts_column
-                .as_primitive::<TimestampNanosecondType>()
-                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000_000)),
-        ),
-        _ => {
-            return error::InvalidPromRemoteReadQueryResultSnafu {
-                msg: format!(
-                    "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
-                    ts_column.data_type()
-                ),
-            }
-            .fail();
-        }
-    };
-    let ts_column = ts_column
-        .as_primitive_opt::<TimestampMillisecondType>()
-        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: format!(
-                "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
-                ts_column.data_type()
-            ),
-        })?;
-
-    // TODO: Add native-histogram encoding when Prometheus Remote Read support is prioritized.
-    // The current path intentionally returns scalar samples only.
-    let field_column = recordbatch
-        .column_by_name(value_column_name)
-        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: format!("missing value column '{value_column_name}' in query result"),
-        })?;
-    let field_column = field_column
-        .as_primitive_opt::<Float64Type>()
-        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: format!(
-                "Expect value column of datatype Float64, actual {:?}",
-                field_column.data_type()
-            ),
-        })?;
-
-    let columns = label_columns(&recordbatch, timestamp_column_name, value_column_name)?;
-    let mut previous_timeseries: Option<usize> = None;
-
-    for row in 0..recordbatch.num_rows() {
-        let timeseries_index = match previous_timeseries {
-            Some(index) if matches_timeseries(&timeseries[index].labels, &columns, row) => index,
-            _ => {
-                let hash = hash_timeseries(&columns, row);
-                let candidates = timeseries_by_hash.entry(hash).or_default();
-                match candidates
-                    .iter()
-                    .copied()
-                    .find(|index| matches_timeseries(&timeseries[*index].labels, &columns, row))
-                {
-                    Some(index) => index,
-                    None => {
-                        let index = timeseries.len();
-                        timeseries.push(new_timeseries(table, &columns, row));
-                        candidates.push(index);
-                        index
-                    }
-                }
-            }
-        };
-        previous_timeseries = Some(timeseries_index);
-
-        if ts_column.is_null(row) || field_column.is_null(row) {
-            continue;
-        }
-
-        let value = field_column.value(row);
-        let timestamp = ts_column.value(row);
-        let sample = Sample { value, timestamp };
-
-        timeseries[timeseries_index].samples.push(sample);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
