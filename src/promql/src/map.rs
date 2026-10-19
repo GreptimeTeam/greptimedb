@@ -37,7 +37,9 @@ use datatypes::series::samples::{
 };
 use datatypes::series::time::{GridRange, TimeAxis};
 
+use crate::evaluated::EvaluatedChunk;
 use crate::functions::Round;
+use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
 
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug)]
@@ -130,6 +132,115 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
     output.metric = drop_metric_name(&output.metric)?;
     Ok(Some(output))
+}
+
+/// Applies the map kernels `ops` to one evaluated chunk, in order.
+///
+/// The returned chunk always covers the input chunk's decided range and keeps its `is_last`; a
+/// chain that maps every value away delivers missing values, not a shorter range. A kernel
+/// dropping values is a property of the values, not of how far evaluation has progressed, so the
+/// positions the chunk decided still travel with it and its consumer still advances. Trimming the
+/// result to the rows holding a value, as the output does, is a separate stage.
+///
+/// At least one kernel rewrites the labels as [`map_math`] does, so with one the metadata labels
+/// are dropped even from a chunk without any value to map. A chain without kernels maps nothing,
+/// so it is the identity on the whole chunk and returns its labels unchanged: a consumer of the
+/// series reads the chunks of one series as one series only while they agree on them. Raw time
+/// axes are rejected.
+pub fn map_chunk(
+    schema: &SeriesSchema,
+    chunk: &EvaluatedChunk,
+    ops: &[MathOp],
+) -> Result<EvaluatedChunk> {
+    let TimeAxis::Grid(range) = &chunk.series.time else {
+        return Err(DataFusionError::Execution(
+            "Map math requires an evaluated grid time axis".into(),
+        ));
+    };
+    if ops.is_empty() {
+        // No kernel maps anything, so the chunk is already its own result. Returning it before the
+        // labels are rewritten keeps the whole chunk -- labels, range and end -- exactly as it came
+        // in, which a consumer of the series requires: every chunk of one series has to carry the
+        // same labels, and a chain without kernels must not relabel the zero-length chunk that
+        // closes a series differently from the chunk before it.
+        return EvaluatedChunk::try_new(chunk.series.clone(), chunk.is_last);
+    }
+    let mut metric = chunk.series.metric.clone();
+    metric.remove_all(&METADATA_LABELS);
+    if range.is_empty() {
+        // Nothing left to map, but the labels of the series are still rewritten.
+        let mut series = chunk.series.clone();
+        series.metric = metric;
+        return EvaluatedChunk::try_new(series, chunk.is_last);
+    }
+    // Each kernel maps the result of the previous one. A kernel that maps every value away ends
+    // the chain: there is no value left for the next one to map.
+    let mut mapped = Some(chunk.series.clone());
+    for op in ops {
+        let Some(series) = mapped.take() else {
+            break;
+        };
+        mapped = map_math(schema, &series, *op)?;
+    }
+    if let Some(mapped) = &mapped
+        && let TimeAxis::Grid(mapped_range) = &mapped.time
+        && mapped_range == range
+    {
+        // The chain did not move the ends of the series, so it is already the chunk.
+        return EvaluatedChunk::try_new(mapped.clone(), chunk.is_last);
+    }
+
+    // The chain trimmed rows off one or both ends, or dropped every value. Place its rows back at
+    // the offset they kept and hold the span open to the input chunk's ends.
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
+    builder.cover_from(range.start())?;
+    if let Some(mapped) = &mapped {
+        let TimeAxis::Grid(mapped_range) = &mapped.time else {
+            return Err(DataFusionError::Execution(
+                "Map math requires an evaluated grid time axis".into(),
+            ));
+        };
+        let offset = mapped_range
+            .start()
+            .checked_sub(range.start())
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "mapped series begins at {} before its input chunk at {}",
+                    mapped_range.start(),
+                    range.start()
+                ))
+            })?;
+        // One cursor per field, for the reason `map_math` advances iterators rather than calling
+        // `sample(row)`.
+        let mut cursors = mapped
+            .fields
+            .iter()
+            .map(|samples| samples.iter())
+            .collect::<Vec<_>>();
+        let mut values = vec![None; mapped.fields.len()];
+        for row in 0..mapped_range.len() {
+            for (value, cursor) in values.iter_mut().zip(cursors.iter_mut()) {
+                *value = match cursor.next() {
+                    // A mapped field holds no histogram, so anything else stays missing.
+                    Some(SampleRef::Float(value)) => Some(value),
+                    _ => None,
+                };
+            }
+            builder.push(range.start() + offset + row, &values)?;
+        }
+    }
+    builder.cover_through(range.start() + range.len())?;
+    // `cover_from` opens the span for every non-empty range, and the empty one returned above, so
+    // the builder always hands back the series it spans. Refuse to report a shorter range than the
+    // chunk decided rather than take a wrong answer here should that ever stop holding.
+    let Some(series) = builder.finish(metric)? else {
+        return Err(DataFusionError::Execution(format!(
+            "mapped chunk lost the positions {}..{} it decided",
+            range.start(),
+            range.start() + range.len()
+        )));
+    };
+    EvaluatedChunk::try_new(series, chunk.is_last)
 }
 
 /// Negates every float field and drops the metric name, like Prometheus' unary minus.
