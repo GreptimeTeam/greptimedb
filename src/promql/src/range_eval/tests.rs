@@ -40,15 +40,16 @@ use super::{
     CounterReset, FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel,
     subquery_grid,
 };
+use crate::evaluated::EvaluatedChunk;
 use crate::functions::{
     Changes, CountOverTime, IDelta, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Resets,
 };
-use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
     Dense, GoldenCase, OwnedHistogram, assert_histogram_close, assert_series_eq,
     assert_series_eq_any_nan, close, expand, golden_cases, labels_of, metric_of, mixed_series,
     random_dense, special_value,
 };
+use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::range_array::RangeArray;
 use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
@@ -195,6 +196,70 @@ fn random_chunks(rng: &mut StdRng, rows: &[Row], fields: usize, host: u64) -> Ve
         start = end;
     }
     chunks
+}
+
+/// The float values of a single-field series, in order.
+fn floats(series: &Series) -> Vec<f64> {
+    let field = &series.fields.as_slice()[0];
+    (0..field.len())
+        .map(|index| match field.sample(index) {
+            SampleRef::Float(value) => value,
+            _ => panic!("expected a float"),
+        })
+        .collect()
+}
+
+/// Pushes every chunk of one series, keeping what the evaluator hands out on the way.
+fn collect_chunks(
+    evaluator: &mut RangeEvaluator,
+    pieces: &[RawSeriesChunk],
+) -> Vec<EvaluatedChunk> {
+    pieces
+        .iter()
+        .flat_map(|piece| evaluator.push(piece).unwrap())
+        .collect()
+}
+
+/// Folds the chunks of one series back into one series, the way a consumer that keeps every value
+/// would, and checks the chunk protocol: absolute increasing ranges, and one closing chunk last.
+fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<Series> {
+    let metric = chunks
+        .first()
+        .expect("a series always hands out its closing chunk")
+        .series
+        .metric
+        .clone();
+    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    let mut closing = false;
+    for chunk in chunks {
+        assert!(!closing, "a chunk follows the closing chunk");
+        closing = chunk.is_last;
+        let range = chunk.range();
+        let mut fields: Vec<_> = chunk
+            .series
+            .fields
+            .iter()
+            .map(|field| field.iter())
+            .collect();
+        for row in 0..range.len() {
+            let values: Vec<_> = fields
+                .iter_mut()
+                .map(
+                    |field| match field.next().expect("the range length is checked") {
+                        SampleRef::Missing => None,
+                        SampleRef::Float(value) => Some(GridSample::Float(value)),
+                        SampleRef::Histogram(view) => Some(GridSample::Histogram(Box::new(
+                            FloatHistogram::try_from_view(&view).unwrap(),
+                        ))),
+                    },
+                )
+                .collect();
+            // Positions only increase across chunks, so an overlap is an error here.
+            builder.push_samples(range.start() + row, &values).unwrap();
+        }
+    }
+    assert!(closing, "the series never closed");
+    builder.finish(metric).unwrap()
 }
 
 fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
@@ -454,14 +519,11 @@ fn evaluator_matches_brute_force_reference() {
         for host in 0..3 {
             let rows = random_rows(&mut rng, fields);
             let expected = reference(&rows, &grid, window, fields, true, step_invariant);
-            let mut result = None;
-            for piece in random_chunks(&mut rng, &rows, fields, host) {
-                assert!(
-                    result.is_none(),
-                    "seed {seed}: result before the last chunk"
-                );
-                result = evaluator.push(&piece).unwrap();
-            }
+            let chunks = collect_chunks(
+                &mut evaluator,
+                &random_chunks(&mut rng, &rows, fields, host),
+            );
+            let result = fold_chunks(&chunks, evaluator.output_schema());
             assert_series_eq(result.as_ref(), &expected, &metric(host));
         }
         evaluator.finish().unwrap();
@@ -496,10 +558,11 @@ fn functions_match_range_udfs() {
             for host in 0..3 {
                 let rows = random_rows(&mut rng, fields);
                 let expected = udf_reference(function, &rows, &grid, window, fields, true);
-                let mut result = None;
-                for piece in random_chunks(&mut rng, &rows, fields, host) {
-                    result = evaluator.push(&piece).unwrap();
-                }
+                let chunks = collect_chunks(
+                    &mut evaluator,
+                    &random_chunks(&mut rng, &rows, fields, host),
+                );
+                let result = fold_chunks(&chunks, evaluator.output_schema());
                 assert_series_eq(result.as_ref(), &expected, &output_metric(function, host));
             }
         }
@@ -691,12 +754,49 @@ fn empty_input_and_series_without_results() {
     };
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
+    // A series whose samples all miss the grid still closes, on a chunk holding no positions.
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
     let after_grid = chunk(&[(31, vec![Some(1.0)])], 1, 0, true);
-    assert!(evaluator.push(&after_grid).unwrap().is_none());
+    let closed = evaluator
+        .push(&after_grid)
+        .unwrap()
+        .expect("a series closes");
+    assert!(closed.is_last);
+    assert!(closed.range().is_empty());
     let only_stale = chunk(&[(5, vec![Some(stale())])], 1, 1, true);
-    assert!(evaluator.push(&only_stale).unwrap().is_none());
+    let closed = evaluator
+        .push(&only_stale)
+        .unwrap()
+        .expect("a series closes");
+    assert!(closed.is_last);
+    assert!(closed.range().is_empty());
     evaluator.finish().unwrap();
+}
+
+/// A series whose last sample is behind the end of the grid still closes, on a chunk holding no
+/// positions: the remaining points have no values, and only the closing chunk tells the consumer
+/// that the series is over rather than still waiting for input.
+#[test]
+fn a_series_that_ends_early_still_closes() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 5), window);
+    let first = chunk(&[(0, vec![Some(1.0)]), (10, vec![Some(2.0)])], 1, 0, false);
+    let handed = evaluator
+        .push(&first)
+        .unwrap()
+        .expect("the windows of the first two points are complete");
+    assert!(!handed.is_last);
+    assert_eq!((handed.range().start(), handed.range().len()), (0, 2));
+
+    let last = chunk(&[(45, vec![Some(3.0)])], 1, 0, true);
+    let closed = evaluator.push(&last).unwrap().expect("a series closes");
+    assert!(closed.is_last);
+    assert!(closed.range().is_empty());
+    assert_eq!(closed.range().start(), 2);
 }
 
 #[test]
@@ -859,7 +959,7 @@ fn histogram_samples_need_a_function_and_drop_stale_markers() {
         RangeFunction::CountOverTime,
     )
     .unwrap();
-    let series = evaluator.push(&piece).unwrap().unwrap();
+    let series = evaluator.push(&piece).unwrap().unwrap().series;
     assert!(matches!(
         series.fields.as_slice()[0].sample(0),
         SampleRef::Float(count) if count == 1.0
@@ -968,14 +1068,15 @@ fn counter_resets_follow_the_window_and_survive_chunking() {
         .unwrap();
         for (start, end) in pieces {
             let last = end == rows.len();
-            let result = evaluator
+            if let Some(handed) = evaluator
                 .push(&chunk(&rows[start..end], 2, 0, last))
-                .unwrap();
-            assert_eq!(
-                result.is_some(),
-                last,
-                "the series must finish on its last chunk"
-            );
+                .unwrap()
+            {
+                assert_eq!(
+                    handed.is_last, last,
+                    "only the last chunk closes the series"
+                );
+            }
         }
         evaluator
     };
@@ -1012,12 +1113,17 @@ fn counter_resets_follow_the_window_and_survive_chunking() {
     // index state of the first series may survive, so the second series reports exactly the same
     // windows and resets.
     recorded.lock().unwrap().clear();
-    let mut result = None;
     for (start, end) in pieces {
-        assert!(result.is_none(), "a result before the last chunk");
-        result = evaluator
-            .push(&chunk(&rows[start..end], 2, 1, end == rows.len()))
-            .unwrap();
+        let closed = end == rows.len();
+        if let Some(chunk) = evaluator
+            .push(&chunk(&rows[start..end], 2, 1, closed))
+            .unwrap()
+        {
+            assert_eq!(
+                chunk.is_last, closed,
+                "only the last chunk closes the series"
+            );
+        }
     }
     assert_eq!(*recorded.lock().unwrap(), recorded_of(&expected));
     evaluator.finish().unwrap();
@@ -1160,20 +1266,23 @@ fn subquery_series_match_references() {
         )
         .unwrap();
         let expected = reference(&rows, &outer, window, fields, false, true);
-        assert_series_eq(
-            probe.push_series(&series).unwrap().as_ref(),
-            &expected,
-            &metric(seed),
-        );
+        let evaluated = probe
+            .push_series(&series)
+            .unwrap()
+            .expect("the input closes");
+        assert!(evaluated.is_last);
+        let result = fold_chunks(std::slice::from_ref(&evaluated), probe.output_schema());
+        assert_series_eq(result.as_ref(), &expected, &metric(seed));
         for function in udf_functions() {
             let mut evaluator =
                 RangeEvaluator::try_new(&schema, outer.clone(), window, function).unwrap();
             let expected = udf_reference(function, &rows, &outer, window, fields, false);
-            assert_series_eq(
-                evaluator.push_series(&series).unwrap().as_ref(),
-                &expected,
-                &output_metric(function, seed),
-            );
+            let evaluated = evaluator
+                .push_series(&series)
+                .unwrap()
+                .expect("the input closes");
+            let result = fold_chunks(std::slice::from_ref(&evaluated), evaluator.output_schema());
+            assert_series_eq(result.as_ref(), &expected, &output_metric(function, seed));
         }
     }
 }
@@ -1316,14 +1425,16 @@ fn range_functions_match_prometheus() {
         let mut evaluator =
             RangeEvaluator::try_new(&raw_schema(1), grid, window, function).unwrap();
         let split = rows.len() / 2;
-        let mut result = None;
-        if split > 0 {
-            evaluator.push(&chunk(&rows[..split], 1, 0, false)).unwrap();
-        }
-        result = evaluator
-            .push(&chunk(&rows[split..], 1, 0, true))
-            .unwrap()
-            .or(result);
+        let pieces = if split > 0 {
+            vec![
+                chunk(&rows[..split], 1, 0, false),
+                chunk(&rows[split..], 1, 0, true),
+            ]
+        } else {
+            vec![chunk(&rows, 1, 0, true)]
+        };
+        let chunks = collect_chunks(&mut evaluator, &pieces);
+        let result = fold_chunks(&chunks, evaluator.output_schema());
         assert_series_eq_any_nan(
             result.as_ref(),
             &expected,
@@ -1354,7 +1465,11 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
         };
         // Like Prometheus, only a window holding a sample checks the factors.
         let outside = chunk(&[(100, vec![Some(1.0)])], 1, 0, true);
-        assert!(evaluator().push(&outside).unwrap().is_none());
+        let closed = evaluator()
+            .push(&outside)
+            .unwrap()
+            .expect("a series closes");
+        assert!(closed.range().is_empty());
         evaluator().finish().unwrap();
         let inside = chunk(&[(5, vec![Some(1.0)])], 1, 0, true);
         assert!(matches!(
@@ -1404,7 +1519,7 @@ fn range_functions_drop_metadata_labels() {
         let mut evaluator =
             RangeEvaluator::try_new(&raw_schema(1), grid(2_000, 1_000, 1), window, function)
                 .unwrap();
-        let series = evaluator.push(&chunk).unwrap().unwrap();
+        let series = evaluator.push(&chunk).unwrap().unwrap().series;
         assert_eq!(series.metric, expected, "{function:?}");
     }
 }
@@ -1428,7 +1543,11 @@ fn ts_of_extremum_moves_past_a_leading_nan() {
         let mut evaluator =
             RangeEvaluator::try_new(&raw_schema(1), grid(3_000, 1_000, 1), window, function)
                 .unwrap();
-        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let series = evaluator
+            .push(&chunk(&rows, 1, 0, true))
+            .unwrap()
+            .unwrap()
+            .series;
         assert_series_eq(
             Some(&series),
             &vec![vec![Some(expected)]],
@@ -1480,7 +1599,11 @@ fn ts_of_last_over_time_reports_zero_for_negative_timestamps() {
     ] {
         let mut evaluator =
             RangeEvaluator::try_new(&raw_schema(1), grid(0, 1_000, 1), window, function).unwrap();
-        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let series = evaluator
+            .push(&chunk(&rows, 1, 0, true))
+            .unwrap()
+            .unwrap()
+            .series;
         assert_series_eq(
             Some(&series),
             &vec![vec![Some(expected)]],
@@ -1536,7 +1659,11 @@ fn quantile_picks_the_signed_zero_go_picks() {
             RangeFunction::QuantileOverTime(f64::from(k) / 19.0),
         )
         .unwrap();
-        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let series = evaluator
+            .push(&chunk(&rows, 1, 0, true))
+            .unwrap()
+            .unwrap()
+            .series;
         let SampleRef::Float(value) = series.fields.as_slice()[0].sample(0) else {
             panic!("expected a float");
         };
@@ -1604,7 +1731,11 @@ fn anchored_predict_linear_regresses_around_each_point() {
             RangeFunction::PredictLinear(0.0),
         )
         .unwrap();
-        let series = evaluator.push(&chunk(&rows, 1, 0, true)).unwrap().unwrap();
+        let series = evaluator
+            .push(&chunk(&rows, 1, 0, true))
+            .unwrap()
+            .unwrap()
+            .series;
         let values: Vec<_> = (0..3)
             .map(|index| match series.fields.as_slice()[0].sample(index) {
                 SampleRef::Float(value) => value,
@@ -1746,7 +1877,12 @@ fn absent_over_time_is_absent_over_present_over_time() {
                 RangeFunction::PresentOverTime,
             )
             .unwrap();
-            present.extend(evaluator.push(&chunk(&rows, 1, host as u64, true)).unwrap());
+            let closed = evaluator
+                .push(&chunk(&rows, 1, host as u64, true))
+                .unwrap()
+                .expect("the series closes");
+            assert!(closed.is_last);
+            present.push(closed.series);
         }
         let schema = SeriesSchema {
             fields: raw_schema(1).fields,
@@ -1852,10 +1988,9 @@ fn histogram_range_functions_match_prometheus() {
                 let mut evaluator =
                     RangeEvaluator::try_new(&raw_schema(1), case.grid.clone(), window, function)
                         .unwrap();
-                for chunk in mixed_chunks(&case, index, split) {
-                    if let Some(series) = evaluator.push(&chunk).unwrap() {
-                        actual.insert(labels_of(&series.metric), series);
-                    }
+                let chunks = collect_chunks(&mut evaluator, &mixed_chunks(&case, index, split));
+                if let Some(series) = fold_chunks(&chunks, evaluator.output_schema()) {
+                    actual.insert(labels_of(&series.metric), series);
                 }
             }
             let expected = case.outcome.as_ref().unwrap();
@@ -1933,7 +2068,7 @@ fn evaluated_histograms_drop_counter_reset_hints() {
     };
     let mut evaluator =
         RangeEvaluator::try_new(&schema, grid(10, 10, 1), window, RangeFunction::Resets).unwrap();
-    let result = evaluator.push_series(&series).unwrap().unwrap();
+    let result = evaluator.push_series(&series).unwrap().unwrap().series;
     assert!(matches!(
         result.fields.as_slice()[0].sample(0),
         SampleRef::Float(resets) if resets == 0.0
