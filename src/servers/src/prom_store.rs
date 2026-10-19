@@ -1070,6 +1070,43 @@ mod tests {
             );
         }
         assert!(MetricNameMatchers::new(&[]).unwrap().matches("cpu"));
+        for (conditions, expected) in [
+            (
+                vec![(MatcherType::Eq, "cpu"), (MatcherType::Re, "c.*")],
+                true,
+            ),
+            (
+                vec![(MatcherType::Eq, "cpu"), (MatcherType::Eq, "cpu")],
+                true,
+            ),
+            (
+                vec![(MatcherType::Eq, "cpu"), (MatcherType::Eq, "memory")],
+                false,
+            ),
+            (
+                vec![(MatcherType::Eq, "cpu"), (MatcherType::Neq, "cpu")],
+                false,
+            ),
+            (
+                vec![(MatcherType::Re, ".*"), (MatcherType::Nre, "cpu")],
+                false,
+            ),
+        ] {
+            let matchers = conditions
+                .iter()
+                .map(|(op, value)| LabelMatcher {
+                    name: METRIC_NAME_LABEL.into(),
+                    value: (*value).into(),
+                    r#type: *op as i32,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                expected,
+                MetricNameMatchers::new(&matchers).unwrap().matches("cpu"),
+                "{conditions:?}"
+            );
+        }
+
         // Validate even when an EQ condition would make the result empty.
         for (op, value) in [
             (99, "cpu"),

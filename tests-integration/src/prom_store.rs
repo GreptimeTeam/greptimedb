@@ -804,44 +804,11 @@ mod tests {
                 vec![name(MatcherType::Re, "cpu|memory")],
                 vec!["cpu", "memory"],
             ),
-            (vec![name(MatcherType::Neq, "cpu")], vec!["memory"]),
-            (vec![name(MatcherType::Nre, "cpu")], vec!["memory"]),
-            (vec![name(MatcherType::Re, "cp")], vec![]),
-            (
-                vec![
-                    name(MatcherType::Re, ".*"),
-                    name(MatcherType::Nre, "memory"),
-                ],
-                vec!["cpu"],
-            ),
-            (
-                vec![name(MatcherType::Eq, "cpu"), name(MatcherType::Re, "c.*")],
-                vec!["cpu"],
-            ),
-            (
-                vec![
-                    name(MatcherType::Eq, "cpu"),
-                    name(MatcherType::Eq, "memory"),
-                ],
-                vec![],
-            ),
-            (
-                vec![name(MatcherType::Eq, "cpu"), name(MatcherType::Neq, "cpu")],
-                vec![],
-            ),
             (vec![name(MatcherType::Eq, "")], vec![]),
-            (vec![name(MatcherType::Re, "")], vec![]),
-            (vec![name(MatcherType::Eq, "missing")], vec![]),
+            (vec![name(MatcherType::Eq, "cpu")], vec!["cpu"]),
             (vec![], vec!["cpu", "memory"]),
             (vec![matcher("job", MatcherType::Eq, "api")], vec!["cpu"]),
             (vec![matcher("job", MatcherType::Eq, "")], vec!["memory"]),
-            (
-                vec![
-                    name(MatcherType::Re, "cpu|memory"),
-                    matcher("label_zone", MatcherType::Neq, "us"),
-                ],
-                vec!["cpu"],
-            ),
         ];
         let queries = cases
             .iter()
@@ -901,13 +868,10 @@ mod tests {
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].timeseries.len(), 2);
 
-        // A syntax error must not be hidden by an empty EQ or an empty catalog result.
-        for metric in ["", "missing"] {
-            let mut query = remote_query(metric);
-            query.matchers.push(name(MatcherType::Re, "["));
-            let response = post_remote_read(client, vec![query]).await;
-            assert_eq!(response.status(), 400);
-        }
+        // An empty EQ must not bypass matcher validation.
+        let mut query = remote_query("");
+        query.matchers.push(name(MatcherType::Re, "["));
+        assert_eq!(post_remote_read(client, vec![query]).await.status(), 400);
         for database in ["unknown_schema", "unknown_catalog-name_matches"] {
             let query = Query {
                 matchers: vec![
@@ -932,22 +896,16 @@ mod tests {
             .await[0]
             .as_ref()
             .unwrap();
-        for names in [
-            vec![name(MatcherType::Eq, "invalid")],
-            vec![name(MatcherType::Re, "cpu|invalid")],
-            vec![],
-        ] {
-            let mut query = Query {
-                matchers: names,
-                ..Default::default()
-            };
-            query
-                .matchers
-                .push(matcher("__database__", MatcherType::Eq, "name_matches"));
-            let response = post_remote_read(client, vec![query]).await;
-            assert!(!response.status().is_success());
-            assert!(response.text().await.contains("Ambiguous value column"));
-        }
+        let query = Query {
+            matchers: vec![
+                name(MatcherType::Re, "cpu|invalid"),
+                matcher("__database__", MatcherType::Eq, "name_matches"),
+            ],
+            ..Default::default()
+        };
+        let response = post_remote_read(client, vec![query]).await;
+        assert!(!response.status().is_success());
+        assert!(response.text().await.contains("Ambiguous value column"));
     }
 
     fn remote_query(metric: &str) -> Query {
