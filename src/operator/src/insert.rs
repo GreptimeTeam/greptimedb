@@ -1389,7 +1389,9 @@ impl Inserter {
             // stripping it from the logical table.
             if retention_ttl_hint(ctx).is_some() {
                 return InvalidInsertRequestSnafu {
-                    reason: retention_ttl_hint_on_existing_physical_table_reason(physical_table),
+                    reason: retention_ttl_hint_on_existing_physical_table_reason(
+                        &physical_table,
+                    ),
                 }
                 .fail();
             }
