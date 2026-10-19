@@ -799,6 +799,37 @@ fn empty_input_and_series_without_results() {
     evaluator.finish().unwrap();
 }
 
+/// A push that completes nothing must not hand out a chunk.
+///
+/// `evaluate` opens the builder's span at the first position it has not handed out yet, even when
+/// this push settled no position, so finishing unconditionally yields a zero-length series rather
+/// than none. Handing that out would report progress the push did not make.
+#[test]
+fn a_push_that_completes_nothing_hands_out_no_chunk() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = probe_evaluator(1, grid(10, 10, 3), window);
+    // The only sample sits inside the first window, so the first point cannot be settled yet: no
+    // position is completed and the push has nothing to report.
+    let partial = chunk(&[(5, vec![Some(1.0)])], 1, 0, false);
+    assert!(
+        evaluator.push(&partial).unwrap().is_none(),
+        "a push that completed no position must not hand out a chunk"
+    );
+
+    // The closing push still hands one out, and it reports every position of the grid.
+    let closed = evaluator
+        .push(&chunk(&[(100, vec![Some(2.0)])], 1, 0, true))
+        .unwrap()
+        .expect("a series closes");
+    assert!(closed.is_last);
+    assert_eq!((closed.range().start(), closed.range().len()), (0, 3));
+    evaluator.finish().unwrap();
+}
+
 /// A series whose last sample is behind the end of the grid still closes, on a chunk holding no
 /// positions: the remaining points have no values, and only the closing chunk tells the consumer
 /// that the series is over rather than still waiting for input.

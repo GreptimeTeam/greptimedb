@@ -580,6 +580,12 @@ impl RangeEvaluator {
             return Ok(None);
         };
         let (start, end) = (state.emitted_end, state.completed);
+        // `evaluate` opens the builder's span at the first not-yet-handed-out position even when
+        // this push completed nothing, so finishing here would produce a zero-length chunk that
+        // claims progress the push did not make. Only the last chunk is handed out regardless.
+        if end == start && !is_last {
+            return Ok(None);
+        }
         let mut metric = state.metric.clone();
         if self.drops_metric_name {
             metric.remove_all(&METADATA_LABELS);
