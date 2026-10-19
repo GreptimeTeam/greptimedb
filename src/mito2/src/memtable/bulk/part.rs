@@ -74,7 +74,7 @@ use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, apply_column_compression,
-    apply_float_field_encoding,
+    apply_float_field_encoding, apply_internal_column_encoding,
 };
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1347,6 +1347,7 @@ impl BulkPartEncoder {
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
             .set_statistics_truncate_length(None);
+        props = apply_internal_column_encoding(props, &metadata);
         props = apply_float_field_encoding(props, &metadata, float_field_encoding);
         props = apply_column_compression(props, &metadata)?;
         let writer_props = Some(props.build());
