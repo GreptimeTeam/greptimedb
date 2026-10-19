@@ -1222,7 +1222,7 @@ fn bounded_fold(
     window: RangeWindow,
     inputs: &[RawSeriesChunk],
     budget: usize,
-) -> Option<Series> {
+) -> (Vec<(usize, usize)>, Option<Series>) {
     let mut evaluator = if step_invariant {
         probe_evaluator(fields, grid, window)
     } else {
@@ -1236,13 +1236,19 @@ fn bounded_fold(
             pieces.push(pulled);
         }
     }
+    let ranges = pieces
+        .iter()
+        .map(|piece| (piece.range().start(), piece.range().len()))
+        .collect();
     let folded = fold_chunks(&pieces, evaluator.output_schema());
     evaluator.finish().unwrap();
-    folded
+    (ranges, folded)
 }
 
 /// A budget changes how a series is cut, never what it holds: for random input, anchored selectors
-/// included, the pieces pulled at any budget fold back to the unbounded result.
+/// included, the pieces pulled at any budget fold back to the unbounded result and cover the same
+/// span. Folding the valued positions alone cannot notice a decided range that went missing -- a
+/// series that stops short folds to a shorter series -- so the pieces' ranges are checked too.
 #[test]
 fn a_bounded_hand_out_matches_the_unbounded_one_for_random_input() {
     for seed in 0..120 {
@@ -1252,28 +1258,33 @@ fn a_bounded_hand_out_matches_the_unbounded_one_for_random_input() {
         let step_invariant = rng.random_bool(0.5);
         let rows = random_rows(&mut rng, fields);
         let inputs = random_chunks(&mut rng, &rows, fields, 0);
-        let expected = bounded_fold(
+        let (unbounded, expected) = bounded_fold(
             step_invariant,
             fields,
             grid.clone(),
             window,
             &inputs,
             usize::MAX,
-        )
-        .map(|series| (expand(&series), series.metric));
+        );
+        let expected = expected.map(|series| (expand(&series), series.metric));
         for budget in [1, 2, 5, 17] {
-            let bounded = bounded_fold(
+            let (ranges, bounded) = bounded_fold(
                 step_invariant,
                 fields,
                 grid.clone(),
                 window,
                 &inputs,
                 budget,
-            )
-            .map(|series| (expand(&series), series.metric));
+            );
+            let bounded = bounded.map(|series| (expand(&series), series.metric));
             assert_eq!(
                 bounded, expected,
                 "seed {seed} with a budget of {budget} changed the series"
+            );
+            assert_refines(
+                &ranges,
+                &unbounded,
+                &format!("seed {seed} with a budget of {budget}"),
             );
         }
     }
@@ -1363,6 +1374,57 @@ fn execution_error<T: std::fmt::Debug>(result: Result<T, DataFusionError>) {
     assert!(
         matches!(result, Err(DataFusionError::Execution(_))),
         "{result:?}"
+    );
+}
+
+/// Asserts `result` fails with exactly `message`, so two errors of the same variant are told apart.
+fn execution_error_message<T: std::fmt::Debug>(result: Result<T, DataFusionError>, message: &str) {
+    match result {
+        Err(DataFusionError::Execution(actual)) => assert_eq!(actual, message),
+        other => panic!("expected the execution error {message:?}, got {other:?}"),
+    }
+}
+
+/// The two ways a series can be left with work outstanding have an error each, and they are not
+/// interchangeable: a series whose last chunk never arrived is a broken input, while a closed series
+/// the consumer has not drained is a consumer that dropped decided positions.
+#[test]
+fn an_unclosed_series_and_an_undrained_one_fail_differently() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    // The input stopped inside a series.
+    let mut unclosed = probe_evaluator(1, grid(0, 10, 4), window);
+    unclosed
+        .push(&chunk(&[(1, vec![Some(1.0)])], 1, 0, false))
+        .unwrap();
+    execution_error_message(
+        unclosed.finish(),
+        "series input ended before the last chunk of a series",
+    );
+
+    // The series closed, but its pieces are still to pull: the one the push handed out is not the
+    // last, so finishing now would drop the rest of the decided span.
+    let (mut undrained, rows) = dense_span(2, 4);
+    let first = undrained
+        .push(&rows)
+        .unwrap()
+        .expect("the last chunk of the series hands out a piece");
+    assert!(!first.is_last, "one budget cannot cover the whole span");
+    execution_error_message(
+        undrained.finish(),
+        "series input ended with pieces of the last series still to pull",
+    );
+
+    // Starting another series before draining that one is rejected by the same guard, with its own
+    // message.
+    let (mut occupied, rows) = dense_span(2, 4);
+    occupied.push(&rows).unwrap();
+    execution_error_message(
+        occupied.push(&chunk(&[(1, vec![Some(1.0)])], 1, 1, true)),
+        "a new series cannot start before the pieces of the previous one are pulled",
     );
 }
 
@@ -2995,6 +3057,54 @@ fn a_series_may_begin_past_the_first_position_of_its_grid() {
     );
 }
 
+/// The budgeted hand-out of a series of *evaluated* input, which no other budgeted test drives:
+/// `push_evaluated` arms the same bounded pieces as `push`, and they cover the span the unbudgeted
+/// run covers, ending where each push of the run ended.
+#[test]
+fn a_budgeted_push_of_evaluated_input_hands_out_the_same_ranges() {
+    let grid = grid(0, 10, 5);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid.clone()),
+    });
+    let chunks = [
+        evaluated_chunk(&schema, 0, vec![Some(1.0), Some(2.0)], false),
+        evaluated_chunk(&schema, 2, vec![Some(3.0), None, Some(4.0)], true),
+    ];
+    let ranges = |budget: usize| -> Vec<(usize, usize)> {
+        let mut evaluator = evaluated_layer(&schema, grid.clone(), 10);
+        evaluator.set_pull_budget(budget).unwrap();
+        let mut ranges = Vec::new();
+        for chunk in &chunks {
+            let mut next = evaluator.push_evaluated(chunk).unwrap();
+            while let Some(piece) = next {
+                ranges.push((piece.range().start(), piece.range().len()));
+                next = evaluator.pull(budget).unwrap();
+            }
+        }
+        evaluator.finish().expect("the series closed");
+        ranges
+    };
+    let unbounded = ranges(usize::MAX);
+    assert_eq!(
+        tiled_ends(&unbounded).last(),
+        Some(&5),
+        "the unbudgeted run does not cover the input: {unbounded:?}"
+    );
+    for budget in 1..=3 {
+        let bounded = ranges(budget);
+        assert_refines(
+            &bounded,
+            &unbounded,
+            &format!("evaluated input pushed with a budget of {budget}"),
+        );
+        assert!(
+            bounded.iter().all(|&(_, len)| len <= budget),
+            "a piece of {bounded:?} covers more than the budget of {budget}"
+        );
+    }
+}
+
 /// Composed layers: an inner evaluator hands its chunks to a map chain and on to an outer
 /// evaluator, so the chunk protocol is exercised end to end instead of on one side alone.
 mod composition {
@@ -3359,4 +3469,127 @@ mod composition {
         }
         pipeline.finish();
     }
+}
+
+/// The grid positions a series' pieces cover, as the cumulative end of each piece. The pieces of one
+/// series tile its span in order, so a gap between two of them -- a decided range that never
+/// travelled with the piece that decided it -- fails here instead of shortening the coverage.
+fn tiled_ends(ranges: &[(usize, usize)]) -> Vec<usize> {
+    let mut end = 0;
+    let mut ends = Vec::with_capacity(ranges.len());
+    for &(start, len) in ranges {
+        assert_eq!(
+            start, end,
+            "the pieces {ranges:?} do not start at 0 and continue the span at {end}"
+        );
+        end += len;
+        ends.push(end);
+    }
+    ends
+}
+
+/// Asserts the pieces of a bounded run refine the pieces of the unbounded one: both tile the same
+/// span in order, and every end of the unbounded run is an end of the bounded one too, so no span a
+/// push decided was dropped or merged into a neighbour.
+fn assert_refines(bounded: &[(usize, usize)], unbounded: &[(usize, usize)], context: &str) {
+    let bounded_ends = tiled_ends(bounded);
+    let unbounded_ends = tiled_ends(unbounded);
+    assert_eq!(
+        bounded_ends.last(),
+        unbounded_ends.last(),
+        "{context}: the bounded pieces {bounded:?} cover another span than {unbounded:?}"
+    );
+    for end in unbounded_ends {
+        assert!(
+            bounded_ends.contains(&end),
+            "{context}: no bounded piece ends at {end}, the pieces being {bounded:?}"
+        );
+    }
+}
+
+/// The pieces a series hands out for the skip the reviewer reported, as `(start, len)` ranges: a
+/// grid of four 10 ms points, a 10 ms window, and one sample at 31 ms in the chunk that closes the
+/// series. The sample lies past every window, so all four points are decided without a value.
+fn skip_ahead_pieces(anchor_ms: Option<i64>, budget: usize) -> Vec<(usize, usize)> {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
+    evaluator.set_pull_budget(budget).unwrap();
+    let rows = chunk(&[(31, vec![Some(1.0)])], 1, 0, true);
+    let first = evaluator.push(&rows).unwrap();
+    let pieces = drain(&mut evaluator, first, budget);
+    let ranges: Vec<_> = pieces
+        .iter()
+        .map(|piece| (piece.range().start(), piece.range().len()))
+        .collect();
+    // The skip decides the whole grid, so every case built here reports all four points. A decided
+    // range that never travelled with its piece shows up as a shorter coverage, or as a series
+    // still holding pieces to pull below.
+    assert_eq!(
+        tiled_ends(&ranges).last(),
+        Some(&4),
+        "the pieces {ranges:?} do not cover the grid"
+    );
+    assert!(
+        pieces.iter().all(|piece| all_missing(&piece.series)),
+        "a point decided without a value carries one: {ranges:?}"
+    );
+    // A span the evaluator decided but never handed out leaves pieces to pull, which `finish`
+    // reports rather than dropping them silently.
+    evaluator.finish().expect("the series closed");
+    ranges
+}
+
+/// A skip over an empty window decides the points behind it, and an anchored selector reports what
+/// it decides through its broadcast: the points of the skip have to travel with the piece that
+/// decided them. Advancing only the cursor used to leave them unreported, so the whole series came
+/// out as a zero-length closing chunk.
+#[test]
+fn an_anchored_selector_that_skips_ahead_reports_every_point_it_decided() {
+    let ranges = skip_ahead_pieces(Some(0), usize::MAX);
+    let ends = tiled_ends(&ranges);
+    assert_eq!(
+        ends,
+        vec![4],
+        "the pieces do not cover the grid from 0 to 4: {ranges:?}"
+    );
+}
+
+/// The same case with a budget smaller than the grid. One round decides the whole grid at once, so
+/// a bounded round reports one budget of it and the pieces that follow carry the rest; the points
+/// past the first budget are the ones that used to be dropped for good.
+#[test]
+fn an_anchored_skip_reports_its_points_one_budget_at_a_time() {
+    for budget in 1..4 {
+        let ranges = skip_ahead_pieces(Some(0), budget);
+        assert_eq!(
+            tiled_ends(&ranges).last(),
+            Some(&4),
+            "a budget of {budget} stops short of the grid: {ranges:?}"
+        );
+        assert!(
+            ranges.len() > 1,
+            "a budget of {budget} handed the whole grid out at once: {ranges:?}"
+        );
+        assert!(
+            ranges.iter().all(|&(_, len)| len <= budget),
+            "a piece of {ranges:?} covers more than the budget of {budget}"
+        );
+    }
+}
+
+/// The control: the same skip without `@`, which reported the whole grid before and still does. An
+/// anchored selector may not be treated differently from an unanchored one here.
+#[test]
+fn a_selector_without_an_anchor_that_skips_ahead_reports_the_same_ranges() {
+    let unanchored = skip_ahead_pieces(None, usize::MAX);
+    assert_eq!(unanchored, vec![(0, 4)]);
+    assert_eq!(
+        unanchored,
+        skip_ahead_pieces(Some(0), usize::MAX),
+        "the anchored selector is reported differently from the unanchored one"
+    );
 }

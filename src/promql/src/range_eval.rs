@@ -707,6 +707,10 @@ impl RangeEvaluator {
             )));
         }
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
+        // Advanced only now: `ingest` may fail on a sample it cannot shift or convert.
+        if let Some(state) = self.series.as_mut() {
+            state.reached_end = state.reached_end.max(input_end);
+        }
         if chunk.is_last {
             return self.close_series();
         }
@@ -1133,8 +1137,25 @@ impl RangeEvaluator {
                 let step = i128::from(spec.step_ms);
                 let steps = (i128::from(earliest) - i128::from(spec.start_ms) + step - 1) / step;
                 let next = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
-                state.cursor = next.min(cap_end);
-                continue;
+                if matches!(self.replay, Replay::PerPoint) {
+                    state.cursor = next.min(cap_end);
+                    continue;
+                }
+                // An anchored selector reads one window, and this skip decides that the window
+                // holds nothing: the bound checked above says no sample can still reach it, so no
+                // point can gain a value. That decision is reported through the broadcast like any
+                // other, and a bounded round reports one budget of it and leaves the rest to the
+                // pieces that follow.
+                let end = cap_end.min(grid.len());
+                state.broadcast_end = state.broadcast_end.max(end);
+                // The cursor is what consumes the one window, and consuming it drops the samples
+                // behind it. Until the broadcast has covered the grid the loop has to come back for
+                // the next piece, so the cursor only advances with the last of them.
+                if state.broadcast_end == grid.len() {
+                    state.cursor = next.min(cap_end);
+                }
+                stopped |= state.broadcast_end < grid.len();
+                break;
             }
             if let Some(error) = &self.window_error {
                 return Err(DataFusionError::Execution(error.clone()));
