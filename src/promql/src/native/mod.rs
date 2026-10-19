@@ -31,5 +31,6 @@
 
 pub mod batch;
 mod display;
+pub mod execute;
 pub mod metrics;
 pub mod plan;
