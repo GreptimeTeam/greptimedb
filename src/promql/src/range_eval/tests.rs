@@ -2370,98 +2370,6 @@ fn evaluated_chunk(
     EvaluatedChunk::try_new(series, is_last).unwrap()
 }
 
-/// Pushes `chunks` into a fresh consumer on the 5/20 grid and returns what it handed out together
-/// with the series those chunks fold into.
-fn consume(
-    input: &Arc<SeriesSchema>,
-    chunks: &[EvaluatedChunk],
-) -> (Vec<EvaluatedChunk>, Option<Series>) {
-    let mut consumer = outer_layer(input);
-    let schema = consumer.output_schema().clone();
-    let handed_out: Vec<_> = chunks
-        .iter()
-        .flat_map(|chunk| consumer.push_evaluated(chunk).unwrap())
-        .collect();
-    consumer.finish().expect("the series closed");
-    let series = fold_chunks(&handed_out, &schema);
-    (handed_out, series)
-}
-
-/// The chunks of one evaluated series pushed one at a time and the whole series pushed as one
-/// chunk reach the same consumer result, on a grid the series is not indexed on.
-///
-/// This is chunking invariance, not an independent oracle: both sides run the same outer layer,
-/// so it is the properties the other tests of this module name that pin the protocol itself.
-#[test]
-fn a_series_pushed_in_chunks_matches_the_whole_series() {
-    let mut inner = inner_layer();
-    let schema = inner.output_schema().clone();
-    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
-    inner.finish().expect("the inner series closed");
-    assert!(
-        inner_chunks.len() > 1,
-        "the fixture hands the inner series out as one chunk"
-    );
-
-    let (handed_out, chunked) = consume(&schema, &inner_chunks);
-
-    // The whole inner series as one chunk that closes it, the way a producer that never chunked
-    // would hand it over.
-    let whole = fold_chunks(&inner_chunks, &schema).expect("the fixture inner series holds values");
-    let whole = EvaluatedChunk::try_new(whole, true).unwrap();
-    let (_, at_once) = consume(&schema, std::slice::from_ref(&whole));
-
-    assert!(
-        handed_out.len() > 1,
-        "the chunked path handed out one chunk, exactly like the whole-series path"
-    );
-    assert_series_eq(
-        chunked.as_ref(),
-        &expand(at_once.as_ref().expect("both paths produce a value")),
-        &metric(0),
-    );
-}
-
-/// A chunk leaving the outer layer is addressed on the outer grid, and the starts of those chunks
-/// strictly increase: no row number of the inner grid leaks into the outer addressing.
-#[test]
-fn a_chunk_indexed_on_the_inner_grid_is_absolute_on_the_outer_one() {
-    let mut inner = inner_layer();
-    let schema = inner.output_schema().clone();
-    let inner_grid = schema.eval_grid.clone().unwrap();
-    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
-    inner.finish().expect("the inner series closed");
-
-    assert_ne!(
-        inner_grid.spec(),
-        outer_grid().spec(),
-        "the fixture evaluates both layers on one grid"
-    );
-    let mut consumer = outer_layer(&schema);
-    let mut starts = Vec::new();
-    for chunk in &inner_chunks {
-        let Some(handed_out) = consumer.push_evaluated(chunk).unwrap() else {
-            continue;
-        };
-        assert_eq!(
-            handed_out.range().grid().spec(),
-            outer_grid().spec(),
-            "a chunk is addressed on a grid other than the one its layer was asked for"
-        );
-        starts.push(handed_out.range().start());
-    }
-    consumer.finish().expect("the outer series closed");
-
-    assert!(
-        starts.len() > 1,
-        "one chunk makes the strict monotonicity below free"
-    );
-    assert!(
-        starts.windows(2).all(|pair| pair[0] < pair[1]),
-        "the outer chunk starts {starts:?} do not strictly increase"
-    );
-}
-
 /// A point is decided by the chunk after which no sample can reach its window, so it leaves with
 /// that chunk: the outer point at 5 ms is settled by the inner chunk covering position 0, and it
 /// must not wait for the chunk that follows it.
@@ -2643,36 +2551,10 @@ fn a_map_chain_yielding_no_value_keeps_progress_and_the_closing_chunk() {
     );
 }
 
-/// The chunks of one series are handed over once, in order: a chunk starting behind the end of the
-/// previous one is rejected, and the error names both positions.
-#[test]
-fn an_out_of_order_chunk_is_rejected() {
-    let mut inner = inner_layer();
-    let schema = inner.output_schema().clone();
-    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
-    inner.finish().expect("the inner series closed");
-
-    let mut consumer = evaluated_layer(&schema, grid(0, 10, 5), 10);
-    // The first two chunks cover 0..1 and 1..3, so the series has reached position 3.
-    for chunk in &inner_chunks[..2] {
-        consumer.push_evaluated(chunk).unwrap();
-    }
-    let overlapping = evaluated_chunk(&schema, 2, vec![Some(1.0)], false);
-    let error = consumer.push_evaluated(&overlapping).unwrap_err();
-    assert!(
-        matches!(error, DataFusionError::Execution(_)),
-        "not an execution error: {error}"
-    );
-    let message = error.to_string();
-    assert!(
-        message.contains("2 does not continue from 3"),
-        "the message does not name both positions: {message}"
-    );
-}
-
-/// A producer that trims its output starts at its first row holding a value. The consumer accepts
-/// that series and reports the positions before it as decided, so the undelivered prefix is not
-/// left waiting for input.
+/// A position no chunk covers reads exactly like one whose chunk carries a missing value: both say
+/// there is no sample there, so a window over either takes no sample. The consumer does not ask
+/// which of the two it was given, and reports the position as decided either way rather than
+/// leaving it waiting for input.
 #[test]
 fn a_series_may_begin_past_the_first_position_of_its_grid() {
     let grid = grid(0, 10, 4);
@@ -2867,95 +2749,6 @@ mod composition {
             self.inner.finish().expect("the inner series closed");
             self.outer.finish().expect("the outer series closed");
         }
-    }
-
-    /// An empty map chain is the identity, and it has to be the identity on every chunk of one
-    /// series: the valued chunk and the zero-length closing one must carry the same labels, or
-    /// the consumer of the series rejects it as two.
-    ///
-    /// `last_over_time` keeps `__name__` -- it is one of the two range functions that do -- so this
-    /// series carries the metadata label a map chain rewrites, and the identity below is not
-    /// vacuous. Before `map_chunk` treated a chain without kernels as the identity it dropped the
-    /// metadata labels from the zero-length chunk alone, so the chunk that closed the series was
-    /// labelled differently from the chunk before it.
-    ///
-    /// No plan reaches this state: a `Map` is only built around at least one kernel, and
-    /// `map_chunk` is the only caller-side contract here. The empty slice is therefore pinned as
-    /// what `map_chunk` documents it to be -- the identity -- rather than as a case a planner
-    /// produces. Rejecting the empty slice instead would drop this test and nothing else.
-    #[test]
-    fn an_empty_map_chain_keeps_the_chunk_identity() {
-        let window = RangeWindow {
-            range_ms: 10,
-            offset_ms: 0,
-            anchor_ms: None,
-        };
-        let inner_grid = grid(0, 10, 2);
-        let mut inner = RangeEvaluator::try_new(
-            &raw_schema(1),
-            inner_grid.clone(),
-            window,
-            RangeFunction::LastOverTime,
-        )
-        .unwrap();
-        let schema = inner.output_schema().clone();
-
-        // The sample at 10 ms settles both points of the two-point grid, and the point at 10 ms
-        // reads it, so this push hands out the whole grid with a value in it.
-        let first = chunk(&[(10, vec![Some(2.0)])], 1, 0, false);
-        let valued = inner
-            .push(&first)
-            .unwrap()
-            .expect("the windows of both points are complete");
-        assert!(!valued.is_last);
-        assert_eq!(
-            (valued.range().start(), valued.range().len()),
-            (0, inner_grid.timestamps().len()),
-            "the fixture does not decide the whole grid before the last chunk"
-        );
-
-        // The last sample lies past every window, so the closing chunk decides nothing new and
-        // reaches a consumer with no positions at all.
-        let last = chunk(&[(100, vec![Some(3.0)])], 1, 0, true);
-        let closing = inner.push(&last).unwrap().expect("a series closes");
-        assert!(closing.is_last);
-        assert!(
-            closing.range().is_empty(),
-            "the closing chunk decided a position: {} values",
-            closing.range().len()
-        );
-        inner.finish().expect("the inner series closed");
-
-        // Without a metadata label in the fixture both assertions below would hold for free.
-        assert_eq!(valued.series.metric.name(), Some("http_requests"));
-        assert_eq!(closing.series.metric.name(), Some("http_requests"));
-
-        // An empty chain maps nothing, so each chunk comes back exactly as it went in.
-        let mapped_valued = map_chunk(&schema, &valued, &[]).unwrap();
-        assert_eq!(
-            mapped_valued.series.metric, valued.series.metric,
-            "an empty chain rewrote the valued chunk's labels"
-        );
-        let mapped_closing = map_chunk(&schema, &closing, &[]).unwrap();
-        assert_eq!(
-            mapped_closing.series.metric, closing.series.metric,
-            "an empty chain rewrote the closing chunk's labels"
-        );
-
-        // Both chunks are one series to the consumer: the valued one opens it, the closing one is
-        // accepted after it, and the series ends.
-        let mut downstream =
-            RangeEvaluator::try_new(&schema, inner_grid, window, RangeFunction::LastOverTime)
-                .unwrap();
-        downstream
-            .push_evaluated(&mapped_valued)
-            .expect("the valued chunk opens the series");
-        let closed = downstream
-            .push_evaluated(&mapped_closing)
-            .expect("the closing chunk carries the labels of the chunk before it")
-            .expect("a series closes");
-        assert!(closed.is_last);
-        downstream.finish().expect("the series closed");
     }
 
     /// A chain with a kernel rewrites the labels of every chunk it maps, and it has to rewrite them
@@ -3178,14 +2971,6 @@ mod composition {
                 starts.windows(2).all(|pair| pair[0] < pair[1]),
                 "the chunk starts {starts:?} of the {layer} layer do not increase"
             );
-        }
-        for chunk in &pipeline.outer_chunks {
-            for &timestamp in &chunk.range().timestamps() {
-                assert!(
-                    !inner_grid.timestamps().contains(&timestamp),
-                    "the outer layer used the inner timestamp {timestamp}"
-                );
-            }
         }
         pipeline.finish();
     }

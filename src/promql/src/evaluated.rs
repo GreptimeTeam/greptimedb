@@ -33,6 +33,11 @@ use datatypes::series::time::{GridRange, TimeAxis};
 /// A series closes exactly once, on the chunk that carries `is_last`. A closed prefix is always
 /// followed by a closing chunk, even when that chunk holds no values, so a consumer can tell
 /// "nothing more here" from "no more input".
+///
+/// The chunks of a series need not tile the grid: a position no chunk covers holds no sample, which
+/// is an ordinary state for a PromQL series rather than a missing report. A window over such a
+/// position reads no sample there, exactly as it does for a position whose chunk carries a missing
+/// value, so a consumer never has to tell the two apart.
 #[derive(Clone, Debug)]
 pub struct EvaluatedChunk {
     /// The evaluated values, addressed on their absolute grid positions.

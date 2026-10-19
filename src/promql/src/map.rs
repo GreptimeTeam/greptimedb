@@ -143,10 +143,11 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 /// result to the rows holding a value, as the output does, is a separate stage.
 ///
 /// A kernel rewrites the labels as [`map_math`] does -- dropping the metadata labels and every
-/// label whose value is empty -- even from a chunk without any value to map. A chain without
-/// kernels maps nothing, so it is the identity on the whole chunk and returns its labels
-/// unchanged: a consumer of the series reads the chunks of one series as one series only while
-/// they agree on them. Raw time axes are rejected.
+/// label whose value is empty -- even from a chunk without any value to map: a consumer of the
+/// series reads the chunks of one series as one series only while they agree on them, and a
+/// chunk that skipped the rewrite would label the closing chunk differently from the one before
+/// it. `ops` is therefore required to name at least one kernel; a `Map` is only built around one.
+/// Raw time axes are rejected.
 pub fn map_chunk(
     schema: &SeriesSchema,
     chunk: &EvaluatedChunk,
@@ -158,12 +159,13 @@ pub fn map_chunk(
         ));
     };
     if ops.is_empty() {
-        // No kernel maps anything, so the chunk is already its own result. Returning it before the
-        // labels are rewritten keeps the whole chunk -- labels, range and end -- exactly as it came
-        // in, which a consumer of the series requires: every chunk of one series has to carry the
-        // same labels, and a chain without kernels must not relabel the zero-length chunk that
-        // closes a series differently from the chunk before it.
-        return EvaluatedChunk::try_new(chunk.series.clone(), chunk.is_last);
+        // Refused rather than given a meaning: with no kernel there is nothing to rewrite the
+        // labels, and the paths below would disagree about them -- the empty range returns with
+        // the metadata labels dropped, the valued one keeps whatever `map_math` hands back. A
+        // `Map` is only built around at least one kernel, so this is a caller error.
+        return Err(DataFusionError::Execution(
+            "map math requires at least one kernel".into(),
+        ));
     }
     let metric = drop_metric_name(&chunk.series.metric)?;
     if range.is_empty() {

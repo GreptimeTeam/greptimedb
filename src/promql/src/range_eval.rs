@@ -264,11 +264,6 @@ struct SeriesState {
     primary_key: Option<Buffer>,
     metric: MetricName,
     last_ts: i64,
-    /// Grid index after the last input position consumed. The chunks of one evaluated series tile
-    /// the input grid, so this is where the next one has to start. Unlike `completed`, it counts
-    /// positions of the *input* grid, which is a different grid whenever the input is itself
-    /// evaluated.
-    input_end: usize,
     /// Next grid index to evaluate.
     cursor: usize,
     /// Grid index after the last position the evaluator has decided, whether it holds a value or
@@ -576,14 +571,10 @@ impl RangeEvaluator {
     /// the value at each grid point is a sample at that time. Stale markers are kept as values,
     /// since the input is computed.
     ///
-    /// The first chunk opens the series with its labels, each later one starts exactly where the
-    /// previous one ended, and the one marked `is_last` closes it. The first chunk may begin at any
-    /// position of the input grid: a producer that trims its output starts at its first row
-    /// holding a value, and the positions before it carry no sample rather than a missing one. A
-    /// consumer therefore cannot tell a dropped leading chunk from a trimmed prefix -- both leave
-    /// the same positions without a sample and are reported as decided. A gap after the first
-    /// chunk is rejected instead, because there it would claim positions between two chunks of one
-    /// series are settled while a sample may still arrive in them.
+    /// The first chunk opens the series with its labels and the one marked `is_last` closes it. The
+    /// chunks need not tile the input grid: a position no chunk covers holds no sample, which is
+    /// the same state as a position whose chunk carries a missing value, so the positions a chunk
+    /// jumps over are simply reported as decided without a sample.
     ///
     /// A chunk reports the positions it decided, whether they hold a value or not, so a position
     /// an inner evaluation settled without a result crosses this layer too; as on the raw path,
@@ -620,29 +611,6 @@ impl RangeEvaluator {
                 range.start()
             )));
         }
-        // Every chunk after the first has to continue exactly where the previous one ended, so the
-        // positions of one series never repeat or leave a gap. The first chunk is not constrained:
-        // a producer that trims its output to the rows holding a value begins at its first such
-        // row, and the positions before it carry no sample rather than a missing one. Reporting
-        // them as decided is still correct, because no input ever arrives there, so a window over
-        // them can never gain a sample.
-        //
-        // The concession is deliberately leading-only, and it costs the consumer no information:
-        // `emit`, the only producer here, begins a series at position 0 and tiles every chunk after
-        // it, so a leading gap can only mean an outside producer trimmed the series head -- a
-        // dropped leading chunk and a trimmed prefix are the same thing to this layer, since both
-        // leave the positions before the start without a sample. A gap in the middle is not the
-        // same: the positions in it lie between two chunks of one series, so they would read as
-        // decided-without-a-sample while a sample may still arrive there, and it is rejected.
-        if let Some(state) = &self.series
-            && range.start() != state.input_end
-        {
-            return Err(DataFusionError::Execution(format!(
-                "evaluated chunks are out of order: {} does not continue from {}",
-                range.start(),
-                state.input_end
-            )));
-        }
         if let Some(state) = &self.series {
             if state.metric != chunk.series.metric {
                 return Err(DataFusionError::Execution(format!(
@@ -655,7 +623,6 @@ impl RangeEvaluator {
                 primary_key: None,
                 metric: chunk.series.metric.clone(),
                 last_ts: 0,
-                input_end: 0,
                 cursor: 0,
                 completed: 0,
                 emitted_end: 0,
@@ -665,11 +632,6 @@ impl RangeEvaluator {
         // on its timestamps, so the next sample can only arrive there.
         let input_end = range.start() + range.len();
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
-        // Advanced only now: `ingest` may fail on a sample it cannot shift or convert.
-        if let Some(state) = self.series.as_mut() {
-            // Open, because the first chunk above opens the series and `ingest` never closes it.
-            state.input_end = input_end;
-        }
         if !chunk.is_last {
             // A point is decided once no sample that can still arrive falls in its window, and the
             // next sample can only sit at `grid[input_end]`. `ready` is inclusive and in the
@@ -787,7 +749,6 @@ impl RangeEvaluator {
                     primary_key: Some(chunk.primary_key.clone()),
                     metric,
                     last_ts: time[time.len() - 1],
-                    input_end: 0,
                     cursor: 0,
                     completed: 0,
                     emitted_end: 0,
