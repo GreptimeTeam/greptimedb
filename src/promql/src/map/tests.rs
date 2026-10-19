@@ -32,6 +32,8 @@ use datatypes::series::{Label, MetricName};
 use super::*;
 use crate::functions::IeeeSqrt;
 
+mod prometheus;
+
 fn schema(names: &[&str]) -> SeriesSchema {
     SeriesSchema {
         fields: names

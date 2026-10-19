@@ -225,7 +225,7 @@ fn math_matches_prometheus() {
         let output = case
             .series
             .iter()
-            .map(|series| map_math(&case.schema, series, op).unwrap())
+            .filter_map(|series| map_math(&case.schema, series, op).unwrap())
             .collect();
         assert_result(case, output);
         matched += 1;
