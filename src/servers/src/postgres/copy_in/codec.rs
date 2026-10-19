@@ -104,6 +104,13 @@ pub(super) trait CopyInCodec: Send + Sync + std::fmt::Debug {
     fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()>;
     /// Creates the stateful parser for one copy stream over the targeted
     /// columns (in COPY field order).
-    fn create_parser(&self, columns: &[ColumnSchema])
-    -> PgWireResult<Box<dyn RecordParser + Send>>;
+    ///
+    /// `timezone` is the session timezone (an IANA name or a UTC offset):
+    /// formats that parse offset-free timestamp strings from text should
+    /// interpret them in this zone, matching SQL INSERT.
+    fn create_parser(
+        &self,
+        columns: &[ColumnSchema],
+        timezone: &str,
+    ) -> PgWireResult<Box<dyn RecordParser + Send>>;
 }

@@ -119,12 +119,17 @@ impl CopyInCodec for CsvCodec {
     fn create_parser(
         &self,
         columns: &[ColumnSchema],
+        timezone: &str,
     ) -> PgWireResult<Box<dyn RecordParser + Send>> {
         // Decode schema: the greptime schema's arrow projection, except
         // Boolean columns decode as Utf8 — arrow-csv only accepts
         // `true`/`false`, while PostgreSQL COPY IN accepts its full set
         // of boolean spellings (`t`, `f`, `yes`, `on`, ...), which COPY
-        // OUT emits. The substitution is reverted in `flush_batch`.
+        // OUT emits — and Timestamp fields carry the SESSION timezone so
+        // offset-free strings parse like SQL INSERT does instead of as
+        // UTC. The substitutions are applied in `flush_batch` and by the
+        // decoder's tz-aware parsing respectively; explicit offsets in
+        // the input always win.
         let boolean_columns: Vec<usize> = columns
             .iter()
             .enumerate()
@@ -135,16 +140,24 @@ impl CopyInCodec for CsvCodec {
             .map_err(|e| unsupported(format!("invalid columns for format csv: {e}")))?
             .arrow_schema()
             .clone();
+        let timezone = timezone.to_string();
         let fields = arrow_schema
             .fields()
             .iter()
             .zip(columns)
-            .map(|(field, column)| {
-                if matches!(column.data_type, ConcreteDataType::Boolean(_)) {
+            .map(|(field, column)| match &column.data_type {
+                ConcreteDataType::Boolean(_) => {
                     Field::new(field.name(), ArrowDataType::Utf8, field.is_nullable())
-                } else {
-                    field.as_ref().clone()
                 }
+                ConcreteDataType::Timestamp(_) => match field.data_type() {
+                    ArrowDataType::Timestamp(unit, None) => Field::new(
+                        field.name(),
+                        ArrowDataType::Timestamp(*unit, Some(Arc::from(timezone.as_str()))),
+                        field.is_nullable(),
+                    ),
+                    _ => field.as_ref().clone(),
+                },
+                _ => field.as_ref().clone(),
             })
             .collect::<Vec<_>>();
         let mut builder = ReaderBuilder::new(Arc::new(ArrowSchema::new(fields)))
@@ -281,7 +294,7 @@ mod tests {
     fn parser() -> Box<dyn RecordParser + Send> {
         build_csv_codec(CopyOptionSet::default())
             .unwrap()
-            .create_parser(&test_columns())
+            .create_parser(&test_columns(), "UTC")
             .unwrap()
     }
 
@@ -296,7 +309,7 @@ mod tests {
         set.take_format().unwrap();
         build_csv_codec(set)
             .unwrap()
-            .create_parser(&test_columns())
+            .create_parser(&test_columns(), "UTC")
             .unwrap()
     }
 
@@ -512,7 +525,7 @@ mod tests {
         let check = |chunk: usize| {
             let mut parser = build_csv_codec(CopyOptionSet::default())
                 .unwrap()
-                .create_parser(&sweep_columns)
+                .create_parser(&sweep_columns, "UTC")
                 .unwrap();
             let mut ids: Vec<i32> = Vec::new();
             for c in payload.chunks(chunk) {
@@ -548,7 +561,7 @@ mod tests {
             shifted.drain(..37);
             let mut parser = build_csv_codec(CopyOptionSet::default())
                 .unwrap()
-                .create_parser(&sweep_columns)
+                .create_parser(&sweep_columns, "UTC")
                 .unwrap();
             let mut count = 0usize;
             for c in shifted.chunks(chunk) {
@@ -573,7 +586,7 @@ mod tests {
         ];
         let mut parser = build_csv_codec(CopyOptionSet::default())
             .unwrap()
-            .create_parser(&columns)
+            .create_parser(&columns, "UTC")
             .unwrap();
         let rows = feed_all(
             &mut parser,
@@ -616,7 +629,7 @@ mod tests {
         ];
         let mut parser = build_csv_codec(CopyOptionSet::default())
             .unwrap()
-            .create_parser(&columns)
+            .create_parser(&columns, "UTC")
             .unwrap();
         parser.feed(b"maybe,2024-01-01 00:00:00\n").unwrap();
         let err = match parser.finish() {
@@ -628,6 +641,40 @@ mod tests {
                 .contains("invalid input syntax for type boolean"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn test_csv_timestamp_session_timezone() {
+        // Offset-free timestamp strings must parse in the session
+        // timezone (parity with SQL INSERT); explicit offsets win.
+        let columns = vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&columns, "Asia/Shanghai")
+            .unwrap();
+        let rows = feed_all(
+            &mut parser,
+            &[b"host1,2024-01-01 00:00:00\n\
+                host2,2024-01-01T00:00:00+08:00\n\
+                host3,2024-01-01T00:00:00Z\n"],
+        );
+        let millis = |row: &ParsedRow| match row.values[1].value_data.as_ref().unwrap() {
+            api::v1::value::ValueData::TimestampMillisecondValue(v) => *v,
+            other => panic!("expected ts, got {other:?}"),
+        };
+        // 2024-01-01T00:00:00+08:00 == 2023-12-31T16:00:00Z
+        assert_eq!(millis(&rows[0]), 1704038400000);
+        // Explicit +08:00 offset: same instant as the naive parse.
+        assert_eq!(millis(&rows[1]), 1704038400000);
+        // Explicit Z: parsed as UTC regardless of the session zone.
+        assert_eq!(millis(&rows[2]), 1704067200000);
     }
 
     #[test]

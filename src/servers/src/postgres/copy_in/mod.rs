@@ -259,7 +259,7 @@ impl CopyInState {
                 )));
             }
         }
-        let parser = codec.create_parser(&columns)?;
+        let parser = codec.create_parser(&columns, query_ctx.timezone().to_string().as_str())?;
 
         let grpc_schema = columns
             .iter()

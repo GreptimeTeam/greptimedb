@@ -339,3 +339,64 @@ async fn test_postgres_copy_in_failed_copy_then_new_copy() {
 
     server.shutdown().await.unwrap();
 }
+
+/// COPY/INSERT parity in a non-UTC session: offset-free timestamp strings
+/// must be interpreted in the session timezone by both paths.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_session_timezone_parity() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_tz").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query(
+            "CREATE TABLE copy_tz (case_id STRING PRIMARY KEY, ts TIMESTAMP, TIME INDEX(ts))",
+        )
+        .await
+        .unwrap();
+
+    client
+        .simple_query("SET TIMEZONE TO 'Asia/Shanghai'")
+        .await
+        .unwrap();
+
+    client
+        .simple_query("INSERT INTO copy_tz VALUES ('insert', '2024-01-01 00:00:00')")
+        .await
+        .unwrap();
+    let rows = feed_copy_in(
+        &client,
+        "COPY copy_tz (case_id, ts) FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from_static(b"copy,2024-01-01 00:00:00\n")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT case_id, CAST(ts AS BIGINT) FROM copy_tz ORDER BY case_id")
+        .await
+        .unwrap();
+    let results: Vec<(String, String)> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => {
+                Some((row.get(0)?.to_string(), row.get(1)?.to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0].0, "copy");
+    assert_eq!(results[1].0, "insert");
+    // The whole point: both paths store the same instant.
+    assert_eq!(
+        results[0].1, results[1].1,
+        "COPY and INSERT must agree on offset-free timestamps: {results:?}"
+    );
+    // And it is the Asia/Shanghai interpretation, not UTC.
+    assert_eq!(results[0].1, "1704038400000");
+
+    server.shutdown().await.unwrap();
+}
