@@ -59,6 +59,7 @@ use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
 use either::Either;
 use futures_util::future::try_join_all;
+use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt};
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
@@ -95,7 +96,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::{self, timeout};
 use tonic::{Request, Response, Result as TonicResult};
 
@@ -728,9 +729,10 @@ impl RegionServer {
 
     /// Puts into ready mito regions together through
     /// [`RegionEngine::handle_batch_put_requests`], so that each mito worker gets the puts of the
-    /// request to its regions at once and writes them in one batch. As on the per-region path,
-    /// every response is awaited and accounted, for the regions it answers, on its own ingest
-    /// task.
+    /// request to its regions at once and writes them in one batch. One ingest task awaits every
+    /// response at once and accounts each, for the regions it answers, as the per-region path
+    /// does; it hands the first error back at once and keeps accounting the rest, also when the
+    /// caller goes away.
     ///
     /// Returns Either::Right(original_requests) unless
     /// [`mito_engine_for_batch_puts`](Self::mito_engine_for_batch_puts) accepts the requests.
@@ -752,64 +754,69 @@ impl RegionServer {
             .collect();
         let started = Instant::now();
         let tracing_context = TracingContext::from_current_span();
-        // The accounting tasks are spawned by the batch task, so a caller that goes away does not
-        // lose them.
-        let tasks = common_runtime::spawn_ingest(async move {
-            engine
+        let (result_tx, result_rx) = oneshot::channel();
+        let batch = common_runtime::spawn_ingest(async move {
+            let mut pending = engine
                 .handle_batch_put_requests(puts)
                 .into_iter()
                 .map(|(region_ids, response)| {
-                    let region_id = region_ids[0];
                     let span = tracing_context.attach(info_span!(
                         "RegionServer::handle_region_request",
-                        region_id = region_id.to_string()
+                        region_id = region_ids[0].to_string()
                     ));
-                    common_runtime::spawn_ingest(
-                        async move {
-                            let result = response
-                                .await
-                                .context(HandleRegionRequestSnafu { region_id });
-                            let elapsed = started.elapsed().as_secs_f64();
-                            for _ in &region_ids {
-                                crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-                                    .with_label_values(&[request_type])
-                                    .observe(elapsed);
-                            }
-                            match &result {
-                                Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
-                                    .with_label_values(&[request_type])
-                                    .inc_by(response.affected_rows as u64),
-                                Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                                    .with_label_values(&[request_type, err.status_code().as_ref()])
-                                    .inc_by(region_ids.len() as u64),
-                            }
-                            result
-                        }
-                        .trace(span),
-                    )
+                    async move { (region_ids, response.await) }.trace(span)
                 })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })?;
-        let responses = try_join_all(
-            tasks
-                .into_iter()
-                .map(|task| async move { task.await.context(RuntimeJoinSnafu { request_type })? }),
-        )
-        .await?;
+                .collect::<FuturesUnordered<_>>();
+            let mut result_tx = Some(result_tx);
+            let mut affected_rows = 0;
+            let mut extensions = HashMap::new();
+            while let Some((region_ids, result)) = pending.next().await {
+                let elapsed = started.elapsed().as_secs_f64();
+                for _ in &region_ids {
+                    crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
+                        .with_label_values(&[request_type])
+                        .observe(elapsed);
+                }
+                match result.context(HandleRegionRequestSnafu {
+                    region_id: region_ids[0],
+                }) {
+                    Ok(response) => {
+                        crate::metrics::REGION_CHANGED_ROW_COUNT
+                            .with_label_values(&[request_type])
+                            .inc_by(response.affected_rows as u64);
+                        affected_rows += response.affected_rows;
+                        extensions.extend(response.extensions);
+                    }
+                    Err(err) => {
+                        crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+                            .with_label_values(&[request_type, err.status_code().as_ref()])
+                            .inc_by(region_ids.len() as u64);
+                        if let Some(result_tx) = result_tx.take() {
+                            let _ = result_tx.send(Err(err));
+                        }
+                    }
+                }
+            }
+            if let Some(result_tx) = result_tx {
+                let _ = result_tx.send(Ok(RegionResponse {
+                    affected_rows,
+                    extensions,
+                    metadata: Vec::new(),
+                }));
+            }
+        });
 
-        let mut affected_rows = 0;
-        let mut extensions = HashMap::new();
-        for response in responses {
-            affected_rows += response.affected_rows;
-            extensions.extend(response.extensions);
+        match result_rx.await {
+            Ok(result) => result.map(Either::Left),
+            // The batch task answers on every path it completes, so it panicked or was cancelled.
+            Err(_) => {
+                batch.await.context(RuntimeJoinSnafu { request_type })?;
+                UnexpectedSnafu {
+                    violated: "the batch put task completed without answering",
+                }
+                .fail()
+            }
         }
-        Ok(Either::Left(RegionResponse {
-            affected_rows,
-            extensions,
-            metadata: Vec::new(),
-        }))
     }
 
     /// Returns the mito engine when there are at least two requests, every one a put into a ready
