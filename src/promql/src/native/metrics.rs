@@ -73,6 +73,14 @@ impl NodePath {
     pub fn metric_name(&self, metric: &str) -> String {
         format!("{NATIVE_PREFIX}.{}.{}", self.0, metric)
     }
+
+    /// The full metric name for `metric` at this position in `partition`.
+    ///
+    /// A figure that must not be merged across partitions needs the partition in its name: the
+    /// collector aggregates by name first, and a sum of peaks is not a peak.
+    pub fn partitioned_metric_name(&self, metric: &str, partition: usize) -> String {
+        format!("{NATIVE_PREFIX}.p{partition}.{}.{metric}", self.0)
+    }
 }
 
 impl std::fmt::Display for NodePath {
@@ -189,8 +197,9 @@ impl Default for NodeMetrics {
 impl NodeMetrics {
     /// Registers this node's metrics under `path` in `set`.
     ///
-    /// `partition` is part of the registration, so two partitions of one plan report separately
-    /// and a peak never gets summed across them.
+    /// `partition` is part of the registration, so two partitions of one plan report separately.
+    /// It is also part of the peak's name, because a peak is the one figure a collector must not
+    /// add up across partitions.
     pub fn register(&self, path: &NodePath, set: &ExecutionPlanMetricsSet, partition: usize) {
         fn count(set: &ExecutionPlanMetricsSet, partition: usize, name: String, count: &Count) {
             MetricBuilder::new(set)
@@ -251,10 +260,14 @@ impl NodeMetrics {
             path.metric_name(NodeMetric::CURRENT_RESERVED_BYTES),
             &self.current_reserved_bytes,
         );
+        // The peak is the one figure named per partition. The collector groups by name and sums
+        // gauges, and a sum of two peaks is neither peak: partitions peak at different moments.
+        // Summing the other gauges and counts stays meaningful — the memory held now, the groups
+        // tracked and the samples seen all add up across partitions.
         gauge(
             set,
             partition,
-            path.metric_name(NodeMetric::PEAK_RESERVED_BYTES),
+            path.partitioned_metric_name(NodeMetric::PEAK_RESERVED_BYTES, partition),
             &self.peak_reserved_bytes,
         );
         gauge(
@@ -343,6 +356,7 @@ pub fn register_tree(
 mod tests {
     use std::sync::Arc;
 
+    use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue};
     use datatypes::series::samples::SeriesSchema;
     use datatypes::series::time::{EvalGrid, GridSpec};
 
@@ -365,13 +379,13 @@ mod tests {
     }
 
     fn input() -> NativeNode {
-        let schema = schema();
+        let output = NativeType::Samples(schema());
         NativeNode {
             expr: NativeExpr::Input(BoundInput {
-                schema: Arc::clone(&schema),
+                output: output.clone(),
                 ordering: datatypes::series::SeriesOrdering::KeyThenTime,
             }),
-            output: NativeType::Samples(schema),
+            output,
         }
     }
 
@@ -470,12 +484,42 @@ mod tests {
             path.metric_name(NodeMetric::SELF_COMPUTE_TIME_NS),
             "native.root.left.input.self_compute_time_ns"
         );
-        // The peak keeps the partition, because two partitions peak at different moments.
-        assert!(
-            NodePath::root()
-                .metric_name(NodeMetric::PEAK_RESERVED_BYTES)
-                .starts_with("native.root.")
+        assert_eq!(
+            path.partitioned_metric_name(NodeMetric::PEAK_RESERVED_BYTES, 1),
+            "native.p1.root.left.input.peak_reserved_bytes"
         );
+    }
+
+    /// The peak keeps the partition in its name, so the collector's aggregation by name cannot add
+    /// two partitions' peaks: 1024 and 2048 peak at different moments, and 3072 is neither peak.
+    #[test]
+    fn a_peak_is_not_merged_across_partitions() {
+        let root = map(window(input()));
+        let set = ExecutionPlanMetricsSet::new();
+        let peaks = [(0, 1024), (1, 2048)];
+        for (partition, peak) in peaks {
+            let registered = register_tree(&root, &set, partition);
+            // The root comes first in traversal order.
+            registered[0].1.record_reserved_bytes(peak);
+        }
+
+        // The real collector path: `aggregate_by_name` groups by metric name and sums the
+        // values in each group.
+        let aggregated = set.clone_inner().aggregate_by_name();
+        let peak = |partition: usize| -> Option<usize> {
+            let expected = NodePath::root()
+                .partitioned_metric_name(NodeMetric::PEAK_RESERVED_BYTES, partition);
+            aggregated.iter().find_map(|metric| match metric.value() {
+                MetricValue::Gauge { name, gauge } if name.as_ref() == expected.as_str() => {
+                    Some(gauge.value())
+                }
+                _ => None,
+            })
+        };
+        // Two separate names, each holding its own partition's peak: had the name not carried the
+        // partition, aggregation would have merged them into one gauge summing to 3072.
+        assert_eq!(peak(0), Some(1024));
+        assert_eq!(peak(1), Some(2048));
     }
 
     /// Registration covers every node, so no node is executed without a way to observe it.
