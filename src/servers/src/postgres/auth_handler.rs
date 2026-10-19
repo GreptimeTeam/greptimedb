@@ -26,6 +26,7 @@ use common_error::status_code::StatusCode;
 use common_time::Timezone;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
+use pgwire::api::auth::cleartext::CleartextPasswordAuth;
 use pgwire::api::auth::driver::AuthOutcome;
 use pgwire::api::auth::mechanism::{AuthMechanism, AuthMechanismFactory, AuthState};
 use pgwire::api::auth::sasl::scram::{ScramAuth, ScramSecret};
@@ -33,7 +34,7 @@ use pgwire::api::auth::{AuthSource, LoginInfo as WireLoginInfo};
 use pgwire::api::{ClientInfo, PidSecretKeyGenerator, auth};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
-use pgwire::messages::startup::{Authentication, PasswordMessageFamily, SecretKey};
+use pgwire::messages::startup::{PasswordMessageFamily, SecretKey};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::Session;
 use snafu::IntoError;
@@ -180,22 +181,23 @@ fn to_scram_secret(verifier: &PgScramSha256Verifier) -> ScramSecret {
     }
 }
 
-/// Hands pgwire's SCRAM machinery the verifier resolved at connection start.
+/// Hands pgwire's SCRAM machinery the verifier and identity resolved at
+/// connection start.
 #[derive(Debug)]
 struct FixedScramSecretSource {
-    secret: Mutex<Option<ScramSecret>>,
+    secret: Mutex<Option<(ScramSecret, Option<UserInfoRef>)>>,
 }
 
 impl FixedScramSecretSource {
-    fn new(secret: ScramSecret) -> Self {
+    fn new(secret: ScramSecret, user_info: Option<UserInfoRef>) -> Self {
         Self {
-            secret: Mutex::new(Some(secret)),
+            secret: Mutex::new(Some((secret, user_info))),
         }
     }
 }
 
 #[async_trait]
-impl AuthSource for FixedScramSecretSource {
+impl AuthSource<UserInfoRef> for FixedScramSecretSource {
     async fn get_password(
         &self,
         _login: &WireLoginInfo,
@@ -205,7 +207,10 @@ impl AuthSource for FixedScramSecretSource {
         ))
     }
 
-    async fn get_scram_secret(&self, _login: &WireLoginInfo) -> PgWireResult<ScramSecret> {
+    async fn get_scram_secret(
+        &self,
+        _login: &WireLoginInfo,
+    ) -> PgWireResult<(ScramSecret, Option<UserInfoRef>)> {
         self.secret
             .lock()
             .unwrap()
@@ -214,14 +219,54 @@ impl AuthSource for FixedScramSecretSource {
     }
 }
 
-/// pgwire's SCRAM mechanism plus the GreptimeDB authorization check, run
-/// after the client proof is verified. Reports the verified identity.
-struct PgScramMechanism {
-    inner: Box<dyn AuthMechanism>,
+/// Backs pgwire's cleartext mechanism: the user provider verifies the
+/// password (or bearer token) itself and resolves the identity, so the
+/// built-in cleartext mechanism can be used directly.
+struct GreptimePasswordSource {
     user_provider: UserProviderRef,
     login: LoginInfo,
-    /// `None` for unknown users, whose mock verifier can never be satisfied.
-    user_info: Option<UserInfoRef>,
+}
+
+impl Debug for GreptimePasswordSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GreptimePasswordSource")
+            .field("user", &self.login.user)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl AuthSource<UserInfoRef> for GreptimePasswordSource {
+    async fn get_password(
+        &self,
+        _login: &WireLoginInfo,
+    ) -> PgWireResult<pgwire::api::auth::Password> {
+        Err(PgWireError::ApiError(
+            "passwords are verified by the user provider, never served".into(),
+        ))
+    }
+
+    async fn verify_password(
+        &self,
+        _login: &WireLoginInfo,
+        presented_password: &[u8],
+    ) -> PgWireResult<Option<UserInfoRef>> {
+        let password = str::from_utf8(presented_password).map_err(|e| {
+            PgWireError::ApiError(format!("password is not valid UTF-8: {e}").into())
+        })?;
+        // Metrics are recorded inside `authenticate_password`.
+        let user_info = authenticate_password(&self.user_provider, &self.login, password).await?;
+        Ok(Some(user_info))
+    }
+}
+
+/// pgwire's SCRAM mechanism plus the GreptimeDB authorization check, run
+/// after the client proof is verified so a rejection still precedes
+/// `AuthenticationOk`.
+struct PgScramMechanism {
+    inner: Box<dyn AuthMechanism<UserInfoRef>>,
+    user_provider: UserProviderRef,
+    login: LoginInfo,
 }
 
 impl PgScramMechanism {
@@ -233,18 +278,6 @@ impl PgScramMechanism {
             .inc();
         result
     }
-
-    /// Maps an inner state, dropping its `()` identity.
-    fn map_state(state: AuthState) -> AuthState<UserInfoRef> {
-        match state {
-            AuthState::InProgress(message) => AuthState::InProgress(message),
-            AuthState::Ok { final_message, .. } => AuthState::Ok {
-                final_message,
-                identity: None,
-            },
-            AuthState::Failed(e) => AuthState::Failed(e),
-        }
-    }
 }
 
 #[async_trait]
@@ -253,7 +286,7 @@ impl AuthMechanism<UserInfoRef> for PgScramMechanism {
         &mut self,
         client: &(dyn ClientInfo + Send + Sync),
     ) -> PgWireResult<AuthState<UserInfoRef>> {
-        self.inner.begin(client).await.map(Self::map_state)
+        self.inner.begin(client).await
     }
 
     async fn next(
@@ -263,8 +296,13 @@ impl AuthMechanism<UserInfoRef> for PgScramMechanism {
     ) -> PgWireResult<AuthState<UserInfoRef>> {
         match self.inner.next(client, message).await {
             // Proof verified: authorize before the handshake completes.
-            Ok(AuthState::Ok { final_message, .. }) => {
-                let Some(user_info) = self.user_info.take() else {
+            Ok(AuthState::Ok {
+                final_message,
+                identity,
+            }) => {
+                let Some(user_info) = identity else {
+                    // Unknown user, whose mock verifier can never be
+                    // satisfied; fail closed with the uniform label.
                     return Ok(Self::record_scram_failure(AuthState::Failed(
                         PgWireError::InvalidPassword(self.login.user.clone().unwrap_or_default()),
                     )));
@@ -278,40 +316,9 @@ impl AuthMechanism<UserInfoRef> for PgScramMechanism {
                     identity: Some(user_info),
                 })
             }
-            Ok(AuthState::InProgress(message)) => Ok(AuthState::InProgress(message)),
+            Ok(state @ AuthState::InProgress(_)) => Ok(state),
             Ok(AuthState::Failed(e)) => Ok(Self::record_scram_failure(AuthState::Failed(e))),
             Err(e) => Err(Self::record_scram_failure(e)),
-        }
-    }
-}
-
-struct PgCleartextMechanism {
-    user_provider: UserProviderRef,
-    login: LoginInfo,
-}
-
-#[async_trait]
-impl AuthMechanism<UserInfoRef> for PgCleartextMechanism {
-    async fn begin(
-        &mut self,
-        _client: &(dyn ClientInfo + Send + Sync),
-    ) -> PgWireResult<AuthState<UserInfoRef>> {
-        Ok(AuthState::InProgress(Authentication::CleartextPassword))
-    }
-
-    async fn next(
-        &mut self,
-        _client: &(dyn ClientInfo + Send + Sync),
-        message: PasswordMessageFamily,
-    ) -> PgWireResult<AuthState<UserInfoRef>> {
-        let message = message.into_password()?;
-        // Metrics are recorded inside `authenticate_password`.
-        match authenticate_password(&self.user_provider, &self.login, &message.password).await {
-            Ok(user_info) => Ok(AuthState::Ok {
-                final_message: None,
-                identity: Some(user_info),
-            }),
-            Err(e) => Ok(AuthState::Failed(e)),
         }
     }
 }
@@ -489,10 +496,11 @@ impl PostgresServerHandlerInner {
         user_provider: UserProviderRef,
         login: LoginInfo,
     ) -> Box<dyn AuthMechanism<UserInfoRef>> {
-        Box::new(PgCleartextMechanism {
+        CleartextPasswordAuth::new(Arc::new(GreptimePasswordSource {
             user_provider,
             login,
-        })
+        }))
+        .create()
     }
 
     fn scram_mechanism(
@@ -501,12 +509,11 @@ impl PostgresServerHandlerInner {
         user_info: Option<UserInfoRef>,
         secret: ScramSecret,
     ) -> Box<dyn AuthMechanism<UserInfoRef>> {
-        let scram = ScramAuth::new(Arc::new(FixedScramSecretSource::new(secret)));
+        let scram = ScramAuth::new(Arc::new(FixedScramSecretSource::new(secret, user_info)));
         Box::new(PgScramMechanism {
             inner: scram.create(),
             user_provider,
             login,
-            user_info,
         })
     }
 }
