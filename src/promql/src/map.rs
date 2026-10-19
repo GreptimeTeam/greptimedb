@@ -39,7 +39,6 @@ use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::evaluated::EvaluatedChunk;
 use crate::functions::Round;
-use crate::grid_series::GridSeriesBuilder;
 
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug)]
@@ -136,16 +135,16 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 
 /// Applies the map kernels `ops` to one evaluated chunk, in order.
 ///
-/// The result is one chunk per maximal run of consecutive positions the chain left holding a
-/// value. A position it mapped away is not a row of the result, and no piece spans one, so a chain
-/// that drops values costs nothing for the positions it dropped: a consumer reads them as holding
-/// no sample, which is what the chain left there. A chunk the chain emptied entirely therefore
-/// yields no piece, and only the close is unconditional -- a series whose whole result was mapped
-/// away still has to end, so it ends on an empty chunk.
+/// Every kernel is pointwise and keeps the input's time axis, so the result carries exactly the
+/// positions the chunk carries: one chunk, its labels rewritten. A position the chain mapped away
+/// is not a row of that chunk, as it was not a row of the input, and a chain that empties the chunk
+/// entirely therefore yields no piece at all -- a consumer reads those positions as holding no
+/// sample, which is what the chain left there. Only the close is unconditional: a series whose
+/// whole result was mapped away still has to end, so it ends on an empty chunk.
 ///
-/// At least one kernel rewrites the labels as [`map_math`] does -- dropping the metadata labels
-/// and every label whose value is empty -- even from a chunk without any value to map. A chain
-/// without kernels maps nothing, so it is the identity on the whole chunk and returns its labels
+/// A kernel rewrites the labels as [`map_math`] does -- dropping the metadata labels and every
+/// label whose value is empty -- even from a chunk without any value to map. A chain without
+/// kernels maps nothing, so it is the identity on the whole chunk and returns its labels
 /// unchanged: a consumer of the series reads the chunks of one series as one series only while
 /// they agree on them. Raw time axes are rejected.
 pub fn map_chunk(
@@ -185,84 +184,29 @@ pub fn map_chunk(
         };
         mapped = map_math(schema, &series, *op)?;
     }
-    if let Some(mapped) = &mapped
-        && let TimeAxis::Grid(mapped_range) = &mapped.time
-        && mapped_range == range
-    {
-        // The chain did not move the ends of the series, so it is already the chunk.
-        return Ok(vec![EvaluatedChunk::try_new(
-            mapped.clone(),
-            chunk.is_last,
-        )?]);
+    if let Some(mapped) = mapped {
+        // `map_math` keeps the input's time axis, so the mapped series covers exactly the positions
+        // this chunk carries: it is already the chunk, labels rewritten.
+        return Ok(vec![EvaluatedChunk::try_new(mapped, chunk.is_last)?]);
     }
 
-    // The chain trimmed rows off one or both ends, or dropped every value. Its rows stay where the
-    // chain left them, so a position the mapping left without a value becomes a gap between two
-    // chunks rather than a null row inside one: the chunk reports what it holds, and a position no
-    // chunk covers carries no sample.
-    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
-    if let Some(mapped) = &mapped {
-        let TimeAxis::Grid(mapped_range) = &mapped.time else {
-            return Err(DataFusionError::Execution(
-                "Map math requires an evaluated grid time axis".into(),
-            ));
-        };
-        let offset = mapped_range
-            .start()
-            .checked_sub(range.start())
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "mapped series begins at {} before its input chunk at {}",
-                    mapped_range.start(),
-                    range.start()
-                ))
-            })?;
-        // One cursor per field, for the reason `map_math` advances iterators rather than calling
-        // `sample(row)`.
-        let mut cursors = mapped
-            .fields
-            .iter()
-            .map(|samples| samples.iter())
-            .collect::<Vec<_>>();
-        let mut values = vec![None; mapped.fields.len()];
-        for row in 0..mapped_range.len() {
-            for (value, cursor) in values.iter_mut().zip(cursors.iter_mut()) {
-                *value = match cursor.next() {
-                    // A mapped field holds no histogram, so anything else stays missing.
-                    Some(SampleRef::Float(value)) => Some(value),
-                    _ => None,
-                };
-            }
-            builder.push(range.start() + offset + row, &values)?;
-        }
+    // The chain mapped every value away, so no piece covers the positions it decided: they hold no
+    // sample, exactly as if the chain had never produced one. A mapping that drops values is a
+    // property of the values, not of how far evaluation has progressed, so a chunk that does not
+    // close the series has nothing left to report. The closing one still has to end it, which it
+    // does with a chunk of no rows addressed after everything its input decided. It must not carry
+    // the input's samples: those are the values the chain just dropped.
+    if !chunk.is_last {
+        return Ok(Vec::new());
     }
-    let pieces = builder.finish(metric.clone())?;
-    if pieces.is_empty() {
-        // The chain mapped every value away, so no piece covers the positions it decided: they
-        // hold no sample, exactly as if the chain had never produced one. A chunk that does not
-        // close the series has nothing left to report; the closing one still has to end it, which
-        // it does with a chunk of no rows addressed after everything its input decided. It must
-        // not carry the input's samples: those are the values the chain just dropped.
-        if !chunk.is_last {
-            return Ok(Vec::new());
-        }
-        let time = GridRange::try_new(range.grid().clone(), range.start() + range.len(), 0)
-            .map_err(series_error)?;
-        let empty = Samples::from_float(Float64Array::from(Vec::<f64>::new()));
-        let fields =
-            SeriesFields::try_from_vec(vec![empty; schema.fields.len()]).map_err(series_error)?;
-        let series =
-            Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
-        return Ok(vec![EvaluatedChunk::try_new(series, true)?]);
-    }
-    let mut chunks = Vec::with_capacity(pieces.len());
-    let last = pieces.len();
-    for (index, series) in pieces.into_iter().enumerate() {
-        // Only the piece that sees nothing behind it closes the series.
-        let is_last = chunk.is_last && index + 1 == last;
-        chunks.push(EvaluatedChunk::try_new(series, is_last)?);
-    }
-    Ok(chunks)
+    let time = GridRange::try_new(range.grid().clone(), range.start() + range.len(), 0)
+        .map_err(series_error)?;
+    let empty = Samples::from_float(Float64Array::from(Vec::<f64>::new()));
+    let fields =
+        SeriesFields::try_from_vec(vec![empty; schema.fields.len()]).map_err(series_error)?;
+    let series =
+        Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
+    Ok(vec![EvaluatedChunk::try_new(series, true)?])
 }
 
 /// Negates every float field and drops the metric name, like Prometheus' unary minus.

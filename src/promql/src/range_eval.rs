@@ -574,6 +574,11 @@ impl RangeEvaluator {
     /// covers holds no sample, exactly like a missing value. They may not go backwards or repeat,
     /// because the samples are kept in arrival order and read back by timestamp.
     ///
+    /// A skipped position is what a producer settled without a result, so the positions before a
+    /// chunk are all decided and the next sample can only arrive at or after its end. That is what
+    /// bounds how far a chunk lets this layer settle points: the chunk's end, not the last sample
+    /// it carried.
+    ///
     /// A series ends exactly once, on the chunk marked `is_last`. The windows of a later chunk read
     /// the samples of the earlier ones, so the state a series retains lives on across chunks: only
     /// the closing one ends it. An empty chunk decides nothing and is therefore only legal as that
@@ -663,16 +668,25 @@ impl RangeEvaluator {
                 state.last_ts = last_ts;
             }
         }
+        // The first position this chunk does not carry. A later chunk of the same series starts
+        // after it, so no sample can arrive before it: that is what bounds the settle below.
+        let input_end = range.start() + range.len();
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
         if chunk.is_last {
             return self.close_series();
         }
-        // Later chunks only hold samples after `last_ts`, so every point up to it is decided. The
-        // samples are shifted onto the evaluation timeline by the selector offset, so the ready
-        // point is on that timeline too.
-        self.evaluate(Some(
-            i128::from(last_ts) + i128::from(self.window.offset_ms),
-        ))?;
+        // A point is decided once no sample that can still arrive falls in its window, and the next
+        // sample can only sit at `grid[input_end]`: a chunk carries only positions it decided, so
+        // the next one starts at or after its end. `ready` is inclusive and in the shifted sample
+        // domain, so it is that boundary shifted by the offset, minus one: a point at the boundary
+        // itself still reads a sample arriving there. At the end of the input grid no sample can
+        // follow at all, which is what `None` means.
+        let ready = range
+            .grid()
+            .timestamps()
+            .get(input_end)
+            .map(|&next| i128::from(next) + i128::from(self.window.offset_ms) - 1);
+        self.evaluate(ready)?;
         self.emit()
     }
 
@@ -763,7 +777,7 @@ impl RangeEvaluator {
     pub fn finish(self) -> Result<()> {
         if self.series.is_some() {
             return Err(DataFusionError::Execution(
-                "raw series input ended before the last chunk of a series".into(),
+                "series input ended before the last chunk of a series".into(),
             ));
         }
         if self.output.has_pending() {
@@ -840,7 +854,7 @@ impl RangeEvaluator {
         fields: &SeriesFields,
         drop_stale: bool,
     ) -> bool {
-        // Lengths are checked by `check_chunk` for raw input and by `push_series` for evaluated
+        // Lengths are checked by `check_chunk` for raw input and by `push_evaluated` for evaluated
         // input, so only the shape of the columns is decided here.
         if self.window.offset_ms != 0 {
             return false;

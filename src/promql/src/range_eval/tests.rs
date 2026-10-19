@@ -3158,6 +3158,121 @@ fn a_chunk_indexed_on_the_inner_grid_is_absolute_on_the_outer_one() {
     );
 }
 
+/// A point is decided by the chunk after which no sample can reach its window, so it leaves with
+/// that chunk: the outer point at 5 ms is settled by the inner chunk covering position 0, and it
+/// must not wait for the chunk that follows it.
+///
+/// The grids differ on purpose -- inner 0/10, outer 5/20 -- so the first outer point reads the
+/// first inner sample and no other, and the next sample that can arrive sits at inner 10 ms, five
+/// steps past the end of its window.
+#[test]
+fn a_point_no_later_sample_can_reach_leaves_with_the_chunk_that_settles_it() {
+    let raw = consumer_chunks();
+    let mut inner = inner_layer();
+    let schema = inner.output_schema().clone();
+    let mut consumer = outer_layer(&schema);
+
+    // The sample at 0 ms is the whole of inner position 0, so this push hands the consumer the
+    // inner chunk covering that position alone.
+    let first = inner
+        .push(&raw[0])
+        .unwrap()
+        .expect("the sample at 0 ms settles the inner point at 0 ms");
+    assert_eq!(
+        (first.range().start(), first.range().len()),
+        (0, 1),
+        "the inner fixture hands out a chunk other than the one covering position 0 alone"
+    );
+    assert!(!first.is_last);
+
+    let settled = consumer
+        .push_evaluated(&first)
+        .unwrap()
+        .expect("nothing after inner position 0 can reach the window of the outer point at 5 ms");
+    assert_eq!(
+        (settled.range().start(), settled.range().len()),
+        (0, 1),
+        "the outer point the first inner chunk settles waited for the next one"
+    );
+    assert_eq!(
+        expand(&settled.series),
+        vec![vec![Some(4.0)], vec![None], vec![None]],
+        "the outer point at 5 ms does not report the value of the inner sample at 0 ms alone"
+    );
+
+    // The rest of the series still streams through both layers, and the whole series is the same
+    // as the one handed out one chunk at a time.
+    let mut handed_out = vec![settled];
+    for piece in &raw[1..] {
+        let inner_chunk = inner.push(piece).unwrap();
+        if let Some(inner_chunk) = inner_chunk {
+            handed_out.extend(consumer.push_evaluated(&inner_chunk).unwrap());
+        }
+    }
+    inner.finish().expect("the inner series closed");
+    let outer_schema = consumer.output_schema().clone();
+    consumer.finish().expect("the outer series closed");
+
+    let series = fold_chunks(&handed_out, &outer_schema);
+    assert_series_eq(
+        series.as_ref(),
+        &vec![vec![Some(4.0)], vec![Some(6.0)], vec![Some(8.0)]],
+        &metric(0),
+    );
+}
+
+/// A non-final chunk that reaches the end of the input grid decides everything that is left: no
+/// sample can follow it, so the outer points behind it are handed out at once instead of waiting
+/// for the chunk that closes the series.
+#[test]
+fn a_non_final_chunk_ending_the_input_grid_decides_the_rest() {
+    let inner_grid = grid(0, 10, 5);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(inner_grid),
+    });
+    // One chunk carrying the whole input grid, without closing the series.
+    let whole = evaluated_chunk(
+        &schema,
+        0,
+        vec![Some(4.0), Some(5.0), Some(6.0), Some(7.0), Some(8.0)],
+        false,
+    );
+    let mut consumer = outer_layer(&schema);
+    let decided = consumer
+        .push_evaluated(&whole)
+        .unwrap()
+        .expect("the last input position leaves no outer point waiting for a sample");
+    assert!(
+        !decided.is_last,
+        "the chunk closes a series its input does not close"
+    );
+    assert_eq!(
+        (decided.range().start(), decided.range().len()),
+        (0, 3),
+        "the outer points behind the last inner position waited for a closing chunk"
+    );
+    assert_eq!(
+        expand(&decided.series),
+        vec![vec![Some(4.0)], vec![Some(6.0)], vec![Some(8.0)]],
+        "the outer points do not read the inner samples their windows hold"
+    );
+
+    // Only the empty chunk that closes the series is left, and it decides nothing new.
+    let closing = evaluated_chunk(&schema, 5, vec![], true);
+    let closing = consumer
+        .push_evaluated(&closing)
+        .unwrap()
+        .expect("a series closes");
+    assert!(closing.is_last);
+    assert!(
+        closing.range().is_empty(),
+        "the closing chunk decided {} position(s) the chunk before it already decided",
+        closing.range().len()
+    );
+    consumer.finish().expect("the outer series closed");
+}
+
 /// A map chain that yields no value keeps no row for the positions it emptied, and still ends the
 /// series: the chunk that closed the input comes back as an empty closing chunk.
 #[test]
@@ -3383,6 +3498,20 @@ mod composition {
         metric
     }
 
+    /// The chunk a push hands out first, followed by every piece still pending.
+    ///
+    /// A push decides runs of positions, and one chunk carries one run, so a caller that wants the
+    /// whole series has to take the rest with `pull`; a push that decided nothing pending returns
+    /// just its first chunk, or nothing at all.
+    fn take_everything(
+        first: Option<EvaluatedChunk>,
+        evaluator: &mut RangeEvaluator,
+    ) -> Vec<EvaluatedChunk> {
+        let mut chunks: Vec<_> = first.into_iter().collect();
+        chunks.extend(std::iter::from_fn(|| evaluator.pull().unwrap()));
+        chunks
+    }
+
     impl Pipeline {
         fn new() -> Self {
             let inner = RangeEvaluator::try_new(
@@ -3414,16 +3543,19 @@ mod composition {
 
         /// Pushes one raw chunk through all three layers, keeping what each of them handed out.
         fn push(&mut self, raw: &RawSeriesChunk) {
-            let inner = self.inner.push(raw).unwrap();
+            let mut inner = take_everything(self.inner.push(raw).unwrap(), &mut self.inner);
             let mapped: Vec<_> = inner
                 .iter()
                 .flat_map(|chunk| map_chunk(self.inner.output_schema(), chunk, &OPS).unwrap())
                 .collect();
             let mut outer = Vec::new();
             for chunk in &mapped {
-                outer.extend(self.outer.push_evaluated(chunk).unwrap());
+                outer.extend(take_everything(
+                    self.outer.push_evaluated(chunk).unwrap(),
+                    &mut self.outer,
+                ));
             }
-            self.inner_chunks.extend(inner);
+            self.inner_chunks.append(&mut inner);
             self.mapped_chunks.extend(mapped);
             self.outer_chunks.extend(outer);
         }
@@ -3457,7 +3589,10 @@ mod composition {
             .unwrap();
             let mut chunks = Vec::new();
             for chunk in &mapped {
-                chunks.extend(outer.push_evaluated(chunk).unwrap());
+                chunks.extend(take_everything(
+                    outer.push_evaluated(chunk).unwrap(),
+                    &mut outer,
+                ));
             }
             let result = fold_chunks(&chunks, outer.output_schema());
             outer.finish().expect("the reference series closed");
@@ -3480,6 +3615,11 @@ mod composition {
     /// vacuous. Before `map_chunk` treated a chain without kernels as the identity it dropped the
     /// metadata labels from the zero-length chunk alone, so the chunk that closed the series was
     /// labelled differently from the chunk before it.
+    ///
+    /// No plan reaches this state: a `Map` is only built around at least one kernel, and
+    /// `map_chunk` is the only caller-side contract here. The empty slice is therefore pinned as
+    /// what `map_chunk` documents it to be -- the identity -- rather than as a case a planner
+    /// produces. Rejecting the empty slice instead would drop this test and nothing else.
     #[test]
     fn an_empty_map_chain_keeps_the_chunk_identity() {
         let window = RangeWindow {
@@ -3639,10 +3779,16 @@ mod composition {
         let closing = with_metric(3, vec![], true);
 
         let ops = [MathOp::Abs];
+        // A kernel is pointwise and keeps the time axis, so each of these chunks stays one piece.
         let mapped_valued = map_chunk(&schema, &valued, &ops).unwrap();
         let mapped_closing = map_chunk(&schema, &closing, &ops).unwrap();
+        assert_eq!(
+            (mapped_valued.len(), mapped_closing.len()),
+            (1, 1),
+            "a pointwise kernel split a chunk the label comparison below would then miss"
+        );
 
-        let names: Vec<_> = mapped_valued
+        let names: Vec<_> = mapped_valued[0]
             .series
             .metric
             .tags()
@@ -3655,17 +3801,17 @@ mod composition {
             "the kernel did not drop the name, the metadata labels and the empty-valued label"
         );
         assert_eq!(
-            mapped_closing.series.metric, mapped_valued.series.metric,
+            mapped_closing[0].series.metric, mapped_valued[0].series.metric,
             "the closing chunk carries labels the chunk before it does not"
         );
 
         // Both chunks are one series to the consumer.
         let mut downstream = outer_layer(&schema);
         downstream
-            .push_evaluated(&mapped_valued)
+            .push_evaluated(&mapped_valued[0])
             .expect("the valued chunk opens the series");
         downstream
-            .push_evaluated(&mapped_closing)
+            .push_evaluated(&mapped_closing[0])
             .expect("the closing chunk carries the labels of the chunk before it")
             .expect("a series closes");
         downstream.finish().expect("the series closed");
@@ -3716,16 +3862,30 @@ mod composition {
     /// absence of a chunk, not as a chunk of null rows, and the values on either side of it still
     /// reach the outer window in order.
     ///
-    /// The stretch is the one the 5 ms inner windows leave between the 0/10 grid points: the push
-    /// whose samples land at 3 ms and 12 ms settles the point at 10 ms, and no inner sample lies
-    /// inside that window. Windows reaching back across such a stretch to an earlier run of the
-    /// same series are covered by `a_window_reads_across_the_gap_between_runs_of_one_series`; what
-    /// this test pins is that the stretch itself costs no chunk anywhere in the chain.
+    /// The fixture is its own: the middle push carries samples at 3 ms and 25 ms, past both inner
+    /// windows the point at 10 ms could read, so the inner layer settles the points at 10 and 20 ms
+    /// without a value while its own sample belongs to no window at all. The next sample the input
+    /// can still deliver sits at 40 ms, past the window (15..25) of the outer point at 25 ms, so
+    /// that push is what makes the outer point final -- and it does so without handing a single row
+    /// across the chain, because a settled position holding no value is not a row of any chunk.
     #[test]
-    fn a_stretch_without_a_value_costs_no_chunk_and_swallows_no_value() {
-        let raw = composed_raw();
+    fn a_settled_stretch_without_a_value_costs_no_chunk_and_keeps_outer_values() {
+        let raw = [
+            chunk(&[(0, vec![Some(1.0)])], 1, 0, false),
+            chunk(&[(3, vec![Some(2.0)]), (25, vec![Some(3.0)])], 1, 0, false),
+            chunk(&[(40, vec![Some(8.0)])], 1, 0, true),
+        ];
         let mut pipeline = Pipeline::new();
         pipeline.push(&raw[0]);
+
+        // The outer layer already reported the point at 5 ms: nothing after inner position 0 can
+        // reach its window. That is the early stop, and it is what regresses first if the settle
+        // bound goes back to the last sample a chunk carried.
+        assert_eq!(
+            pipeline.outer_extent(),
+            1,
+            "the fixture does not advance the outer layer on its first push"
+        );
         let before = (
             pipeline.inner_chunks.len(),
             pipeline.mapped_chunks.len(),
@@ -3733,13 +3893,13 @@ mod composition {
         );
         assert_eq!(
             before,
-            (1, 1, 0),
-            "the fixture hands out nothing before this"
+            (1, 1, 1),
+            "the first push does not hand out one chunk per layer"
         );
 
-        // The settled position holds no value, so it is not a row of any chunk: the stretch is
-        // reported by the absence of a chunk, and its cost is that absence. A chunk carrying a
-        // null row for it would be exactly the allocation this change removes.
+        // The middle push settles the inner positions at 10 and 20 ms without a value, which is not
+        // a row anywhere: the stretch is reported by the absence of a chunk, and its cost is that
+        // absence. A chunk carrying a null row for it would be exactly the allocation this removes.
         pipeline.push(&raw[1]);
         assert_eq!(
             (
@@ -3750,13 +3910,6 @@ mod composition {
             before,
             "a stretch holding no value handed out a chunk somewhere in the chain"
         );
-        assert!(
-            pipeline
-                .mapped_chunks
-                .iter()
-                .all(|chunk| !chunk.range().is_empty()),
-            "the map chain handed out a chunk of no positions"
-        );
 
         for raw in &raw[2..] {
             pipeline.push(raw);
@@ -3764,14 +3917,14 @@ mod composition {
         let chunked = fold_chunks(&pipeline.outer_chunks, pipeline.outer.output_schema())
             .expect("the outer series holds values");
 
-        // Read off the fixture rather than off another run of the same code: the inner grid point
-        // at 0 ms reads the sample at 0 ms, the one at 20 ms reads the sample at 20 ms, and the
-        // one at 40 ms reads the sample at 40 ms, so the outer points at 5, 25 and 45 ms see 1, 4
-        // and 5. The stretch between the first two sits below no outer window and must still leave
-        // the values on both of its sides intact and in order.
+        // Read off the fixture rather than off another run of the same code. The outer point at
+        // 5 ms reads the inner sample at 0 ms. The point at 25 ms reads the window (15, 25], which
+        // holds no inner sample: the one at 25 ms belongs to the inner point at 30 ms, past every
+        // outer window that could reach it. The point at 45 ms reads the sample at 40 ms. The
+        // stretch therefore leaves a hole in the outer result, and the value after it survives.
         assert_eq!(
             expand(&chunked),
-            vec![vec![Some(1.0)], vec![Some(4.0)], vec![Some(5.0)]],
+            vec![vec![Some(1.0)], vec![None], vec![Some(8.0)]],
             "the outer window lost or reordered a value on one side of the stretch"
         );
         assert_eq!(
