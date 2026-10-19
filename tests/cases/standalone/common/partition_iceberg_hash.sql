@@ -56,3 +56,24 @@ PARTITION ON COLUMNS (a) (
   iceberg_hash(a) < 0,
   iceberg_hash(a) > 0
 );
+
+CREATE TABLE quoted_hash (
+  "host-name" STRING,
+  uid BIGINT,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY ("host-name")
+)
+PARTITION ON COLUMNS ("host-name", uid) (
+  iceberg_hash("host-name") < 0,
+  iceberg_hash("host-name") >= 0 AND iceberg_hash(uid) < 0,
+  iceberg_hash("host-name") >= 0 AND iceberg_hash(uid) >= 0
+);
+
+SHOW CREATE TABLE quoted_hash;
+
+-- A partition column keeps its type, even when nullable and outside the primary key.
+ALTER TABLE quoted_hash MODIFY COLUMN uid DOUBLE;
+
+ALTER TABLE quoted_hash MODIFY COLUMN uid STRING;
+
+DROP TABLE quoted_hash;

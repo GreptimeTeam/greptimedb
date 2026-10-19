@@ -16,26 +16,26 @@ Affected Rows: 0
 
 SHOW CREATE TABLE hash_routes;
 
-+-------------+---------------------------------------------------------+
-| Table       | Create Table                                            |
-+-------------+---------------------------------------------------------+
-| hash_routes | CREATE TABLE IF NOT EXISTS "hash_routes" (              |
-|             |   "host" STRING NULL,                                   |
-|             |   "tenant" BIGINT UNSIGNED NULL,                        |
-|             |   "ts" TIMESTAMP(3) NOT NULL,                           |
-|             |   "v" INT NULL,                                         |
-|             |   TIME INDEX ("ts"),                                    |
-|             |   PRIMARY KEY ("host", "tenant")                        |
-|             | )                                                       |
-|             | PARTITION ON COLUMNS ("host", "tenant") (               |
-|             |   iceberg_hash(host) < 0 AND tenant < 100,              |
-|             |   iceberg_hash(host) < 0 AND tenant >= 100,             |
-|             |   iceberg_hash(host) >= 0 AND iceberg_hash(tenant) < 0, |
-|             |   iceberg_hash(host) >= 0 AND iceberg_hash(tenant) >= 0 |
-|             | )                                                       |
-|             | ENGINE=mito                                             |
-|             |                                                         |
-+-------------+---------------------------------------------------------+
++-------------+-------------------------------------------------------------+
+| Table       | Create Table                                                |
++-------------+-------------------------------------------------------------+
+| hash_routes | CREATE TABLE IF NOT EXISTS "hash_routes" (                  |
+|             |   "host" STRING NULL,                                       |
+|             |   "tenant" BIGINT UNSIGNED NULL,                            |
+|             |   "ts" TIMESTAMP(3) NOT NULL,                               |
+|             |   "v" INT NULL,                                             |
+|             |   TIME INDEX ("ts"),                                        |
+|             |   PRIMARY KEY ("host", "tenant")                            |
+|             | )                                                           |
+|             | PARTITION ON COLUMNS ("host", "tenant") (                   |
+|             |   iceberg_hash("host") < 0 AND "tenant" < 100,              |
+|             |   iceberg_hash("host") < 0 AND "tenant" >= 100,             |
+|             |   iceberg_hash("host") >= 0 AND iceberg_hash("tenant") < 0, |
+|             |   iceberg_hash("host") >= 0 AND iceberg_hash("tenant") >= 0 |
+|             | )                                                           |
+|             | ENGINE=mito                                                 |
+|             |                                                             |
++-------------+-------------------------------------------------------------+
 
 -- SQLNESS REPLACE (\d{13}) ID
 SELECT partition_name, partition_expression FROM information_schema.partitions WHERE table_name = 'hash_routes' ORDER BY partition_name;
@@ -134,4 +134,52 @@ PARTITION ON COLUMNS (a) (
 );
 
 Error: 1004(InvalidArguments), Checkpoint `iceberg_hash(a)=0` is not covered
+
+CREATE TABLE quoted_hash (
+  "host-name" STRING,
+  uid BIGINT,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY ("host-name")
+)
+PARTITION ON COLUMNS ("host-name", uid) (
+  iceberg_hash("host-name") < 0,
+  iceberg_hash("host-name") >= 0 AND iceberg_hash(uid) < 0,
+  iceberg_hash("host-name") >= 0 AND iceberg_hash(uid) >= 0
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE quoted_hash;
+
++-------------+---------------------------------------------------------------+
+| Table       | Create Table                                                  |
++-------------+---------------------------------------------------------------+
+| quoted_hash | CREATE TABLE IF NOT EXISTS "quoted_hash" (                    |
+|             |   "host-name" STRING NULL,                                    |
+|             |   "uid" BIGINT NULL,                                          |
+|             |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|             |   TIME INDEX ("ts"),                                          |
+|             |   PRIMARY KEY ("host-name")                                   |
+|             | )                                                             |
+|             | PARTITION ON COLUMNS ("host-name", "uid") (                   |
+|             |   iceberg_hash("host-name") < 0,                              |
+|             |   iceberg_hash("host-name") >= 0 AND iceberg_hash("uid") < 0, |
+|             |   iceberg_hash("host-name") >= 0 AND iceberg_hash("uid") >= 0 |
+|             | )                                                             |
+|             | ENGINE=mito                                                   |
+|             |                                                               |
++-------------+---------------------------------------------------------------+
+
+-- A partition column keeps its type, even when nullable and outside the primary key.
+ALTER TABLE quoted_hash MODIFY COLUMN uid DOUBLE;
+
+Error: 1004(InvalidArguments), Invalid alter table(quoted_hash) request: Not allowed to change partition column 'uid'
+
+ALTER TABLE quoted_hash MODIFY COLUMN uid STRING;
+
+Error: 1004(InvalidArguments), Invalid alter table(quoted_hash) request: Not allowed to change partition column 'uid'
+
+DROP TABLE quoted_hash;
+
+Affected Rows: 0
 

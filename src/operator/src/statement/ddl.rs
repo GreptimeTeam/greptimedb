@@ -3769,12 +3769,13 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
     #[test]
     fn test_convert_partition_function() {
-        let names = ["host", "count", "device", "measure"].map(String::from);
+        let names = ["host", "count", "device", "measure", "host-name"].map(String::from);
         let column_name_and_type = HashMap::from([
             (&names[0], ConcreteDataType::string_datatype()),
             (&names[1], ConcreteDataType::int16_datatype()),
             (&names[2], ConcreteDataType::uint64_datatype()),
             (&names[3], ConcreteDataType::float64_datatype()),
+            (&names[4], ConcreteDataType::string_datatype()),
         ]);
         let timezone = Timezone::from_tz_string("UTC").unwrap();
         let dialect = GreptimeDbDialect {};
@@ -3791,10 +3792,16 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             "ICEBERG_HASH(device) >= -1073741824",
             "0 > iceberg_hash(count)",
             "iceberg_hash(host) < 100 AND host < 'm'",
+            r#"iceberg_hash("host-name") < 0 AND "host-name" < 'm'"#,
         ] {
             let expr = convert_one_expr(&parse(sql), &column_name_and_type, &timezone).unwrap();
-            // SHOW CREATE TABLE prints the rule back as SQL.
-            let restored = parse(&expr.to_parser_expr().to_string());
+            // SHOW CREATE TABLE prints the rule back as SQL, quoting identifiers.
+            let mut partitions = Partitions {
+                column_list: vec![],
+                exprs: vec![expr.to_parser_expr()],
+            };
+            partitions.set_quote('"');
+            let restored = parse(&partitions.exprs[0].to_string());
             assert_eq!(
                 convert_one_expr(&restored, &column_name_and_type, &timezone).unwrap(),
                 expr,

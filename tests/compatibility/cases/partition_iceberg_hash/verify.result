@@ -1,25 +1,25 @@
 SHOW CREATE TABLE iceberg_hash_routes;
 
-+---------------------+---------------------------------------------------------+
-| Table               | Create Table                                            |
-+---------------------+---------------------------------------------------------+
-| iceberg_hash_routes | CREATE TABLE IF NOT EXISTS "iceberg_hash_routes" (      |
-|                     |   "host" STRING NULL,                                   |
-|                     |   "tenant" BIGINT UNSIGNED NULL,                        |
-|                     |   "ts" TIMESTAMP(3) NOT NULL,                           |
-|                     |   "v" INT NULL,                                         |
-|                     |   TIME INDEX ("ts"),                                    |
-|                     |   PRIMARY KEY ("host", "tenant")                        |
-|                     | )                                                       |
-|                     | PARTITION ON COLUMNS ("host", "tenant") (               |
-|                     |   iceberg_hash(host) < 0 AND tenant < 100,              |
-|                     |   iceberg_hash(host) < 0 AND tenant >= 100,             |
-|                     |   iceberg_hash(host) >= 0 AND iceberg_hash(tenant) < 0, |
-|                     |   iceberg_hash(host) >= 0 AND iceberg_hash(tenant) >= 0 |
-|                     | )                                                       |
-|                     | ENGINE=mito                                             |
-|                     |                                                         |
-+---------------------+---------------------------------------------------------+
++---------------------+-------------------------------------------------------------+
+| Table               | Create Table                                                |
++---------------------+-------------------------------------------------------------+
+| iceberg_hash_routes | CREATE TABLE IF NOT EXISTS "iceberg_hash_routes" (          |
+|                     |   "host" STRING NULL,                                       |
+|                     |   "tenant" BIGINT UNSIGNED NULL,                            |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                               |
+|                     |   "v" INT NULL,                                             |
+|                     |   TIME INDEX ("ts"),                                        |
+|                     |   PRIMARY KEY ("host", "tenant")                            |
+|                     | )                                                           |
+|                     | PARTITION ON COLUMNS ("host", "tenant") (                   |
+|                     |   iceberg_hash("host") < 0 AND "tenant" < 100,              |
+|                     |   iceberg_hash("host") < 0 AND "tenant" >= 100,             |
+|                     |   iceberg_hash("host") >= 0 AND iceberg_hash("tenant") < 0, |
+|                     |   iceberg_hash("host") >= 0 AND iceberg_hash("tenant") >= 0 |
+|                     | )                                                           |
+|                     | ENGINE=mito                                                 |
+|                     |                                                             |
++---------------------+-------------------------------------------------------------+
 
 SELECT * FROM iceberg_hash_routes ORDER BY ts;
 
