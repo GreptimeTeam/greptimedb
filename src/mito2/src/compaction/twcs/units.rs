@@ -19,22 +19,23 @@
 //! together.
 //!
 //! - [`pick_active_l1`] reduces the L1 file count of the active window.
-//! - [`pick_closed_merge`] only merges *closed* intervals in an inactive window:
-//!   no other file of the window intrudes on the bounding box of the inputs.
-//!   Compaction outputs stay inside that box, so they cannot overlap a file that
-//!   the inputs did not overlap.
+//! - [`pick_closed_merge`] only merges intervals of an inactive window whose
+//!   outputs cannot add conflicts. Compaction outputs stay inside the bounding
+//!   box of the inputs, so they can only overlap files intruding on that box.
 //!
 //! # Termination
 //!
 //! Let `P` be the number of conflicting file pairs ([`Extent::conflicts`]) in an
-//! inactive window and `N` its file count. A closed merge removes every pair
-//! among its inputs and adds none: its outputs are one sorted run, whose files
-//! only share boundary keys, inside a box no other file intrudes on. Every
-//! inactive pick either resolves a pair (`P` drops) or removes a file (`P` does
-//! not grow and `N` drops), so `(P, N)` strictly decreases in lexicographic
-//! order until the window receives new writes. Active-window picks are not
-//! closed and may add conflicts, so each of them must remove a file: `N`
-//! strictly decreases.
+//! inactive window and `N` its file count. A merge removes every pair among its
+//! inputs. Its outputs are one sorted run, whose files only share boundary keys,
+//! so they only conflict with the `I` files intruding on the inputs' box, at
+//! most `outputs · I` pairs. An inactive pick only merges inputs that had at
+//! least as many pairs with other files, so `P` does not grow; without
+//! intruders the inputs are closed and add no pairs. Every inactive pick either
+//! resolves a pair (`P` drops) or removes a file (`P` does not grow and `N`
+//! drops), so `(P, N)` strictly decreases in lexicographic order until the
+//! window receives new writes. Active-window picks may add conflicts, so each
+//! of them must remove a file: `N` strictly decreases.
 //!
 //! The argument relies on how the compactor writes outputs:
 //!
@@ -130,7 +131,7 @@ pub(crate) fn pick_active_l1(
     sort_units(&mut units);
 
     let mut best: Option<(usize, u64, Range<usize>)> = None;
-    for_each_interval(&units, options.max_input_files, |range, stats| {
+    for_each_interval(&units, &extents, options.max_input_files, |range, stats| {
         let reduction = stats
             .num_files
             .saturating_sub(options.predicted_outputs(stats.size));
@@ -171,11 +172,14 @@ pub(crate) struct ClosedMergeOptions {
     pub(crate) allow_unbalanced: bool,
 }
 
-/// Picks a closed interval of units among all files of an inactive window.
+/// Picks an interval of units among all files of an inactive window.
 ///
 /// Units are the closures of conflicting files: no file outside a unit intrudes
-/// on its bounding box. Intervals follow [`sort_units`]. An interval is
-/// eligible if it
+/// on its bounding box. A closure larger than the input limit is split back into
+/// single files, so files around a late file spanning a large sorted run can
+/// still be merged. Intervals follow [`sort_units`]. An interval is eligible if
+/// its outputs add no more conflicts than its files have with other files (see
+/// [`adds_no_conflicts`]), and it
 ///
 /// - removes files within the rewrite budget, or
 /// - resolves conflicts without rewriting a dominant sorted run (unless
@@ -191,10 +195,11 @@ pub(crate) fn pick_closed_merge(
     let extents = extents_of(files, mapper);
     let mut units = conflict_units(files, &extents);
     close_units(&mut units, &extents);
+    split_oversized_units(&mut units, files, &extents, limits.max_input_files);
     sort_units(&mut units);
 
     let mut best: Option<(u64, u64, Range<usize>, bool)> = None;
-    for_each_interval(&units, limits.max_input_files, |range, stats| {
+    for_each_interval(&units, &extents, limits.max_input_files, |range, stats| {
         if stats.num_files < 2 {
             return;
         }
@@ -228,7 +233,7 @@ pub(crate) fn pick_closed_merge(
         {
             return;
         }
-        if units.len() > 1 && !is_closed(units, &extents) {
+        if units.len() > 1 && !adds_no_conflicts(units, &extents, outputs) {
             return;
         }
         best = Some((benefit, stats.size, range, reduces_files));
@@ -351,6 +356,9 @@ struct Unit {
     largest_file_size: u64,
     /// Number of conflicting file pairs inside the unit.
     conflicts: usize,
+    /// A single file split from a unit over the input limit. It may conflict
+    /// with other split files, which [`for_each_interval`] counts.
+    split: bool,
 }
 
 impl Unit {
@@ -372,6 +380,7 @@ impl Unit {
             files: members,
             extent,
             conflicts,
+            split: false,
         }
     }
 
@@ -410,7 +419,8 @@ fn conflict_units(files: &[FileHandle], extents: &[Extent]) -> Vec<Unit> {
         .collect()
 }
 
-/// Replaces units with more files than one compaction accepts by single files.
+/// Replaces units with more files than one compaction accepts by single files,
+/// which are no longer closed.
 fn split_oversized_units(
     units: &mut Vec<Unit>,
     files: &[FileHandle],
@@ -424,7 +434,10 @@ fn split_oversized_units(
         oversized
             .into_iter()
             .flat_map(|unit| unit.files)
-            .map(|i| Unit::new(vec![i], files, extents, 0)),
+            .map(|i| Unit {
+                split: true,
+                ..Unit::new(vec![i], files, extents, 0)
+            }),
     );
     *units = kept;
 }
@@ -504,14 +517,18 @@ struct IntervalStats {
 }
 
 /// Visits every contiguous interval of units with at most `max_input_files`
-/// files: O(U · K) intervals for an input limit K.
+/// files: O(U · K) intervals for an input limit K. Conflicts among split files
+/// are counted pairwise, which takes O(U · K²) checks at most.
 fn for_each_interval(
     units: &[Unit],
+    extents: &[Extent],
     max_input_files: usize,
     mut visit: impl FnMut(Range<usize>, &IntervalStats),
 ) {
+    let mut split_files = Vec::new();
     for left in 0..units.len() {
         let mut stats = IntervalStats::default();
+        split_files.clear();
         for (right, unit) in units.iter().enumerate().skip(left) {
             stats.num_files += unit.files.len();
             if stats.num_files > max_input_files {
@@ -520,13 +537,25 @@ fn for_each_interval(
             stats.size += unit.size;
             stats.largest_file_size = stats.largest_file_size.max(unit.largest_file_size);
             stats.conflicts += unit.conflicts;
+            if unit.split {
+                // Files of different units never conflict, only split files may.
+                let i = unit.files[0];
+                stats.conflicts += split_files
+                    .iter()
+                    .filter(|&&j| extents[i].conflicts(&extents[j]))
+                    .count();
+                split_files.push(i);
+            }
             visit(left..right + 1, &stats);
         }
     }
 }
 
-/// Whether no file outside `units` intrudes on their bounding box.
-fn is_closed(units: &[Unit], extents: &[Extent]) -> bool {
+/// Whether merging `units` into `outputs` files adds no more conflicts than
+/// their files have with other files. Outputs stay inside the bounding box of
+/// the inputs, so each of them may conflict with every file intruding on that
+/// box. An interval without intruders is closed and adds no conflicts.
+fn adds_no_conflicts(units: &[Unit], extents: &[Extent], outputs: usize) -> bool {
     let area = units[1..]
         .iter()
         .fold(units[0].extent.clone(), |area, unit| {
@@ -536,10 +565,23 @@ fn is_closed(units: &[Unit], extents: &[Extent]) -> bool {
     for &i in units.iter().flat_map(|unit| unit.files.iter()) {
         selected[i] = true;
     }
-    !extents
+    let intruders: Vec<usize> = (0..extents.len())
+        .filter(|&i| !selected[i] && extents[i].intrudes(&area))
+        .collect();
+    if intruders.is_empty() {
+        return true;
+    }
+    let existing: usize = intruders
         .iter()
-        .zip(&selected)
-        .any(|(extent, selected)| !selected && extent.intrudes(&area))
+        .map(|&other| {
+            units
+                .iter()
+                .flat_map(|unit| unit.files.iter())
+                .filter(|&&i| extents[i].conflicts(&extents[other]))
+                .count()
+        })
+        .sum();
+    outputs.saturating_mul(intruders.len()) <= existing
 }
 
 /// Whether the largest sorted run among `files` holds at most `tolerance` bytes
@@ -751,14 +793,56 @@ mod tests {
         assert!(pick.reduces_files);
     }
 
-    #[test]
-    fn test_closed_merge_skips_components_over_input_limit() {
-        // A file spanning all keys overlaps more files than one compaction accepts.
-        let mut files = (0..20u8)
-            .map(|idx| file(0, 1000, &[b'a', idx], &[b'a', idx], MAX_OUTPUT))
+    /// A sorted run of `sizes.len()` key-sliced files, and files spanning all
+    /// of its keys in the given time ranges, which overlap the whole run.
+    fn run_with_late_files(
+        sizes: &[u64],
+        late: &[(i64, i64)],
+    ) -> (Vec<FileHandle>, Vec<FileHandle>) {
+        let run = sizes
+            .iter()
+            .enumerate()
+            .map(|(idx, &size)| {
+                let idx = 2 * idx as u8;
+                file(0, 1000, &[b'a', idx], &[b'a', idx + 2], size)
+            })
             .collect::<Vec<_>>();
-        files.push(file(100, 900, &[b'a', 0], &[b'a', 19], MAX_OUTPUT));
+        let max_key = 2 * sizes.len() as u8;
+        let late = late
+            .iter()
+            .map(|&(start, end)| file(start, end, &[b'a', 0], &[b'a', max_key], 1))
+            .collect();
+        (run, late)
+    }
+
+    #[test]
+    fn test_closed_merge_splits_components_over_input_limit() {
+        // The late file joins all 20 run files into one component, over the
+        // input limit. Small run files are still merged.
+        let (run, late) = run_with_late_files(&[1; 20], &[(100, 900)]);
+        let files = [run, late].concat();
+        let pick = closed_merge(&files, MAX_OUTPUT).unwrap();
+        assert!(pick.reduces_files);
+        assert!(pick.inputs.len() <= 16);
+    }
+
+    #[test]
+    fn test_closed_merge_leaves_late_file_over_large_run() {
+        // Resolving the overlap would rewrite the whole run, beyond the input
+        // limit, and merging part of it would only spread the overlap.
+        let (run, late) = run_with_late_files(&[MAX_OUTPUT; 20], &[(100, 900)]);
+        let files = [run, late].concat();
         assert!(closed_merge(&files, MAX_OUTPUT).is_none());
+    }
+
+    #[test]
+    fn test_closed_merge_compacts_late_files_over_large_run() {
+        let (run, late) =
+            run_with_late_files(&[MAX_OUTPUT; 20], &[(100, 200), (300, 400), (500, 600)]);
+        let files = [run, late.clone()].concat();
+        let pick = closed_merge(&files, MAX_OUTPUT).unwrap();
+        assert_eq!(ids(&late), ids(&pick.inputs));
+        assert!(pick.reduces_files);
     }
 
     #[test]
@@ -893,6 +977,33 @@ mod tests {
             .collect()
     }
 
+    /// A sorted run of more files than one compaction accepts, and a few files
+    /// spanning many of its keys, which join them into oversized components.
+    fn oversized_window(rng: &mut Rng) -> Vec<SimFile> {
+        let run_files = 17 + rng.next(40);
+        let mut files: Vec<_> = (0..run_files)
+            .map(|idx| {
+                let start = rng.next(100) as i64;
+                let end = 2_900 + rng.next(100) as i64;
+                sim_file(
+                    start,
+                    end,
+                    5 * idx,
+                    5 * (idx + 1),
+                    1 + rng.next(2 * MAX_OUTPUT),
+                )
+            })
+            .collect();
+        files.extend((0..1 + rng.next(6)).map(|_| {
+            let start = rng.next(2_800) as i64;
+            let end = start + 1 + rng.next(200) as i64;
+            let min = rng.next(5 * run_files / 2);
+            let max = min + 5 * run_files / 2 + rng.next(5 * run_files / 2);
+            sim_file(start, end, min, max, 1 + rng.next(MAX_OUTPUT))
+        }));
+        files
+    }
+
     /// Applies `pick` until it picks nothing, asserting that `measure` strictly
     /// decreases with every merge. Returns the number of merges.
     fn run_to_fixpoint(
@@ -900,9 +1011,18 @@ mod tests {
         pick: impl Fn(&[FileHandle]) -> Option<UnitPick>,
         measure: impl Fn(&[FileHandle]) -> (usize, usize),
     ) -> usize {
+        run_windows_to_fixpoint(rng, random_window, pick, measure)
+    }
+
+    fn run_windows_to_fixpoint(
+        rng: &mut Rng,
+        new_window: impl Fn(&mut Rng) -> Vec<SimFile>,
+        pick: impl Fn(&[FileHandle]) -> Option<UnitPick>,
+        measure: impl Fn(&[FileHandle]) -> (usize, usize),
+    ) -> usize {
         let mut total_steps = 0;
         for window in 0..300 {
-            let mut files = random_window(rng);
+            let mut files = new_window(rng);
             let handles =
                 |files: &[SimFile]| files.iter().map(|f| f.handle.clone()).collect::<Vec<_>>();
             let mut current = measure(&handles(&files));
@@ -929,6 +1049,17 @@ mod tests {
     fn test_closed_merges_terminate() {
         let steps = run_to_fixpoint(
             &mut Rng(7),
+            |files| closed_merge(files, MAX_OUTPUT),
+            |files| (conflict_pairs(files), files.len()),
+        );
+        assert!(steps > 300);
+    }
+
+    #[test]
+    fn test_closed_merges_of_oversized_components_terminate() {
+        let steps = run_windows_to_fixpoint(
+            &mut Rng(19),
+            oversized_window,
             |files| closed_merge(files, MAX_OUTPUT),
             |files| (conflict_pairs(files), files.len()),
         );
