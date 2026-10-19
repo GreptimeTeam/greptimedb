@@ -39,7 +39,7 @@ use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::evaluated::EvaluatedChunk;
 use crate::functions::Round;
-use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
+use crate::grid_series::GridSeriesBuilder;
 
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug)]
@@ -142,11 +142,11 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 /// positions the chunk decided still travel with it and its consumer still advances. Trimming the
 /// result to the rows holding a value, as the output does, is a separate stage.
 ///
-/// At least one kernel rewrites the labels as [`map_math`] does, so with one the metadata labels
-/// are dropped even from a chunk without any value to map. A chain without kernels maps nothing,
-/// so it is the identity on the whole chunk and returns its labels unchanged: a consumer of the
-/// series reads the chunks of one series as one series only while they agree on them. Raw time
-/// axes are rejected.
+/// At least one kernel rewrites the labels as [`map_math`] does -- dropping the metadata labels
+/// and every label whose value is empty -- even from a chunk without any value to map. A chain
+/// without kernels maps nothing, so it is the identity on the whole chunk and returns its labels
+/// unchanged: a consumer of the series reads the chunks of one series as one series only while
+/// they agree on them. Raw time axes are rejected.
 pub fn map_chunk(
     schema: &SeriesSchema,
     chunk: &EvaluatedChunk,
@@ -165,8 +165,7 @@ pub fn map_chunk(
         // closes a series differently from the chunk before it.
         return EvaluatedChunk::try_new(chunk.series.clone(), chunk.is_last);
     }
-    let mut metric = chunk.series.metric.clone();
-    metric.remove_all(&METADATA_LABELS);
+    let metric = drop_metric_name(&chunk.series.metric)?;
     if range.is_empty() {
         // Nothing left to map, but the labels of the series are still rewritten.
         let mut series = chunk.series.clone();
