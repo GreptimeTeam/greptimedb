@@ -311,15 +311,29 @@ impl FlatLastTimestampSelector {
             return Ok(());
         }
 
+        // Dictionary keys may differ for the same primary key, e.g. readers that wrap binary
+        // keys into a dictionary with identity keys, so merge adjacent ranges by key bytes.
+        let mut series_ranges: Vec<(usize, usize)> = Vec::with_capacity(offsets.len() - 1);
+        for window in offsets.windows(2) {
+            let (start, end) = (window[0], window[1]);
+            match series_ranges.last_mut() {
+                Some(last)
+                    if primary_key_bytes_at(&batch, pk_col_idx, last.0)
+                        == primary_key_bytes_at(&batch, pk_col_idx, start) =>
+                {
+                    last.1 = end;
+                }
+                _ => series_ranges.push((start, end)),
+            }
+        }
+
         let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-        let num_ranges = offsets.len() - 1;
+        let num_ranges = series_ranges.len();
         // Rows of keys that start and end inside this batch. They are gathered with one
         // `take` instead of buffering a slice per key: concatenating thousands of single-row
         // slices merges their dictionaries once per slice.
         let mut completed_rows = Vec::new();
-        for i in 0..num_ranges {
-            let range_start = offsets[i];
-            let range_end = offsets[i + 1];
+        for (i, &(range_start, range_end)) in series_ranges.iter().enumerate() {
             let range_key = primary_key_bytes_at(&batch, pk_col_idx, range_start);
             let range_last_ts = ts_values[range_end - 1];
             let range_last_ts_start = last_timestamp_start(ts_values, range_start, range_end);
@@ -449,8 +463,8 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
-        UInt64Array,
+        ArrayRef, BinaryDictionaryBuilder, DictionaryArray, Int64Array, TimestampMillisecondArray,
+        UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -694,6 +708,33 @@ mod tests {
             rows
         );
         assert_eq!(vec![10, 21, 30, 31, 40, 41, 50, 51, 60, 70], fields);
+    }
+
+    /// Rebuilds the primary key column with one dictionary key per row, as
+    /// `wrap_pk_binary_to_dict` does for binary primary keys.
+    fn with_identity_pk_keys(batch: RecordBatch) -> RecordBatch {
+        let pk_col_idx = primary_key_column_index(batch.num_columns());
+        let values = (0..batch.num_rows())
+            .map(|i| Some(primary_key_bytes_at(&batch, pk_col_idx, i)))
+            .collect::<BinaryArray>();
+        let keys = UInt32Array::from_iter_values(0..batch.num_rows() as u32);
+        let mut columns = batch.columns().to_vec();
+        columns[pk_col_idx] = Arc::new(DictionaryArray::new(keys, Arc::new(values)));
+        RecordBatch::try_new(batch.schema(), columns).unwrap()
+    }
+
+    #[test]
+    fn test_flat_identity_dictionary_keys() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let batches = vec![
+            with_identity_pk_keys(new_flat_batch(&[b"a", b"a", b"b"], &[1, 2, 3], &[0; 3])),
+            with_identity_pk_keys(new_flat_batch(&[b"b", b"c", b"c"], &[4, 5, 6], &[0; 3])),
+        ];
+        let results = collect_flat_results(&mut selector, batches);
+        assert_eq!(
+            vec![(b"a".to_vec(), 2), (b"b".to_vec(), 4), (b"c".to_vec(), 6)],
+            results
+        );
     }
 
     #[test]
