@@ -2010,18 +2010,14 @@ GROUP BY l.number, time_window
                 .await;
         let sink = sink_with_synthesizable_time_index("delta_sink", vec![]);
         assert!(
-            (*sink.table_info())
-                .meta
-                .schema
-                .timestamp_column()
-                .is_some(),
+            sink.table_info().meta.schema.timestamp_column().is_some(),
             "the fixture sink must have a real time index"
         );
         BatchingEngine::ensure_simple_source_delta_sink_keys_are_produced(&task, &sink)
             .expect_err("the unproduced time index is still a key");
 
         // Drop the time index from the fixture: only the non-key trailing timestamp remains.
-        let mut info = (*sink.table_info()).clone();
+        let mut info = sink.table_info().as_ref().clone();
         info.meta.schema = Arc::new(
             SchemaBuilder::try_from(vec![
                 ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
