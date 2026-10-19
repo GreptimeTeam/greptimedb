@@ -522,8 +522,12 @@ impl BatchingEngine {
 
     /// Enforces the sink half of the opt-in row-local incremental-read contract: a delta round is
     /// written as a keyed materialization, so an append-mode sink would accumulate replayed
-    /// history instead of overwriting the keys it has already materialized.
-    fn ensure_simple_source_delta_sink(task: &BatchingTask, sink: &TableRef) -> Result<(), Error> {
+    /// history instead of overwriting the keys it has already materialized. Also called per
+    /// round, because `append_mode` can be switched on after creation.
+    pub(crate) fn ensure_simple_source_delta_sink(
+        task: &BatchingTask,
+        sink: &TableRef,
+    ) -> Result<(), Error> {
         ensure!(
             !Self::table_options_enable_append_mode(&sink.table_info().meta.options.extra_options),
             UnsupportedSnafu {
@@ -723,8 +727,14 @@ impl BatchingEngine {
         // a round executes: `gen_plan_with_matching_schema_and_values` replans the SQL without the
         // flow optimizer, where `now()` and other stable expressions are still time-dependent.
         // The optimized plan above remains the source for TQL/time-window/table analysis.
-        let retained_plan =
-            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, false).await?;
+        // Only the opt-in row-local delta feature needs that replan; every other flow keeps the
+        // optimized plan so that leaving the option off stays byte-identical to the previous
+        // behavior, without an extra fallible planning pass.
+        let retained_plan = if batch_opts.experimental_enable_incremental_read {
+            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, false).await?
+        } else {
+            plan.clone()
+        };
 
         if is_tql {
             self.check_is_tql_table(&plan, &query_ctx).await?;
@@ -855,8 +865,9 @@ impl BatchingEngine {
         }
         // A source whose table id equals the sink id scans without incremental bounds, so delta
         // coverage would silently become an unbounded full scan. DDL already rejects equal
-        // source/sink names; this keeps the fail-closed guarantee local to the flow.
-        {
+        // source/sink names; this keeps the fail-closed guarantee local to the flow. It is only
+        // needed by the opt-in row-local delta path, so other flows see no new rejection.
+        if task.config.simple_source_delta {
             let sink_table_id = table.table_info().table_id();
             ensure!(
                 !source_table_ids_seen.contains(&sink_table_id),
@@ -1232,6 +1243,7 @@ mod tests {
     use crate::adapter::AUTO_CREATED_UPDATE_AT_TS_COL;
     use crate::test_utils::create_test_query_engine;
     use datatypes::schema::SchemaBuilder;
+    use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
     use table::metadata::FilterPushDownType;
     use table::test_util::MemTable;
 
@@ -2066,11 +2078,41 @@ GROUP BY l.number, time_window
             ],
         )
         .unwrap();
-        engine
+        let source = MemTable::new_with_catalog(
+            "self_source",
+            recordbatch.clone(),
+            SELF_SINK_ID,
+            "greptime".to_string(),
+            "public".to_string(),
+        );
+        // The rejection only protects the row-local delta guarantee, so this flow must opt in, and
+        // the delta path requires an append-only source that preserves row sequences.
+        let mut source_info = (*source.table_info()).clone();
+        source_info.meta.options.extra_options = HashMap::from([
+            (APPEND_MODE_KEY.to_string(), "true".to_string()),
+            (PRESERVE_ROW_SEQUENCE.to_string(), "true".to_string()),
+        ]);
+        let source = Arc::new(table::Table::new(
+            Arc::new(source_info),
+            FilterPushDownType::Unsupported,
+            source.data_source(),
+        ));
+        let catalog_manager = engine
             .catalog_manager
             .as_any()
             .downcast_ref::<MemoryCatalogManager>()
-            .unwrap()
+            .unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "self_source".to_string(),
+                table_id: SELF_SINK_ID,
+                table: source,
+            })
+            .unwrap();
+        // The sink stays non-append, which is what makes the delta round idempotent.
+        catalog_manager
             .register_table_sync(RegisterTableRequest {
                 catalog: "greptime".to_string(),
                 schema: "public".to_string(),
@@ -2085,10 +2127,13 @@ GROUP BY l.number, time_window
                 ),
             })
             .unwrap();
+        let mut source_meta = new_test_table_info_with_name(SELF_SINK_ID, "self_source");
+        source_meta.meta.options.extra_options =
+            HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]);
         engine
             .table_meta
             .create_table_metadata(
-                new_test_table_info_with_name(SELF_SINK_ID, "self_sink"),
+                source_meta,
                 TableRouteValue::physical(vec![]),
                 HashMap::new(),
             )
@@ -2099,6 +2144,10 @@ GROUP BY l.number, time_window
         // bounds, so delta coverage must fail closed at creation time.
         let mut args = flow_create_args(11, "self_sink");
         args.source_table_ids = vec![SELF_SINK_ID];
+        args.flow_options = HashMap::from([(
+            FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+            "true".to_string(),
+        )]);
         let err = engine
             .create_flow_inner(args)
             .await
@@ -2132,6 +2181,49 @@ GROUP BY l.number, time_window
         let keyed_sink = sink_with_extra_options("delta_sink", HashMap::new());
         BatchingEngine::ensure_simple_source_delta_sink(&task, &keyed_sink)
             .expect("a non-append sink is accepted");
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_rejects_append_mode_sink_each_round() {
+        // `append_mode` can be switched on after creation (`ALTER TABLE ... SET (append_mode='true')`),
+        // so the sink contract must be revalidated when a round plan is generated, not only at
+        // create time.
+        let (task, query_engine) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        assert!(task.config.simple_source_delta);
+
+        let append_sink = sink_with_extra_options(
+            "delta_sink",
+            HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]),
+        );
+        query_engine
+            .engine_state()
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .expect("test catalog manager is a memory catalog")
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: "delta_sink".to_string(),
+                table_id: 9501,
+                table: append_sink,
+            })
+            .unwrap();
+
+        let err = match task
+            .gen_insert_plan_with_values_unlocked(&query_engine, None, &BTreeMap::new(), false)
+            .await
+        {
+            Ok(_) => panic!("an append-mode sink must be rejected at round generation"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("incremental read requires a non-append sink table"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

@@ -55,6 +55,7 @@ use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::checkpoint::checkpoint_mode_label;
+use crate::batching_mode::engine::BatchingEngine;
 use crate::batching_mode::eval_schedule::{EvalSchedule, select_due_scheduled_times};
 use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
 use crate::batching_mode::simple_delta;
@@ -1112,6 +1113,13 @@ impl BatchingTask {
         )
         .await?;
 
+        // `ALTER TABLE ... SET (append_mode = 'true')` is allowed after creation, so the sink
+        // contract that makes a delta round idempotent must be revalidated before every plan and
+        // write, not only when the flow was created.
+        if self.config.simple_source_delta {
+            BatchingEngine::ensure_simple_source_delta_sink(self, &table)?;
+        }
+
         let table_meta = &table.table_info().meta;
         let merge_mode_last_non_null =
             is_merge_mode_last_non_null(&table_meta.options.extra_options);
@@ -1610,7 +1618,10 @@ impl BatchingTask {
 
     #[allow(clippy::too_many_arguments)]
     /// Build an unfiltered plan only when the live dirty signal was present;
-    /// otherwise skip this round without querying.
+    /// otherwise skip this round without querying. `run_when_clean` runs the
+    /// round anyway: the row-local delta path cannot depend on the dirty
+    /// notification, which can arrive before the source write commits or be
+    /// dropped, so an empty sequence range is its natural no-op.
     async fn gen_unfiltered_plan_info_if_dirty(
         &self,
         engine: QueryEngineRef,
@@ -1621,9 +1632,10 @@ impl BatchingTask {
         values: &BTreeMap<String, ScalarValue>,
         retention_filter: Option<(&str, Timestamp, &'static str)>,
         coverage: QueryCoverage,
+        run_when_clean: bool,
     ) -> Result<Option<PlanInfo>, Error> {
         let (is_dirty, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
-        if !is_dirty {
+        if !is_dirty && !run_when_clean {
             debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
             return Ok(None);
         }
@@ -2142,6 +2154,9 @@ impl BatchingTask {
                     && self.config.simple_source_delta
                     && self.should_use_unfiltered_incremental_delta()
                 {
+                    // The dirty notification is only bookkeeping here: it is dispatched before
+                    // the source write commits and may be dropped with the mirror, so the round
+                    // must run regardless and let an empty sequence range be the natural no-op.
                     return self
                         .gen_unfiltered_plan_info_if_dirty(
                             engine,
@@ -2152,6 +2167,7 @@ impl BatchingTask {
                             values,
                             None,
                             QueryCoverage::IncrementalDelta,
+                            true,
                         )
                         .await;
                 }
@@ -2259,6 +2275,7 @@ impl BatchingTask {
                     values,
                     retention_filter,
                     QueryCoverage::IncrementalDelta,
+                    false,
                 )
                 .await;
         }
@@ -2837,6 +2854,23 @@ mod simple_source_delta_tests {
             "incremental round must use IncrementalDelta"
         );
         assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+
+        // The dirty notification can be dropped or arrive before the source write commits, so a
+        // clean delta round must still produce a plan: the empty sequence range is the no-op.
+        let clean = task
+            .gen_query_with_time_window(query_engine.clone(), &sink_schema, &[], false, None)
+            .await
+            .unwrap()
+            .expect("a clean delta round must still generate a plan");
+        assert!(
+            matches!(clean.coverage, QueryCoverage::IncrementalDelta),
+            "a clean delta round must stay an IncrementalDelta plan, got {}",
+            clean.plan
+        );
+        assert!(
+            task.state.read().unwrap().dirty_time_windows.is_empty(),
+            "the empty dirty signal must stay consumed"
+        );
 
         // A forced full snapshot (durable recovery) stays a full snapshot.
         add_dirty_window(&task);

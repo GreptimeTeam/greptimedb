@@ -18,6 +18,13 @@
 //! rows written since the last checkpoint. That is correct only because the projection is a
 //! deterministic, row-local function of a single source row, and because a delta round is written
 //! as a keyed materialization: rows sharing the sink key collapse under ordinary sink semantics.
+//!
+//! The guarantee covers only source rows still retained in the source table: a finite source TTL
+//! plus compaction can remove rows this flow never read, for example while it is paused or down,
+//! and that loss is not detected here. This path also applies no `expire_after` filtering, because
+//! a window-less flow has no time-window expression to evaluate. Finally, because the keyed
+//! materialization keeps one row per key, rows that project to identical sink keys collapse, so a
+//! "delta read" does not promise to preserve every historical source write.
 
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, Volatility};
