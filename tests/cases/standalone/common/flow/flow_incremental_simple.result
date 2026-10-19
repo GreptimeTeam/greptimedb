@@ -1,0 +1,258 @@
+-- A plain projection/filter flow without a time window reads only source rows
+-- written since the last checkpoint when incremental reads are opted in.
+--
+-- `ADMIN FLUSH_FLOW` returns the number of rows the round wrote to the sink, so
+-- the numbers below are the assertion that a round read only the delta: a round
+-- that rescanned history would rewrite every already-materialized row
+-- (2 + 2 = 4 after the second round instead of 2).
+--
+-- The source must be append-only and preserve row sequence. The sink is a keyed
+-- materialization: two rows sharing the sink key collapse.
+CREATE TABLE flow_incremental_simple_input (
+    host STRING,
+    val DOUBLE,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(host)
+) WITH (
+    append_mode = 'true',
+    preserve_row_sequence = 'true'
+);
+
+Affected Rows: 0
+
+-- A long interval keeps every round explicit, so the row counts are stable.
+CREATE FLOW flow_incremental_simple
+SINK TO flow_incremental_simple_sink
+EVAL INTERVAL '1h'
+WITH (experimental_enable_incremental_read = 'true')
+AS
+SELECT host, val, ts FROM flow_incremental_simple_input WHERE val >= 0;
+
+Affected Rows: 0
+
+-- Both hosts share one timestamp, so the sink keeps two rows and its time index
+-- is the source time index rather than the first timestamp column it finds.
+INSERT INTO flow_incremental_simple_input VALUES
+    ('host_a', 1.0, '2024-01-01 00:00:00'),
+    ('host_b', 2.0, '2024-01-01 00:00:00');
+
+Affected Rows: 2
+
+ADMIN FLUSH_FLOW('flow_incremental_simple');
+
++---------------------------------------------+
+| ADMIN FLUSH_FLOW('flow_incremental_simple') |
++---------------------------------------------+
+| 2                                           |
++---------------------------------------------+
+
+SELECT host, val, ts FROM flow_incremental_simple_sink ORDER BY host, ts;
+
++--------+-----+---------------------+
+| host   | val | ts                  |
++--------+-----+---------------------+
+| host_a | 1.0 | 2024-01-01T00:00:00 |
+| host_b | 2.0 | 2024-01-01T00:00:00 |
++--------+-----+---------------------+
+
+SHOW CREATE TABLE flow_incremental_simple_sink;
+
++------------------------------+-------------------------------------------------------------+
+| Table                        | Create Table                                                |
++------------------------------+-------------------------------------------------------------+
+| flow_incremental_simple_sink | CREATE TABLE IF NOT EXISTS "flow_incremental_simple_sink" ( |
+|                              |   "host" STRING NULL,                                       |
+|                              |   "val" DOUBLE NULL,                                        |
+|                              |   "ts" TIMESTAMP(3) NOT NULL,                               |
+|                              |   "update_at" TIMESTAMP(3) NULL,                            |
+|                              |   TIME INDEX ("ts"),                                        |
+|                              |   PRIMARY KEY ("host")                                      |
+|                              | )                                                           |
+|                              |                                                             |
+|                              | ENGINE=mito                                                 |
+|                              | WITH(                                                       |
+|                              |   'comment' = 'Auto created table by flow engine'           |
+|                              | )                                                           |
++------------------------------+-------------------------------------------------------------+
+
+-- Move the checkpointed source rows into SST files so the next round must use
+-- the exact sequence range instead of rescanning them.
+ADMIN FLUSH_TABLE('flow_incremental_simple_sink');
+
++---------------------------------------------------+
+| ADMIN FLUSH_TABLE('flow_incremental_simple_sink') |
++---------------------------------------------------+
+| 0                                                 |
++---------------------------------------------------+
+
+ADMIN FLUSH_TABLE('flow_incremental_simple_input');
+
++----------------------------------------------------+
+| ADMIN FLUSH_TABLE('flow_incremental_simple_input') |
++----------------------------------------------------+
+| 0                                                  |
++----------------------------------------------------+
+
+INSERT INTO flow_incremental_simple_input VALUES
+    ('host_a', 3.0, '2024-01-01 00:01:00'),
+    ('host_c', 4.0, '2024-01-01 00:01:00');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('flow_incremental_simple_input');
+
++----------------------------------------------------+
+| ADMIN FLUSH_TABLE('flow_incremental_simple_input') |
++----------------------------------------------------+
+| 0                                                  |
++----------------------------------------------------+
+
+ADMIN FLUSH_FLOW('flow_incremental_simple');
+
++---------------------------------------------+
+| ADMIN FLUSH_FLOW('flow_incremental_simple') |
++---------------------------------------------+
+| 2                                           |
++---------------------------------------------+
+
+SELECT host, val, ts FROM flow_incremental_simple_sink ORDER BY host, ts;
+
++--------+-----+---------------------+
+| host   | val | ts                  |
++--------+-----+---------------------+
+| host_a | 1.0 | 2024-01-01T00:00:00 |
+| host_a | 3.0 | 2024-01-01T00:01:00 |
+| host_b | 2.0 | 2024-01-01T00:00:00 |
+| host_c | 4.0 | 2024-01-01T00:01:00 |
++--------+-----+---------------------+
+
+-- A fully filtered round writes nothing; its scan still proves a watermark, so
+-- the checkpoint advances and the following insert must be processed.
+INSERT INTO flow_incremental_simple_input VALUES
+    ('host_a', -1.0, '2024-01-01 00:02:00');
+
+Affected Rows: 1
+
+ADMIN FLUSH_FLOW('flow_incremental_simple');
+
++---------------------------------------------+
+| ADMIN FLUSH_FLOW('flow_incremental_simple') |
++---------------------------------------------+
+| 0                                           |
++---------------------------------------------+
+
+SELECT host, val, ts FROM flow_incremental_simple_sink ORDER BY host, ts;
+
++--------+-----+---------------------+
+| host   | val | ts                  |
++--------+-----+---------------------+
+| host_a | 1.0 | 2024-01-01T00:00:00 |
+| host_a | 3.0 | 2024-01-01T00:01:00 |
+| host_b | 2.0 | 2024-01-01T00:00:00 |
+| host_c | 4.0 | 2024-01-01T00:01:00 |
++--------+-----+---------------------+
+
+INSERT INTO flow_incremental_simple_input VALUES
+    ('host_d', 5.0, '2024-01-01 00:03:00');
+
+Affected Rows: 1
+
+ADMIN FLUSH_FLOW('flow_incremental_simple');
+
++---------------------------------------------+
+| ADMIN FLUSH_FLOW('flow_incremental_simple') |
++---------------------------------------------+
+| 1                                           |
++---------------------------------------------+
+
+SELECT host, val, ts FROM flow_incremental_simple_sink ORDER BY host, ts;
+
++--------+-----+---------------------+
+| host   | val | ts                  |
++--------+-----+---------------------+
+| host_a | 1.0 | 2024-01-01T00:00:00 |
+| host_a | 3.0 | 2024-01-01T00:01:00 |
+| host_b | 2.0 | 2024-01-01T00:00:00 |
+| host_c | 4.0 | 2024-01-01T00:01:00 |
+| host_d | 5.0 | 2024-01-01T00:03:00 |
++--------+-----+---------------------+
+
+-- Without the opt-in option a window-less flow keeps rescanning history: the same
+-- second round rewrites all four rows instead of only the two new ones.
+CREATE FLOW flow_incremental_simple_full
+SINK TO flow_incremental_simple_full_sink
+EVAL INTERVAL '1h'
+AS
+SELECT host, val, ts FROM flow_incremental_simple_input WHERE val >= 0;
+
+Affected Rows: 0
+
+INSERT INTO flow_incremental_simple_input VALUES
+    ('host_e', 6.0, '2024-01-01 00:04:00');
+
+Affected Rows: 1
+
+ADMIN FLUSH_FLOW('flow_incremental_simple_full');
+
++--------------------------------------------------+
+| ADMIN FLUSH_FLOW('flow_incremental_simple_full') |
++--------------------------------------------------+
+| 6                                                |
++--------------------------------------------------+
+
+SELECT host, val, ts FROM flow_incremental_simple_full_sink ORDER BY host, ts;
+
++--------+-----+---------------------+
+| host   | val | ts                  |
++--------+-----+---------------------+
+| host_b | 2.0 | 2024-01-01T00:00:00 |
+| host_c | 4.0 | 2024-01-01T00:01:00 |
+| host_d | 5.0 | 2024-01-01T00:03:00 |
+| host_e | 6.0 | 2024-01-01T00:04:00 |
++--------+-----+---------------------+
+
+INSERT INTO flow_incremental_simple_input VALUES
+    ('host_f', 7.0, '2024-01-01 00:05:00');
+
+Affected Rows: 1
+
+ADMIN FLUSH_FLOW('flow_incremental_simple_full');
+
++--------------------------------------------------+
+| ADMIN FLUSH_FLOW('flow_incremental_simple_full') |
++--------------------------------------------------+
+| 7                                                |
++--------------------------------------------------+
+
+SELECT host, val, ts FROM flow_incremental_simple_full_sink ORDER BY host, ts;
+
++--------+-----+---------------------+
+| host   | val | ts                  |
++--------+-----+---------------------+
+| host_b | 2.0 | 2024-01-01T00:00:00 |
+| host_c | 4.0 | 2024-01-01T00:01:00 |
+| host_d | 5.0 | 2024-01-01T00:03:00 |
+| host_e | 6.0 | 2024-01-01T00:04:00 |
+| host_f | 7.0 | 2024-01-01T00:05:00 |
++--------+-----+---------------------+
+
+DROP FLOW flow_incremental_simple;
+
+Affected Rows: 0
+
+DROP FLOW flow_incremental_simple_full;
+
+Affected Rows: 0
+
+DROP TABLE flow_incremental_simple_input;
+
+Affected Rows: 0
+
+DROP TABLE flow_incremental_simple_sink;
+
+Affected Rows: 0
+
+DROP TABLE flow_incremental_simple_full_sink;
+
+Affected Rows: 0
+

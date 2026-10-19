@@ -43,6 +43,7 @@ use sql::parsers::utils::is_tql;
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::mito_engine_options::APPEND_MODE_KEY;
 use store_api::storage::{RegionId, TableId};
+use table::TableRef;
 use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
 
@@ -519,6 +520,23 @@ impl BatchingEngine {
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
     }
 
+    /// Enforces the sink half of the opt-in row-local incremental-read contract: a delta round is
+    /// written as a keyed materialization, so an append-mode sink would accumulate replayed
+    /// history instead of overwriting the keys it has already materialized.
+    fn ensure_simple_source_delta_sink(task: &BatchingTask, sink: &TableRef) -> Result<(), Error> {
+        ensure!(
+            !Self::table_options_enable_append_mode(&sink.table_info().meta.options.extra_options),
+            UnsupportedSnafu {
+                reason: format!(
+                    "Flow {} incremental read requires a non-append sink table, but sink `{}` is append-only. A restarted flow replays a full snapshot, which would duplicate history in an append-mode sink",
+                    task.config.flow_id,
+                    task.config.sink_table_name.join(".")
+                ),
+            }
+        );
+        Ok(())
+    }
+
     /// SQL flows without a usable time-window expression can only run as an
     /// explicit full-query flow, so require `EVAL INTERVAL` at creation time.
     fn ensure_sql_flow_has_twe_or_eval_interval(
@@ -658,6 +676,12 @@ impl BatchingEngine {
         let (tx, rx) = oneshot::channel();
 
         let plan = sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, true).await?;
+        // The retained task plan is judged for row-local delta eligibility, so it must match what
+        // a round executes: `gen_plan_with_matching_schema_and_values` replans the SQL without the
+        // flow optimizer, where `now()` and other stable expressions are still time-dependent.
+        // The optimized plan above remains the source for TQL/time-window/table analysis.
+        let retained_plan =
+            sql_to_df_plan(query_ctx.clone(), self.query_engine.clone(), &sql, false).await?;
 
         if is_tql {
             self.check_is_tql_table(&plan, &query_ctx).await?;
@@ -719,7 +743,10 @@ impl BatchingEngine {
         let task_args = TaskArgs {
             flow_id,
             query: &sql,
-            plan,
+            // Eligibility must be judged on the plan that is actually executed. Each round
+            // replans the SQL without the flow optimizer, so constant folding in the optimized
+            // plan must not hide time-dependent expressions such as `now()`.
+            plan: retained_plan,
             time_window_expr: phy_expr,
             expire_after,
             sink_table_name,
@@ -751,9 +778,37 @@ impl BatchingEngine {
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
 
+        // Opt-in row-local delta reads replay a full snapshot on restart or fallback, so an
+        // append-mode sink would duplicate history instead of overwriting its keys. An
+        // auto-created sink must also keep every source key, because a delta round is written as
+        // a keyed materialization of the source rows. The key contract is validated before the
+        // sink is created so a rejected flow leaves no keyless sink behind.
+        if task.config.simple_source_delta {
+            ensure!(
+                task.sequence_range_capable().await?,
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow {flow_id} is a row-local delta flow, which requires exact sequence-range reads, but source table `{}` lacks the Mito preserve_row_sequence capability",
+                        task.config
+                            .source_table_names
+                            .iter()
+                            .map(|name| name.join("."))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            );
+        }
+        if task.config.simple_source_delta && !task.sink_table_exists().await? {
+            task.ensure_derivable_sink_keys(&engine).await?;
+        }
+
         // Create the sink before asking an optional extension to own execution.
         // The default path retains the OSS schema validation.
         let table = task.check_or_create_sink_table(&engine, &frontend).await?;
+        if task.config.simple_source_delta {
+            Self::ensure_simple_source_delta_sink(&task, &table)?;
+        }
         let execution = if let Some(factory) = &self.execution_factory {
             factory.create(&task, table, &engine, &frontend).await?
         } else {
@@ -1722,6 +1777,133 @@ GROUP BY l.number, time_window
         .unwrap();
 
         (task, tx)
+    }
+
+    /// Builds a task for the opt-in row-local delta path from the test query engine.
+    async fn new_simple_delta_task(
+        query: &str,
+        sink_name: &str,
+        incremental: bool,
+    ) -> (BatchingTask, QueryEngineRef) {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+            .await
+            .unwrap();
+        let (_tx, rx) = oneshot::channel();
+        let batch_opts = Arc::new(BatchingModeOptions {
+            experimental_enable_incremental_read: incremental,
+            ..Default::default()
+        });
+        let task = BatchingTask::try_new(TaskArgs {
+            flow_id: 1,
+            query,
+            plan,
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                sink_name.to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts,
+            flow_eval_interval: Some(Duration::from_secs(60)),
+            eval_schedule: None,
+        })
+        .unwrap();
+        (task, query_engine)
+    }
+
+    /// Builds a sink table ref whose extra options match `extra_options`.
+    fn sink_with_extra_options(
+        name: &str,
+        extra_options: HashMap<String, String>,
+    ) -> table::TableRef {
+        use table::metadata::FilterPushDownType;
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let table = table::test_util::MemTable::table(name, recordbatch);
+        let mut info = (*table.table_info()).clone();
+        info.meta.options.extra_options = extra_options;
+        Arc::new(table::Table::new(
+            Arc::new(info),
+            FilterPushDownType::Unsupported,
+            table.data_source(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_rejects_append_mode_sink() {
+        let (task, _) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        assert!(task.config.simple_source_delta);
+
+        let append_sink = sink_with_extra_options(
+            "delta_sink",
+            HashMap::from([(APPEND_MODE_KEY.to_string(), "true".to_string())]),
+        );
+        let err = BatchingEngine::ensure_simple_source_delta_sink(&task, &append_sink)
+            .expect_err("an append-mode sink must be rejected for a row-local delta flow");
+        assert!(
+            err.to_string()
+                .contains("incremental read requires a non-append sink table"),
+            "{err}"
+        );
+
+        let keyed_sink = sink_with_extra_options("delta_sink", HashMap::new());
+        BatchingEngine::ensure_simple_source_delta_sink(&task, &keyed_sink)
+            .expect("a non-append sink is accepted");
+    }
+
+    #[tokio::test]
+    async fn test_simple_source_delta_requires_derivable_sink_keys() {
+        // Dropping the source time index makes the auto-created sink keyless for a delta round.
+        let (task, query_engine) =
+            new_simple_delta_task("SELECT number FROM numbers_with_ts", "delta_sink", true).await;
+        assert!(task.config.simple_source_delta);
+
+        let err = task
+            .ensure_derivable_sink_keys(&query_engine)
+            .await
+            .expect_err("a projection without the source time index has no derivable sink keys");
+        assert!(
+            err.to_string()
+                .contains("Create a compatible keyed sink table explicitly"),
+            "{err}"
+        );
+
+        let (keyed_task, keyed_engine) =
+            new_simple_delta_task("SELECT number, ts FROM numbers_with_ts", "delta_sink", true)
+                .await;
+        keyed_task
+            .ensure_derivable_sink_keys(&keyed_engine)
+            .await
+            .expect("a projection keeping the source keys is accepted");
     }
 
     #[tokio::test]
