@@ -129,6 +129,8 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
 /// Filters containing `IN` lists are rejected: an oversized payload replaces `IN` with
 /// `true`, which only widens a conjunction but can narrow an arbitrary predicate such as
 /// `(host IN (...)) = false`.
+// TODO(dennis): make the bounds-only fallback in `DynFilterPayload` replace only `IN` lists
+// in conjunctive positions, then drop this restriction.
 fn is_scalar_subquery_filter(filter: &Arc<dyn PhysicalExpr>) -> bool {
     let mut has_scalar_subquery = false;
     let mut supported = true;
