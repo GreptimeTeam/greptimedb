@@ -39,7 +39,10 @@ mod tests;
 ///
 /// The output starts at the first row with a valid value in any field and ends at the last such
 /// row, so a short-lived series never holds values for the whole grid. Missing rows between
-/// valid ones become nulls; NaN is a valid value.
+/// valid ones become nulls; NaN is a valid value. A caller that has decided positions hold no
+/// value widens the span with [`GridSeriesBuilder::cover_from`] and
+/// [`GridSeriesBuilder::cover_through`], which is how a decided-but-empty position reaches a
+/// consumer instead of being trimmed away.
 pub struct GridSeriesBuilder {
     schema: Arc<SeriesSchema>,
     grid: Arc<EvalGrid>,
@@ -170,6 +173,61 @@ impl GridSeriesBuilder {
         }
         self.valid_end = index + 1;
         Ok(true)
+    }
+
+    /// Declares that the output span begins at `index`, before any value is pushed for it.
+    ///
+    /// A caller that has already decided the positions before its first value hold no value uses
+    /// this, so the span covers them: a span beginning at the first value would report those
+    /// positions as ones nothing is known about, and a consumer would never learn they were
+    /// decided. Positions must still be pushed in increasing order from here.
+    pub fn cover_from(&mut self, index: usize) -> Result<()> {
+        if self.start.is_some() || index == self.grid.timestamps().len() {
+            return Ok(());
+        }
+        if index < self.next {
+            return Err(DataFusionError::Execution(format!(
+                "grid series cannot begin its span at {index}, behind the next row {}",
+                self.next
+            )));
+        }
+        self.start = Some(index);
+        self.valid_end = index;
+        self.next = index;
+        self.fields = (0..self.schema.fields.len())
+            .map(|_| FieldBuilder {
+                values: Vec::new(),
+                nulls: NullBufferBuilder::new(0),
+                histograms: None,
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Extends the output span to `end`, writing a missing value for every position in between.
+    ///
+    /// The counterpart of [`Self::cover_from`] for positions decided after the last value.
+    pub fn cover_through(&mut self, end: usize) -> Result<()> {
+        if self.start.is_none() {
+            return Ok(());
+        }
+        if end < self.valid_end {
+            return Err(DataFusionError::Execution(format!(
+                "grid series cannot cover through {end}, behind its last row {}",
+                self.valid_end
+            )));
+        }
+        let gap = end - self.valid_end;
+        for field in &mut self.fields {
+            field.values.resize(field.values.len() + gap, 0.0);
+            field.nulls.append_n_nulls(gap);
+            if let Some(column) = &mut field.histograms {
+                column.indices.resize(column.indices.len() + gap, None);
+            }
+        }
+        self.valid_end = end;
+        self.next = end;
+        Ok(())
     }
 
     /// Finishes the current series and resets the builder for the next one.
