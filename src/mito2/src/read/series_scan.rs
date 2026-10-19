@@ -15,7 +15,6 @@
 //! Per-series scan implementation.
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,7 +44,6 @@ use crate::error::{
     Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
-use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
@@ -54,50 +52,20 @@ use crate::read::scan_util::{
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_candidate::{SeriesCandidateScanner, is_sparse_metric_metadata};
-use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, SeriesReader};
+use crate::read::series_reader::{SeriesReadSemaphores, SeriesReader};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// Timeout to send a batch to a sender.
 const SEND_TIMEOUT: Duration = Duration::from_micros(100);
 
-/// Maximum number of candidate series retained before distributing assignments.
-const CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD: usize = 1_000_000;
+/// Maximum number of candidate series retained before reading their data.
+const CANDIDATE_SERIES_THRESHOLD: usize = 1_000_000;
 
-/// Legacy data receivers for output partitions.
-type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
-
-/// Candidate assignment receivers for output partitions.
-type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
-
-/// Candidate assignment senders for output partitions.
-type CandidateSenderList = Vec<Option<mpsc::UnboundedSender<Result<SeriesReaderInput>>>>;
-
-struct CandidateReceiver {
-    receiver: mpsc::UnboundedReceiver<Result<SeriesReaderInput>>,
-    active_receivers: Arc<AtomicUsize>,
-}
-
-impl CandidateReceiver {
-    async fn recv(&mut self) -> Option<Result<SeriesReaderInput>> {
-        self.receiver.recv().await
-    }
-}
-
-impl Drop for CandidateReceiver {
-    fn drop(&mut self) {
-        let previous = self.active_receivers.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(previous > 0);
-    }
-}
-
-/// Input required by a partition-local series reader.
-struct SeriesReaderInput {
-    assigned_series: AssignedSeriesBatch,
-    partition_pruner: Arc<PartitionPruner>,
-    range_semaphore: Arc<Semaphore>,
-}
+/// Series data receivers for output partitions.
+type ReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeriesScanMode {
@@ -128,10 +96,8 @@ pub struct SeriesScan {
     stream_ctx: Arc<StreamContext>,
     /// Shared pruner for file range building.
     pruner: Arc<Pruner>,
-    /// Legacy data receivers for each partition.
-    legacy_receivers: Mutex<LegacyReceiverList>,
-    /// Candidate assignment receivers for each partition.
-    candidate_receivers: Mutex<CandidateReceiverList>,
+    /// Series data receivers for each partition.
+    receivers: Mutex<ReceiverList>,
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: Arc<PartitionMetricsList>,
@@ -174,8 +140,7 @@ impl SeriesScan {
             properties,
             stream_ctx,
             pruner,
-            legacy_receivers: Mutex::new(Vec::new()),
-            candidate_receivers: Mutex::new(Vec::new()),
+            receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
         }
     }
@@ -259,31 +224,8 @@ impl SeriesScan {
             }
         );
 
-        match self.mode {
-            SeriesScanMode::Legacy => self.scan_legacy_batch_in_partition(
-                partition,
-                part_metrics,
-                metrics_set,
-                ctx.explain_verbose,
-            ),
-            SeriesScanMode::TwoPhase => self.scan_two_phase_batch_in_partition(
-                partition,
-                part_metrics,
-                metrics_set,
-                ctx.explain_verbose,
-            ),
-        }
-    }
-
-    fn scan_legacy_batch_in_partition(
-        &self,
-        partition: usize,
-        part_metrics: PartitionMetrics,
-        metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
-    ) -> Result<ScanBatchStream> {
-        self.maybe_start_legacy_distributor(metrics_set, explain_verbose);
-        let mut receiver = self.legacy_receivers.lock().unwrap()[partition]
+        self.maybe_start_distributor(metrics_set, ctx.explain_verbose);
+        let mut receiver = self.receivers.lock().unwrap()[partition]
             .take()
             .context(ScanMultiTimesSnafu { partition })?;
         let stream = try_stream! {
@@ -309,82 +251,24 @@ impl SeriesScan {
         Ok(Box::pin(stream))
     }
 
-    fn scan_two_phase_batch_in_partition(
-        &self,
-        partition: usize,
-        part_metrics: PartitionMetrics,
-        metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
-    ) -> Result<ScanBatchStream> {
-        self.maybe_start_candidate_distributor(metrics_set, explain_verbose);
-        // Safety: `scan_batch_in_partition` validates the index, and the receiver
-        // list always contains one entry for each output partition.
-        let mut receiver = self.candidate_receivers.lock().unwrap()[partition]
-            .take()
-            .context(ScanMultiTimesSnafu { partition })?;
-        let stream_ctx = self.stream_ctx.clone();
-        let partition_ranges = self
-            .properties
-            .partitions
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        let stream = try_stream! {
-            part_metrics.on_first_poll();
-
-            let mut fetch_start = Instant::now();
-            let mut metrics = ScannerMetrics::default();
-            while let Some(input) = receiver.recv().await {
-                let input = input?;
-                metrics.scan_cost += fetch_start.elapsed();
-
-                let build_start = Instant::now();
-                let reader = SeriesReader::try_new(
-                    stream_ctx.clone(),
-                    partition_ranges.clone(),
-                    input.assigned_series,
-                    input.partition_pruner,
-                    input.range_semaphore,
-                    part_metrics.clone(),
-                )?;
-                let mut reader_stream = reader.build_stream().await?;
-                metrics.scan_cost += build_start.elapsed();
-                fetch_start = Instant::now();
-                while let Some(record_batch) = reader_stream.try_next().await? {
-                    metrics.scan_cost += fetch_start.elapsed();
-                    metrics.num_batches += 1;
-                    metrics.num_rows += record_batch.num_rows();
-
-                    let yield_start = Instant::now();
-                    yield ScanBatch::RecordBatch(record_batch);
-                    metrics.yield_cost += yield_start.elapsed();
-                    fetch_start = Instant::now();
-                }
-            }
-            metrics.scan_cost += fetch_start.elapsed();
-
-            part_metrics.merge_metrics(&metrics);
-            part_metrics.on_finish();
-        };
-        Ok(Box::pin(stream))
-    }
-
-    fn maybe_start_legacy_distributor(
+    fn maybe_start_distributor(
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
         explain_verbose: bool,
     ) {
-        let mut rx_list = self.legacy_receivers.lock().unwrap();
+        let mut rx_list = self.receivers.lock().unwrap();
         if !rx_list.is_empty() {
             return;
         }
 
-        let (senders, receivers) = new_legacy_channel_list(self.properties.num_partitions());
+        let (senders, receivers) = new_channel_list(self.properties.num_partitions());
         let mut distributor = SeriesDistributor {
+            mode: self.mode,
             stream_ctx: self.stream_ctx.clone(),
-            range_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
-            final_merge_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
+            semaphores: SeriesReadSemaphores {
+                range: Arc::new(Semaphore::new(self.properties.num_partitions())),
+                file: Arc::new(Semaphore::new(self.properties.num_partitions())),
+            },
             partitions: self.properties.partitions.clone(),
             pruner: self.pruner.clone(),
             senders,
@@ -394,41 +278,6 @@ impl SeriesScan {
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
-        common_runtime::spawn_query(
-            async move {
-                distributor.execute().await;
-            }
-            .instrument(span),
-        );
-
-        *rx_list = receivers;
-    }
-
-    fn maybe_start_candidate_distributor(
-        &self,
-        metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
-    ) {
-        let mut rx_list = self.candidate_receivers.lock().unwrap();
-        if !rx_list.is_empty() {
-            return;
-        }
-
-        let (senders, receivers, active_receivers) =
-            new_candidate_channel_list(self.properties.num_partitions());
-        let mut distributor = SeriesCandidateDistributor {
-            stream_ctx: self.stream_ctx.clone(),
-            range_semaphore: Arc::new(Semaphore::new(self.properties.num_partitions())),
-            partitions: self.properties.partitions.clone(),
-            pruner: self.pruner.clone(),
-            senders,
-            active_receivers,
-            metrics_set: metrics_set.clone(),
-            metrics_list: self.metrics_list.clone(),
-            explain_verbose,
-        };
-        let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
-        let span = tracing::info_span!("SeriesScan::candidate_distributor", region_id = %region_id);
         common_runtime::spawn_query(
             async move {
                 distributor.execute().await;
@@ -507,7 +356,7 @@ impl SeriesScan {
     }
 }
 
-fn new_legacy_channel_list(num_partitions: usize) -> (SenderList, LegacyReceiverList) {
+fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..num_partitions)
         .map(|_| {
             let (sender, receiver) = mpsc::channel(1);
@@ -515,26 +364,6 @@ fn new_legacy_channel_list(num_partitions: usize) -> (SenderList, LegacyReceiver
         })
         .unzip();
     (SenderList::new(senders), receivers)
-}
-
-fn new_candidate_channel_list(
-    num_partitions: usize,
-) -> (CandidateSenderList, CandidateReceiverList, Arc<AtomicUsize>) {
-    let active_receivers = Arc::new(AtomicUsize::new(num_partitions));
-    let (senders, receivers) = (0..num_partitions)
-        .map(|_| {
-            // Partition streams can be consumed sequentially. A bounded channel for an unpolled
-            // partition could block the distributor and prevent it from sending more assignments
-            // to the partition currently being consumed, causing a deadlock.
-            let (sender, receiver) = mpsc::unbounded_channel();
-            let receiver = CandidateReceiver {
-                receiver,
-                active_receivers: active_receivers.clone(),
-            };
-            (Some(sender), Some(receiver))
-        })
-        .unzip();
-    (senders, receivers, active_receivers)
 }
 
 impl RegionScanner for SeriesScan {
@@ -602,8 +431,7 @@ impl RegionScanner for SeriesScan {
                 },
             )),
         };
-        self.legacy_receivers.lock().unwrap().clear();
-        self.candidate_receivers.lock().unwrap().clear();
+        self.receivers.lock().unwrap().clear();
         self.metrics_list = Arc::new(PartitionMetricsList::default());
     }
 
@@ -667,15 +495,12 @@ impl SeriesScan {
 
 /// The distributor scans series and distributes them to different partitions.
 struct SeriesDistributor {
+    /// Input construction used by this scan.
+    mode: SeriesScanMode,
     /// Context for the scan stream.
     stream_ctx: Arc<StreamContext>,
-    /// Semaphore for file scanning and range-level merging.
-    range_semaphore: Option<Arc<Semaphore>>,
-    /// Semaphore for the final merge across all range streams.
-    /// Must be separate from `range_semaphore` to avoid deadlock: final merge tasks
-    /// hold a permit while waiting for data from range-level merge tasks, which also
-    /// need permits to produce data.
-    final_merge_semaphore: Option<Arc<Semaphore>>,
+    /// Independent budgets for range work and buffered file sources.
+    semaphores: SeriesReadSemaphores,
     /// Partition ranges to scan.
     partitions: Vec<Vec<PartitionRange>>,
     /// Shared pruner for file range building.
@@ -700,8 +525,21 @@ impl SeriesDistributor {
         fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
     )]
     async fn execute(&mut self) {
-        if let Err(e) = self.scan_partitions_flat().await {
-            self.senders.send_error(e).await;
+        let senders = self
+            .senders
+            .senders
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        let closed = futures::future::join_all(senders.iter().map(Sender::closed));
+        tokio::select! {
+            result = self.scan_partitions_flat() => {
+                if let Err(e) = result {
+                    self.senders.send_error(e).await;
+                }
+            }
+            _ = closed => {}
         }
     }
 
@@ -711,84 +549,19 @@ impl SeriesDistributor {
         fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
     )]
     async fn scan_partitions_flat(&mut self) -> Result<()> {
-        // Initialize reference counts for all partition ranges.
-        for partition_ranges in &self.partitions {
-            self.pruner.add_partition_ranges(partition_ranges);
-        }
-
-        // Create PartitionPruner covering all partitions
-        let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
-        let partition_pruner = Arc::new(PartitionPruner::new(
-            self.pruner.clone(),
-            &all_partition_ranges,
-        ));
-
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
             self.explain_verbose,
             &self.metrics_set,
-            self.partitions.len(),
+            self.partitions.len() + usize::from(self.mode == SeriesScanMode::TwoPhase),
             &self.metrics_list,
         );
         part_metrics.on_first_poll();
-        // Start fetch time before building sources so scan cost contains
-        // build part cost.
         let mut fetch_start = Instant::now();
-
-        // Builds one deduped stream per partition range, then merges across ranges.
-        let build_start = Instant::now();
-        let mut tasks = Vec::new();
-        for partition in &self.partitions {
-            for part_range in partition {
-                let stream_ctx = self.stream_ctx.clone();
-                let part_range = *part_range;
-                let part_metrics = part_metrics.clone();
-                let partition_pruner = partition_pruner.clone();
-                let file_scan_semaphore = self.range_semaphore.clone();
-                let merge_semaphore = self.range_semaphore.clone();
-                tasks.push(common_runtime::spawn_query(async move {
-                    SeqScan::build_flat_partition_range_read(
-                        &stream_ctx,
-                        &part_range,
-                        false,
-                        &part_metrics,
-                        partition_pruner,
-                        file_scan_semaphore,
-                        merge_semaphore,
-                    )
-                    .await
-                }));
-            }
-        }
-        let mut range_streams = Vec::with_capacity(tasks.len());
-        let mut estimated_batch_sizes = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            let (stream, estimated_batch_size) = task.await.context(JoinSnafu)??;
-            range_streams.push(stream);
-            estimated_batch_sizes.push(estimated_batch_size);
-        }
-        let channel_size =
-            compute_parallel_channel_size(compute_average_batch_size(estimated_batch_sizes));
-        common_telemetry::debug!(
-            "SeriesDistributor built {} range_streams, region: {}, build cost: {:?}, channel_size: {}",
-            range_streams.len(),
-            self.stream_ctx.input.region_metadata().region_id,
-            build_start.elapsed(),
-            channel_size,
-        );
-
-        // Each partition range stream is already deduped, so skip dedup here.
-        // Use a separate semaphore for the final merge to avoid deadlock with
-        // range-level merge tasks that share the range_semaphore.
-        let mut reader = SeqScan::build_flat_reader_from_sources(
-            &self.stream_ctx,
-            range_streams,
-            self.final_merge_semaphore.clone(),
-            Some(&part_metrics),
-            true,
-            channel_size,
-        )
-        .await?;
+        let mut reader = match self.mode {
+            SeriesScanMode::Legacy => self.build_legacy_reader(&part_metrics).await?,
+            SeriesScanMode::TwoPhase => self.build_two_phase_reader(part_metrics.clone()).await?,
+        };
         let mut metrics = SeriesDistributorMetrics::default();
 
         let mut divider = FlatSeriesBatchDivider::default();
@@ -838,112 +611,148 @@ impl SeriesDistributor {
 
         Ok(())
     }
-}
 
-/// Discovers metric series and sends one reader assignment to each partition.
-struct SeriesCandidateDistributor {
-    stream_ctx: Arc<StreamContext>,
-    range_semaphore: Arc<Semaphore>,
-    partitions: Vec<Vec<PartitionRange>>,
-    pruner: Arc<Pruner>,
-    senders: CandidateSenderList,
-    active_receivers: Arc<AtomicUsize>,
-    metrics_set: ExecutionPlanMetricsSet,
-    metrics_list: Arc<PartitionMetricsList>,
-    explain_verbose: bool,
-}
-
-impl SeriesCandidateDistributor {
-    async fn execute(&mut self) {
-        if let Err(e) = self.distribute().await {
-            self.send_error(e);
+    /// Builds the legacy merged data stream before series dispatch.
+    async fn build_legacy_reader(
+        &self,
+        part_metrics: &PartitionMetrics,
+    ) -> Result<BoxedRecordBatchStream> {
+        // Initialize reference counts for all partition ranges.
+        for partition_ranges in &self.partitions {
+            self.pruner.add_partition_ranges(partition_ranges);
         }
+
+        // Create PartitionPruner covering all partitions
+        let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let partition_pruner = Arc::new(PartitionPruner::new(
+            self.pruner.clone(),
+            &all_partition_ranges,
+        ));
+
+        // Builds one deduped stream per partition range, then merges across ranges.
+        let build_start = Instant::now();
+        let mut tasks = Vec::new();
+        for partition in &self.partitions {
+            for part_range in partition {
+                let stream_ctx = self.stream_ctx.clone();
+                let part_range = *part_range;
+                let part_metrics = part_metrics.clone();
+                let partition_pruner = partition_pruner.clone();
+                let file_scan_semaphore = Some(self.semaphores.file.clone());
+                let merge_semaphore = Some(self.semaphores.file.clone());
+                tasks.push(common_runtime::spawn_query(async move {
+                    SeqScan::build_flat_partition_range_read(
+                        &stream_ctx,
+                        &part_range,
+                        false,
+                        &part_metrics,
+                        partition_pruner,
+                        file_scan_semaphore,
+                        merge_semaphore,
+                    )
+                    .await
+                }));
+            }
+        }
+        let mut range_streams = Vec::with_capacity(tasks.len());
+        let mut estimated_batch_sizes = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let (stream, estimated_batch_size) = task.await.context(JoinSnafu)??;
+            range_streams.push(stream);
+            estimated_batch_sizes.push(estimated_batch_size);
+        }
+        let channel_size =
+            compute_parallel_channel_size(compute_average_batch_size(estimated_batch_sizes));
+        common_telemetry::debug!(
+            "SeriesDistributor built {} range_streams, region: {}, build cost: {:?}, channel_size: {}",
+            range_streams.len(),
+            self.stream_ctx.input.region_metadata().region_id,
+            build_start.elapsed(),
+            channel_size,
+        );
+
+        // Each partition range stream is already deduped, so skip dedup here.
+        // Use a separate semaphore for the final merge to avoid deadlock with
+        // range-level merge tasks that share the file budget.
+        SeqScan::build_flat_reader_from_sources(
+            &self.stream_ctx,
+            range_streams,
+            Some(self.semaphores.range.clone()),
+            Some(part_metrics),
+            true,
+            channel_size,
+        )
+        .await
     }
 
-    async fn distribute(&mut self) -> Result<()> {
-        let part_metrics = new_partition_metrics(
+    /// Discovers sorted candidates and drains one data reader at a time.
+    async fn build_two_phase_reader(
+        &self,
+        part_metrics: PartitionMetrics,
+    ) -> Result<BoxedRecordBatchStream> {
+        let candidate_metrics = new_partition_metrics(
             &self.stream_ctx,
             self.explain_verbose,
             &self.metrics_set,
             self.partitions.len(),
             &self.metrics_list,
         );
-        part_metrics.on_first_poll();
-
-        let candidate_scanner = SeriesCandidateScanner::try_new(
+        candidate_metrics.on_first_poll();
+        let scanner = SeriesCandidateScanner::try_new(
             self.stream_ctx.clone(),
             self.partitions.clone(),
             self.pruner.clone(),
-            self.range_semaphore.clone(),
+            self.semaphores.range.clone(),
             self.stream_ctx.input.scan_memory_pool.clone(),
             self.metrics_set.clone(),
-            part_metrics.clone(),
+            candidate_metrics.clone(),
         )?;
-        let partition_pruner = candidate_scanner.partition_pruner();
-        let mut candidates = candidate_scanner.build_stream().await?;
-        let mut collector =
-            SeriesBatchCollector::new(self.partitions.len()).context(InvalidSenderSnafu)?;
-        let mut chunked = false;
-        while let Some(batch) = candidates.try_next().await? {
-            if !self.should_fetch_candidates() {
-                part_metrics.on_finish();
-                return Ok(());
-            }
-            collector.push(batch);
-            if collector.len() >= CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD {
-                chunked = true;
-                self.send_assignments(collector.finish(false), &partition_pruner);
-                if !self.should_fetch_candidates() {
-                    part_metrics.on_finish();
-                    return Ok(());
+        let partition_pruner = scanner.partition_pruner();
+        let mut candidates = scanner.build_stream().await?;
+        let stream_ctx = self.stream_ctx.clone();
+        let partition_ranges = self
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let semaphores = self.semaphores.clone();
+        Ok(Box::pin(try_stream! {
+            let mut chunked = false;
+            loop {
+                let mut series = Vec::new();
+                while series.len() < CANDIDATE_SERIES_THRESHOLD {
+                    let Some(batch) = candidates.try_next().await? else {
+                        break;
+                    };
+                    series.extend(batch);
                 }
-                collector =
-                    SeriesBatchCollector::new(self.partitions.len()).context(InvalidSenderSnafu)?;
+                if series.is_empty() {
+                    break;
+                }
+                chunked |= series.len() >= CANDIDATE_SERIES_THRESHOLD;
+                // Only a complete candidate set can use the series-data cache key.
+                // Drain this chunk before fetching more candidates so neither reader
+                // state nor candidate assignments accumulate across output partitions.
+                let reader = SeriesReader::try_new(
+                    stream_ctx.clone(),
+                    partition_ranges.clone(),
+                    series,
+                    !chunked,
+                    partition_pruner.clone(),
+                    semaphores.clone(),
+                    part_metrics.clone(),
+                )?;
+                let mut reader_stream = reader.build_stream().await?;
+                while let Some(batch) = reader_stream.try_next().await? {
+                    yield batch;
+                }
+                if !chunked {
+                    break;
+                }
             }
-        }
-
-        if collector.len() > 0 {
-            self.send_assignments(collector.finish(!chunked), &partition_pruner);
-        }
-        part_metrics.on_finish();
-        Ok(())
-    }
-
-    fn send_assignments(
-        &mut self,
-        assignments: Vec<AssignedSeriesBatch>,
-        partition_pruner: &Arc<PartitionPruner>,
-    ) {
-        for (partition, assigned_series) in assignments.into_iter().enumerate() {
-            if assigned_series.series().is_empty() {
-                continue;
-            }
-            let Some(sender) = self.senders[partition].as_ref() else {
-                continue;
-            };
-            let sent = sender
-                .send(Ok(SeriesReaderInput {
-                    assigned_series,
-                    partition_pruner: partition_pruner.clone(),
-                    range_semaphore: self.range_semaphore.clone(),
-                }))
-                .is_ok();
-            if !sent {
-                self.senders[partition] = None;
-            }
-        }
-    }
-
-    fn should_fetch_candidates(&self) -> bool {
-        self.active_receivers.load(Ordering::Relaxed) > 0
-    }
-
-    fn send_error(&mut self, error: Error) {
-        let error = Arc::new(error);
-        for sender in self.senders.iter_mut().filter_map(Option::take) {
-            let result = Err(error.clone()).context(ScanSeriesSnafu);
-            let _ = sender.send(result);
-        }
+            candidate_metrics.on_finish();
+        }))
     }
 }
 
@@ -1075,10 +884,13 @@ impl SenderList {
 
     async fn send_error(&self, error: Error) {
         let error = Arc::new(error);
-        for sender in self.senders.iter().flatten() {
+        // A full channel for an unpolled partition must not prevent other
+        // partitions from receiving the error.
+        futures::future::join_all(self.senders.iter().flatten().map(|sender| {
             let result = Err(error.clone()).context(ScanSeriesSnafu);
-            let _ = sender.send(result).await;
-        }
+            sender.send(result)
+        }))
+        .await;
     }
 
     fn fetch_add_sender_idx(&mut self) -> usize {
@@ -1268,16 +1080,19 @@ mod tests {
         assert!(SeriesScan::supports_two_phase(&exact_sequence));
     }
 
-    #[test]
-    fn candidate_distributor_stops_after_all_receivers_close() {
-        let (_senders, mut receivers, active_receivers) = new_candidate_channel_list(2);
-        assert_eq!(2, active_receivers.load(Ordering::Relaxed));
+    #[tokio::test]
+    async fn distributor_stops_after_all_receivers_close() {
+        let (senders, mut receivers) = new_channel_list(2);
+        let closed =
+            futures::future::join_all(senders.senders.iter().flatten().map(Sender::closed));
+        tokio::pin!(closed);
+        assert!(futures::poll!(&mut closed).is_pending());
 
         drop(receivers[0].take());
-        assert_eq!(1, active_receivers.load(Ordering::Relaxed));
+        assert!(futures::poll!(&mut closed).is_pending());
 
         drop(receivers[1].take());
-        assert_eq!(0, active_receivers.load(Ordering::Relaxed));
+        assert!(futures::poll!(&mut closed).is_ready());
     }
 
     fn new_test_record_batch(

@@ -49,131 +49,23 @@ use crate::sst::parquet::prefilter::prefilter_flat_batch_by_primary_key;
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
-const TSID_DOMAIN_END: u128 = 1u128 << u64::BITS;
-
-/// A stable partition of the TSID integer domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SeriesRange {
-    start: u128,
-    end: u128,
-}
-
-impl SeriesRange {
-    pub(crate) fn new(partition: usize, partitions: usize) -> Option<Self> {
-        if partitions == 0 || partition >= partitions {
-            return None;
-        }
-
-        let partitions = partitions as u128;
-        let partition = partition as u128;
-        let boundary = |partition: u128| {
-            let numerator = partition * TSID_DOMAIN_END;
-            numerator.div_ceil(partitions)
-        };
-        Some(Self {
-            start: boundary(partition),
-            end: boundary(partition + 1),
-        })
-    }
-
-    fn partition_for(tsid: u64, partitions: usize) -> usize {
-        ((tsid as u128 * partitions as u128) >> u64::BITS) as usize
-    }
-}
-
-/// All series assigned to one data-reader partition.
-#[derive(Debug)]
-pub(crate) struct AssignedSeriesBatch {
-    range: SeriesRange,
-    series: Vec<MetricSeriesId>,
-    enable_range_cache: bool,
-}
-
-impl AssignedSeriesBatch {
-    fn new(range: SeriesRange, series: Vec<MetricSeriesId>, enable_range_cache: bool) -> Self {
-        Self {
-            range,
-            series,
-            enable_range_cache,
-        }
-    }
-
-    pub(crate) fn range(&self) -> SeriesRange {
-        self.range
-    }
-
-    pub(crate) fn series(&self) -> &[MetricSeriesId] {
-        &self.series
-    }
-
-    pub(crate) fn enable_range_cache(&self) -> bool {
-        self.enable_range_cache
-    }
-}
-
-/// Collects candidate batches and assigns every TSID by its integer range.
-pub(crate) struct SeriesBatchCollector {
-    assignments: Vec<Vec<MetricSeriesId>>,
-    num_series: usize,
-}
-
-impl SeriesBatchCollector {
-    pub(crate) fn new(partitions: usize) -> Option<Self> {
-        (partitions > 0).then(|| Self {
-            assignments: (0..partitions).map(|_| Vec::new()).collect(),
-            num_series: 0,
-        })
-    }
-
-    pub(crate) fn push(&mut self, batch: Vec<MetricSeriesId>) {
-        self.num_series += batch.len();
-        let partitions = self.assignments.len();
-        for series in batch {
-            let partition = SeriesRange::partition_for(series.tsid, partitions);
-            self.assignments[partition].push(series);
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.num_series
-    }
-
-    pub(crate) fn finish(self, enable_range_cache: bool) -> Vec<AssignedSeriesBatch> {
-        let partitions = self.assignments.len();
-        self.assignments
-            .into_iter()
-            .enumerate()
-            .map(|(partition, series)| {
-                AssignedSeriesBatch::new(
-                    SeriesRange::new(partition, partitions).unwrap(),
-                    series,
-                    enable_range_cache,
-                )
-            })
-            .collect()
-    }
-}
-
-/// Immutable allow-list for one partition's metric series.
+/// Immutable allow-list for one chunk of candidate metric series.
 #[derive(Clone, Debug)]
 struct MetricSeriesFilter {
-    range: SeriesRange,
     series: Arc<HashSet<MetricSeriesId>>,
     sorted_series: Arc<Vec<MetricSeriesId>>,
     enable_range_cache: bool,
 }
 
 impl MetricSeriesFilter {
-    fn new(assigned: &AssignedSeriesBatch) -> Self {
-        let mut sorted_series = assigned.series().to_vec();
+    fn new(mut sorted_series: Vec<MetricSeriesId>, enable_range_cache: bool) -> Self {
         sorted_series.sort_unstable();
         sorted_series.dedup();
         let series = sorted_series.iter().copied().collect();
         Self {
-            range: assigned.range(),
             series: Arc::new(series),
             sorted_series: Arc::new(sorted_series),
-            enable_range_cache: assigned.enable_range_cache(),
+            enable_range_cache,
         }
     }
 
@@ -205,11 +97,12 @@ impl MetricSeriesFilter {
         if min > max {
             return None;
         }
-        if min_table_id != max_table_id {
-            return Some(true);
-        }
-
-        Some(u128::from(min_tsid) < self.range.end && u128::from(max_tsid) >= self.range.start)
+        let first = self.sorted_series.partition_point(|series| *series < min);
+        Some(
+            self.sorted_series
+                .get(first)
+                .is_some_and(|series| *series <= max),
+        )
     }
 }
 
@@ -257,33 +150,44 @@ fn filter_flat_stream_by_series(
     })
 }
 
-/// Reads all collected metric series assigned to one partition.
+/// Separate budgets for range work and buffered file-source reads.
+///
+/// Range builders and final merge tasks can wait for file-source output while
+/// holding a range permit, so file sources must use an independent pool.
+#[derive(Clone)]
+pub(crate) struct SeriesReadSemaphores {
+    pub(crate) range: Arc<Semaphore>,
+    pub(crate) file: Arc<Semaphore>,
+}
+
+/// Reads one chunk of candidate metric series across all partition ranges.
 pub(crate) struct SeriesReader {
     stream_ctx: Arc<StreamContext>,
     partition_ranges: Vec<PartitionRange>,
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
-    range_semaphore: Arc<Semaphore>,
+    semaphores: SeriesReadSemaphores,
     part_metrics: PartitionMetrics,
 }
 
 impl SeriesReader {
-    /// Creates a reader for the series assigned to one data partition.
+    /// Creates a reader for one chunk of candidate series.
     ///
     /// `partition_pruner` must come from the candidate scanner's pruner, which
     /// has predicate prefiltering disabled. The file read path applies precise
     /// filters with tag filtering skipped because candidate discovery has already
-    /// enforced tag predicates through the exact assigned-series set.
+    /// enforced tag predicates through the exact candidate-series set.
     ///
-    /// A single `range_semaphore` covers both the range-build phase and the final
-    /// merge.
+    /// Range building and final merging share a budget; file sources use a
+    /// separate budget so they can produce batches while a merge holds a permit.
     pub(crate) fn try_new(
         stream_ctx: Arc<StreamContext>,
         partition_ranges: Vec<PartitionRange>,
-        assigned_series: AssignedSeriesBatch,
+        series: Vec<MetricSeriesId>,
+        enable_range_cache: bool,
         partition_pruner: Arc<PartitionPruner>,
-        range_semaphore: Arc<Semaphore>,
+        semaphores: SeriesReadSemaphores,
         part_metrics: PartitionMetrics,
     ) -> Result<Self> {
         validate_metric_metadata(&stream_ctx)?;
@@ -296,7 +200,7 @@ impl SeriesReader {
             }
         );
 
-        let filter = MetricSeriesFilter::new(&assigned_series);
+        let filter = MetricSeriesFilter::new(series, enable_range_cache);
         let codec = SparsePrimaryKeyCodec::new(stream_ctx.input.region_metadata());
         Ok(Self {
             stream_ctx,
@@ -304,7 +208,7 @@ impl SeriesReader {
             filter,
             codec,
             partition_pruner,
-            range_semaphore,
+            semaphores,
             part_metrics,
         })
     }
@@ -320,7 +224,8 @@ impl SeriesReader {
             let filter = self.filter.clone();
             let codec = self.codec.clone();
             let partition_pruner = self.partition_pruner.clone();
-            let range_semaphore = self.range_semaphore.clone();
+            let range_semaphore = self.semaphores.range.clone();
+            let file_semaphore = self.semaphores.file.clone();
             let part_metrics = self.part_metrics.clone();
             tasks.push(common_runtime::spawn_query(async move {
                 let _permit = range_semaphore.acquire().await.map_err(|error| {
@@ -336,6 +241,7 @@ impl SeriesReader {
                     codec,
                     partition_pruner,
                     part_metrics,
+                    file_semaphore,
                 )
                 .await
             }));
@@ -355,7 +261,7 @@ impl SeriesReader {
         SeqScan::build_flat_reader_from_sources(
             &self.stream_ctx,
             range_streams,
-            Some(self.range_semaphore.clone()),
+            Some(self.semaphores.range.clone()),
             Some(&self.part_metrics),
             true,
             compute_parallel_channel_size(estimated_batch_size),
@@ -371,11 +277,11 @@ async fn build_series_partition_range(
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
     part_metrics: PartitionMetrics,
+    file_semaphore: Arc<Semaphore>,
 ) -> Result<(BoxedRecordBatchStream, usize)> {
-    let range = filter.range;
     let cache_key = filter
         .enable_range_cache
-        .then(|| build_series_range_cache_key(&stream_ctx, &part_range, range))
+        .then(|| build_series_range_cache_key(&stream_ctx, &part_range))
         .flatten();
     if let Some(key) = cache_key.as_ref() {
         if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
@@ -474,7 +380,7 @@ async fn build_series_partition_range(
     let stream = SeqScan::build_flat_reader_from_sources(
         &stream_ctx,
         sources,
-        None,
+        Some(file_semaphore),
         Some(&part_metrics),
         false,
         compute_parallel_channel_size(estimated_batch_size),
@@ -591,105 +497,12 @@ mod tests {
         MetricSeriesId { table_id, tsid }
     }
 
-    fn assigned_batch(
-        partitions: usize,
-        partition: usize,
-        series: Vec<MetricSeriesId>,
-    ) -> AssignedSeriesBatch {
-        let mut collector = SeriesBatchCollector::new(partitions).unwrap();
-        collector.push(series);
-        collector.finish(true).remove(partition)
-    }
-
-    #[test]
-    fn series_range_assignment_is_stable_across_batch_boundaries() {
-        let input = vec![
-            series(1, 0),
-            series(2, 1u64 << 62),
-            series(1, 1u64 << 63),
-            series(2, 3u64 << 62),
-            series(1, u64::MAX),
-            series(3, 0),
-        ];
-        let mut first = SeriesBatchCollector::new(4).unwrap();
-        first.push(input.clone());
-        let first = first.finish(true);
-
-        let mut second = SeriesBatchCollector::new(4).unwrap();
-        for chunk in input.chunks(2) {
-            second.push(chunk.to_vec());
-        }
-        let second = second.finish(true);
-
-        assert_eq!(
-            first
-                .iter()
-                .map(AssignedSeriesBatch::series)
-                .collect::<Vec<_>>(),
-            second
-                .iter()
-                .map(AssignedSeriesBatch::series)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(&[series(1, 0), series(3, 0)], first[0].series());
-        assert_eq!(&[series(2, 1u64 << 62)], first[1].series());
-        assert_eq!(
-            input.len(),
-            first
-                .iter()
-                .map(|batch| batch.series().len())
-                .sum::<usize>()
-        );
-    }
-
-    #[test]
-    fn collector_tracks_size_and_cache_policy() {
-        let mut collector = SeriesBatchCollector::new(2).unwrap();
-        collector.push(vec![series(1, 1), series(1, u64::MAX)]);
-        collector.push(vec![series(2, 2)]);
-        assert_eq!(3, collector.len());
-
-        let assignments = collector.finish(false);
-        assert_eq!(
-            3,
-            assignments
-                .iter()
-                .map(|batch| batch.series().len())
-                .sum::<usize>()
-        );
-        assert!(assignments.iter().all(|batch| !batch.enable_range_cache()));
-    }
-
-    #[test]
-    fn series_ranges_cover_the_tsid_domain() {
-        let ranges = (0..3)
-            .map(|partition| SeriesRange::new(partition, 3).unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(0, ranges[0].start);
-        assert_eq!(TSID_DOMAIN_END, ranges[2].end);
-        assert_eq!(ranges[0].end, ranges[1].start);
-        assert_eq!(ranges[1].end, ranges[2].start);
-        assert_eq!(0, SeriesRange::partition_for(0, 3));
-        assert_eq!(2, SeriesRange::partition_for(u64::MAX, 3));
-
-        for (partition, range) in ranges.iter().enumerate() {
-            assert_eq!(partition, SeriesRange::partition_for(range.start as u64, 3));
-            if range.end < TSID_DOMAIN_END {
-                assert_eq!(
-                    partition + 1,
-                    SeriesRange::partition_for(range.end as u64, 3)
-                );
-            }
-        }
-    }
-
     #[test]
     fn metric_series_filter_matches_encoded_primary_key() {
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let assigned = assigned_batch(1, 0, vec![series(1, 10), series(2, 20)]);
-        let filter = MetricSeriesFilter::new(&assigned);
+        let filter = MetricSeriesFilter::new(vec![series(1, 10), series(2, 20)], true);
         let codec = SparsePrimaryKeyCodec::new(&metadata);
         let mut primary_key_filter = filter.primary_key_filter(codec);
 
@@ -729,17 +542,23 @@ mod tests {
     }
 
     #[test]
-    fn series_range_overlaps_single_table_primary_key_bounds() {
+    fn series_filter_overlaps_single_table_primary_key_bounds() {
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let assigned = assigned_batch(2, 0, vec![series(1, 10), series(2, 20)]);
-        let filter = MetricSeriesFilter::new(&assigned);
+        let filter = MetricSeriesFilter::new(vec![series(1, 10), series(2, 20)], true);
         let codec = SparsePrimaryKeyCodec::new(&metadata);
 
-        // The full assigned range overlaps even though the actual candidate bounds do not.
         assert_eq!(
             Some(true),
+            filter.overlaps_encoded_bounds(
+                &codec,
+                &encode_series(&metadata, 1, 0),
+                &encode_series(&metadata, 1, 10),
+            )
+        );
+        assert_eq!(
+            Some(false),
             filter.overlaps_encoded_bounds(
                 &codec,
                 &encode_series(&metadata, 1, 100),
@@ -755,7 +574,7 @@ mod tests {
             )
         );
         assert_eq!(
-            Some(true),
+            Some(false),
             filter.overlaps_encoded_bounds(
                 &codec,
                 &encode_series(&metadata, 3, 10),
@@ -765,12 +584,11 @@ mod tests {
     }
 
     #[test]
-    fn series_range_keeps_multiple_table_primary_key_bounds() {
+    fn series_filter_overlaps_multiple_table_primary_key_bounds() {
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let assigned = assigned_batch(2, 0, vec![series(1, 10), series(2, 20)]);
-        let filter = MetricSeriesFilter::new(&assigned);
+        let filter = MetricSeriesFilter::new(vec![series(1, 10), series(2, 20)], true);
         let codec = SparsePrimaryKeyCodec::new(&metadata);
 
         assert_eq!(
@@ -788,8 +606,7 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata_with_encoding(
             PrimaryKeyEncoding::Sparse,
         ));
-        let assigned = assigned_batch(2, 0, vec![series(1, 10)]);
-        let filter = MetricSeriesFilter::new(&assigned);
+        let filter = MetricSeriesFilter::new(vec![series(1, 10)], true);
         let codec = SparsePrimaryKeyCodec::new(&metadata);
 
         assert_eq!(
