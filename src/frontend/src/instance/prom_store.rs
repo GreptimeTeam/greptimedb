@@ -403,7 +403,8 @@ impl Instance {
     }
 
     /// Filters automatically discovered targets: returns false for tables denied
-    /// by Remote Read ACLs or marked as internal physical tables.
+    /// by Remote Read ACLs or marked as Metric Engine physical tables via
+    /// `physical_metric_table`. Ordinary Mito tables are not excluded by this check.
     /// Other errors propagate. Explicit EQ targets bypass this filter.
     async fn is_visible_remote_read_target(
         &self,

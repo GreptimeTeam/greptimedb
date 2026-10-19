@@ -799,7 +799,7 @@ mod tests {
             r#type: op as i32,
         };
         let name = |op, value| matcher(prom_store::METRIC_NAME_LABEL, op, value);
-        let cases = vec![
+        let cases = [
             (
                 vec![name(MatcherType::Re, "cpu|memory")],
                 vec!["cpu", "memory"],
