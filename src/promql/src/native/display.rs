@@ -1,0 +1,295 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! One line per node of a [`NativeTree`].
+//!
+//! The position a node is shown at is derived by [`metrics::walk`], the same traversal that names
+//! the node's metrics, so a node cannot be shown at one place and measured at another. The
+//! display is an observation of a compiled tree: it runs nothing, and a node whose operation has
+//! no executor says so instead of reading like an operation that will happen.
+
+use std::fmt::{self, Write};
+use std::sync::Arc;
+
+use datatypes::series::SeriesOrdering;
+use datatypes::series::time::EvalGrid;
+
+use crate::map::MathOp;
+use crate::native::metrics::{self, NodePath};
+use crate::native::plan::{
+    AggregateKind, AggregateStage, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+};
+use crate::range_eval::RangeFunction;
+use crate::vector_match::{BinaryOp, Cardinality, MatchingLabels};
+
+/// The header line of every tree.
+const HEADER: &str = "NativeTree";
+
+/// What a node without an executor is marked with, so its line does not read like a run.
+const NO_EXECUTOR: &str = " (no executor)";
+
+/// How deep `path` is: the root is at depth zero, its input at one.
+fn depth(path: &NodePath) -> usize {
+    path.as_str().matches('.').count()
+}
+
+/// The last segment of `path`, which is the name of the node in its parent.
+fn name(path: &NodePath) -> &str {
+    // `NodePath` only ever appends `.segment`, so the last segment is never empty.
+    path.as_str().rsplit('.').next().unwrap_or(path.as_str())
+}
+
+/// A grid as `<start>/<step>x<len>`.
+fn grid_name(grid: &EvalGrid) -> String {
+    let spec = grid.spec();
+    format!(
+        "{}/{step}x{len}",
+        spec.start_ms,
+        step = spec.step_ms,
+        len = spec.len
+    )
+}
+
+/// A label list in the order it was bound.
+fn label_list(labels: &[Arc<str>]) -> String {
+    labels
+        .iter()
+        .map(|label| label.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The ordering an input guarantees, when it is weaker than the scan's default.
+fn ordering(ordering: SeriesOrdering) -> &'static str {
+    // `KeyThenTime` is what a scan that orders anything at all provides, so it is the
+    // uninteresting case; a weaker guarantee is what a consumer has to know about.
+    match ordering {
+        SeriesOrdering::KeyThenTime => "",
+        SeriesOrdering::Contiguous => ", contiguous",
+        SeriesOrdering::Interleaved => ", interleaved",
+    }
+}
+
+/// The operation a node computes, in the words of the query that produced it.
+fn describe(node: &NativeNode) -> String {
+    match &node.expr {
+        NativeExpr::Input(input) => match &input.output {
+            NativeType::Samples(schema) if schema.eval_grid.is_some() => {
+                format!("evaluated samples{}", ordering(input.ordering))
+            }
+            NativeType::Samples(_) => format!("raw samples{}", ordering(input.ordering)),
+            NativeType::Scalar(grid) => format!("scalar on grid {}", grid_name(grid)),
+            NativeType::AggregateState(_) => "aggregate state".to_string(),
+        },
+        NativeExpr::Scalar(scalar) => scalar.value.to_string(),
+        NativeExpr::Instant { op, .. } => format!(
+            "lookback {}ms offset {} on grid {}",
+            op.lookback_ms,
+            op.offset_ms,
+            grid_name(&op.output_grid)
+        ),
+        NativeExpr::Window { op, .. } => window(op),
+        NativeExpr::Map { op, .. } => {
+            let ops: Vec<String> = op.ops.iter().map(math_op).collect();
+            ops.join(", ")
+        }
+        NativeExpr::Aggregate { op, .. } => format!(
+            "{} by [{}] {}",
+            match op.kind {
+                AggregateKind::Sum => "sum",
+            },
+            label_list(&op.group),
+            match op.stage {
+                AggregateStage::Complete => "complete",
+                AggregateStage::Partial => "partial",
+                AggregateStage::Final => "final",
+            }
+        ),
+        NativeExpr::Binary { matching, .. } => format!(
+            "{}{} {} {}",
+            binary_op(matching.op),
+            if matching.return_bool { " bool" } else { "" },
+            match &matching.labels {
+                MatchingLabels::On(labels) => format!("on [{}]", label_list(labels)),
+                MatchingLabels::Ignoring(labels) => format!("ignoring [{}]", label_list(labels)),
+            },
+            match &matching.cardinality {
+                Cardinality::OneToOne => "one-to-one".to_string(),
+                Cardinality::ManyToOne(labels) => format!("many-to-one [{}]", label_list(labels)),
+                Cardinality::OneToMany(labels) => format!("one-to-many [{}]", label_list(labels)),
+            }
+        ),
+    }
+}
+
+/// A window: what it runs, over which range, and where it lands.
+fn window(op: &BoundWindow) -> String {
+    format!(
+        "{} [{}ms] offset {} anchor {} on grid {}",
+        function(op.function),
+        op.window.range_ms,
+        op.window.offset_ms,
+        match op.window.anchor_ms {
+            Some(anchor_ms) => anchor_ms.to_string(),
+            None => "-".to_string(),
+        },
+        grid_name(&op.output_grid)
+    )
+}
+
+/// The PromQL name of a range function, with the constant argument it was bound to.
+fn function(function: RangeFunction) -> String {
+    match function {
+        RangeFunction::Rate => "rate".to_string(),
+        RangeFunction::Increase => "increase".to_string(),
+        RangeFunction::Delta => "delta".to_string(),
+        RangeFunction::Irate => "irate".to_string(),
+        RangeFunction::Idelta => "idelta".to_string(),
+        RangeFunction::AvgOverTime => "avg_over_time".to_string(),
+        RangeFunction::MinOverTime => "min_over_time".to_string(),
+        RangeFunction::MaxOverTime => "max_over_time".to_string(),
+        RangeFunction::SumOverTime => "sum_over_time".to_string(),
+        RangeFunction::CountOverTime => "count_over_time".to_string(),
+        RangeFunction::LastOverTime => "last_over_time".to_string(),
+        RangeFunction::PresentOverTime => "present_over_time".to_string(),
+        RangeFunction::StddevOverTime => "stddev_over_time".to_string(),
+        RangeFunction::StdvarOverTime => "stdvar_over_time".to_string(),
+        RangeFunction::QuantileOverTime(quantile) => format!("quantile_over_time {quantile}"),
+        RangeFunction::Resets => "resets".to_string(),
+        RangeFunction::Changes => "changes".to_string(),
+        RangeFunction::Deriv => "deriv".to_string(),
+        RangeFunction::PredictLinear(seconds) => format!("predict_linear {seconds}"),
+        RangeFunction::DoubleExponentialSmoothing { smoothing, trend } => {
+            format!("double_exponential_smoothing {smoothing} {trend}")
+        }
+        RangeFunction::FirstOverTime => "first_over_time".to_string(),
+        RangeFunction::MadOverTime => "mad_over_time".to_string(),
+        RangeFunction::TsOfFirstOverTime => "ts_of_first_over_time".to_string(),
+        RangeFunction::TsOfLastOverTime => "ts_of_last_over_time".to_string(),
+        RangeFunction::TsOfMinOverTime => "ts_of_min_over_time".to_string(),
+        RangeFunction::TsOfMaxOverTime => "ts_of_max_over_time".to_string(),
+    }
+}
+
+/// The PromQL name of a point-wise operation, with the constant arguments it was bound to.
+fn math_op(op: &MathOp) -> String {
+    match op {
+        MathOp::Abs => "abs".to_string(),
+        MathOp::Ceil => "ceil".to_string(),
+        MathOp::Floor => "floor".to_string(),
+        MathOp::Sqrt => "sqrt".to_string(),
+        MathOp::Round { nearest } => format!("round {nearest}"),
+        MathOp::Exp => "exp".to_string(),
+        MathOp::Ln => "ln".to_string(),
+        MathOp::Log2 => "log2".to_string(),
+        MathOp::Log10 => "log10".to_string(),
+        MathOp::Sin => "sin".to_string(),
+        MathOp::Cos => "cos".to_string(),
+        MathOp::Tan => "tan".to_string(),
+        MathOp::Asin => "asin".to_string(),
+        MathOp::Acos => "acos".to_string(),
+        MathOp::Atan => "atan".to_string(),
+        MathOp::Sinh => "sinh".to_string(),
+        MathOp::Cosh => "cosh".to_string(),
+        MathOp::Tanh => "tanh".to_string(),
+        MathOp::Asinh => "asinh".to_string(),
+        MathOp::Acosh => "acosh".to_string(),
+        MathOp::Atanh => "atanh".to_string(),
+        MathOp::Deg => "deg".to_string(),
+        MathOp::Rad => "rad".to_string(),
+        MathOp::Sgn => "sgn".to_string(),
+        MathOp::Clamp { min, max } => format!("clamp {min} {max}"),
+        MathOp::ClampMin { min } => format!("clamp_min {min}"),
+        MathOp::ClampMax { max } => format!("clamp_max {max}"),
+    }
+}
+
+/// The PromQL symbol of a binary operator.
+fn binary_op(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Pow => "^",
+        BinaryOp::Atan2 => "atan2",
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Lt => "<",
+        BinaryOp::Ge => ">=",
+        BinaryOp::Le => "<=",
+    }
+}
+
+/// What kind of node this is, as its line names it.
+fn kind(expr: &NativeExpr) -> &'static str {
+    match expr {
+        NativeExpr::Input(_) => "Input",
+        NativeExpr::Scalar(_) => "Scalar",
+        NativeExpr::Instant { .. } => "Instant",
+        NativeExpr::Window { .. } => "Window",
+        NativeExpr::Map { .. } => "Map",
+        NativeExpr::Aggregate { .. } => "Aggregate",
+        NativeExpr::Binary { .. } => "Binary",
+    }
+}
+
+/// Whether the node's operation has an executor, so its line may read like something that runs.
+fn has_executor(expr: &NativeExpr) -> bool {
+    matches!(
+        expr,
+        NativeExpr::Input(_) | NativeExpr::Window { .. } | NativeExpr::Map { .. }
+    )
+}
+
+/// The line a node is shown as, without its indentation.
+fn line(node: &NativeNode, path: &NodePath) -> String {
+    format!(
+        "{} {} {}{}",
+        name(path),
+        kind(&node.expr),
+        describe(node),
+        if has_executor(&node.expr) {
+            ""
+        } else {
+            NO_EXECUTOR
+        }
+    )
+}
+
+impl fmt::Display for NativeTree {
+    /// One line per node, outermost first, indented two spaces per depth below the header.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(HEADER)?;
+        let mut lines = Vec::new();
+        metrics::walk(self.root(), &mut |node, path| {
+            lines.push((depth(path), line(node, path)));
+        });
+        for (depth, line) in lines {
+            f.write_char('\n')?;
+            // The root sits one level in from the header, and each input one level below its
+            // consumer, so the shape of the tree is the shape of the output.
+            for _ in 0..depth + 1 {
+                f.write_str("  ")?;
+            }
+            f.write_str(&line)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;
