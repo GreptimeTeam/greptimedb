@@ -2551,6 +2551,86 @@ fn a_map_chain_yielding_no_value_keeps_progress_and_the_closing_chunk() {
     );
 }
 
+/// A chunk reaching backwards is refused before anything is stored: the samples of one series are
+/// kept in arrival order and read back by binary search, so an out-of-order one would make that
+/// search stop at the wrong sample and report a wrong value with no error to show for it. A chunk
+/// starting *past* the end is a different matter and is accepted -- see
+/// [`a_series_may_begin_past_the_first_position_of_its_grid`], and the same holds mid-series.
+#[test]
+fn a_chunk_reaching_backwards_is_refused() {
+    let grid = grid(0, 10, 5);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid.clone()),
+    });
+    let mut consumer = RangeEvaluator::try_new(
+        &schema,
+        grid.clone(),
+        last_window(10),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    consumer
+        .push_evaluated(&evaluated_chunk(
+            &schema,
+            0,
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            false,
+        ))
+        .expect("the first chunk opens the series");
+
+    // Starts at 2, behind the position 3 the series reached.
+    let backwards = evaluated_chunk(&schema, 2, vec![Some(9.0)], true);
+    let error = consumer
+        .push_evaluated(&backwards)
+        .expect_err("a chunk behind the reached position is out of order");
+    assert!(
+        matches!(error, DataFusionError::Execution(_)),
+        "not an execution error: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("2 starts behind 3"),
+        "the message does not name both positions: {message}"
+    );
+}
+
+/// A gap in the middle of a series is accepted, exactly like one at the head: the positions it
+/// jumps over hold no sample, and a window over them takes none.
+#[test]
+fn a_gap_in_the_middle_of_a_series_is_accepted() {
+    let grid = grid(0, 10, 5);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid.clone()),
+    });
+    let mut consumer = RangeEvaluator::try_new(
+        &schema,
+        grid.clone(),
+        last_window(10),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    let mut handed_out = consumer
+        .push_evaluated(&evaluated_chunk(
+            &schema,
+            0,
+            vec![Some(1.0), Some(2.0)],
+            false,
+        ))
+        .unwrap();
+    assert!(handed_out.is_some(), "the first chunk decides a point");
+    // Jumps over positions 2 and 3.
+    handed_out = consumer
+        .push_evaluated(&evaluated_chunk(&schema, 4, vec![Some(9.0)], true))
+        .expect("a gap holds no sample, so the chunk is not out of order");
+    assert!(
+        handed_out.is_some_and(|chunk| chunk.is_last),
+        "the closing chunk is lost"
+    );
+    consumer.finish().expect("the series closed");
+}
+
 /// A position no chunk covers reads exactly like one whose chunk carries a missing value: both say
 /// there is no sample there, so a window over either takes no sample. The consumer does not ask
 /// which of the two it was given, and reports the position as decided either way rather than

@@ -264,6 +264,13 @@ struct SeriesState {
     primary_key: Option<Buffer>,
     metric: MetricName,
     last_ts: i64,
+    /// Grid index one past the last position any chunk of this series covered.
+    ///
+    /// A later chunk must not start behind it: the samples of one series are stored in the order
+    /// they arrive and read back by binary search, so a chunk reaching backwards would store
+    /// timestamps out of order and the search would stop at the wrong one -- a wrong value, with no
+    /// error. A chunk starting *past* it is fine: the positions it jumps over hold no sample.
+    reached_end: usize,
     /// Next grid index to evaluate.
     cursor: usize,
     /// Grid index after the last position the evaluator has decided, whether it holds a value or
@@ -574,7 +581,9 @@ impl RangeEvaluator {
     /// The first chunk opens the series with its labels and the one marked `is_last` closes it. The
     /// chunks need not tile the input grid: a position no chunk covers holds no sample, which is
     /// the same state as a position whose chunk carries a missing value, so the positions a chunk
-    /// jumps over are simply reported as decided without a sample.
+    /// jumps over are simply reported as decided without a sample. They may not reach *backwards*,
+    /// though: this series' samples are stored in arrival order and read back by binary search, so
+    /// a chunk starting behind where the previous one ended is refused.
     ///
     /// A chunk reports the positions it decided, whether they hold a value or not, so a position
     /// an inner evaluation settled without a result crosses this layer too; as on the raw path,
@@ -623,18 +632,34 @@ impl RangeEvaluator {
                 primary_key: None,
                 metric: chunk.series.metric.clone(),
                 last_ts: 0,
+                reached_end: 0,
                 cursor: 0,
                 completed: 0,
                 emitted_end: 0,
             });
         }
-        // The first position this chunk does not carry. Chunks tile the input grid and samples sit
-        // on its timestamps, so the next sample can only arrive there.
+        // The first position this chunk does not carry. Samples sit on grid timestamps, so no
+        // sample can arrive before it -- whether or not a later chunk ever covers it.
         let input_end = range.start() + range.len();
+        // Before anything is stored: a chunk reaching backwards would leave this series' samples
+        // out of order, and `evaluate` reads them back by binary search.
+        if let Some(state) = &self.series
+            && range.start() < state.reached_end
+        {
+            return Err(DataFusionError::Execution(format!(
+                "evaluated chunks are out of order: {} starts behind {}",
+                range.start(),
+                state.reached_end
+            )));
+        }
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
+        // Advanced only now: `ingest` may fail on a sample it cannot shift or convert.
+        if let Some(state) = self.series.as_mut() {
+            state.reached_end = state.reached_end.max(input_end);
+        }
         if !chunk.is_last {
             // A point is decided once no sample that can still arrive falls in its window, and the
-            // next sample can only sit at `grid[input_end]`. `ready` is inclusive and in the
+            // next sample cannot arrive before `grid[input_end]`. `ready` is inclusive and in the
             // shifted sample domain, so it is that boundary shifted by the offset, minus one: a
             // point at the boundary itself still reads a sample arriving there. At the end of the
             // input grid no sample can follow at all, which is what `None` means.
@@ -749,6 +774,7 @@ impl RangeEvaluator {
                     primary_key: Some(chunk.primary_key.clone()),
                     metric,
                     last_ts: time[time.len() - 1],
+                    reached_end: 0,
                     cursor: 0,
                     completed: 0,
                     emitted_end: 0,
