@@ -154,3 +154,8 @@ required-features = ["testing"]
 name = "bench_dense_index_update"
 harness = false
 required-features = ["testing"]
+
+[[bench]]
+name = "bench_compaction_merge"
+harness = false
+required-features = ["test"]
