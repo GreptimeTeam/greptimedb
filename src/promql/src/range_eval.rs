@@ -472,8 +472,6 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    /// Retains the samples of `fields` at `timestamps`. From `raw` input a row holding a stale
-    /// marker in any field is dropped; evaluated input keeps it as a value.
     /// Appends the chunk in bulk when every field is an entirely present, unshifted float column.
     ///
     /// Returns `false` when any condition of the per-sample path applies, so the caller can run
@@ -488,17 +486,19 @@ impl RangeEvaluator {
         timestamps: &[i64],
         fields: &SeriesFields,
         drop_stale: bool,
-    ) -> Result<bool> {
-        if self.window.offset_ms != 0 || fields.len() != self.fields.len() {
-            return Ok(false);
+    ) -> bool {
+        // Lengths are checked by `check_chunk` for raw input and by `push_series` for evaluated
+        // input, so only the shape of the columns is decided here.
+        if self.window.offset_ms != 0 {
+            return false;
         }
         let mut columns = Vec::with_capacity(fields.len());
         for field in fields.iter() {
             let Some(DenseSamplesRef::Float(values)) = field.dense() else {
-                return Ok(false);
+                return false;
             };
-            if values.len() != timestamps.len() || values.null_count() != 0 {
-                return Ok(false);
+            if values.null_count() != 0 {
+                return false;
             }
             columns.push(values);
         }
@@ -513,7 +513,7 @@ impl RangeEvaluator {
                     .any(|value| is_prometheus_stale_nan(*value))
             })
         {
-            return Ok(false);
+            return false;
         }
         for (field, values) in self.fields.iter_mut().zip(columns) {
             field.push_bulk(timestamps, values.values());
@@ -522,11 +522,13 @@ impl RangeEvaluator {
         {
             self.bulk_ingests += 1;
         }
-        Ok(true)
+        true
     }
 
+    /// Retains the samples of `fields` at `timestamps`. From `raw` input a row holding a stale
+    /// marker in any field is dropped; evaluated input keeps it as a value.
     fn ingest(&mut self, timestamps: &[i64], fields: &SeriesFields, raw: bool) -> Result<()> {
-        if self.ingest_in_bulk(timestamps, fields, raw)? {
+        if self.ingest_in_bulk(timestamps, fields, raw) {
             return Ok(());
         }
         let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();

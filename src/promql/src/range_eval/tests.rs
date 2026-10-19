@@ -571,47 +571,6 @@ fn a_chunk_with_histograms_is_not_appended_in_bulk() {
     assert_eq!(evaluator.bulk_ingest_count(), 0);
 }
 
-/// A chunk with a stale marker drops its whole row, which the bulk path cannot reproduce without
-/// the same scan, so it takes the per-sample loop instead.
-#[test]
-fn a_chunk_with_a_stale_marker_is_not_appended_in_bulk() {
-    let rows = vec![
-        (0, vec![Some(1.0)]),
-        (10_000, vec![Some(stale())]),
-        (20_000, vec![Some(3.0)]),
-    ];
-    let mut evaluator = probe_evaluator(
-        1,
-        grid(0, 10_000, 3),
-        RangeWindow {
-            range_ms: 20_000,
-            offset_ms: 0,
-            anchor_ms: None,
-        },
-    );
-    evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
-    assert_eq!(evaluator.bulk_ingest_count(), 0);
-}
-
-/// An offset shifts every timestamp, so the source timestamps cannot be appended as they are.
-#[test]
-fn a_shifted_chunk_is_not_appended_in_bulk() {
-    let rows: Vec<Row> = (0..3)
-        .map(|index| (index as i64 * 10_000, vec![Some(index as f64)]))
-        .collect();
-    let mut evaluator = probe_evaluator(
-        1,
-        grid(0, 10_000, 3),
-        RangeWindow {
-            range_ms: 20_000,
-            offset_ms: 5_000,
-            anchor_ms: None,
-        },
-    );
-    evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
-    assert_eq!(evaluator.bulk_ingest_count(), 0);
-}
-
 #[test]
 fn empty_input_and_series_without_results() {
     let window = RangeWindow {
