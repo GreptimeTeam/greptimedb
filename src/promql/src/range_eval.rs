@@ -162,6 +162,11 @@ pub struct RangeEvaluator {
     /// so a test comparing only output could not tell which one ran.
     #[cfg(test)]
     batch_calls: usize,
+    /// Grid points examined so far to find the end of a decided run in the tail of a round.
+    /// Test-only: a search and the walk it replaced find the same end, so a test comparing only
+    /// the pieces could not tell how much of the grid a round touched.
+    #[cfg(test)]
+    decided_scans: usize,
 }
 
 /// Windows accumulated for the next batch call: one list per field.
@@ -548,6 +553,8 @@ impl RangeEvaluator {
             pull_budget: usize::MAX,
             #[cfg(test)]
             batch_calls: 0,
+            #[cfg(test)]
+            decided_scans: 0,
         })
     }
 
@@ -564,6 +571,13 @@ impl RangeEvaluator {
     #[cfg(test)]
     pub(crate) fn batch_call_count(&self) -> usize {
         self.batch_calls
+    }
+
+    /// Grid points examined so far to find the end of a decided run. Test-only: any search finds
+    /// the same end as the walk it replaced, so only a count can tell the two apart.
+    #[cfg(test)]
+    pub(crate) fn decided_scan_count(&self) -> usize {
+        self.decided_scans
     }
 
     /// Schema of the evaluated series: the input fields on the evaluation grid.
@@ -1238,14 +1252,20 @@ impl RangeEvaluator {
         let completed = if empty_tail {
             match self.replay {
                 Replay::PerPoint => {
-                    let mut decided = state.cursor;
-                    if let Some(ready) = ready {
-                        while decided < points_read && i128::from(grid[decided]) <= ready {
-                            decided += 1;
+                    let decided = match ready {
+                        Some(ready) => {
+                            state.cursor
+                                + settled_run(
+                                    grid,
+                                    state.cursor,
+                                    points_read,
+                                    ready,
+                                    #[cfg(test)]
+                                    &mut self.decided_scans,
+                                )
                         }
-                    } else {
-                        decided = points_read;
-                    }
+                        None => points_read,
+                    };
                     // A bounded round reports at most its budget of these settled points; the rest
                     // are decided by the pieces that follow. Later rounds start from here either
                     // way, and none of these points can gain a value, so the cursor may skip them.
@@ -1356,6 +1376,39 @@ impl RowEvaluator<'_> {
 /// would let a bounded consumer pull a whole dense span at once.
 fn zero_budget() -> DataFusionError {
     DataFusionError::Execution("a pull budget must be positive, got 0".into())
+}
+
+/// The number of leading grid points from `start` up to `end` whose timestamp is at or before
+/// `bound`: the run of points a round settles without evaluating them.
+///
+/// The grid is sorted, so the run ends where a search puts it. Walking to that end instead costs a
+/// step per point, and a bounded round would pay the whole distance to the bound on every piece
+/// rather than the rows it reports: the piece that follows restarts at the cursor and walks to the
+/// same far end again.
+fn settled_run(
+    grid: &[i64],
+    start: usize,
+    end: usize,
+    bound: i128,
+    #[cfg(test)] scans: &mut usize,
+) -> usize {
+    // An empty span settles nothing, as a walk over it would: the caller's cursor can sit at the
+    // end of what the input is read for.
+    let settled = grid.get(start..end).unwrap_or(&[]);
+    #[cfg(test)]
+    let mut examined = 0;
+    let run = settled.partition_point(|&timestamp| {
+        #[cfg(test)]
+        {
+            examined += 1;
+        }
+        i128::from(timestamp) <= bound
+    });
+    #[cfg(test)]
+    {
+        *scans += examined;
+    }
+    run
 }
 
 /// The offset samples are shifted by: the selector offset, or for `@` the offset that places

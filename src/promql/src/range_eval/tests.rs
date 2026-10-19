@@ -217,14 +217,6 @@ fn collect_chunks(
         .collect()
 }
 
-/// Feeds one whole evaluated series to the chunked entry point as its single closing chunk.
-impl RangeEvaluator {
-    fn push_series(&mut self, series: &Series) -> Result<Option<EvaluatedChunk>, DataFusionError> {
-        let chunk = EvaluatedChunk::try_new(series.clone(), true)?;
-        self.push_evaluated(&chunk)
-    }
-}
-
 /// Folds the chunks of one series back into one series, the way a consumer that keeps every value
 /// would, and checks the chunk protocol: absolute ranges, never going backwards, all of the same
 /// series, and one closing chunk last.
@@ -1084,6 +1076,64 @@ fn the_pieces_of_one_series_fold_back_to_the_whole_series() {
         assert_series_eq(Some(&folded), &expected, &metric(0));
         evaluator.finish().unwrap();
     }
+}
+
+/// A bounded round ends by reporting, one budget at a time, the run of points the input has
+/// settled without a value. Finding the end of that run must not walk the distance to the end of
+/// the input's bound on every piece: doing so costs about `LEN²/(2 · budget)` comparisons for a
+/// tail of `LEN` settled points, and this test fails if that repeating scan comes back. It does
+/// not pin a particular search, only that each round's scan stays far below the distance to the
+/// bound.
+///
+/// A stale marker is what makes the run long and cheap to find: it moves the bound to the last
+/// grid point, but it is dropped on the raw path, so every point behind the value at the first one
+/// is decided to hold nothing, and no window ever needs a sample again.
+#[test]
+fn a_bounded_round_does_not_walk_the_settled_tail() {
+    const BUDGET: usize = 64;
+    const LEN: usize = 4_096;
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, LEN as u64), window);
+    evaluator.set_pull_budget(BUDGET).unwrap();
+    let last = 10 * (LEN as i64 - 1);
+    let rows = chunk(
+        &[(0, vec![Some(1.0)]), (last, vec![Some(stale())])],
+        1,
+        0,
+        false,
+    );
+
+    // Every piece with the number of grid points its round examined to find the end of the run.
+    let mut rounds = Vec::new();
+    let mut next = evaluator.push(&rows).unwrap();
+    while let Some(piece) = next {
+        rounds.push((
+            piece.range().start(),
+            piece.range().len(),
+            evaluator.decided_scan_count(),
+        ));
+        next = evaluator.pull(BUDGET).unwrap();
+    }
+
+    // The pieces tile the span, so no point is reported twice and none is skipped, and the work of
+    // no round re-walks the settled tail it already reported past.
+    let mut end = 0;
+    let mut examined = 0;
+    for (index, &(start, len, scanned)) in rounds.iter().enumerate() {
+        let round = scanned - examined;
+        examined = scanned;
+        assert_eq!(start, end, "piece {index} does not continue the span");
+        assert!(
+            round <= 4 * len + 64,
+            "the round of piece {index} examined {round} grid points to report {len} rows"
+        );
+        end += len;
+    }
+    assert_eq!(end, LEN, "the pieces cover every point the input settled");
 }
 
 /// The remaining span of a closed series is handed out by pulling, and the series closes exactly
