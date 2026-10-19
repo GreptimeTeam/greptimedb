@@ -69,325 +69,223 @@ use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
-struct RemoteQueryOutput {
-    table_name: String,
-    timestamp_column_name: String,
-    value_column_name: String,
-    output: Output,
+/// This handler is mainly used for `frontend` or `standalone` to directly import
+/// the metrics collected by itself, thereby avoiding importing metrics through the network,
+/// thus reducing compression and network transmission overhead,
+/// so only implement `PromStoreProtocolHandler::write` method.
+pub struct ExportMetricHandler {
+    inserter: InserterRef,
+    statement_executor: Arc<StatementExecutor>,
 }
 
-fn auto_create_table_type_for_prom_remote_write(
-    ctx: &QueryContextRef,
-    with_metric_engine: bool,
-) -> AutoCreateTableType {
-    if with_metric_engine {
-        let physical_table = ctx
-            .extension(PHYSICAL_TABLE_PARAM)
-            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-            .to_string();
-        AutoCreateTableType::Logical(physical_table)
-    } else {
-        AutoCreateTableType::Physical
+impl ExportMetricHandler {
+    pub fn new_handler(
+        inserter: InserterRef,
+        statement_executor: Arc<StatementExecutor>,
+    ) -> PromStoreProtocolHandlerRef {
+        Arc::new(Self {
+            inserter,
+            statement_executor,
+        })
     }
 }
 
-fn required_physical_table_for_create_type(create_type: &AutoCreateTableType) -> Option<&str> {
-    match create_type {
-        AutoCreateTableType::Logical(physical_table) => Some(physical_table.as_str()),
-        _ => None,
-    }
-}
-
-fn fill_metric_physical_table_options(table_options: &mut HashMap<String, String>) {
-    // We always enforce flat format in this ingestion path.
-    table_options.insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
-    table_options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
-}
-
-#[inline]
-fn is_supported(response_type: i32) -> bool {
-    // Only supports samples response right now
-    response_type == SAMPLES_RESPONSE_TYPE
-}
-
-/// Negotiating the content type of the remote read response.
-///
-/// Response types are taken from the list in the FIFO order. If no response type in `accepted_response_types` is
-/// implemented by server, error is returned.
-/// For request that do not contain `accepted_response_types` field the SAMPLES response type will be used.
-fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<ResponseType> {
-    if accepted_response_types.is_empty() {
-        return Ok(ResponseType::Samples);
-    }
-
-    let response_type = accepted_response_types
-        .iter()
-        .find(|t| is_supported(**t))
-        .with_context(|| error::NotSupportedSnafu {
-            feat: format!(
-                "server does not support any of the requested response types: {accepted_response_types:?}",
-            ),
-        })?;
-
-    // It's safe to unwrap here, we known that it should be SAMPLES_RESPONSE_TYPE
-    Ok(ResponseType::try_from(*response_type).unwrap())
-}
-
-fn resolve_remote_query_target(
-    ctx: &QueryContextRef,
-    query: &Query,
-    table_name: &str,
-) -> PermissionTableTarget {
-    match prom_store::extract_schema_from_query(query) {
-        Some(database) => {
-            let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(&database);
-            PermissionTableTarget::new(
-                catalog.unwrap_or_else(|| ctx.current_catalog().to_string()),
-                schema,
-                table_name,
-            )
-        }
-        None => PermissionTableTarget::new(ctx.current_catalog(), ctx.current_schema(), table_name),
-    }
-}
-
-#[instrument(skip_all, fields(table_name))]
-async fn to_query_result(
-    table_name: &str,
-    timestamp_column_name: &str,
-    value_column_name: &str,
-    output: Output,
-) -> ServerResult<QueryResult> {
-    let OutputData::Stream(stream) = output.data else {
-        unreachable!()
-    };
-    let recordbatches = RecordBatches::try_collect(stream)
-        .await
-        .context(error::CollectRecordbatchSnafu)?;
-    Ok(QueryResult {
-        timeseries: prom_store::recordbatches_to_timeseries(
-            table_name,
-            timestamp_column_name,
-            value_column_name,
-            recordbatches,
-        )?,
-    })
-}
-
-fn resolve_value_column_name(table_name: &str, table: &TableRef) -> Result<String> {
-    let columns = table
-        .field_columns()
-        .map(|column| column.name)
-        .collect::<Vec<_>>();
-
-    match columns.as_slice() {
-        [] => ColumnNotFoundSnafu {
-            msg: format!("value field in table '{table_name}'"),
-        }
-        .fail(),
-
-        [only] => Ok(only.clone()),
-
-        columns if columns.iter().any(|name| name == greptime_value()) => {
-            Ok(greptime_value().to_string())
-        }
-
-        columns => AmbiguousValueColumnSnafu {
-            table_name: table_name.to_string(),
-            field_columns: columns.to_vec(),
-        }
-        .fail(),
-    }
-}
-
-fn ensure_string_label_columns(
-    schema: &Schema,
-    timestamp_column_name: &str,
-    value_column_name: &str,
-) -> Result<()> {
-    for column in schema.column_schemas() {
-        if column.name == timestamp_column_name || column.name == value_column_name {
-            continue;
-        }
-        // All remaining columns are emitted as labels, including non-key columns.
-        ensure!(
-            matches!(column.data_type, ConcreteDataType::String(_)),
-            InvalidPromRemoteReadSchemaSnafu {
-                detail: format!(
-                    "Prometheus remote read only supports string labels: column '{}' has type {:?}",
-                    column.name, column.data_type
-                ),
-            }
-        );
-    }
-    Ok(())
-}
-
-impl Instance {
-    /// Resolves each query independently while retaining empty result slots.
-    async fn resolve_remote_query_targets(
+#[async_trait]
+impl PromStoreProtocolHandler for ExportMetricHandler {
+    async fn pre_write(
         &self,
-        ctx: &QueryContextRef,
-        queries: &[Query],
-    ) -> ServerResult<Vec<Vec<PermissionTableTarget>>> {
-        // Validate every query before enumerating metadata or short-circuiting on an EQ.
-        let matchers = queries
-            .iter()
-            .map(|query| prom_store::MetricNameMatchers::new(&query.matchers))
-            .collect::<ServerResult<Vec<_>>>()?;
-        let disallow_cross_catalog_query = self
-            .plugins
-            .get::<QueryOptions>()
-            .map(|opts| opts.disallow_cross_catalog_query)
-            .unwrap_or_default();
-        let mut query_targets = Vec::with_capacity(queries.len());
-        for (query, matchers) in queries.iter().zip(matchers) {
-            let target =
-                resolve_remote_query_target(ctx, query, matchers.exact_name().unwrap_or_default());
-            if disallow_cross_catalog_query {
-                validate_catalog_and_schema(&target.catalog, &target.schema, ctx)
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu)?;
-            }
-            let mut names = match matchers.exact_name() {
-                Some(name) => vec![name.to_string()],
-                None => self
-                    .catalog_manager
-                    .table_names(&target.catalog, &target.schema, Some(ctx))
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu)?,
-            };
-            names.retain(|name| !name.is_empty() && matchers.matches(name));
-            names.sort_unstable();
-            names.dedup();
-            query_targets.push(
-                names
-                    .into_iter()
-                    .map(|name| PermissionTableTarget::new(&target.catalog, &target.schema, name))
-                    .collect(),
-            );
-        }
-        Ok(query_targets)
+        _request: &RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn handle_remote_query(
+    async fn write_prepared(
         &self,
-        ctx: &QueryContextRef,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        query: &Query,
-    ) -> Result<Option<RemoteQueryOutput>> {
-        let Some(table) = self
-            .catalog_manager
-            .table(catalog_name, schema_name, table_name, Some(ctx))
-            .await
-            .context(CatalogSnafu)?
-        else {
-            debug!(
-                catalog = catalog_name,
-                schema = schema_name,
-                table = table_name,
-                "Table not found during remote read, returning empty result"
-            );
-            return Ok(None);
-        };
-
-        let timestamp_column_name = table
-            .schema()
-            .timestamp_column()
-            .with_context(|| ColumnNotFoundSnafu {
-                msg: format!("time index in table '{table_name}'"),
-            })?
-            .name
-            .clone();
-
-        let value_column_name = resolve_value_column_name(table_name, &table)?;
-
-        ensure_string_label_columns(&table.schema(), &timestamp_column_name, &value_column_name)?;
-
-        let dataframe = self
-            .query_engine
-            .read_table(table)
-            .with_context(|_| ReadTableSnafu {
-                table_name: format_full_table_name(catalog_name, schema_name, table_name),
-            })?;
-
-        let logical_plan = prom_store::query_to_plan(dataframe, query, &timestamp_column_name)
-            .context(PromStoreRemoteQueryPlanSnafu)?;
-
-        debug!(
-            "Prometheus remote read, table: {}, logical plan: {}",
-            table_name,
-            logical_plan.display_indent(),
-        );
-
-        let output = self
-            .query_engine
-            .execute(logical_plan, ctx.clone())
-            .await
-            .context(ExecLogicalPlanSnafu)?;
-
-        Ok(Some(RemoteQueryOutput {
-            table_name: table_name.to_string(),
-            timestamp_column_name,
-            value_column_name,
-            output,
-        }))
-    }
-
-    #[tracing::instrument(skip_all)]
-    async fn handle_remote_queries(
-        &self,
+        request: RowInsertRequests,
         ctx: QueryContextRef,
-        queries: &[Query],
-        query_targets: &[Vec<PermissionTableTarget>],
-        metrics: &mut HashMap<String, u64>,
-    ) -> ServerResult<Vec<QueryResult>> {
-        let mut results = Vec::with_capacity(queries.len());
-        for (query, targets) in queries.iter().zip(query_targets) {
-            let mut result = QueryResult { timeseries: vec![] };
-            for target in targets {
-                // Look up and execute one table at a time. Do not retain live streams
-                // for all matched tables while collecting the response.
-                let Some(output) = self
-                    .handle_remote_query(
-                        &ctx,
-                        &target.catalog,
-                        &target.schema,
-                        &target.table,
-                        query,
-                    )
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu)?
-                else {
-                    continue;
-                };
-                let RemoteQueryOutput {
-                    table_name,
-                    timestamp_column_name,
-                    value_column_name,
-                    output,
-                } = output;
-                let plan = output.meta.plan.clone();
-                let table_result = to_query_result(
-                    &table_name,
-                    &timestamp_column_name,
-                    &value_column_name,
-                    output,
-                )
-                .await?;
-                result.timeseries.extend(table_result.timeseries);
-                if let Some(ref plan) = plan {
-                    collect_plan_metrics(plan, &mut [metrics]);
-                }
+        _: bool,
+    ) -> ServerResult<Output> {
+        self.inserter
+            .handle_metric_row_inserts(
+                request,
+                ctx,
+                &self.statement_executor,
+                GREPTIME_PHYSICAL_TABLE.to_string(),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        mut requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> ServerResult<Vec<ServerResult<Output>>> {
+        operator::insert::admit_row_insert_batches(&mut requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+        let mut outputs = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
             }
-            results.push(result);
         }
-        Ok(results)
+        Ok(outputs)
+    }
+
+    async fn read(
+        &self,
+        _request: ReadRequest,
+        _ctx: QueryContextRef,
+    ) -> ServerResult<PromStoreResponse> {
+        unreachable!();
+    }
+}
+
+#[async_trait]
+impl PromStoreProtocolHandler for Instance {
+    async fn pre_write(
+        &self,
+        request: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_WRITE))
+            .context(AuthSnafu)?;
+        let interceptor_ref = self
+            .plugins
+            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_write(request, ctx.clone())?;
+        self.check_row_insert_permission(request, &ctx, PermissionReq::Action(PROM_STORE_WRITE))
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    async fn write_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.execute_prom_store_write(request, ctx, with_metric_engine)
+            .await
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> ServerResult<Vec<ServerResult<Output>>> {
+        let mut prepared = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
+            prepared.push((ctx, request));
+        }
+        operator::insert::admit_row_insert_batches(&mut prepared)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+
+        let mut outputs = Vec::with_capacity(prepared.len());
+        for (ctx, request) in prepared {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
+            }
+        }
+        Ok(outputs)
+    }
+
+    #[instrument(skip_all, fields(table_name))]
+    async fn read(
+        &self,
+        request: ReadRequest,
+        ctx: QueryContextRef,
+    ) -> ServerResult<PromStoreResponse> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_READ))
+            .context(AuthSnafu)?;
+
+        let interceptor_ref = self
+            .plugins
+            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_read(&request, ctx.clone())?;
+        let ctx = Arc::new(ctx.fork());
+
+        let query_targets = self
+            .resolve_remote_query_targets(&ctx, &request.queries)
+            .await?;
+        let targets = self
+            .resolve_query_permission_targets(
+                PermissionTableTargets::resolved(query_targets.iter().flatten().cloned().collect()),
+                &ctx,
+            )
+            .await?;
+        self.check_table_permission(&ctx, PermissionReq::Action(PROM_STORE_READ), targets)
+            .context(AuthSnafu)?;
+
+        let response_type = negotiate_response_type(&request.accepted_response_types)?;
+
+        // TODO(dennis): use read_hints to speedup query if possible
+        match response_type {
+            ResponseType::Samples => {
+                let mut map = HashMap::new();
+                let query_results = self
+                    .handle_remote_queries(ctx, &request.queries, &query_targets, &mut map)
+                    .await?;
+                let response = ReadResponse {
+                    results: query_results,
+                };
+
+                let resp_metrics = map
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into()))
+                    .collect::<HashMap<_, _>>();
+
+                // TODO(dennis): may consume too much memory, adds flow control
+                Ok(PromStoreResponse {
+                    content_type: CONTENT_TYPE_PROTOBUF.clone(),
+                    content_encoding: CONTENT_ENCODING_SNAPPY.clone(),
+                    resp_metrics,
+                    body: prom_store::snappy_compress(&response.encode_to_vec())?,
+                })
+            }
+            ResponseType::StreamedXorChunks => error::NotSupportedSnafu {
+                feat: "streamed remote read",
+            }
+            .fail(),
+        }
     }
 }
 
@@ -555,6 +453,176 @@ impl PendingRowsSchemaAlterer for Instance {
 }
 
 impl Instance {
+    /// Resolves matching tables for each query. The outer vector follows request query
+    /// order; each inner vector contains that query's table targets. Empty groups are
+    /// retained so execution produces one `QueryResult` per query, merging only tables
+    /// matched by the same query.
+    async fn resolve_remote_query_targets(
+        &self,
+        ctx: &QueryContextRef,
+        queries: &[Query],
+    ) -> ServerResult<Vec<Vec<PermissionTableTarget>>> {
+        // Validate every query before enumerating metadata or short-circuiting on an EQ.
+        let matchers = queries
+            .iter()
+            .map(|query| prom_store::MetricNameMatchers::new(&query.matchers))
+            .collect::<ServerResult<Vec<_>>>()?;
+        let disallow_cross_catalog_query = self
+            .plugins
+            .get::<QueryOptions>()
+            .map(|opts| opts.disallow_cross_catalog_query)
+            .unwrap_or_default();
+        let mut query_targets = Vec::with_capacity(queries.len());
+        for (query, matchers) in queries.iter().zip(matchers) {
+            let target =
+                resolve_remote_query_target(ctx, query, matchers.exact_name().unwrap_or_default());
+            if disallow_cross_catalog_query {
+                validate_catalog_and_schema(&target.catalog, &target.schema, ctx)
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?;
+            }
+            let mut names = match matchers.exact_name() {
+                Some(name) => vec![name.to_string()],
+                None => self
+                    .catalog_manager
+                    .table_names(&target.catalog, &target.schema, Some(ctx))
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?,
+            };
+            names.retain(|name| !name.is_empty() && matchers.matches(name));
+            names.sort_unstable();
+            names.dedup();
+            query_targets.push(
+                names
+                    .into_iter()
+                    .map(|name| PermissionTableTarget::new(&target.catalog, &target.schema, name))
+                    .collect(),
+            );
+        }
+        Ok(query_targets)
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_remote_queries(
+        &self,
+        ctx: QueryContextRef,
+        queries: &[Query],
+        query_targets: &[Vec<PermissionTableTarget>],
+        metrics: &mut HashMap<String, u64>,
+    ) -> ServerResult<Vec<QueryResult>> {
+        let mut results = Vec::with_capacity(queries.len());
+        for (query, targets) in queries.iter().zip(query_targets) {
+            let mut result = QueryResult { timeseries: vec![] };
+            for target in targets {
+                // Look up and execute one table at a time. Do not retain live streams
+                // for all matched tables while collecting the response.
+                let Some(output) = self
+                    .handle_remote_query(
+                        &ctx,
+                        &target.catalog,
+                        &target.schema,
+                        &target.table,
+                        query,
+                    )
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?
+                else {
+                    continue;
+                };
+                let RemoteQueryOutput {
+                    table_name,
+                    timestamp_column_name,
+                    value_column_name,
+                    output,
+                } = output;
+                let plan = output.meta.plan.clone();
+                let table_result = to_query_result(
+                    &table_name,
+                    &timestamp_column_name,
+                    &value_column_name,
+                    output,
+                )
+                .await?;
+                result.timeseries.extend(table_result.timeseries);
+                if let Some(ref plan) = plan {
+                    collect_plan_metrics(plan, &mut [metrics]);
+                }
+            }
+            results.push(result);
+        }
+        Ok(results)
+    }
+    #[tracing::instrument(skip_all)]
+    async fn handle_remote_query(
+        &self,
+        ctx: &QueryContextRef,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        query: &Query,
+    ) -> Result<Option<RemoteQueryOutput>> {
+        let Some(table) = self
+            .catalog_manager
+            .table(catalog_name, schema_name, table_name, Some(ctx))
+            .await
+            .context(CatalogSnafu)?
+        else {
+            debug!(
+                catalog = catalog_name,
+                schema = schema_name,
+                table = table_name,
+                "Table not found during remote read, returning empty result"
+            );
+            return Ok(None);
+        };
+
+        let timestamp_column_name = table
+            .schema()
+            .timestamp_column()
+            .with_context(|| ColumnNotFoundSnafu {
+                msg: format!("time index in table '{table_name}'"),
+            })?
+            .name
+            .clone();
+
+        let value_column_name = resolve_value_column_name(table_name, &table)?;
+
+        ensure_string_label_columns(&table.schema(), &timestamp_column_name, &value_column_name)?;
+
+        let dataframe = self
+            .query_engine
+            .read_table(table)
+            .with_context(|_| ReadTableSnafu {
+                table_name: format_full_table_name(catalog_name, schema_name, table_name),
+            })?;
+
+        let logical_plan = prom_store::query_to_plan(dataframe, query, &timestamp_column_name)
+            .context(PromStoreRemoteQueryPlanSnafu)?;
+
+        debug!(
+            "Prometheus remote read, table: {}, logical plan: {}",
+            table_name,
+            logical_plan.display_indent(),
+        );
+
+        let output = self
+            .query_engine
+            .execute(logical_plan, ctx.clone())
+            .await
+            .context(ExecLogicalPlanSnafu)?;
+
+        Ok(Some(RemoteQueryOutput {
+            table_name: table_name.to_string(),
+            timestamp_column_name,
+            value_column_name,
+            output,
+        }))
+    }
+}
+
+impl Instance {
     async fn prepare_prom_store_write(
         &self,
         request: RowInsertRequests,
@@ -587,138 +655,6 @@ impl Instance {
         };
 
         Ok(output)
-    }
-}
-
-#[async_trait]
-impl PromStoreProtocolHandler for Instance {
-    async fn pre_write(
-        &self,
-        request: &RowInsertRequests,
-        ctx: QueryContextRef,
-    ) -> ServerResult<()> {
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_WRITE))
-            .context(AuthSnafu)?;
-        let interceptor_ref = self
-            .plugins
-            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
-        interceptor_ref.pre_write(request, ctx.clone())?;
-        self.check_row_insert_permission(request, &ctx, PermissionReq::Action(PROM_STORE_WRITE))
-            .context(AuthSnafu)?;
-        Ok(())
-    }
-
-    async fn write_prepared(
-        &self,
-        request: RowInsertRequests,
-        ctx: QueryContextRef,
-        with_metric_engine: bool,
-    ) -> ServerResult<Output> {
-        self.execute_prom_store_write(request, ctx, with_metric_engine)
-            .await
-    }
-
-    async fn write(
-        &self,
-        request: RowInsertRequests,
-        ctx: QueryContextRef,
-        with_metric_engine: bool,
-    ) -> ServerResult<Output> {
-        let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
-        self.write_prepared(request, ctx, with_metric_engine).await
-    }
-
-    async fn write_all(
-        &self,
-        requests: Vec<(QueryContextRef, RowInsertRequests)>,
-        with_metric_engine: bool,
-    ) -> ServerResult<Vec<ServerResult<Output>>> {
-        let mut prepared = Vec::with_capacity(requests.len());
-        for (ctx, request) in requests {
-            let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
-            prepared.push((ctx, request));
-        }
-        operator::insert::admit_row_insert_batches(&mut prepared)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-
-        let mut outputs = Vec::with_capacity(prepared.len());
-        for (ctx, request) in prepared {
-            let output = self.write_prepared(request, ctx, with_metric_engine).await;
-            let failed = output.is_err();
-            outputs.push(output);
-            if failed {
-                break;
-            }
-        }
-        Ok(outputs)
-    }
-
-    #[instrument(skip_all, fields(table_name))]
-    async fn read(
-        &self,
-        request: ReadRequest,
-        ctx: QueryContextRef,
-    ) -> ServerResult<PromStoreResponse> {
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_READ))
-            .context(AuthSnafu)?;
-
-        let interceptor_ref = self
-            .plugins
-            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
-        interceptor_ref.pre_read(&request, ctx.clone())?;
-        let ctx = Arc::new(ctx.fork());
-
-        let query_targets = self
-            .resolve_remote_query_targets(&ctx, &request.queries)
-            .await?;
-        let targets = self
-            .resolve_query_permission_targets(
-                PermissionTableTargets::resolved(query_targets.iter().flatten().cloned().collect()),
-                &ctx,
-            )
-            .await?;
-        self.check_table_permission(&ctx, PermissionReq::Action(PROM_STORE_READ), targets)
-            .context(AuthSnafu)?;
-
-        let response_type = negotiate_response_type(&request.accepted_response_types)?;
-
-        // TODO(dennis): use read_hints to speedup query if possible
-        match response_type {
-            ResponseType::Samples => {
-                let mut map = HashMap::new();
-                let query_results = self
-                    .handle_remote_queries(ctx, &request.queries, &query_targets, &mut map)
-                    .await?;
-                let response = ReadResponse {
-                    results: query_results,
-                };
-
-                let resp_metrics = map
-                    .into_iter()
-                    .map(|(k, v)| (k, v.into()))
-                    .collect::<HashMap<_, _>>();
-
-                // TODO(dennis): may consume too much memory, adds flow control
-                Ok(PromStoreResponse {
-                    content_type: CONTENT_TYPE_PROTOBUF.clone(),
-                    content_encoding: CONTENT_ENCODING_SNAPPY.clone(),
-                    resp_metrics,
-                    body: prom_store::snappy_compress(&response.encode_to_vec())?,
-                })
-            }
-            ResponseType::StreamedXorChunks => error::NotSupportedSnafu {
-                feat: "streamed remote read",
-            }
-            .fail(),
-        }
     }
 }
 
@@ -777,92 +713,158 @@ impl Instance {
     }
 }
 
-/// This handler is mainly used for `frontend` or `standalone` to directly import
-/// the metrics collected by itself, thereby avoiding importing metrics through the network,
-/// thus reducing compression and network transmission overhead,
-/// so only implement `PromStoreProtocolHandler::write` method.
-pub struct ExportMetricHandler {
-    inserter: InserterRef,
-    statement_executor: Arc<StatementExecutor>,
+struct RemoteQueryOutput {
+    table_name: String,
+    timestamp_column_name: String,
+    value_column_name: String,
+    output: Output,
 }
 
-impl ExportMetricHandler {
-    pub fn new_handler(
-        inserter: InserterRef,
-        statement_executor: Arc<StatementExecutor>,
-    ) -> PromStoreProtocolHandlerRef {
-        Arc::new(Self {
-            inserter,
-            statement_executor,
-        })
+fn auto_create_table_type_for_prom_remote_write(
+    ctx: &QueryContextRef,
+    with_metric_engine: bool,
+) -> AutoCreateTableType {
+    if with_metric_engine {
+        let physical_table = ctx
+            .extension(PHYSICAL_TABLE_PARAM)
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+            .to_string();
+        AutoCreateTableType::Logical(physical_table)
+    } else {
+        AutoCreateTableType::Physical
     }
 }
 
-#[async_trait]
-impl PromStoreProtocolHandler for ExportMetricHandler {
-    async fn pre_write(
-        &self,
-        _request: &RowInsertRequests,
-        _ctx: QueryContextRef,
-    ) -> ServerResult<()> {
-        Ok(())
+fn required_physical_table_for_create_type(create_type: &AutoCreateTableType) -> Option<&str> {
+    match create_type {
+        AutoCreateTableType::Logical(physical_table) => Some(physical_table.as_str()),
+        _ => None,
+    }
+}
+
+fn fill_metric_physical_table_options(table_options: &mut HashMap<String, String>) {
+    // We always enforce flat format in this ingestion path.
+    table_options.insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
+    table_options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+}
+
+#[inline]
+fn is_supported(response_type: i32) -> bool {
+    // Only supports samples response right now
+    response_type == SAMPLES_RESPONSE_TYPE
+}
+
+/// Negotiating the content type of the remote read response.
+///
+/// Response types are taken from the list in the FIFO order. If no response type in `accepted_response_types` is
+/// implemented by server, error is returned.
+/// For request that do not contain `accepted_response_types` field the SAMPLES response type will be used.
+fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<ResponseType> {
+    if accepted_response_types.is_empty() {
+        return Ok(ResponseType::Samples);
     }
 
-    async fn write_prepared(
-        &self,
-        request: RowInsertRequests,
-        ctx: QueryContextRef,
-        _: bool,
-    ) -> ServerResult<Output> {
-        self.inserter
-            .handle_metric_row_inserts(
-                request,
-                ctx,
-                &self.statement_executor,
-                GREPTIME_PHYSICAL_TABLE.to_string(),
+    let response_type = accepted_response_types
+        .iter()
+        .find(|t| is_supported(**t))
+        .with_context(|| error::NotSupportedSnafu {
+            feat: format!(
+                "server does not support any of the requested response types: {accepted_response_types:?}",
+            ),
+        })?;
+
+    // It's safe to unwrap here, we known that it should be SAMPLES_RESPONSE_TYPE
+    Ok(ResponseType::try_from(*response_type).unwrap())
+}
+
+fn resolve_remote_query_target(
+    ctx: &QueryContextRef,
+    query: &Query,
+    table_name: &str,
+) -> PermissionTableTarget {
+    match prom_store::extract_schema_from_query(query) {
+        Some(database) => {
+            let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(&database);
+            PermissionTableTarget::new(
+                catalog.unwrap_or_else(|| ctx.current_catalog().to_string()),
+                schema,
+                table_name,
             )
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)
-    }
-
-    async fn write(
-        &self,
-        request: RowInsertRequests,
-        ctx: QueryContextRef,
-        with_metric_engine: bool,
-    ) -> ServerResult<Output> {
-        self.write_prepared(request, ctx, with_metric_engine).await
-    }
-
-    async fn write_all(
-        &self,
-        mut requests: Vec<(QueryContextRef, RowInsertRequests)>,
-        with_metric_engine: bool,
-    ) -> ServerResult<Vec<ServerResult<Output>>> {
-        operator::insert::admit_row_insert_batches(&mut requests)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)?;
-        let mut outputs = Vec::with_capacity(requests.len());
-        for (ctx, request) in requests {
-            let output = self.write_prepared(request, ctx, with_metric_engine).await;
-            let failed = output.is_err();
-            outputs.push(output);
-            if failed {
-                break;
-            }
         }
-        Ok(outputs)
+        None => PermissionTableTarget::new(ctx.current_catalog(), ctx.current_schema(), table_name),
     }
+}
 
-    async fn read(
-        &self,
-        _request: ReadRequest,
-        _ctx: QueryContextRef,
-    ) -> ServerResult<PromStoreResponse> {
-        unreachable!();
+#[instrument(skip_all, fields(table_name))]
+async fn to_query_result(
+    table_name: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+    output: Output,
+) -> ServerResult<QueryResult> {
+    let OutputData::Stream(stream) = output.data else {
+        unreachable!()
+    };
+    let recordbatches = RecordBatches::try_collect(stream)
+        .await
+        .context(error::CollectRecordbatchSnafu)?;
+    Ok(QueryResult {
+        timeseries: prom_store::recordbatches_to_timeseries(
+            table_name,
+            timestamp_column_name,
+            value_column_name,
+            recordbatches,
+        )?,
+    })
+}
+
+fn resolve_value_column_name(table_name: &str, table: &TableRef) -> Result<String> {
+    let columns = table
+        .field_columns()
+        .map(|column| column.name)
+        .collect::<Vec<_>>();
+
+    match columns.as_slice() {
+        [] => ColumnNotFoundSnafu {
+            msg: format!("value field in table '{table_name}'"),
+        }
+        .fail(),
+
+        [only] => Ok(only.clone()),
+
+        columns if columns.iter().any(|name| name == greptime_value()) => {
+            Ok(greptime_value().to_string())
+        }
+
+        columns => AmbiguousValueColumnSnafu {
+            table_name: table_name.to_string(),
+            field_columns: columns.to_vec(),
+        }
+        .fail(),
     }
+}
+
+fn ensure_string_label_columns(
+    schema: &Schema,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+) -> Result<()> {
+    for column in schema.column_schemas() {
+        if column.name == timestamp_column_name || column.name == value_column_name {
+            continue;
+        }
+        // All remaining columns are emitted as labels, including non-key columns.
+        ensure!(
+            matches!(column.data_type, ConcreteDataType::String(_)),
+            InvalidPromRemoteReadSchemaSnafu {
+                detail: format!(
+                    "Prometheus remote read only supports string labels: column '{}' has type {:?}",
+                    column.name, column.data_type
+                ),
+            }
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
