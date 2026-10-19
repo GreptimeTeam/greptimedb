@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use api::v1::region::region_server::{Region, RegionServer};
 use api::v1::region::{
-    AlignedSchemaVersion, BulkInsertRequest, DeleteRequest, InsertRequest, RegionRequestHeader,
-    RegionResponse as PbRegionResponse, bulk_insert_request,
+    AlignedSchemaVersion, BulkInsertRequest, DeleteRequest, DeleteRequests, InsertRequest,
+    InsertRequests, RegionRequestHeader, RegionResponse as PbRegionResponse, bulk_insert_request,
 };
 use api::v1::value::ValueData;
 use api::v1::{
@@ -78,6 +78,8 @@ use crate::test_util;
 
 #[derive(Clone, Default)]
 struct RecordingRegionService {
+    request_sizes: Arc<Mutex<Vec<usize>>>,
+    rpc_rejections: Arc<Mutex<VecDeque<Status>>>,
     requests: Arc<Mutex<Vec<RegionRequest>>>,
     rejections: Arc<Mutex<HashMap<u64, VecDeque<Status>>>>,
     release: Arc<Mutex<Option<Arc<Semaphore>>>>,
@@ -90,6 +92,53 @@ impl Region for RecordingRegionService {
         request: Request<RegionRequest>,
     ) -> std::result::Result<Response<PbRegionResponse>, Status> {
         let request = request.into_inner();
+        if !matches!(&request.body, Some(Body::Inserts(_) | Body::Deletes(_))) {
+            return self.handle_entry(request).await;
+        }
+        let entries = split_request(request);
+        self.request_sizes.lock().unwrap().push(entries.len());
+        if let Some(status) = self.rpc_rejections.lock().unwrap().pop_front() {
+            self.requests.lock().unwrap().extend(entries);
+            return Err(status);
+        }
+        let mut response = PbRegionResponse {
+            header: Some(ResponseHeader {
+                status: Some(PbStatus::default()),
+            }),
+            ..Default::default()
+        };
+        let results =
+            future::join_all(entries.into_iter().map(|entry| self.handle_entry(entry))).await;
+        for (index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(result) => response.affected_rows += result.into_inner().affected_rows,
+                Err(status) => response
+                    .failures
+                    .push(api::v1::region::RegionRequestFailure {
+                        request_index: index as u32,
+                        status: Some(api::region::status_from_error(&client::Error::from(status))),
+                    }),
+            }
+        }
+        if !response.failures.is_empty() {
+            response
+                .header
+                .as_mut()
+                .unwrap()
+                .status
+                .as_mut()
+                .unwrap()
+                .status_code = StatusCode::PartialFailure as u32;
+        }
+        Ok(Response::new(response))
+    }
+}
+
+impl RecordingRegionService {
+    async fn handle_entry(
+        &self,
+        request: RegionRequest,
+    ) -> std::result::Result<Response<PbRegionResponse>, Status> {
         let region_id = write_region_id(&request).unwrap().as_u64();
         self.requests.lock().unwrap().push(request);
         let release = self.release.lock().unwrap().clone();
@@ -372,22 +421,29 @@ async fn test_write_retry_disabled_and_enabled_ablation() {
 
 #[tokio::test]
 async fn test_write_retry_does_not_replay_successful_regions() {
-    let server = RegionTestServer::start().await;
-    server.fail_region(2, [RetryHint::Retryable]);
-    let dispatcher = server.create_dispatcher(2).await;
-    let response = dispatcher
-        .dispatch(vec![build_insert_request(&[1, 2])])
-        .await
-        .unwrap();
-    assert_eq!(response.affected_rows, 2);
-    assert_eq!(
-        server.attempt_counts(),
-        HashMap::from([
-            (RegionId::new(1, 1).as_u64(), 1),
-            (RegionId::new(1, 2).as_u64(), 2),
-        ])
-    );
-    assert!(server.invalidator.calls.lock().unwrap().is_empty());
+    for regions in [vec![1, 2], vec![1, 1, 1]] {
+        let server = RegionTestServer::start().await;
+        server.fail_region(1, [RetryHint::Retryable]);
+        let dispatcher = server.create_dispatcher(2).await;
+        let response = dispatcher
+            .dispatch(vec![build_insert_request(&regions)])
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, regions.len());
+        let mut expected = HashMap::new();
+        for region in &regions {
+            *expected
+                .entry(RegionId::new(1, *region).as_u64())
+                .or_insert(0) += 1;
+        }
+        *expected.get_mut(&RegionId::new(1, 1).as_u64()).unwrap() += 1;
+        assert_eq!(server.attempt_counts(), expected);
+        assert_eq!(
+            *server.service.request_sizes.lock().unwrap(),
+            vec![regions.len(), 1]
+        );
+        assert!(server.invalidator.calls.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
@@ -429,10 +485,10 @@ async fn test_write_retry_transport_errors() {
             }
             server
                 .service
-                .rejections
+                .rpc_rejections
                 .lock()
                 .unwrap()
-                .insert(region_id, VecDeque::from([status]));
+                .push_back(status);
             let dispatcher = server.create_dispatcher(2).await;
             let attempt = dispatcher
                 .send(
@@ -462,12 +518,12 @@ async fn test_write_retry_transport_attempt_budget() {
         for failures in [1, 3] {
             let server = RegionTestServer::start().await;
             let region_id = RegionId::new(1, 1).as_u64();
-            server.service.rejections.lock().unwrap().insert(
-                region_id,
-                (0..failures)
-                    .map(|_| Status::new(code, "write failed"))
-                    .collect(),
-            );
+            server
+                .service
+                .rpc_rejections
+                .lock()
+                .unwrap()
+                .extend((0..failures).map(|_| Status::new(code, "write failed")));
             let dispatcher = server.create_dispatcher(2).await;
             let response = dispatcher.dispatch(vec![build_insert_request(&[1])]).await;
             let expected_attempts = if failures == 1 {
