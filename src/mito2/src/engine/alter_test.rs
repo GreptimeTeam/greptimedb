@@ -3754,7 +3754,11 @@ fn add_nullable_field2() -> RegionAlterRequest {
     }
 }
 
-fn put_request(schema: Vec<api::v1::ColumnSchema>, start: usize, end: usize) -> RegionRequest {
+fn build_put_request(
+    schema: Vec<api::v1::ColumnSchema>,
+    start: usize,
+    end: usize,
+) -> RegionRequest {
     RegionRequest::Put(RegionPutRequest {
         rows: Rows {
             schema,
@@ -3776,7 +3780,7 @@ async fn put_filled_with_stale_metadata(
 ) -> error::Result<usize> {
     let (request, receiver) = WorkerRequest::try_from_region_request(
         region_id,
-        put_request(schema, 0, 2),
+        build_put_request(schema, 0, 2),
         Some(metadata),
     )
     .unwrap();
@@ -3816,7 +3820,7 @@ async fn test_put_filled_at_boundary_rechecked_after_add_column() {
 
     // The worker still serves the region.
     let response = engine
-        .handle_request(region_id, put_request(column_schemas, 2, 3))
+        .handle_request(region_id, build_put_request(column_schemas, 2, 3))
         .await
         .unwrap();
     assert_eq!(1, response.affected_rows);
