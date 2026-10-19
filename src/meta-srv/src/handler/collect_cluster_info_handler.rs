@@ -134,6 +134,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
                 ctx,
                 stat.timestamp_millis,
                 NodeStatus::Datanode(DatanodeStatus {
+                    schedulable: true,
                     rcus: stat.rcus,
                     wcus: stat.wcus,
                     leader_regions,

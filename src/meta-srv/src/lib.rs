@@ -15,6 +15,7 @@
 pub mod bootstrap;
 pub mod cache_invalidator;
 pub mod cluster;
+pub mod datanode_state;
 pub mod discovery;
 pub mod error;
 pub mod event;

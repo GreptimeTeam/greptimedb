@@ -87,6 +87,7 @@ pub(crate) async fn put_datanodes(meta_peer_client: &MetaPeerClientRef, datanode
             peer,
             last_activity_ts: time_util::current_time_millis(),
             status: NodeStatus::Datanode(DatanodeStatus {
+                schedulable: true,
                 rcus: 0,
                 wcus: 0,
                 leader_regions: 0,

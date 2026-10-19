@@ -156,6 +156,7 @@ mod tests {
             peer: Peer::empty(id),
             last_activity_ts: 0,
             status: NodeStatus::Datanode(DatanodeStatus {
+                schedulable: true,
                 rcus: 0,
                 wcus: 0,
                 leader_regions: 0,

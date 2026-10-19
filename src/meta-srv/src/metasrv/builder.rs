@@ -56,6 +56,7 @@ use store_api::storage::MAX_REGION_SEQ;
 use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
+use crate::datanode_state::DatanodeStateManager;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::event::EventHandlerImpl;
 use crate::gc::{DefaultGcSchedulerCtx, GcScheduler};
@@ -230,6 +231,7 @@ impl MetasrvBuilder {
             None => State::leader(options.grpc.server_addr.clone(), true),
             Some(_) => State::follower(options.grpc.server_addr.clone()),
         }));
+        let datanode_state_manager = Arc::new(DatanodeStateManager::new(kv_backend.clone()));
 
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(
             state.clone(),
@@ -238,6 +240,9 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+        meta_peer_client
+            .set_datanode_state_manager(datanode_state_manager.clone())
+            .await;
         let database_operator = Arc::new(DatabaseOperator::new(meta_peer_client.clone()));
 
         let event_inserter = Box::new(InsertForwarder::new(
