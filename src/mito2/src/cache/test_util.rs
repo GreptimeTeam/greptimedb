@@ -60,7 +60,10 @@ fn parquet_file_data() -> Vec<u8> {
     parquet_file_data_inner(None)
 }
 
-fn parquet_file_data_with_region_metadata(region_metadata: &RegionMetadataRef) -> Vec<u8> {
+/// Returns a small Parquet file with embedded region metadata.
+pub(crate) fn parquet_file_data_with_region_metadata(
+    region_metadata: &RegionMetadataRef,
+) -> Vec<u8> {
     let json = region_metadata.to_json().unwrap();
     let key_value = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
     parquet_file_data_inner(Some(vec![key_value]))

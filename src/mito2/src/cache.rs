@@ -696,6 +696,34 @@ impl CacheStrategy {
         }
     }
 
+    /// Shares an in-progress metadata load with requests for the same file and policy.
+    /// Completed values remain owned by the existing metadata caches, not this coordinator.
+    pub(crate) async fn coalesce_sst_meta_load<F>(
+        &self,
+        file_id: RegionFileId,
+        page_index_policy: PageIndexPolicy,
+        load: F,
+    ) -> Result<(Arc<CachedSstMeta>, bool)>
+    where
+        F: std::future::Future<Output = Result<(Arc<CachedSstMeta>, bool)>>,
+    {
+        let loads = match self {
+            Self::EnableAll(manager) | Self::Compaction(manager) => manager.sst_meta_loads.as_ref(),
+            Self::Disabled => None,
+        };
+        let Some(loads) = loads else {
+            return load.await;
+        };
+        let key = (
+            SstMetaKey(file_id.region_id(), file_id.file_id()),
+            mem::discriminant(&page_index_policy),
+        );
+        loads
+            .try_get_with(key, load)
+            .await
+            .context(crate::error::LoadSstMetaSnafu)
+    }
+
     /// Gets fused SST metadata with cache metrics tracking.
     pub(crate) async fn get_sst_meta_data(
         &self,
@@ -719,6 +747,26 @@ impl CacheStrategy {
                 None
             }
         }
+    }
+
+    /// Returns decoded metadata immediately when cached, recording only hits.
+    /// Misses are accounted for by the coordinated load's cache lookup.
+    pub(crate) fn get_cached_sst_meta(
+        &self,
+        file_id: RegionFileId,
+        page_index_policy: PageIndexPolicy,
+        metrics: &mut MetadataCacheMetrics,
+    ) -> Option<Arc<CachedSstMeta>> {
+        let manager = match self {
+            Self::EnableAll(manager) | Self::Compaction(manager) => manager,
+            Self::Disabled => return None,
+        };
+        let metadata =
+            manager.get_sst_meta_data_from_mem_cache_inner(file_id, page_index_policy)?;
+        CACHE_HIT.with_label_values(&[SST_META_TYPE]).inc();
+        CACHE_HIT.with_label_values(&[SST_META_DECODED_TYPE]).inc();
+        metrics.mem_cache_hit += 1;
+        Some(metadata)
     }
 
     /// Calls [CacheManager::get_sst_meta_data_from_mem_cache()].
@@ -1018,6 +1066,8 @@ impl CacheStrategy {
 /// All caches are disabled by default.
 #[derive(Default)]
 pub struct CacheManager {
+    /// Zero-capacity cache used only to share in-progress metadata loads.
+    sst_meta_loads: Option<SstMetaLoads>,
     /// Cache for compact, authoritative SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
@@ -1148,11 +1198,18 @@ impl CacheManager {
         file_id: RegionFileId,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
-        let key = SstMetaKey(file_id.region_id(), file_id.file_id());
-        let value = self
-            .get_decoded_sst_meta(&key)
-            .filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy));
+        let value = self.get_sst_meta_data_from_mem_cache_inner(file_id, page_index_policy);
         update_hit_miss(value, SST_META_DECODED_TYPE)
+    }
+
+    fn get_sst_meta_data_from_mem_cache_inner(
+        &self,
+        file_id: RegionFileId,
+        page_index_policy: PageIndexPolicy,
+    ) -> Option<Arc<CachedSstMeta>> {
+        let key = SstMetaKey(file_id.region_id(), file_id.file_id());
+        self.get_decoded_sst_meta(&key)
+            .filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy))
     }
 
     /// Gets cached [ParquetMetaData] from in-memory cache.
@@ -1664,7 +1721,10 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
+        let sst_meta_loads = (sst_meta_cache.is_some() || sst_decoded_meta_cache.is_some())
+            .then(|| moka::future::Cache::new(0));
         CacheManager {
+            sst_meta_loads,
             sst_meta_cache,
             sst_decoded_meta_cache,
             vector_cache,
@@ -2082,6 +2142,15 @@ impl SelectorResultValue {
     }
 }
 
+/// Coordinates in-progress SST metadata loads.
+///
+/// Capacity is zero: Moka shares the initializer result with current waiters, but does
+/// not retain it afterward. In particular, decoded metadata cannot bypass its budget.
+type SstMetaLoads = moka::future::Cache<
+    (SstMetaKey, mem::Discriminant<PageIndexPolicy>),
+    (Arc<CachedSstMeta>, bool),
+>;
+
 /// Maps (region id, file id) to fused SST metadata.
 type SstMetaCache = Cache<SstMetaKey, Arc<CompactSstMeta>>;
 /// Maps (region id, file id) to decoded SST metadata retained as an acceleration tier.
@@ -2167,6 +2236,169 @@ mod tests {
         );
 
         assert!(cache.write_cache().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sst_meta_load_coalescing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let manager = Arc::new(CacheManager::builder().sst_meta_cache_size(2000).build());
+        let strategy = CacheStrategy::EnableAll(manager.clone());
+        let (metadata, region) = sst_parquet_meta();
+        let metadata = Arc::new(
+            CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap(),
+        );
+        let file_id = RegionFileId::new(region.region_id, FileId::random());
+        let calls = AtomicUsize::new(0);
+        let gate = tokio::sync::Notify::new();
+        let load = || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            gate.notified().await;
+            Ok((metadata.clone(), true))
+        };
+        let mut first =
+            Box::pin(strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, load()));
+        let mut second =
+            Box::pin(strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, load()));
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        assert_eq!(1, calls.load(Ordering::Relaxed));
+        gate.notify_waiters();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(Arc::ptr_eq(&first.0, &second.0));
+        assert!(
+            first.1 && second.1,
+            "all waiters preserve the remote miss flag"
+        );
+
+        // A completed load must not become an unbudgeted decoded metadata cache.
+        let mut next =
+            Box::pin(strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, load()));
+        assert!(futures::poll!(&mut next).is_pending());
+        assert_eq!(2, calls.load(Ordering::Relaxed));
+        drop(next);
+        manager
+            .sst_meta_loads
+            .as_ref()
+            .unwrap()
+            .run_pending_tasks()
+            .await;
+        assert_eq!(0, manager.sst_meta_loads.as_ref().unwrap().entry_count());
+    }
+
+    #[tokio::test]
+    async fn test_sst_meta_load_cancellation_and_policy_isolation() {
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder().sst_meta_cache_size(2000).build(),
+        ));
+        let (metadata, region) = sst_parquet_meta();
+        let metadata = Arc::new(
+            CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap(),
+        );
+        let file_id = RegionFileId::new(region.region_id, FileId::random());
+        let mut first = Box::pin(strategy.coalesce_sst_meta_load(
+            file_id,
+            PageIndexPolicy::Skip,
+            std::future::pending(),
+        ));
+        assert!(futures::poll!(&mut first).is_pending());
+        // A different policy or file does not wait for this load.
+        for (id, policy) in [
+            (file_id, PageIndexPolicy::Optional),
+            (file_id, PageIndexPolicy::Required),
+            (
+                RegionFileId::new(region.region_id, FileId::random()),
+                PageIndexPolicy::Skip,
+            ),
+        ] {
+            let mut independent = Box::pin(
+                strategy
+                    .coalesce_sst_meta_load(id, policy, async { Ok((metadata.clone(), false)) }),
+            );
+            assert!(futures::poll!(&mut independent).is_ready());
+        }
+        let mut waiter = Box::pin(strategy.coalesce_sst_meta_load(
+            file_id,
+            PageIndexPolicy::Skip,
+            async { Ok((metadata.clone(), false)) },
+        ));
+        assert!(futures::poll!(&mut waiter).is_pending());
+        drop(first);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&metadata, &result.0));
+    }
+
+    #[tokio::test]
+    async fn test_sst_meta_load_failure_retry_and_disabled_cache() {
+        use common_error::ext::ErrorExt;
+
+        let manager = Arc::new(CacheManager::builder().sst_meta_cache_size(2000).build());
+        let strategy = CacheStrategy::EnableAll(manager);
+        let (metadata, region) = sst_parquet_meta();
+        let metadata = Arc::new(
+            CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap(),
+        );
+        let file_id = RegionFileId::new(region.region_id, FileId::random());
+        let gate = tokio::sync::Notify::new();
+        let mut first =
+            Box::pin(
+                strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, async {
+                    gate.notified().await;
+                    UnexpectedSnafu {
+                        reason: "load failed",
+                    }
+                    .fail()
+                }),
+            );
+        let mut waiter = Box::pin(strategy.coalesce_sst_meta_load(
+            file_id,
+            PageIndexPolicy::Skip,
+            async { panic!("waiter must share the failure") },
+        ));
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut waiter).is_pending());
+        gate.notify_waiters();
+        let first = first.await.unwrap_err();
+        let second = waiter.await.unwrap_err();
+        assert_eq!(first.status_code(), second.status_code());
+        match (first, second) {
+            (
+                crate::error::Error::LoadSstMeta { source: a, .. },
+                crate::error::Error::LoadSstMeta { source: b, .. },
+            ) => assert!(Arc::ptr_eq(&a, &b)),
+            errors => panic!("unexpected errors: {errors:?}"),
+        }
+        assert!(
+            strategy
+                .coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, async {
+                    Ok((metadata.clone(), true))
+                })
+                .await
+                .is_ok()
+        );
+
+        for strategy in [
+            CacheStrategy::Disabled,
+            CacheStrategy::EnableAll(Arc::new(CacheManager::default())),
+        ] {
+            let mut blocked = Box::pin(strategy.coalesce_sst_meta_load(
+                file_id,
+                PageIndexPolicy::Skip,
+                std::future::pending(),
+            ));
+            assert!(futures::poll!(&mut blocked).is_pending());
+            let mut independent = Box::pin(strategy.coalesce_sst_meta_load(
+                file_id,
+                PageIndexPolicy::Skip,
+                async { Ok((metadata.clone(), true)) },
+            ));
+            assert!(futures::poll!(&mut independent).is_ready());
+        }
     }
 
     #[test]
