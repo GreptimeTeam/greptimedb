@@ -205,17 +205,6 @@ fn all_missing(series: &Series) -> bool {
     })
 }
 
-/// The float values of a single-field series, in order.
-fn floats(series: &Series) -> Vec<f64> {
-    let field = &series.fields.as_slice()[0];
-    (0..field.len())
-        .map(|index| match field.sample(index) {
-            SampleRef::Float(value) => value,
-            _ => panic!("expected a float"),
-        })
-        .collect()
-}
-
 /// Pushes every chunk of one series, keeping what the evaluator hands out on the way.
 fn collect_chunks(
     evaluator: &mut RangeEvaluator,
@@ -751,9 +740,14 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
         .expect("the series completes");
     assert_eq!(per_window.batch_call_count(), 0);
 
-    let expected = expand(&expected);
+    // Fold the chunk back into one series first: a chunk's range reports the positions its push
+    // decided, which can include leading and trailing positions holding no value, while the
+    // comparison is against the trimmed series the per-window path produced.
+    let schema = batch.output_schema();
+    let batched = fold_chunks(std::slice::from_ref(&batched), &schema);
+    let expected = expand(&expected.series);
     assert_series_eq(
-        Some(&batched),
+        batched.as_ref(),
         &expected,
         &output_metric(RangeFunction::Rate, 0),
     );
