@@ -28,5 +28,6 @@
 //!   here" from "no more input".
 
 pub mod batch;
+mod display;
 pub mod metrics;
 pub mod plan;
