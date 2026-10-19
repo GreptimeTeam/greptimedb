@@ -117,12 +117,21 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 
     // Histogram samples leave holes, which may move the ends of the series.
     let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
+    // One cursor per field. `sample(row)` restarts its walk from the first chunk on every row,
+    // which costs O(rows x chunks) on chunked input; advancing an iterator visits each segment
+    // once and lands on the same sample for every row.
+    let mut cursors = series
+        .fields
+        .iter()
+        .map(|samples| samples.iter())
+        .collect::<Vec<_>>();
     let mut values = vec![None; series.fields.len()];
     for row in 0..range.len() {
-        for (value, samples) in values.iter_mut().zip(series.fields.iter()) {
-            *value = match samples.sample(row) {
-                SampleRef::Float(sample) => Some(apply(op, sample)),
-                SampleRef::Missing | SampleRef::Histogram(_) => None,
+        for (value, cursor) in values.iter_mut().zip(cursors.iter_mut()) {
+            *value = match cursor.next() {
+                Some(SampleRef::Float(sample)) => Some(apply(op, sample)),
+                // A histogram point has no float to map, and a missing point stays missing.
+                _ => None,
             };
         }
         builder.push(range.start() + row, &values)?;

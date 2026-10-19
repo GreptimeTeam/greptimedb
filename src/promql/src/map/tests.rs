@@ -421,6 +421,44 @@ fn histogram_and_mixed_points_are_skipped_instead_of_failing_the_series() {
     assert_floats(output.fields.get(1).unwrap(), &[None, None, None]);
 }
 
+/// A fragmented field is read by walking its chunks once, not by restarting the walk per row.
+///
+/// The chunks have unequal lengths and a missing position on a boundary, so a cursor that assumed
+/// equal chunks, or that reused a row index across segments, would land on the wrong sample.
+#[test]
+fn fragmented_fields_keep_every_row_aligned_across_chunk_boundaries() {
+    let schema = schema(&["chunked"]);
+    let chunks = vec![
+        floats(&[Some(-1.0), None]),
+        floats(&[Some(-3.0), Some(-4.0), None]),
+        floats(&[Some(-6.0)]),
+        floats(&[None, Some(-8.0), Some(-9.0), Some(-10.0)]),
+    ];
+    let chunked = Samples::try_from_chunks(chunks).unwrap();
+    assert_eq!(chunked.len(), 10);
+    let input = series(&schema, 7, vec![chunked]);
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
+    let TimeAxis::Grid(range) = &output.time else {
+        panic!("lost grid axis")
+    };
+    assert_eq!((range.start(), range.len()), (7, 10));
+    assert_floats(
+        output.fields.get(0).unwrap(),
+        &[
+            Some(1.0),
+            None,
+            Some(3.0),
+            Some(4.0),
+            None,
+            Some(6.0),
+            None,
+            Some(8.0),
+            Some(9.0),
+            Some(10.0),
+        ],
+    );
+}
+
 #[test]
 fn raw_time_axes_are_not_treated_as_evaluated_grids() {
     let mut schema = schema(&["value"]);
