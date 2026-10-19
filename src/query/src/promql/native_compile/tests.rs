@@ -349,3 +349,30 @@ fn the_display_of_a_compiled_tree_is_the_tree() {
         .join("\n")
     );
 }
+
+/// Parentheses group; they do not change what a statement asks for. A compiler that refused them
+/// would reject a query on how it was typed rather than on what it means, and a statement written
+/// with them is otherwise exactly the shape the compiler accepts.
+#[test]
+fn parentheses_around_the_accepted_shape_are_transparent() {
+    let bare = compile(
+        &eval_stmt("rate(x[5m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    for query in [
+        "(rate(x[5m]))",
+        "rate((x[5m]))",
+        "rate(((x[5m])))",
+        "((rate((x[5m]))))",
+    ] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(
+            tree.to_string(),
+            bare.to_string(),
+            "`{query}` did not compile to the tree `rate(x[5m])` does"
+        );
+    }
+}
