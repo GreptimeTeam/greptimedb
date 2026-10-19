@@ -260,7 +260,7 @@ fn flush_batch(
 }
 
 struct SeriesState {
-    /// `None` for evaluated input, which arrives as one complete series.
+    /// `None` for evaluated input, which is identified by its labels instead of a primary key.
     primary_key: Option<Buffer>,
     metric: MetricName,
     last_ts: i64,
@@ -566,39 +566,58 @@ impl RangeEvaluator {
         self.close_series()
     }
 
-    /// Evaluates one run of an evaluated series, such as the inner result of a subquery: the
+    /// Evaluates one chunk of an evaluated series, such as the inner result of a subquery: the
     /// value at each grid point is a sample at that time. Stale markers are kept as values,
     /// since the input is computed.
     ///
-    /// `last` says whether this is the final run of its series. A sparse inner result arrives as
-    /// several runs, and the windows of a later run read the samples of the earlier ones, so the
-    /// state a series retains lives on across them: only the closing call ends it. Handing over
-    /// the runs separately without saying which is last would close the series early and lose
-    /// exactly the samples a window across the gap needs.
+    /// The chunks of one series arrive in grid order and may skip positions: a position no chunk
+    /// covers holds no sample, exactly like a missing value. They may not go backwards or repeat,
+    /// because the samples are kept in arrival order and read back by timestamp.
     ///
-    /// The result of a call can be several chunks when the run holds gaps; the caller takes the
+    /// A series ends exactly once, on the chunk marked `is_last`. The windows of a later chunk read
+    /// the samples of the earlier ones, so the state a series retains lives on across chunks: only
+    /// the closing one ends it. An empty chunk decides nothing and is therefore only legal as that
+    /// closing chunk; a series that produced no result still has to end.
+    ///
+    /// The result of a call can be several chunks when the chunk holds gaps; the caller takes the
     /// rest with [`Self::pull`].
-    pub fn push_series(&mut self, series: &Series, last: bool) -> Result<Option<EvaluatedChunk>> {
-        let TimeAxis::Grid(range) = &series.time else {
+    pub fn push_evaluated(&mut self, chunk: &EvaluatedChunk) -> Result<Option<EvaluatedChunk>> {
+        if self.input_grid.is_none() {
             return Err(DataFusionError::Execution(
-                "evaluated range input must be a grid series".into(),
+                "evaluated chunk pushed to an evaluator of raw series".into(),
+            ));
+        }
+        let TimeAxis::Grid(range) = &chunk.series.time else {
+            return Err(DataFusionError::Execution(
+                "an evaluated chunk must be addressed on a grid".into(),
             ));
         };
         if self.input_grid != Some(range.grid().spec())
-            || series.fields.len() != self.fields.len()
-            || series.fields.iter().any(|field| field.len() != range.len())
+            || chunk.series.fields.len() != self.fields.len()
+            || chunk
+                .series
+                .fields
+                .iter()
+                .any(|field| field.len() != range.len())
         {
             return Err(DataFusionError::Execution(
-                "evaluated series does not match the input schema".into(),
+                "evaluated chunk does not match the input schema".into(),
             ));
         }
-        // A run of no positions carries no sample and decides nothing, so it is not input: the
-        // closing chunk of a series that produced nothing travels as an `EvaluatedChunk` to the
-        // operators, not as a run pushed here. Reading its last timestamp would panic.
+        // An empty chunk decides nothing, so the closing one is the only empty chunk that means
+        // anything: it says the series ended without producing a result of its own.
         if range.is_empty() {
-            return Err(DataFusionError::Execution(
-                "evaluated range input holds no position".into(),
-            ));
+            if !chunk.is_last {
+                return Err(DataFusionError::Execution(format!(
+                    "empty evaluated chunk at {} that does not close its series",
+                    range.start()
+                )));
+            }
+            return if self.series.is_some() {
+                self.close_series()
+            } else {
+                Ok(None)
+            };
         }
         let last_ts = range.timestamps()[range.len() - 1];
         match &mut self.series {
@@ -606,7 +625,7 @@ impl RangeEvaluator {
                 self.output.begin_series();
                 self.series = Some(SeriesState {
                     primary_key: None,
-                    metric: series.metric.clone(),
+                    metric: chunk.series.metric.clone(),
                     last_ts,
                     cursor: 0,
                     closing: false,
@@ -614,7 +633,7 @@ impl RangeEvaluator {
                 });
             }
             Some(state) => {
-                // A run continues its series; the earlier runs' samples stay retained for it.
+                // A chunk continues its series; the earlier chunks' samples stay retained for it.
                 if state.primary_key.is_some() {
                     return Err(DataFusionError::Execution(
                         "evaluated series pushed inside a raw series".into(),
@@ -625,14 +644,18 @@ impl RangeEvaluator {
                         "evaluated series pushed after it closed".into(),
                     ));
                 }
-                if state.metric != series.metric {
-                    return Err(DataFusionError::Execution(
-                        "evaluated series changed identity before its last run".into(),
-                    ));
+                if state.metric != chunk.series.metric {
+                    return Err(DataFusionError::Execution(format!(
+                        "evaluated series label set changed before its last chunk: {:?} after {:?}",
+                        chunk.series.metric, state.metric
+                    )));
                 }
+                // The skipped positions hold no sample, so a window over them can never gain one;
+                // going backwards or repeating would store timestamps out of order, which the
+                // read-back by timestamp would answer from the wrong sample.
                 if range.timestamps()[0] <= state.last_ts {
                     return Err(DataFusionError::Execution(format!(
-                        "evaluated series runs are not increasing: {} after {}",
+                        "evaluated series chunks are not increasing: {} after {}",
                         range.timestamps()[0],
                         state.last_ts
                     )));
@@ -640,11 +663,11 @@ impl RangeEvaluator {
                 state.last_ts = last_ts;
             }
         }
-        self.ingest(&range.timestamps(), &series.fields, false)?;
-        if last {
+        self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
+        if chunk.is_last {
             return self.close_series();
         }
-        // Later runs only hold samples after `last_ts`, so every point up to it is decided. The
+        // Later chunks only hold samples after `last_ts`, so every point up to it is decided. The
         // samples are shifted onto the evaluation timeline by the selector offset, so the ready
         // point is on that timeline too.
         self.evaluate(Some(

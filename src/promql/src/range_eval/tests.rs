@@ -254,8 +254,9 @@ fn drain_chunks(evaluator: &mut RangeEvaluator, chunks: &mut Vec<EvaluatedChunk>
 
 /// Ingests one complete evaluated series and returns every chunk it produced.
 fn evaluate_series(evaluator: &mut RangeEvaluator, series: &Series) -> Vec<EvaluatedChunk> {
+    let chunk = EvaluatedChunk::try_new(series.clone(), true).unwrap();
     let mut chunks: Vec<_> = evaluator
-        .push_series(series, true)
+        .push_evaluated(&chunk)
         .unwrap()
         .into_iter()
         .collect();
@@ -1426,13 +1427,21 @@ fn a_window_reads_across_the_gap_between_runs_of_one_series() {
     };
 
     let mut chunks = Vec::new();
-    chunks.extend(evaluator.push_series(&run(0, 2.0), false).unwrap());
+    chunks.extend(
+        evaluator
+            .push_evaluated(&EvaluatedChunk::try_new(run(0, 2.0), false).unwrap())
+            .unwrap(),
+    );
     drain_chunks(&mut evaluator, &mut chunks);
     assert!(
         chunks.is_empty(),
         "the run at 0ms decides no point of the outer grid"
     );
-    chunks.extend(evaluator.push_series(&run(10, 3.0), true).unwrap());
+    chunks.extend(
+        evaluator
+            .push_evaluated(&EvaluatedChunk::try_new(run(10, 3.0), true).unwrap())
+            .unwrap(),
+    );
     drain_chunks(&mut evaluator, &mut chunks);
 
     let closed = chunks.last().expect("the series closes");
@@ -2082,7 +2091,8 @@ fn evaluate_pieces(evaluator: &mut RangeEvaluator, pieces: &[Series]) -> Vec<Eva
     let mut chunks = Vec::new();
     for (index, piece) in pieces.iter().enumerate() {
         let last = index + 1 == pieces.len();
-        if let Some(chunk) = evaluator.push_series(piece, last).unwrap() {
+        let input = EvaluatedChunk::try_new(piece.clone(), last).unwrap();
+        if let Some(chunk) = evaluator.push_evaluated(&input).unwrap() {
             chunks.push(chunk);
         }
         drain_chunks(evaluator, &mut chunks);
@@ -2181,7 +2191,10 @@ fn rejects_input_of_the_other_kind() {
         .unwrap()
         .pop()
         .expect("one contiguous run");
-    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series, true));
+    execution_error(
+        probe_evaluator(1, grid(0, 10, 4), window)
+            .push_evaluated(&EvaluatedChunk::try_new(series, true).unwrap()),
+    );
 }
 
 /// The range function a golden fixture names, with its constant arguments.
@@ -2952,5 +2965,8 @@ fn an_empty_run_is_refused_not_indexed() {
         fields,
     )
     .unwrap();
-    execution_error(probe_evaluator(1, grid(0, 10, 4), one_ms()).push_series(&empty, true));
+    execution_error(
+        probe_evaluator(1, grid(0, 10, 4), one_ms())
+            .push_evaluated(&EvaluatedChunk::try_new(empty, true).unwrap()),
+    );
 }
