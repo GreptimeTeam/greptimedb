@@ -33,7 +33,7 @@ use datatypes::series::time::{GridRange, TimeAxis};
 /// A series closes exactly once, on the chunk that carries `is_last`. A closed prefix is always
 /// followed by a closing chunk, even when that chunk holds no values, so a consumer can tell
 /// "nothing more here" from "no more input".
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct EvaluatedChunk {
     /// The evaluated values, addressed on their absolute grid positions.
     pub series: Series,
