@@ -443,18 +443,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if self.config.index.build_mode == IndexBuildMode::Sync {
             // Sync flush builds indexes while writing SSTs, except for encoded bulk parts,
             // which are uploaded as-is. Build the missing indexes for those files here.
-            let create_on_flush = self.config.inverted_index.create_on_flush.auto()
-                || self.config.fulltext_index.create_on_flush.auto()
-                || self.config.bloom_filter_index.create_on_flush.auto();
-            if create_on_flush {
-                let metadata = region.metadata();
-                index_build_file_metas.retain(|meta| {
-                    request.unindexed_files.contains(&meta.file_id)
-                        && !meta.is_index_consistent_with_region(&metadata.column_metadatas)
-                });
-            } else {
-                index_build_file_metas.clear();
-            }
+            let metadata = region.metadata();
+            index_build_file_metas.retain(|meta| {
+                request.unindexed_files.contains(&meta.file_id)
+                    && !meta.is_index_consistent_with_region(&metadata.column_metadatas)
+            });
         }
 
         if !index_build_file_metas.is_empty() {
