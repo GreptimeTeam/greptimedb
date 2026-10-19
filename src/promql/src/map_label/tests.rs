@@ -18,9 +18,7 @@ use std::sync::Arc;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 
 use super::{label_join, label_replace};
-use crate::grid_series::reference::{
-    canonical_bits, golden_cases, labels_of, points_of, series_of,
-};
+use crate::grid_series::reference::{canonical_bits, golden_cases, points_by_labels, series_of};
 
 #[test]
 fn label_functions_match_prometheus() {
@@ -52,10 +50,9 @@ fn label_functions_match_prometheus() {
                 if expected.len() < inputs {
                     merged += 1;
                 }
-                let actual: BTreeMap<_, _> = actual
-                    .iter()
-                    .map(|series| (labels_of(&series.metric), points_of(series)))
-                    .collect();
+                // A result arrives as one piece per run of valued positions; a fixture pins
+                // dense points, so the pieces of each label set are folded back together.
+                let actual: BTreeMap<_, _> = points_by_labels(actual.clone());
                 let expected: BTreeMap<_, _> = expected
                     .into_iter()
                     .map(|(labels, points)| {

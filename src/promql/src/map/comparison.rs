@@ -45,14 +45,16 @@ pub enum Comparison {
 /// Compares a vector with a constant scalar, like Prometheus `VectorscalarBinop`.
 ///
 /// Each field is compared independently; a row is kept where any field passes a filter. The
-/// output is trimmed to its first and last kept rows, and `None` means nothing passed. Raw axes
-/// and histogram/mixed inputs share [`crate::map::map_math`]'s rejection contract.
+/// output is trimmed to its first and last kept rows, and an empty result means nothing passed.
+/// A filter keeps a subset of the input's rows, so a passed-over stretch ends a piece and one
+/// series can produce several. Raw axes and histogram/mixed inputs share
+/// [`crate::map::map_math`]'s rejection contract.
 pub fn map_compare(
     schema: &Arc<SeriesSchema>,
     series: &Series,
     comparison: Comparison,
     scalar: ScalarOperand,
-) -> Result<Option<Series>> {
+) -> Result<Vec<Series>> {
     let range = validate_float_series(schema, series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut fields = series

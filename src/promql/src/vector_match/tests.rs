@@ -127,10 +127,11 @@ fn random_side(rng: &mut StdRng, grid: &Arc<EvalGrid>, fields: usize) -> Side {
         for (index, row) in values.iter().enumerate() {
             builder.push(index, row).unwrap();
         }
-        if let Some(built) = builder.finish(metric(&labels)).unwrap() {
-            series.push(built);
-            dense.push((labels, values));
-        }
+        // Random rows can hold holes, so one label set arrives as one piece per run of valued
+        // positions. Every piece is kept: together they cover exactly the valued positions, which
+        // is what the dense matrix behind the reference holds.
+        series.extend(builder.finish(metric(&labels)).unwrap());
+        dense.push((labels, values));
     }
     Side {
         schema,
@@ -422,7 +423,9 @@ fn reference_set(
 fn assert_output(actual: Result<Vec<Series>, DataFusionError>, expected: Expected, seed: u64) {
     match (actual, expected) {
         (Ok(actual), Ok(expected)) => {
-            let actual: BTreeMap<Labels, Series> = actual
+            // A result arrives as one piece per run of valued positions; the reference is dense,
+            // so the pieces of each label set are folded back together first.
+            let actual: BTreeMap<Labels, Series> = crate::golden::fold_pieces(actual)
                 .into_iter()
                 .map(|series| (labels_of(&series.metric), series))
                 .collect();
@@ -580,7 +583,11 @@ fn reports_the_earliest_failing_point() {
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        builder.finish(metric(&labels)).unwrap().unwrap()
+        builder
+            .finish(metric(&labels))
+            .unwrap()
+            .pop()
+            .expect("each call pushes one run")
     };
     let mut lhs = vec![
         series(&[("__name__", "a"), ("job", "z")], &[0]),
@@ -696,14 +703,14 @@ fn vector_operations_match_prometheus() {
                         let value = values.get(&point).map(|bits| f64::from_bits(*bits));
                         builder.push(point, &[value]).unwrap();
                     }
-                    let Some(series) = builder.finish(metric(&labels)).unwrap() else {
-                        continue;
-                    };
-                    if labels.get("__name__").map(String::as_str) == Some("a") {
-                        lhs.push(series);
+                    // A series line can hold holes, so it arrives as one piece per run of valued
+                    // positions; each piece carries its own grid range.
+                    let side = if labels.get("__name__").map(String::as_str) == Some("a") {
+                        &mut lhs
                     } else {
-                        rhs.push(series);
-                    }
+                        &mut rhs
+                    };
+                    side.extend(builder.finish(metric(&labels)).unwrap());
                 }
                 "result" => {
                     let values = values
@@ -761,11 +768,19 @@ fn vector_operations_match_prometheus() {
         };
         match (actual, error) {
             (Ok(actual), None) => {
-                let actual: BTreeMap<Labels, BTreeMap<usize, u64>> = actual
-                    .iter()
-                    .map(|series| (labels_of(&series.metric), points_of(series)))
-                    .collect();
-                assert_close(&actual, &expected, case);
+                // A label set arrives as one piece per run of valued positions; the values of all
+                // its pieces together are the series Prometheus evaluated at those points.
+                let mut folded: BTreeMap<Labels, BTreeMap<usize, u64>> = BTreeMap::new();
+                for series in &actual {
+                    let points = folded.entry(labels_of(&series.metric)).or_default();
+                    for (point, bits) in points_of(series) {
+                        assert!(
+                            points.insert(point, bits).is_none(),
+                            "{case}: {point} handed out twice"
+                        );
+                    }
+                }
+                assert_close(&folded, &expected, case);
                 matched += 1;
             }
             (Err(actual), Some(expected)) => {
@@ -804,7 +819,11 @@ fn colliding_results_fail_by_where_they_collide() {
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        builder.finish(metric(&labels)).unwrap().unwrap()
+        builder
+            .finish(metric(&labels))
+            .unwrap()
+            .pop()
+            .expect("each call pushes one point")
     };
     let lhs = vec![
         series(&[("__name__", "a"), ("__type__", "counter"), ("job", "x")]),
@@ -1001,48 +1020,56 @@ fn histogram_operators_match_prometheus() {
             (expected, actual) => panic!("{context}: got {actual:?}, expected {expected:?}"),
         };
         let (expected, actual) = expected;
-        let actual: BTreeMap<Labels, Series> = actual
-            .into_iter()
-            .map(|series| (labels_of(&series.metric), series))
-            .collect();
+        // A label set arrives as one piece per run of valued positions, so its pieces are gathered
+        // before comparing: together they must cover exactly the points Prometheus reported.
+        let mut folded: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
+        for series in actual {
+            folded
+                .entry(labels_of(&series.metric))
+                .or_default()
+                .push(series);
+        }
         assert_eq!(
-            actual.keys().collect::<Vec<_>>(),
+            folded.keys().collect::<Vec<_>>(),
             expected.keys().collect::<Vec<_>>(),
             "{context}"
         );
         let no_histograms = BTreeMap::new();
-        for (labels, series) in &actual {
-            let TimeAxis::Grid(range) = &series.time else {
-                panic!("expected a grid series");
-            };
+        for (labels, pieces) in &folded {
             let floats = &expected[labels];
             let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
-            let mut points = 0;
-            for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
-                let point = range.start() + row;
-                match sample {
-                    SampleRef::Missing => continue,
-                    SampleRef::Float(value) => {
-                        let want = f64::from_bits(floats[&point]);
-                        assert!(
-                            crate::grid_series::reference::close(value, want, 1e-10),
-                            "{context} at {point}: {value} vs {want}"
-                        );
+            let mut seen = BTreeSet::new();
+            for series in pieces {
+                let TimeAxis::Grid(range) = &series.time else {
+                    panic!("expected a grid series");
+                };
+                for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
+                    let point = range.start() + row;
+                    match sample {
+                        SampleRef::Missing => continue,
+                        SampleRef::Float(value) => {
+                            let want = f64::from_bits(floats[&point]);
+                            assert!(
+                                crate::grid_series::reference::close(value, want, 1e-10),
+                                "{context} at {point}: {value} vs {want}"
+                            );
+                        }
+                        SampleRef::Histogram(view) => {
+                            let want = OwnedHistogram::parse(&texts[&point]);
+                            assert_histogram_close(
+                                &FloatHistogram::try_from_view(&view).unwrap(),
+                                &FloatHistogram::try_from_view(&want.view()).unwrap(),
+                                1e-10,
+                                &format!("{context} at {point}"),
+                            );
+                            histograms += 1;
+                        }
                     }
-                    SampleRef::Histogram(view) => {
-                        let want = OwnedHistogram::parse(&texts[&point]);
-                        assert_histogram_close(
-                            &FloatHistogram::try_from_view(&view).unwrap(),
-                            &FloatHistogram::try_from_view(&want.view()).unwrap(),
-                            1e-10,
-                            &format!("{context} at {point}"),
-                        );
-                        histograms += 1;
-                    }
+                    assert!(seen.insert(point), "{context}: {point} handed out twice");
                 }
-                points += 1;
             }
-            assert_eq!(points, floats.len() + texts.len(), "{context}");
+            let wanted: BTreeSet<usize> = floats.keys().chain(texts.keys()).copied().collect();
+            assert_eq!(seen, wanted, "{context}");
         }
         matched += 1;
     }

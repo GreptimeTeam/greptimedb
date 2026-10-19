@@ -127,9 +127,7 @@ pub fn topk(
         for point in sorted {
             builder.push(point, &[value_at(&series[index], point)?])?;
         }
-        if let Some(built) = builder.finish(series[index].metric.clone())? {
-            result.push(built);
-        }
+        result.extend(builder.finish(series[index].metric.clone())?);
     }
     Ok(result)
 }
@@ -157,9 +155,17 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
         builder.push(point, &[value])?;
     }
     let empty = MetricName::try_new(None, Vec::new()).map_err(external)?;
-    Ok(builder
-        .finish(empty)?
-        .expect("every point of a scalar has a value"))
+    // Every grid point is written above, with a value or a NaN, so the result is one contiguous
+    // piece. A different shape would mean this invariant broke, and dropping the extra pieces
+    // silently would hide it.
+    let mut pieces = builder.finish(empty)?;
+    if pieces.len() != 1 {
+        return Err(DataFusionError::Execution(format!(
+            "scalar produced {} pieces, expected exactly one over the grid",
+            pieces.len()
+        )));
+    }
+    Ok(pieces.pop().expect("checked to hold one piece"))
 }
 
 /// `absent(v)`: 1 with `labels` at every point where no series is present.
@@ -167,11 +173,11 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
 /// `absent_over_time(v[r])` is this over the result of `present_over_time(v[r])`. When `v[r]` is
 /// a range selector, `labels` come from its matchers as for `absent(v)`; for a subquery
 /// Prometheus derives no labels.
-pub fn absent(
-    schema: &SeriesSchema,
-    series: &[Series],
-    labels: MetricName,
-) -> Result<Option<Series>> {
+///
+/// A point where something is absent but another field is not contributes no row, so the result
+/// is several pieces when the output fields take turns being absent. It is empty only when the
+/// grid has no points.
+pub fn absent(schema: &SeriesSchema, series: &[Series], labels: MetricName) -> Result<Vec<Series>> {
     let points = grid_points(schema, series)?;
     let fields = schema.fields.len();
     // Each field is absent on its own.

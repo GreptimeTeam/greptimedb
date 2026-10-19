@@ -25,7 +25,8 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use super::{DateFunction, date_of_eval_time, map_date, time};
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
-    Labels, canonical_bits, golden_cases, labels_of, metric_of, points_of, series_of,
+    Labels, canonical_bits, golden_cases, labels_of, metric_of, points_by_labels, points_of,
+    series_of,
 };
 
 fn schema(grid: Arc<EvalGrid>) -> Arc<SeriesSchema> {
@@ -61,12 +62,17 @@ fn time_functions_match_prometheus() {
         let actual: Vec<Series> = match (case.spec[0].as_str(), case.spec[1].as_str()) {
             ("eval_time", "time") => vec![time(&schema).unwrap()],
             ("eval_time", name) => vec![date_of_eval_time(function(name), &schema).unwrap()],
-            ("date", name) => case
-                .inputs
-                .iter()
-                .filter_map(|(labels, points)| series_of(&schema, labels, points))
-                .filter_map(|series| map_date(function(name), &schema, &series).unwrap())
-                .collect::<Vec<_>>(),
+            ("date", name) => {
+                let mut actual = Vec::new();
+                for series in case
+                    .inputs
+                    .iter()
+                    .filter_map(|(labels, points)| series_of(&schema, labels, points))
+                {
+                    actual.extend(map_date(function(name), &schema, &series).unwrap());
+                }
+                actual
+            }
             (kind, _) => panic!("unknown case {kind}"),
         };
         // Dropping `__name__` can give two series one label set.
@@ -79,10 +85,9 @@ fn time_functions_match_prometheus() {
             (actual, expected) => panic!("case {:?}: {actual:?} is not {expected:?}", case.spec),
         };
         let (actual, expected) = actual;
-        let actual: BTreeMap<_, _> = actual
-            .iter()
-            .map(|series| (labels_of(&series.metric), points_of(series)))
-            .collect();
+        // A date function keeps the values of its input but drops histograms and names, so its
+        // result is one piece per run of valued positions; the fixture pins dense points.
+        let actual: BTreeMap<_, _> = points_by_labels(actual);
         let expected: BTreeMap<_, _> = expected
             .into_iter()
             .map(|(labels, points)| {
@@ -150,7 +155,8 @@ fn map_date_drops_histograms_and_maps_chunks() {
     let mixed = Samples::try_from_chunks(vec![histogram, floats(&[3600.0, 7200.0])]).unwrap();
     let hours = map_date(DateFunction::Hour, &schema, &series(mixed))
         .unwrap()
-        .unwrap();
+        .pop()
+        .expect("a mixed series with one float");
     assert_eq!(
         points_of(&hours),
         BTreeMap::from([(2, 1f64.to_bits()), (3, 2f64.to_bits())])
@@ -163,7 +169,8 @@ fn map_date_drops_histograms_and_maps_chunks() {
     let chunked = Samples::try_from_chunks(vec![floats(&[60.0]), floats(&[120.0, 180.0])]).unwrap();
     let minutes = map_date(DateFunction::Minute, &schema, &series(chunked))
         .unwrap()
-        .unwrap();
+        .pop()
+        .expect("a chunked float series");
     assert_eq!(
         points_of(&minutes),
         BTreeMap::from([

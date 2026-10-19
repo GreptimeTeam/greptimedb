@@ -423,9 +423,7 @@ fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<S
             }
             builder.push_samples(point, &row)?;
         }
-        if let Some(series) = builder.finish(metric)? {
-            output.push(series);
-        }
+        output.extend(builder.finish(metric)?);
     }
     Ok(output)
 }

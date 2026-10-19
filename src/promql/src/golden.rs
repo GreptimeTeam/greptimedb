@@ -151,11 +151,16 @@ fn grid_series(schema: &SeriesSchema, metric: MetricName, points: &Points) -> Op
 }
 
 /// Compares labels and the trimmed absolute range exactly, and values with [`close`].
-pub(crate) fn assert_result(case: &Case, mut actual: Vec<Series>) {
+///
+/// An operator hands out one piece per run of consecutive positions that hold a value, so one
+/// label set can arrive as several pieces. They are folded back together here, in label order,
+/// before the comparison: the values are what a fixture pins down, not how the result was cut.
+pub(crate) fn assert_result(case: &Case, actual: Vec<Series>) {
+    let context = || format!("{} ({})", case.expr, case.header.join(" "));
+    let mut actual = fold_pieces(actual);
     actual.sort_by_key(|series| label_key(&series.metric));
     let mut expected = case.result.iter().collect::<Vec<_>>();
     expected.sort_by_key(|(metric, _)| label_key(metric));
-    let context = || format!("{} ({})", case.expr, case.header.join(" "));
     assert_eq!(actual.len(), expected.len(), "{}", context());
     for (actual, (metric, points)) in actual.iter().zip(expected) {
         assert_eq!(&actual.metric, metric, "{}", context());
@@ -192,6 +197,88 @@ pub(crate) fn assert_result(case: &Case, mut actual: Vec<Series>) {
     }
 }
 
+/// Joins the pieces of each label set into one dense series, with a null where no piece held a
+/// value. One piece sets stay as they are.
+pub(crate) fn fold_pieces(pieces: Vec<Series>) -> Vec<Series> {
+    let mut groups: Vec<(LabelKey, Vec<Series>)> = Vec::new();
+    for piece in pieces {
+        let key = label_key(&piece.metric);
+        match groups.iter_mut().find(|(group, _)| *group == key) {
+            Some((_, members)) => members.push(piece),
+            None => groups.push((key, vec![piece])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, members)| {
+            if members.len() == 1 {
+                return members.into_iter().next().unwrap();
+            }
+            fold_one(members)
+        })
+        .collect()
+}
+
+/// Folds one label set's pieces into one series over the span they cover.
+fn fold_one(pieces: Vec<Series>) -> Series {
+    let metric = pieces[0].metric.clone();
+    let fields = pieces[0].fields.len();
+    let grid = match &pieces[0].time {
+        TimeAxis::Grid(range) => range.grid().clone(),
+        other => panic!("expected a grid series, got {other:?}"),
+    };
+    let mut rows: Vec<Option<Vec<Option<f64>>>> =
+        (0..grid.timestamps().len()).map(|_| None).collect();
+    for piece in &pieces {
+        let TimeAxis::Grid(range) = &piece.time else {
+            panic!("expected a grid series, got {:?}", piece.time);
+        };
+        for row in 0..range.len() {
+            let values: Vec<Option<f64>> = piece
+                .fields
+                .iter()
+                .map(|field| match field.sample(row) {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Missing => None,
+                    _ => panic!("a fixture only pins float outputs"),
+                })
+                .collect();
+            if values.iter().any(Option::is_some) {
+                assert!(
+                    rows[range.start() + row].is_none(),
+                    "two pieces hold a value at position {}",
+                    range.start() + row
+                );
+                rows[range.start() + row] = Some(values);
+            }
+        }
+    }
+    let first = rows.iter().position(Option::is_some).unwrap_or(0);
+    let last = rows.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+    let rows = &rows[first..last.max(first)];
+    let fields = (0..fields)
+        .map(|field| {
+            let values: Float64Array = rows
+                .iter()
+                .map(|row| row.as_ref().and_then(|row| row[field]))
+                .collect();
+            Samples::from_float(values)
+        })
+        .collect::<Vec<_>>();
+    let fields = SeriesFields::try_from_vec(fields).unwrap();
+    let time = GridRange::try_new(grid.clone(), first, rows.len()).unwrap();
+    let schema = SeriesSchema {
+        fields: (0..pieces[0].fields.len())
+            .map(|index| FieldSpec {
+                name: Arc::from(format!("f{index}")),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        eval_grid: Some(grid),
+    };
+    Series::try_new(&schema, metric, TimeAxis::Grid(time), fields).unwrap()
+}
+
 /// Prometheus `almost.Equal` with relative tolerance 1e-10, treating results below 1e-10 as
 /// equal and any NaN as equal to NaN, as promql-compat compares engines.
 pub(crate) fn close(a: f64, b: f64) -> bool {
@@ -211,7 +298,10 @@ pub(crate) fn close(a: f64, b: f64) -> bool {
     equal || (a.abs() < EPSILON && b.abs() < EPSILON)
 }
 
-fn label_key(metric: &MetricName) -> Vec<(String, String)> {
+/// A label set as name/value pairs, the way the fixtures name one.
+type LabelKey = Vec<(String, String)>;
+
+fn label_key(metric: &MetricName) -> LabelKey {
     let mut key = metric
         .tags()
         .iter()

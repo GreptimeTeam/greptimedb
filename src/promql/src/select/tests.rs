@@ -15,17 +15,18 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use datafusion::arrow::array::Float64Array;
 use datafusion::error::DataFusionError;
-use datatypes::series::samples::{FieldSpec, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 
 use super::{
     Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, natural_less, scalar,
     sort_instant, topk,
 };
-use crate::grid_series::GridSeriesBuilder;
-use crate::grid_series::reference::{Dense, assert_series_eq};
+use crate::golden::fold_pieces;
+use crate::grid_series::reference::{Dense, assert_pieces_eq, assert_series_eq, piece_ranges};
 
 fn schema(points: u64, fields: usize) -> SeriesSchema {
     SeriesSchema {
@@ -69,12 +70,35 @@ fn dense(points: usize, values: &str) -> Dense {
     dense
 }
 
+/// The `dense` matrix as one trimmed series, `None` when every row is missing.
+///
+/// An *input*, so the holes stay nulls inside one series: the builder would cut them into pieces,
+/// and the operators under test take one series per input.
 fn build(schema: &SeriesSchema, metric: MetricName, dense: &Dense) -> Option<Series> {
-    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
-    for (index, row) in dense.iter().enumerate() {
-        builder.push(index, row).unwrap();
-    }
-    builder.finish(metric).unwrap()
+    let start = dense
+        .iter()
+        .position(|row| row.iter().any(Option::is_some))?;
+    let end = dense
+        .iter()
+        .rposition(|row| row.iter().any(Option::is_some))?
+        + 1;
+    let rows = &dense[start..end];
+    let fields = (0..schema.fields.len())
+        .map(|field| {
+            let values: Float64Array = rows.iter().map(|row| row[field]).collect();
+            Samples::from_float(values)
+        })
+        .collect::<Vec<_>>();
+    let time = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, rows.len()).unwrap();
+    Some(
+        Series::try_new(
+            schema,
+            metric,
+            TimeAxis::Grid(time),
+            SeriesFields::try_from_vec(fields).unwrap(),
+        )
+        .unwrap(),
+    )
 }
 
 fn names(list: &str) -> Vec<Arc<str>> {
@@ -168,7 +192,9 @@ fn select_operators_match_prometheus() {
             other => panic!("unknown case {other}"),
         };
 
-        let actual: BTreeMap<String, Series> = actual
+        // A result arrives as one piece per run of valued positions; the fixtures pin the dense
+        // values, so the pieces of each label set are folded back together first.
+        let actual: BTreeMap<String, Series> = fold_pieces(actual)
             .into_iter()
             .map(|series| (render(&series.metric), series))
             .collect();
@@ -340,6 +366,9 @@ fn absent_evaluates_fields_independently() {
     let input = vec![vec![Some(3.0), None], vec![None, Some(4.0)]];
     let series = vec![build(&schema, metric("__name__=a"), &input).unwrap()];
     let result = absent(&schema, &series, metric("-")).unwrap();
+    // The two fields take turns holding a value, but a row is kept when either field has one, so
+    // both positions stay in one piece; the missing field carries a null there.
+    assert_eq!(piece_ranges(&result), vec![(0, 2)]);
     let expected = vec![vec![None, Some(1.0)], vec![Some(1.0), None]];
-    assert_series_eq(result.as_ref(), &expected, &metric("-"));
+    assert_pieces_eq(&result, &expected, &metric("-"));
 }

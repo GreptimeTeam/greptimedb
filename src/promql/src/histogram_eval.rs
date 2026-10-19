@@ -213,7 +213,10 @@ pub enum NativeHistogramFunction {
 }
 
 /// Applies `function` to the native histogram samples of `series`; float samples are dropped and
-/// so is `__name__`. The result is `None` when the series has no histogram sample.
+/// so is `__name__`. The result is empty when the series has no histogram sample.
+///
+/// Histogram samples may leave holes, and a hole ends a piece, so one series can produce several:
+/// each covers a run of consecutive positions that hold a result.
 ///
 /// Series that share a label set once their names are dropped must then go through
 /// [`merge_same_labelset`].
@@ -221,7 +224,7 @@ pub fn map_native_histogram(
     function: NativeHistogramFunction,
     schema: &Arc<SeriesSchema>,
     series: &Series,
-) -> Result<Option<Series>> {
+) -> Result<Vec<Series>> {
     let range = grid_range(series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut buckets = Vec::new();

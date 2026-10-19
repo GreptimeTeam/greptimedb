@@ -35,17 +35,18 @@ pub enum ScalarSeriesOperand<'a> {
 /// index, and drops the metric name.
 ///
 /// Prometheus scalars exist at every step; a missing scalar point here yields a missing output.
-/// The output is trimmed to its first and last valid rows, and `None` means no valid row. The
-/// scalar must be unlabelled and single-field on the same grid; histogram/mixed/raw inputs are
-/// rejected even outside the overlap. Two unlabelled single-field inputs also evaluate
-/// scalar–scalar operations. Same-labelset merging is left to the caller, as in
+/// The output is trimmed to its first and last valid rows, and an empty result means no valid row.
+/// A scalar point holding no value ends a piece, so one series can produce several. The scalar
+/// must be unlabelled and single-field on the same grid; histogram/mixed/raw inputs are rejected
+/// even outside the overlap. Two unlabelled single-field inputs also evaluate scalar–scalar
+/// operations. Same-labelset merging is left to the caller, as in
 /// [`crate::map::map_math`].
 pub fn map_arithmetic_series(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
     op: ArithmeticOp,
     scalar: ScalarSeriesOperand<'_>,
-) -> Result<Option<Series>> {
+) -> Result<Vec<Series>> {
     let metric = drop_metric_name(&vector.metric)?;
     map_grid_scalar(schema, vector, scalar, metric, |left, right, _| {
         Some(op.calculate(left, right))
@@ -62,7 +63,7 @@ pub fn map_compare_series(
     vector: &Series,
     comparison: Comparison,
     scalar: ScalarSeriesOperand<'_>,
-) -> Result<Option<Series>> {
+) -> Result<Vec<Series>> {
     let metric = if matches!(comparison, Comparison::Bool(_)) {
         drop_metric_name(&vector.metric)?
     } else {
@@ -80,7 +81,7 @@ fn map_grid_scalar(
     scalar: ScalarSeriesOperand<'_>,
     metric: MetricName,
     calculate: impl Fn(f64, f64, f64) -> Option<f64>,
-) -> Result<Option<Series>> {
+) -> Result<Vec<Series>> {
     let vector_range = validate_float_series(schema, vector)?;
     let (scalar_series, scalar_left) = match scalar {
         ScalarSeriesOperand::Left(s) => (s, true),

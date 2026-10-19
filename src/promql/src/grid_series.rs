@@ -14,8 +14,8 @@
 
 //! Building evaluated series that cover only their result range on a shared grid.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use datafusion::arrow::array::builder::NullBufferBuilder;
@@ -35,24 +35,49 @@ pub(crate) mod reference;
 #[cfg(test)]
 mod tests;
 
-/// Builds one series on the schema's evaluation grid from rows pushed at absolute grid indices.
+/// Builds grid series from rows pushed at absolute grid indices, one piece per run of
+/// consecutive positions that hold a value.
 ///
-/// The output starts at the first row with a valid value in any field and ends at the last such
-/// row, so a short-lived series never holds values for the whole grid. Missing rows between
-/// valid ones become nulls; NaN is a valid value. A caller that has decided positions hold no
-/// value widens the span with [`GridSeriesBuilder::cover_from`] and
-/// [`GridSeriesBuilder::cover_through`], which is how a decided-but-empty position reaches a
-/// consumer instead of being trimmed away.
+/// A push names one position and the value each field holds there. Rows are accumulated
+/// compactly: a row is kept only when at least one field holds a value at that position, so an
+/// empty stretch costs one skipped push and no storage at all. Fields stay row-aligned, so a field
+/// with no value at a retained row still gets a null there; the Arrow layout needs one row per
+/// retained position, and the position does hold a value.
+///
+/// [`GridSeriesBuilder::finish`] cuts the accumulated rows into maximal runs of consecutive
+/// positions and returns one [`Series`] per run, each a slice sharing the one buffer per field.
 pub struct GridSeriesBuilder {
     schema: Arc<SeriesSchema>,
     grid: Arc<EvalGrid>,
-    /// Absolute index of the first valid row.
-    start: Option<usize>,
     /// Smallest index the next push may use.
     next: usize,
-    /// Index after the last valid row; rows from here to the next valid row are pending nulls.
-    valid_end: usize,
+    /// Grid index of each retained row, ascending.
+    ///
+    /// This vector is the only record of where the gaps are, and it says only where rows sit:
+    /// with `V` entries, `F` fields and `k` runs (`k <= V`) the whole series costs `8*F*V` value
+    /// bytes plus validity bits, one `usize` per retained row and `O(k)` run descriptors. Nothing
+    /// is proportional to the positions holding no value.
+    indices: Vec<usize>,
+    /// One row per retained row, per field; empty when nothing is buffered.
     fields: Vec<FieldBuilder>,
+    /// The buffered rows finalized into shared buffers, with the runs still to hand out.
+    finished: Option<Finished>,
+}
+
+/// Retained rows turned into field buffers a run can be sliced out of.
+struct Finished {
+    fields: SeriesFields,
+    /// Absolute start, compact offset and length of each run, in grid order.
+    runs: VecDeque<Run>,
+}
+
+/// A maximal run of consecutive retained positions.
+struct Run {
+    /// Absolute grid index of the run's first row.
+    start: usize,
+    /// Where the run begins in the compact buffers.
+    offset: usize,
+    len: usize,
 }
 
 struct FieldBuilder {
@@ -85,16 +110,16 @@ impl GridSeriesBuilder {
         Ok(Self {
             schema,
             grid,
-            start: None,
             next: 0,
-            valid_end: 0,
+            indices: Vec::new(),
             fields: Vec::new(),
+            finished: None,
         })
     }
 
     /// Pushes the field values at absolute grid `index`; `None` is a missing value.
     ///
-    /// Indices must be strictly increasing; skipped indices are missing rows.
+    /// Indices must be strictly increasing; skipped indices are positions that hold no value.
     pub fn push(&mut self, index: usize, values: &[Option<f64>]) -> Result<()> {
         if !self.start_row(index, values.len(), values.iter().all(Option::is_none))? {
             return Ok(());
@@ -133,7 +158,7 @@ impl GridSeriesBuilder {
         Ok(())
     }
 
-    /// Checks the row and pads the gap before it; returns whether the row has a value to write.
+    /// Validates the row and retains it; returns whether it holds a value to write.
     fn start_row(&mut self, index: usize, len: usize, empty: bool) -> Result<bool> {
         if len != self.schema.fields.len() {
             return Err(DataFusionError::Execution(format!(
@@ -149,99 +174,97 @@ impl GridSeriesBuilder {
         }
         self.next = index + 1;
         if empty {
+            // A position holding no value anywhere is not a row: an index absent from `indices`
+            // already says exactly that, so writing it down would only cost storage.
             return Ok(false);
         }
-
-        if self.start.is_none() {
-            self.start = Some(index);
-            self.fields = (0..len)
-                .map(|_| FieldBuilder {
-                    values: Vec::new(),
-                    nulls: NullBufferBuilder::new(0),
-                    histograms: None,
-                })
-                .collect();
-        } else {
-            let gap = index - self.valid_end;
-            for field in &mut self.fields {
-                field.values.resize(field.values.len() + gap, 0.0);
-                field.nulls.append_n_nulls(gap);
-                if let Some(column) = &mut field.histograms {
-                    column.indices.resize(column.indices.len() + gap, None);
-                }
-            }
+        if self.fields.is_empty() {
+            self.fields = (0..len).map(|_| FieldBuilder::new()).collect();
         }
-        self.valid_end = index + 1;
+        self.indices.push(index);
         Ok(true)
     }
 
-    /// Declares that the output span begins at `index`, before any value is pushed for it.
-    ///
-    /// A caller that has already decided the positions before its first value hold no value uses
-    /// this, so the span covers them: a span beginning at the first value would report those
-    /// positions as ones nothing is known about, and a consumer would never learn they were
-    /// decided. Positions must still be pushed in increasing order from here.
-    pub fn cover_from(&mut self, index: usize) -> Result<()> {
-        if self.start.is_some() || index == self.grid.timestamps().len() {
-            return Ok(());
-        }
-        if index < self.next {
-            return Err(DataFusionError::Execution(format!(
-                "grid series cannot begin its span at {index}, behind the next row {}",
-                self.next
-            )));
-        }
-        self.start = Some(index);
-        self.valid_end = index;
-        self.next = index;
-        self.fields = (0..self.schema.fields.len())
-            .map(|_| FieldBuilder {
-                values: Vec::new(),
-                nulls: NullBufferBuilder::new(0),
-                histograms: None,
-            })
-            .collect();
-        Ok(())
+    /// Whether rows have been pushed that no caller has taken yet.
+    pub fn has_pending(&self) -> bool {
+        !self.indices.is_empty()
+            || self
+                .finished
+                .as_ref()
+                .is_some_and(|finished| !finished.runs.is_empty())
     }
 
-    /// Extends the output span to `end`, writing a missing value for every position in between.
+    /// Starts the series the following pushes belong to.
     ///
-    /// The counterpart of [`Self::cover_from`] for positions decided after the last value.
-    pub fn cover_through(&mut self, end: usize) -> Result<()> {
-        if self.start.is_none() {
-            return Ok(());
-        }
-        if end < self.valid_end {
-            return Err(DataFusionError::Execution(format!(
-                "grid series cannot cover through {end}, behind its last row {}",
-                self.valid_end
-            )));
-        }
-        let gap = end - self.valid_end;
-        for field in &mut self.fields {
-            field.values.resize(field.values.len() + gap, 0.0);
-            field.nulls.append_n_nulls(gap);
-            if let Some(column) = &mut field.histograms {
-                column.indices.resize(column.indices.len() + gap, None);
-            }
-        }
-        self.valid_end = end;
-        self.next = end;
-        Ok(())
-    }
-
-    /// Finishes the current series and resets the builder for the next one.
+    /// A caller that takes pieces one at a time never reaches [`Self::finish`], so this is what
+    /// releases the series before: rows are pushed in increasing order, but the next series may
+    /// begin before the previous one ended, since a piece covers only the positions holding a
+    /// value.
     ///
-    /// Returns `None` when no pushed row had a valid value.
-    pub fn finish(&mut self, metric: MetricName) -> Result<Option<Series>> {
-        let start = self.start.take();
-        let fields = std::mem::take(&mut self.fields);
-        let valid_end = std::mem::take(&mut self.valid_end);
+    /// Panics in debug builds when rows are still pending, which means the previous series was
+    /// left unread.
+    pub fn begin_series(&mut self) {
+        debug_assert!(
+            !self.has_pending(),
+            "a new series starts with rows of the previous one still pending"
+        );
         self.next = 0;
-        let Some(start) = start else {
+        self.indices.clear();
+        self.fields.clear();
+        self.finished = None;
+    }
+
+    /// Hands out the next run of positions holding a value, or `None` when none is left.
+    ///
+    /// Every run a series is cut into shares the one buffer per field, because cutting is a
+    /// slice; which run lands in which piece depends on when the caller asks, since rows pushed
+    /// later can only be positions past the ones already taken. What never happens is one piece
+    /// spanning a position with no value, or an empty position costing any storage.
+    pub fn take_run(&mut self, metric: MetricName) -> Result<Option<Series>> {
+        let exhausted = self
+            .finished
+            .as_ref()
+            .is_none_or(|finished| finished.runs.is_empty());
+        if exhausted && !self.indices.is_empty() {
+            self.finalize()?;
+        }
+        let Some(finished) = self.finished.as_mut() else {
             return Ok(None);
         };
+        let Some(run) = finished.runs.pop_front() else {
+            return Ok(None);
+        };
+        Self::cut(&self.schema, &self.grid, &metric, &finished.fields, &run).map(Some)
+    }
 
+    /// Returns every piece the pushed rows make up and resets the builder for the next series.
+    ///
+    /// One piece per maximal run of consecutive positions holding a value; an empty vector when
+    /// no pushed row held one.
+    pub fn finish(&mut self, metric: MetricName) -> Result<Vec<Series>> {
+        if !self.indices.is_empty() {
+            self.finalize()?;
+        }
+        self.next = 0;
+        let Some(finished) = self.finished.take() else {
+            return Ok(Vec::new());
+        };
+        let mut pieces = Vec::with_capacity(finished.runs.len());
+        for run in finished.runs {
+            pieces.push(Self::cut(
+                &self.schema,
+                &self.grid,
+                &metric,
+                &finished.fields,
+                &run,
+            )?);
+        }
+        Ok(pieces)
+    }
+
+    /// Finalizes the buffered rows into shared field buffers and cuts them into runs.
+    fn finalize(&mut self) -> Result<()> {
+        let fields = std::mem::take(&mut self.fields);
         let samples = fields
             .into_iter()
             .map(|mut field| {
@@ -256,16 +279,63 @@ impl GridSeriesBuilder {
                 Samples::try_from_mixed(floats, histograms).map_err(external)
             })
             .collect::<Result<Vec<_>>>()?;
-        let time =
-            GridRange::try_new(self.grid.clone(), start, valid_end - start).map_err(external)?;
         let fields = SeriesFields::try_from_vec(samples).map_err(external)?;
-        Series::try_new(&self.schema, metric, TimeAxis::Grid(time), fields)
-            .map(Some)
-            .map_err(external)
+        let runs = runs_of(&self.indices);
+        self.indices.clear();
+        self.finished = Some(Finished { fields, runs });
+        Ok(())
+    }
+
+    /// Cuts `run` out of `fields` as one series on the grid.
+    fn cut(
+        schema: &Arc<SeriesSchema>,
+        grid: &Arc<EvalGrid>,
+        metric: &MetricName,
+        fields: &SeriesFields,
+        run: &Run,
+    ) -> Result<Series> {
+        // Slicing offsets into the shared buffers, so a piece costs a descriptor, not a copy.
+        let fields = if fields.len() == 1 {
+            fields.as_slice()[0]
+                .slice(run.offset, run.len)
+                .map(SeriesFields::one)
+                .map_err(external)?
+        } else {
+            let sliced = fields
+                .iter()
+                .map(|field| field.slice(run.offset, run.len).map_err(external))
+                .collect::<Result<Vec<_>>>()?;
+            SeriesFields::try_from_vec(sliced).map_err(external)?
+        };
+        let time = GridRange::try_new(grid.clone(), run.start, run.len).map_err(external)?;
+        Series::try_new(schema, metric.clone(), TimeAxis::Grid(time), fields).map_err(external)
     }
 }
 
+/// Cuts the retained indices into maximal runs of consecutive positions.
+fn runs_of(indices: &[usize]) -> VecDeque<Run> {
+    let mut runs = VecDeque::new();
+    let mut offset = 0;
+    while let Some(&start) = indices.get(offset) {
+        let mut len = 1;
+        while indices.get(offset + len) == Some(&(start + len)) {
+            len += 1;
+        }
+        runs.push_back(Run { start, offset, len });
+        offset += len;
+    }
+    runs
+}
+
 impl FieldBuilder {
+    fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            nulls: NullBufferBuilder::new(0),
+            histograms: None,
+        }
+    }
+
     fn push_float(&mut self, value: Option<f64>) {
         self.values.push(value.unwrap_or_default());
         self.nulls.append(value.is_some());

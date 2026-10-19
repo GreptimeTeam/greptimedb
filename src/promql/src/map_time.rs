@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::Float64Array;
+use datafusion::arrow::array::{Array, Float64Array};
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::samples::{
@@ -57,7 +57,10 @@ pub fn date_of_eval_time(function: DateFunction, schema: &SeriesSchema) -> Resul
 
 /// A date function over `series`: each float value is read as Unix seconds and replaced by the
 /// date component, and the metric name is dropped. Missing values stay missing; histogram
-/// samples are dropped, so the result is `None` when no float remains.
+/// samples are dropped, so the result is empty when no float remains.
+///
+/// A missing value is a hole like any other, so a series whose floats are interrupted produces
+/// one piece per run of consecutive valued positions.
 ///
 /// Series that share a label set once their names are dropped must then go through
 /// [`merge_same_labelset`](crate::grid_series::merge_same_labelset).
@@ -65,7 +68,7 @@ pub fn map_date(
     function: DateFunction,
     schema: &Arc<SeriesSchema>,
     series: &Series,
-) -> Result<Option<Series>> {
+) -> Result<Vec<Series>> {
     let TimeAxis::Grid(range) = &series.time else {
         return Err(DataFusionError::Execution(
             "date functions require an evaluated series".into(),
@@ -75,11 +78,13 @@ pub fn map_date(
     metric.remove_all(&METADATA_LABELS);
     let map = |seconds: f64| function.apply(go_int64(seconds));
 
+    // The fast path maps every float in place, so it needs each field to be entirely present:
+    // a null would survive as a hole, and the series would then span positions holding no value.
+    // A hole is enough to fall through to the builder, which cuts the result into pieces.
     let all_floats = series.fields.iter().all(|samples| {
-        samples
-            .segments()
-            .iter()
-            .all(|segment| matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
+        samples.segments().iter().all(|segment| {
+            matches!(segment.dense(), Some(DenseSamplesRef::Float(floats)) if floats.null_count() == 0)
+        })
     });
     if all_floats {
         let fields = series
@@ -100,12 +105,12 @@ pub fn map_date(
             })
             .collect::<Result<Vec<_>>>()?;
         let fields = SeriesFields::try_from_vec(fields).map_err(external)?;
-        return Series::try_new(schema, metric, series.time.clone(), fields)
-            .map(Some)
-            .map_err(external);
+        let series =
+            Series::try_new(schema, metric, series.time.clone(), fields).map_err(external)?;
+        return Ok(vec![series]);
     }
 
-    // Histogram samples leave holes, which may move the ends of the series.
+    // Holes in any field may move the ends of the series, and a hole ends a piece.
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut values = vec![None; series.fields.len()];
     for row in 0..range.len() {

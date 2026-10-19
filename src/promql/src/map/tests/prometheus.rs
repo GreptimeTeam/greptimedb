@@ -107,7 +107,8 @@ fn evaluate(case: &Case) -> Vec<Series> {
     let schema = &case.schema;
     let full_grid =
         || GridRange::try_new(schema.eval_grid.clone().unwrap(), 0, grid_len(case)).unwrap();
-    let each = |f: &dyn Fn(&Series) -> Option<Series>| case.series.iter().filter_map(f).collect();
+    let each =
+        |f: &dyn Fn(&Series) -> Vec<Series>| case.series.iter().flat_map(f).collect::<Vec<_>>();
     let scalar_series = || {
         let scalar = case.scalar.as_ref().expect("scalar operand");
         match h[h.len() - 1].as_str() {
@@ -116,11 +117,16 @@ fn evaluate(case: &Case) -> Vec<Series> {
         }
     };
     match h[0].as_str() {
-        "math" => each(&|s| map_math(schema, s, math_op(h)).unwrap()),
-        "neg" => each(&|s| Some(map_negate(schema, s).unwrap())),
+        "math" => each(&|s| {
+            map_math(schema, s, math_op(h))
+                .unwrap()
+                .into_iter()
+                .collect()
+        }),
+        "neg" => each(&|s| vec![map_negate(schema, s).unwrap()]),
         "arith" => {
             let operand = scalar_operand(&h[2], hex(&h[3]));
-            each(&|s| Some(map_arithmetic(schema, s, arithmetic_op(&h[1]), operand).unwrap()))
+            each(&|s| vec![map_arithmetic(schema, s, arithmetic_op(&h[1]), operand).unwrap()])
         }
         "cmp" => {
             let operand = scalar_operand(&h[3], hex(&h[4]));

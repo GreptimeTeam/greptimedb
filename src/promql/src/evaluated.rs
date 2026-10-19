@@ -18,21 +18,21 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::Series;
 use datatypes::series::time::{GridRange, TimeAxis};
 
-/// One slice of one evaluated series.
+/// One slice of one evaluated series: a run of consecutive positions that hold a value.
 ///
-/// The series' [`TimeAxis::Grid`] covers the positions this chunk decided, whether they hold a
-/// value or not. Those positions are absolute on the grid: a consumer that concatenates the chunks
-/// of a series never reorders them, and never has to translate a chunk-local row number into a
-/// grid position.
+/// The series' [`TimeAxis::Grid`] covers the positions this chunk holds, and those positions are
+/// absolute on the grid: a consumer that concatenates the chunks of a series never reorders them,
+/// and never has to translate a chunk-local row number into a grid position.
 ///
-/// The range reports progress, not values: a decided position without a result is a missing value
-/// inside the range, and the positions after it have not been decided yet. That is why a chunk can
-/// span positions holding no value at all -- dropping them would leave a consumer waiting for
-/// input that has already settled them.
+/// A decided position without a result is not a row of any chunk. It lies between two chunks, and
+/// the positions after the last one handed out have not been decided yet, so the chunks of a
+/// series may leave gaps -- a chunk never spans a position that holds no value. That is what keeps
+/// a sparse series from costing a row per empty position. A single field may still hold a null at
+/// a position another field fills, since the fields of one chunk are row-aligned.
 ///
-/// A series closes exactly once, on the chunk that carries `is_last`. A closed prefix is always
-/// followed by a closing chunk, even when that chunk holds no values, so a consumer can tell
-/// "nothing more here" from "no more input".
+/// A series closes exactly once, on the chunk that carries `is_last`. A closed prefix is followed
+/// by a closing chunk when nothing is left, even when that chunk holds no values, so a consumer
+/// can tell "nothing more here" from "no more input".
 #[derive(Clone, Debug)]
 pub struct EvaluatedChunk {
     /// The evaluated values, addressed on their absolute grid positions.

@@ -27,7 +27,7 @@ use super::{
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
     GoldenCase, Labels, OwnedHistogram, Points, canonical_bits, close, golden_cases, labels_of,
-    metric_of, mixed_series, points_of,
+    metric_of, mixed_series, points_by_labels, points_of,
 };
 
 fn schema(case: &GoldenCase) -> Arc<SeriesSchema> {
@@ -52,10 +52,9 @@ fn assert_outcome(
 ) -> bool {
     match (actual, expected) {
         (Ok(actual), Ok(expected)) => {
-            let actual: BTreeMap<_, _> = actual
-                .iter()
-                .map(|series| (labels_of(&series.metric), points_of(series)))
-                .collect();
+            // A result arrives as one piece per run of valued positions; a fixture pins
+            // dense points, so the pieces of each label set are folded back together.
+            let actual: BTreeMap<_, _> = points_by_labels(actual.clone());
             let expected: BTreeMap<_, _> = expected
                 .iter()
                 .map(|(labels, points)| {
@@ -143,10 +142,10 @@ fn native_histograms_match_prometheus() {
             })
             .collect();
         let map = |function| -> Result<Vec<Series>, DataFusionError> {
-            let mapped = input
-                .iter()
-                .filter_map(|series| map_native_histogram(function, &schema, series).transpose())
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut mapped = Vec::new();
+            for series in &input {
+                mapped.extend(map_native_histogram(function, &schema, series)?);
+            }
             merge_same_labelset(&schema, mapped)
         };
         let actual = match case.spec[0].as_str() {
@@ -433,7 +432,8 @@ fn histogram_functions_drop_metadata_labels() {
     .unwrap();
     let count = map_native_histogram(NativeHistogramFunction::Count, &schema, &native)
         .unwrap()
-        .unwrap();
+        .pop()
+        .expect("a native histogram result");
     let mut expected = labels(&[]);
     expected.remove("__name__");
     assert_eq!(labels_of(&count.metric), expected);

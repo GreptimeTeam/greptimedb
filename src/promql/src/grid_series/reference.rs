@@ -29,7 +29,6 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::Rng;
 
-use crate::grid_series::GridSeriesBuilder;
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
 /// Values by absolute grid index, then by field; `None` is missing.
@@ -118,6 +117,102 @@ fn assert_series_matches(
             .collect()
     };
     assert_eq!(bits(&expand(actual)), bits(expected), "{context}");
+}
+
+/// Stitches the pieces of one series back into a dense matrix over the whole grid.
+///
+/// A series is handed out as one piece per run of consecutive positions holding a value, so
+/// comparing against a dense expectation means putting the pieces back together. Two pieces
+/// covering one position would be a protocol violation, so it fails here rather than silently
+/// overwriting.
+pub(crate) fn stitch(pieces: &[Series]) -> Dense {
+    let mut dense: Option<Dense> = None;
+    for piece in pieces {
+        let TimeAxis::Grid(range) = &piece.time else {
+            panic!("expected a grid series, got {:?}", piece.time);
+        };
+        let dense = dense.get_or_insert_with(|| {
+            vec![vec![None; piece.fields.len()]; range.grid().timestamps().len()]
+        });
+        for (field, samples) in piece.fields.iter().enumerate() {
+            for row in 0..range.len() {
+                let target = &mut dense[range.start() + row][field];
+                assert!(
+                    target.is_none() || matches!(samples.sample(row), SampleRef::Missing),
+                    "two pieces hold a value at position {}",
+                    range.start() + row
+                );
+                *target = match samples.sample(row) {
+                    SampleRef::Missing => None,
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Histogram(_) => panic!("unexpected histogram sample"),
+                };
+            }
+        }
+    }
+    dense.unwrap_or_default()
+}
+
+/// The `(start, len)` of every piece of one series, in grid order.
+pub(crate) fn piece_ranges(pieces: &[Series]) -> Vec<(usize, usize)> {
+    pieces
+        .iter()
+        .map(|piece| match &piece.time {
+            TimeAxis::Grid(range) => (range.start(), range.len()),
+            other => panic!("expected a grid series, got {other:?}"),
+        })
+        .collect()
+}
+
+/// Asserts `pieces` are the pieces of `expected`: they reproduce it, and together they cover
+/// exactly the positions that hold a value, none of them twice.
+pub(crate) fn assert_pieces_eq(pieces: &[Series], expected: &Dense, metric: &MetricName) {
+    for piece in pieces {
+        assert_eq!(&piece.metric, metric, "a piece changed the metric");
+    }
+    let valued: Vec<usize> = expected
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.iter().any(Option::is_some))
+        .map(|(index, _)| index)
+        .collect();
+    if valued.is_empty() {
+        // Nothing holds a value anywhere, so there is no piece at all -- not one piece of nulls.
+        assert!(
+            pieces.is_empty(),
+            "expected no pieces, got {}",
+            pieces.len()
+        );
+        return;
+    }
+    // Bit comparison, since a NaN never equals itself.
+    let bits = |dense: &Dense| -> Vec<Vec<Option<u64>>> {
+        dense
+            .iter()
+            .map(|row| row.iter().map(|value| value.map(f64::to_bits)).collect())
+            .collect()
+    };
+    assert_eq!(bits(&stitch(pieces)), bits(expected));
+    let mut covered: Vec<usize> = piece_ranges(pieces)
+        .into_iter()
+        .flat_map(|(start, len)| start..start + len)
+        .collect();
+    covered.sort_unstable();
+    assert_eq!(
+        covered, valued,
+        "the pieces do not cover exactly the positions holding a value"
+    );
+}
+
+/// The points of each label set of `pieces`, folded back into one dense point map first.
+///
+/// An operator hands out one piece per run of consecutive positions holding a value, while a
+/// fixture pins dense points, so the pieces of a label set have to be joined before comparing.
+pub(crate) fn points_by_labels(pieces: Vec<Series>) -> std::collections::BTreeMap<Labels, Points> {
+    crate::golden::fold_pieces(pieces)
+        .iter()
+        .map(|series| (labels_of(&series.metric), points_of(series)))
+        .collect()
 }
 
 /// Values covering the bit patterns kernels most often mishandle.
@@ -277,16 +372,29 @@ pub(crate) fn labels_of(metric: &MetricName) -> Labels {
 }
 
 /// A single-field series of `schema` holding `points`; `None` without points.
+///
+/// Built directly rather than through the builder: this is an *input* to an operator, so a hole
+/// stays a null inside one series instead of cutting it into pieces.
 pub(crate) fn series_of(
     schema: &Arc<SeriesSchema>,
     labels: &Labels,
     points: &Points,
 ) -> Option<Series> {
-    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
-    for (&index, &bits) in points {
-        builder.push(index, &[Some(f64::from_bits(bits))]).unwrap();
-    }
-    builder.finish(metric_of(labels)).unwrap()
+    let start = *points.keys().min()?;
+    let end = *points.keys().max()? + 1;
+    let values: Float64Array = (start..end)
+        .map(|index| points.get(&index).map(|bits| f64::from_bits(*bits)))
+        .collect();
+    let time = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, end - start).unwrap();
+    Some(
+        Series::try_new(
+            schema,
+            metric_of(labels),
+            TimeAxis::Grid(time),
+            SeriesFields::one(Samples::from_float(values)),
+        )
+        .unwrap(),
+    )
 }
 
 /// The points of a single-field series, any NaN as one NaN: Prometheus' NaN payloads depend on

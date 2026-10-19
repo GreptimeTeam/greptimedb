@@ -14,13 +14,6 @@
 
 use super::*;
 
-fn grid_range(series: &Series) -> (usize, usize) {
-    let TimeAxis::Grid(range) = &series.time else {
-        panic!("lost grid axis")
-    };
-    (range.start(), range.len())
-}
-
 #[test]
 fn filter_compares_fields_independently_and_trims_the_output() {
     let schema = Arc::new(schema(&["a", "b"]));
@@ -42,24 +35,26 @@ fn filter_compares_fields_independently_and_trims_the_output() {
         Comparison::Filter(ComparisonOp::Greater),
         ScalarOperand::Right(4.0),
     )
-    .unwrap()
     .unwrap();
-    assert_eq!(grid_range(&output), (5, 4));
-    assert_floats(
-        output.fields.get(0).unwrap(),
-        &[None, Some(5.0), None, Some(7.0)],
+    // Field 1 keeps position 5 and field 0 keeps position 6, so 5 and 6 stay one piece; position
+    // 7 fails in both fields, which costs no row and ends the piece; position 8 keeps field 0.
+    assert_eq!(piece_ranges(&output), vec![(5, 2), (8, 1)]);
+    assert_eq!(
+        piece_floats(&output, 0),
+        vec![((5, 2), vec![None, Some(5.0)]), ((8, 1), vec![Some(7.0)])]
     );
-    assert_floats(
-        output.fields.get(1).unwrap(),
-        &[Some(9.0), None, None, None],
+    assert_eq!(
+        piece_floats(&output, 1),
+        vec![((5, 2), vec![Some(9.0), None]), ((8, 1), vec![None])]
     );
-    assert_eq!(output.metric, input.metric);
+    assert!(output.iter().all(|piece| piece.metric == input.metric));
     for scalar in [ScalarOperand::Right(100.0), ScalarOperand::Right(f64::NAN)] {
         let filter = Comparison::Filter(ComparisonOp::Greater);
         assert!(
             map_compare(&schema, &input, filter, scalar)
                 .unwrap()
-                .is_none()
+                .is_empty(),
+            "nothing passes, so the filter yields no piece"
         );
     }
 }
@@ -78,10 +73,14 @@ fn filter_with_left_scalar_keeps_the_vector_value() {
         Comparison::Filter(ComparisonOp::Less),
         ScalarOperand::Left(2.0),
     )
-    .unwrap()
     .unwrap();
-    assert_eq!(grid_range(&output), (6, 3));
-    assert_floats(output.fields.get(0).unwrap(), &[Some(3.0), None, Some(4.0)]);
+    // Position 6 holds 3.0 and position 8 holds 4.0; position 7 failed the filter, so it costs no
+    // row and the result is two pieces rather than one padded stretch.
+    assert_eq!(piece_ranges(&output), vec![(6, 1), (8, 1)]);
+    assert_eq!(
+        piece_floats(&output, 0),
+        vec![((6, 1), vec![Some(3.0)]), ((8, 1), vec![Some(4.0)])]
+    );
 }
 
 #[test]
@@ -102,13 +101,24 @@ fn bool_emits_every_present_field_and_drops_the_name() {
         Comparison::Bool(ComparisonOp::Equal),
         ScalarOperand::Right(0.0),
     )
-    .unwrap()
     .unwrap();
-    assert_eq!(grid_range(&output), (4, 3));
-    assert_floats(output.fields.get(0).unwrap(), &[Some(1.0), None, Some(0.0)]);
-    assert_floats(output.fields.get(1).unwrap(), &[Some(1.0), Some(0.0), None]);
-    assert_eq!(output.metric.name(), None);
-    assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
+    // Every position keeps a value in at least one field, so the result is one piece; a field
+    // missing where the other has a value keeps a null row.
+    assert_eq!(piece_ranges(&output), vec![(4, 3)]);
+    assert_eq!(
+        piece_floats(&output, 0),
+        vec![((4, 3), vec![Some(1.0), None, Some(0.0)])]
+    );
+    assert_eq!(
+        piece_floats(&output, 1),
+        vec![((4, 3), vec![Some(1.0), Some(0.0), None])]
+    );
+    assert!(output.iter().all(|piece| piece.metric.name().is_none()));
+    assert!(
+        output
+            .iter()
+            .all(|piece| piece.metric.tags() == &input.metric.tags()[1..])
+    );
 }
 
 #[test]

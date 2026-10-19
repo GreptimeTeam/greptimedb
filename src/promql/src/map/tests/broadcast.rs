@@ -33,13 +33,6 @@ fn scalar(schema: &SeriesSchema, start: usize, samples: Samples) -> Series {
     .unwrap()
 }
 
-fn grid_range(series: &Series) -> (usize, usize) {
-    let TimeAxis::Grid(range) = &series.time else {
-        panic!("lost grid axis")
-    };
-    (range.start(), range.len())
-}
-
 #[test]
 fn time_varying_scalar_aligns_absolute_indices_across_independent_chunks() {
     // The vector covers 7..15 and the scalar 5..16, each chunked at different offsets.
@@ -109,57 +102,50 @@ fn time_varying_scalar_aligns_absolute_indices_across_independent_chunks() {
         ArithmeticOp::Subtract,
         ScalarSeriesOperand::Left(&scalar),
     )
-    .unwrap()
     .unwrap();
-    assert_eq!(grid_range(&output), (7, 8));
-    assert_floats(
-        output.fields.get(0).unwrap(),
-        &[
-            Some(99.0),
-            Some(198.0),
-            None,
-            None,
-            Some(495.0),
-            Some(594.0),
-            Some(693.0),
-            Some(792.0),
-        ],
+    // The scalar holds no value at grid position 10, so neither field has a result there: that
+    // position is not a row, and the two sides of it form separate pieces.
+    assert_eq!(piece_ranges(&output), vec![(7, 3), (11, 4)]);
+    assert_eq!(
+        piece_floats(&output, 0),
+        vec![
+            ((7, 3), vec![Some(99.0), Some(198.0), None]),
+            (
+                (11, 4),
+                vec![Some(495.0), Some(594.0), Some(693.0), Some(792.0)]
+            ),
+        ]
     );
-    assert_floats(
-        output.fields.get(1).unwrap(),
-        &[
-            None,
-            Some(180.0),
-            Some(270.0),
-            None,
-            Some(450.0),
-            Some(540.0),
-            Some(630.0),
-            None,
-        ],
+    assert_eq!(
+        piece_floats(&output, 1),
+        vec![
+            ((7, 3), vec![None, Some(180.0), Some(270.0)]),
+            ((11, 4), vec![Some(450.0), Some(540.0), Some(630.0), None]),
+        ]
     );
-    assert_eq!(output.metric.name(), None);
-    assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
+    assert!(output.iter().all(|piece| piece.metric.name().is_none()));
+    assert!(
+        output
+            .iter()
+            .all(|piece| piece.metric.tags() == &input.metric.tags()[1..])
+    );
     let output = map_arithmetic_series(
         &schema,
         &input,
         ArithmeticOp::Subtract,
         ScalarSeriesOperand::Right(&scalar),
     )
-    .unwrap()
     .unwrap();
-    assert_floats(
-        output.fields.get(0).unwrap(),
-        &[
-            Some(-99.0),
-            Some(-198.0),
-            None,
-            None,
-            Some(-495.0),
-            Some(-594.0),
-            Some(-693.0),
-            Some(-792.0),
-        ],
+    assert_eq!(piece_ranges(&output), vec![(7, 3), (11, 4)]);
+    assert_eq!(
+        piece_floats(&output, 0),
+        vec![
+            ((7, 3), vec![Some(-99.0), Some(-198.0), None]),
+            (
+                (11, 4),
+                vec![Some(-495.0), Some(-594.0), Some(-693.0), Some(-792.0)]
+            ),
+        ]
     );
 }
 
@@ -196,25 +182,29 @@ fn time_varying_comparison_keeps_vector_values_and_trims() {
         Comparison::Filter(ComparisonOp::Less),
         ScalarSeriesOperand::Left(&scalar),
     )
-    .unwrap()
     .unwrap();
-    assert_eq!(grid_range(&output), (10, 1));
-    assert_floats(output.fields.get(0).unwrap(), &[Some(4.0)]);
-    assert_eq!(output.metric, input.metric);
+    // Only position 10 passes, and it is the whole result: one piece, one row.
+    assert_eq!(piece_ranges(&output), vec![(10, 1)]);
+    assert_eq!(piece_floats(&output, 0), vec![((10, 1), vec![Some(4.0)])]);
+    assert!(output.iter().all(|piece| piece.metric == input.metric));
     let output = map_compare_series(
         &schema,
         &input,
         Comparison::Bool(ComparisonOp::Equal),
         ScalarSeriesOperand::Right(&scalar),
     )
-    .unwrap()
     .unwrap();
-    assert_eq!(grid_range(&output), (6, 6));
-    assert_floats(
-        output.fields.get(0).unwrap(),
-        &[Some(1.0), None, None, Some(0.0), Some(0.0), Some(0.0)],
+    // Bool emits at every position where both operands exist. The scalar holds no value at grid
+    // position 7, so that position has no row and ends a piece; 8 to 10 follow it.
+    assert_eq!(piece_ranges(&output), vec![(6, 1), (9, 3)]);
+    assert_eq!(
+        piece_floats(&output, 0),
+        vec![
+            ((6, 1), vec![Some(1.0)]),
+            ((9, 3), vec![Some(0.0), Some(0.0), Some(0.0)]),
+        ]
     );
-    assert_eq!(output.metric.name(), None);
+    assert!(output.iter().all(|piece| piece.metric.name().is_none()));
 }
 
 #[test]
@@ -254,13 +244,15 @@ fn disjoint_or_missing_overlap_produces_no_series() {
             ScalarSeriesOperand::Right(&scalar),
         )
         .unwrap();
-        match (output, expected) {
-            (None, None) => {}
-            (Some(output), Some((range, values))) => {
-                assert_eq!(grid_range(&output), range);
-                assert_floats(output.fields.get(0).unwrap(), &values);
+        // An overlap with no valid scalar point yields no piece at all, which is what `None`
+        // used to say.
+        match (output.is_empty(), expected) {
+            (true, None) => {}
+            (false, Some((range, values))) => {
+                assert_eq!(piece_ranges(&output), vec![range]);
+                assert_eq!(piece_floats(&output, 0), vec![(range, values)]);
             }
-            (output, expected) => panic!("{start}: {output:?} != {expected:?}"),
+            (_, expected) => panic!("{start}: {output:?} != {expected:?}"),
         }
     }
 }

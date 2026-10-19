@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::Label;
 use datatypes::series::histogram::HistogramBatchBuilder;
@@ -22,6 +24,12 @@ use super::*;
 use crate::golden::{assert_result, cases};
 
 const CASES: &str = include_str!("prometheus_cases.txt");
+
+/// A label set as name/value pairs, the way the fixture names one.
+type LabelKey = Vec<(Arc<str>, Arc<str>)>;
+
+/// The valued positions of one label set, by grid index.
+type Positions = Vec<(usize, u64)>;
 
 const OPS: [AggregateOp; 6] = [
     AggregateOp::Sum,
@@ -91,6 +99,29 @@ fn input(
         SeriesFields::try_from_vec(fields).unwrap(),
     )
     .unwrap()
+}
+
+/// Every valued position of `pieces`, stitched into one dense vector over the grid.
+///
+/// `aggregate_float` returns one piece per run of consecutive positions that hold a result, so a
+/// group whose values are interrupted arrives as several pieces; the first position and the
+/// value vector are what the assertions here compare.
+fn values_of(pieces: &[Series], field: usize, grid_len: usize) -> (usize, Vec<Option<f64>>) {
+    let mut dense = vec![None; grid_len];
+    let mut start = usize::MAX;
+    for piece in pieces {
+        let (piece_start, piece_values) = values(piece, field);
+        start = start.min(piece_start);
+        for (offset, value) in piece_values.into_iter().enumerate() {
+            if value.is_some() {
+                assert!(dense[piece_start + offset].is_none(), "two pieces overlap");
+                dense[piece_start + offset] = value;
+            }
+        }
+    }
+    let first = dense.iter().position(Option::is_some).unwrap_or(0);
+    let last = dense.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+    (first, dense[first..last.max(first)].to_vec())
 }
 
 fn values(series: &Series, field: usize) -> (usize, Vec<Option<f64>>) {
@@ -313,33 +344,41 @@ fn fields_are_aggregated_independently() {
             let output = aggregate_float(&multi, &series, op, grouping).unwrap();
             for field in [0, 1] {
                 let expected = aggregate_float(&single, &project(field), op, grouping).unwrap();
-                let expected = expected
-                    .iter()
-                    .map(|s| (s.metric.clone(), values(s, 0)))
-                    .collect::<Vec<_>>();
-                for actual in &output {
-                    let (start, actual_values) = values(actual, field);
-                    let present = actual_values
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, v)| v.map(|v| (start + i, v.to_bits())))
-                        .collect::<Vec<_>>();
-                    let reference = expected
-                        .iter()
-                        .find(|(metric, _)| metric == &actual.metric)
-                        .map_or_else(Vec::new, |(_, (start, v))| {
-                            v.iter()
+                // The multi-field result is cut into pieces where its values are interrupted, so
+                // the comparison is over the dense values of each label set, not over pieces.
+                let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
+                let grouped = |pieces: &[Series], field: usize| {
+                    let mut by_metric: BTreeMap<LabelKey, Positions> = BTreeMap::new();
+                    for piece in pieces {
+                        let same: Vec<Series> = pieces
+                            .iter()
+                            .filter(|other| other.metric == piece.metric)
+                            .cloned()
+                            .collect();
+                        let (start, values) = values_of(&same, field, grid_len);
+                        let mut key: LabelKey = piece
+                            .metric
+                            .tags()
+                            .iter()
+                            .map(|tag| (tag.name.clone(), tag.value.clone()))
+                            .collect();
+                        if let Some(name) = piece.metric.name() {
+                            key.insert(0, (Arc::from("__name__"), Arc::from(name)));
+                        }
+                        by_metric.insert(
+                            key,
+                            values
+                                .into_iter()
                                 .enumerate()
                                 .filter_map(|(i, v)| v.map(|v| (start + i, v.to_bits())))
-                                .collect()
-                        });
-                    assert_eq!(present, reference, "{op:?} {grouping:?} field {field}");
-                }
-                assert!(
-                    expected
-                        .iter()
-                        .all(|(m, _)| output.iter().any(|s| &s.metric == m))
-                );
+                                .collect(),
+                        );
+                    }
+                    by_metric
+                };
+                let actual = grouped(&output, field);
+                let expected = grouped(&expected, 0);
+                assert_eq!(actual, expected, "{op:?} {grouping:?} field {field}");
             }
         }
     }
@@ -389,7 +428,9 @@ fn state_blocks_keep_absolute_indices_across_boundaries_and_gaps() {
         ),
     ];
     let output = aggregate_float(&schema, &inputs, AggregateOp::Sum, Grouping::By(&[])).unwrap();
-    assert_eq!(output.len(), 1);
+    // One group, and its values are interrupted by empty blocks, so it arrives as several pieces
+    // of the same label set. What must hold is the dense values, not the piece count.
+    assert!(output.iter().all(|piece| piece.metric == output[0].metric));
     let mut a = vec![None; 452];
     let mut b = vec![None; 452];
     for i in 60..68 {
@@ -402,8 +443,8 @@ fn state_blocks_keep_absolute_indices_across_boundaries_and_gaps() {
         a[i - 60] = Some(4.0);
         b[i - 60] = Some(6.0);
     }
-    assert_eq!(values(&output[0], 0), (60, a));
-    assert_eq!(values(&output[0], 1), (60, b));
+    assert_eq!(values_of(&output, 0, 512), (60, a));
+    assert_eq!(values_of(&output, 1, 512), (60, b));
 }
 
 #[test]

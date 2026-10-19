@@ -82,6 +82,46 @@ fn floats(samples: &[Option<f64>]) -> Samples {
     Samples::from_float(Float64Array::from(samples.to_vec()))
 }
 
+/// The `(start, len)` of every piece of a mapped result, in grid order.
+fn piece_ranges(pieces: &[Series]) -> Vec<(usize, usize)> {
+    pieces
+        .iter()
+        .map(|piece| {
+            let TimeAxis::Grid(range) = &piece.time else {
+                panic!("lost grid axis")
+            };
+            (range.start(), range.len())
+        })
+        .collect()
+}
+
+/// The `(start, len)` of one piece together with its values.
+type PieceFloats = Vec<((usize, usize), Vec<Option<f64>>)>;
+
+/// The field-`field` values of `pieces`, one entry per piece, with its absolute start.
+fn piece_floats(pieces: &[Series], field: usize) -> PieceFloats {
+    pieces
+        .iter()
+        .map(|piece| {
+            let (start, _) = {
+                let TimeAxis::Grid(range) = &piece.time else {
+                    panic!("lost grid axis")
+                };
+                (range.start(), range.len())
+            };
+            let values = piece.fields.as_slice()[field]
+                .iter()
+                .map(|sample| match sample {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Missing => None,
+                    _ => panic!("unexpected histogram"),
+                })
+                .collect();
+            ((start, piece.fields.as_slice()[field].len()), values)
+        })
+        .collect()
+}
+
 fn assert_floats(actual: &Samples, expected: &[Option<f64>]) {
     assert_eq!(actual.len(), expected.len());
     for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
