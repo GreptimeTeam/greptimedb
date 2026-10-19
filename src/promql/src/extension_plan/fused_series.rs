@@ -81,7 +81,7 @@ use datatypes::series::{MetricName, SeriesOrdering};
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
-use crate::map::{MathOp, map_math};
+use crate::map::{MathOp, map_chunk};
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::source::materialize_raw_labels;
 
@@ -595,25 +595,6 @@ fn describe_map(op: MathOp) -> String {
     }
 }
 
-/// Applies every map kernel in order and returns the final series.
-///
-/// The kernels work on typed [`Series`]; the duplicate-label-set check and the conversion into a
-/// record batch both need the result of this stage, so no batch is built in between.
-fn apply_maps(
-    evaluator: &RangeEvaluator,
-    maps: &[MathOp],
-    series: Series,
-) -> Result<Option<Series>> {
-    let mut series = series;
-    for op in maps {
-        let Some(mapped) = map_math(evaluator.output_schema(), &series, *op)? else {
-            return Ok(None);
-        };
-        series = mapped;
-    }
-    Ok(Some(series))
-}
-
 /// Maximum number of raw chunks one `poll_next` call consumes before yielding.
 ///
 /// A child that is always ready can deliver many short-lived series whose evaluation yields no
@@ -952,21 +933,26 @@ impl Stream for FusedSeriesStream {
                 evaluator
                     .push(&chunk)
                     .and_then(|evaluated| match evaluated {
-                        Some(evaluated) => apply_maps(evaluator, maps, evaluated.series),
+                        // The map chain keeps the chunk's decided range, so a chain that maps
+                        // every value away still advances the consumer; `emit` trims it to the
+                        // rows holding a value, and a chunk without one produces no batch.
+                        Some(evaluated) => {
+                            map_chunk(evaluator.output_schema(), &evaluated, maps).map(Some)
+                        }
                         None => Ok(None),
                     })
             };
-            let series = match evaluated {
-                Ok(series) => series,
+            let evaluated = match evaluated {
+                Ok(evaluated) => evaluated,
                 Err(error) => {
                     this.abort();
                     return Poll::Ready(Some(Err(error)));
                 }
             };
-            let Some(series) = series else {
+            let Some(evaluated) = evaluated else {
                 continue;
             };
-            return match this.emit(&series) {
+            return match this.emit(&evaluated.series) {
                 Ok(Some(batch)) => Poll::Ready(Some(Ok(batch))),
                 // The chunk settled only positions without a value, so it produces no row and
                 // the loop keeps consuming input.

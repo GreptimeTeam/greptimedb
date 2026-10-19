@@ -51,6 +51,7 @@ use crate::grid_series::reference::{
 };
 use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::map::{MathOp, map_chunk};
 use crate::range_array::RangeArray;
 use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
@@ -1397,6 +1398,7 @@ fn subquery_series_match_references() {
         let (Some(series), rows) = random_evaluated(&mut rng, &inner, fields, seed) else {
             continue;
         };
+        let whole = EvaluatedChunk::try_new(series, true).unwrap();
         let mut probe = RangeEvaluator::with_kernel(
             &schema,
             outer.clone(),
@@ -1408,7 +1410,7 @@ fn subquery_series_match_references() {
         .unwrap();
         let expected = reference(&rows, &outer, window, fields, false, true);
         let evaluated = probe
-            .push_series(&series)
+            .push_evaluated(&whole)
             .unwrap()
             .expect("the input closes");
         assert!(evaluated.is_last);
@@ -1419,7 +1421,7 @@ fn subquery_series_match_references() {
                 RangeEvaluator::try_new(&schema, outer.clone(), window, function).unwrap();
             let expected = udf_reference(function, &rows, &outer, window, fields, false);
             let evaluated = evaluator
-                .push_series(&series)
+                .push_evaluated(&whole)
                 .unwrap()
                 .expect("the input closes");
             let result = fold_chunks(std::slice::from_ref(&evaluated), evaluator.output_schema());
@@ -1471,7 +1473,8 @@ fn rejects_input_of_the_other_kind() {
     let mut builder = GridSeriesBuilder::try_new(Arc::new(evaluated)).unwrap();
     builder.push(0, &[Some(1.0)]).unwrap();
     let series = builder.finish(metric(0)).unwrap().unwrap();
-    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
+    let chunk = EvaluatedChunk::try_new(series, true).unwrap();
+    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_evaluated(&chunk));
 }
 
 /// The range function a golden fixture names, with its constant arguments.
@@ -2211,9 +2214,231 @@ fn evaluated_histograms_drop_counter_reset_hints() {
     };
     let mut evaluator =
         RangeEvaluator::try_new(&schema, grid(10, 10, 1), window, RangeFunction::Resets).unwrap();
-    let result = evaluator.push_series(&series).unwrap().unwrap().series;
+    let chunk = EvaluatedChunk::try_new(series, true).unwrap();
+    let result = evaluator.push_evaluated(&chunk).unwrap().unwrap().series;
     assert!(matches!(
         result.fields.as_slice()[0].sample(0),
         SampleRef::Float(resets) if resets == 0.0
     ));
+}
+
+/// An evaluator of evaluated input: `input_grid` is the grid of the inner result it reads, and
+/// `grid` the grid it reports on.
+fn evaluated_evaluator(
+    input_grid: Arc<EvalGrid>,
+    grid: Arc<EvalGrid>,
+    window: RangeWindow,
+) -> RangeEvaluator {
+    let schema = SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(input_grid),
+    };
+    RangeEvaluator::with_kernel(&schema, grid, window, Box::new(probe), true, true).unwrap()
+}
+
+/// The inner layer of the chunked-consumption tests: one raw series on a 10 ms grid, pushed in
+/// three chunks and evaluated on that same grid.
+fn inner_layer() -> (RangeEvaluator, Vec<EvaluatedChunk>) {
+    let window = RangeWindow {
+        range_ms: 30,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut inner = probe_evaluator(1, grid(0, 10, 8), window);
+    let rows: Vec<Row> = vec![
+        (0, vec![Some(1.0)]),
+        (10, vec![Some(2.0)]),
+        (30, vec![Some(4.0)]),
+        (50, vec![Some(6.0)]),
+        (70, vec![Some(8.0)]),
+    ];
+    let pieces = [
+        chunk(&rows[..2], 1, 0, false),
+        chunk(&rows[2..3], 1, 0, false),
+        chunk(&rows[3..], 1, 0, true),
+    ];
+    let chunks = collect_chunks(&mut inner, &pieces);
+    (inner, chunks)
+}
+
+/// The grid of the outer layer of the chunked-consumption tests: other start, other step, so it
+/// shares no position with the inner one.
+fn outer_grid() -> Arc<EvalGrid> {
+    grid(5, 20, 4)
+}
+
+/// The window the outer layer of the chunked-consumption tests reads its input with.
+fn outer_window() -> RangeWindow {
+    RangeWindow {
+        range_ms: 40,
+        offset_ms: 0,
+        anchor_ms: None,
+    }
+}
+
+/// A chunk whose span is `start..start + values.len()`, every position of it decided.
+fn values_chunk(
+    schema: &Arc<SeriesSchema>,
+    start: usize,
+    values: &[Option<f64>],
+    is_last: bool,
+) -> EvaluatedChunk {
+    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    builder.cover_from(start).unwrap();
+    for (offset, value) in values.iter().enumerate() {
+        builder.push(start + offset, &[*value]).unwrap();
+    }
+    builder.cover_through(start + values.len()).unwrap();
+    let series = builder.finish(metric(0)).unwrap().expect("covered above");
+    EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
+/// Pushing the chunks of one series one at a time must equal pushing the whole series at once:
+/// the state a later chunk needs (retained samples, resets, decided positions) survives the
+/// handover. Each layer is on its own grid, so neither can pass by reusing the other's indices.
+#[test]
+fn a_series_pushed_in_chunks_matches_the_whole_series() {
+    let (inner, inner_chunks) = inner_layer();
+    let mut chunked = evaluated_evaluator(grid(0, 10, 8), outer_grid(), outer_window());
+    let pushed: Vec<_> = inner_chunks
+        .iter()
+        .filter_map(|piece| chunked.push_evaluated(piece).unwrap())
+        .collect();
+
+    let whole = EvaluatedChunk::try_new(
+        fold_chunks(&inner_chunks, inner.output_schema()).expect("the inner series has values"),
+        true,
+    )
+    .unwrap();
+    let mut at_once = evaluated_evaluator(grid(0, 10, 8), outer_grid(), outer_window());
+    let once: Vec<_> = at_once
+        .push_evaluated(&whole)
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    let expected = fold_chunks(&once, at_once.output_schema()).expect("the input closes");
+    let result = fold_chunks(&pushed, chunked.output_schema());
+    assert_series_eq(result.as_ref(), &expand(&expected), &metric(0));
+}
+
+/// A chunk is indexed on the grid of the layer that produced it, and that index is absolute:
+/// reading it on another grid reports positions of that other grid, which only ever increase.
+#[test]
+fn a_chunk_indexed_on_the_inner_grid_is_absolute_on_the_outer_one() {
+    let (_, inner_chunks) = inner_layer();
+    let mut outer = evaluated_evaluator(grid(0, 10, 8), outer_grid(), outer_window());
+    let chunks: Vec<_> = inner_chunks
+        .iter()
+        .filter_map(|piece| outer.push_evaluated(piece).unwrap())
+        .collect();
+
+    // Without more than one chunk the monotonicity below would hold for free.
+    assert!(chunks.len() > 1, "{} outer chunks", chunks.len());
+    for chunk in &chunks {
+        assert_eq!(
+            chunk.range().grid().spec(),
+            outer_grid().spec(),
+            "a chunk is addressed on the outer grid"
+        );
+    }
+    let starts: Vec<_> = chunks.iter().map(|chunk| chunk.range().start()).collect();
+    assert!(
+        starts.windows(2).all(|pair| pair[0] < pair[1]),
+        "positions restart or go back: {starts:?}"
+    );
+    let last = chunks.last().expect("checked above");
+    assert_eq!(
+        last.range().start() + last.range().len(),
+        outer_grid().timestamps().len(),
+        "the outer series reached its end"
+    );
+}
+
+/// A chunk whose values a float map chain removes keeps its range: the positions were decided, and
+/// a consumer advances on decided positions, not on the ones that happened to hold a value.
+#[test]
+fn a_map_that_removes_every_value_still_delivers_its_range() {
+    // Native histogram points have no float for a float map to produce, so `abs` empties this
+    // chunk without any value having been missing from the input.
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid(0, 10, 2)),
+    });
+    let reset = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+    let histograms = BTreeMap::from([(0, reset.to_string()), (1, reset.to_string())]);
+    let labels = BTreeMap::from([("job".to_string(), "x".to_string())]);
+    let series = mixed_series(&schema, &labels, &BTreeMap::new(), &histograms).unwrap();
+    let chunk = EvaluatedChunk::try_new(series, true).unwrap();
+
+    let mapped = map_chunk(&schema, &chunk, &[MathOp::Abs]).unwrap();
+    assert_eq!((mapped.range().start(), mapped.range().len()), (0, 2));
+    assert!(mapped.is_last);
+    assert!(all_missing(&mapped.series));
+
+    let mut downstream = evaluated_evaluator(grid(0, 10, 2), grid(0, 10, 2), outer_window());
+    let closed = downstream
+        .push_evaluated(&mapped)
+        .unwrap()
+        .expect("the last chunk closes its series");
+    assert!(closed.is_last);
+    assert_eq!(closed.range().start() + closed.range().len(), 2);
+    downstream.finish().expect("the series closed");
+}
+
+/// A chunk that starts before the previous one ended is rejected instead of being placed at the
+/// wrong positions.
+#[test]
+fn an_out_of_order_chunk_is_rejected() {
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid(0, 10, 6)),
+    });
+    let mut outer = evaluated_evaluator(grid(0, 10, 6), outer_grid(), outer_window());
+    let first = values_chunk(&schema, 0, &[Some(1.0), Some(2.0)], false);
+    outer.push_evaluated(&first).unwrap();
+
+    let late = values_chunk(&schema, 3, &[Some(3.0)], true);
+    let error = outer.push_evaluated(&late).unwrap_err();
+    assert!(
+        matches!(&error, DataFusionError::Execution(message)
+            if message.contains("3") && message.contains("2")),
+        "{error:?}"
+    );
+}
+
+/// A series may begin past the first position of its grid, and its consumer must accept it.
+///
+/// A producer that trims its output to the rows holding a value starts at the first such row, so
+/// the positions before it carry no sample at all rather than a missing one. The consumer still
+/// reports them as decided, and that is the right answer: a window over them can never contain a
+/// sample, because the input never delivers one there. The first chunk is therefore free to start
+/// anywhere, and only the later ones have to continue exactly where the previous one ended.
+#[test]
+fn a_series_may_begin_past_the_first_position_of_its_grid() {
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid(0, 10, 4)),
+    });
+    let mut late = evaluated_evaluator(grid(0, 10, 4), outer_grid(), outer_window());
+    let from_one = values_chunk(&schema, 1, &[Some(1.0), Some(2.0), Some(3.0)], true);
+    let accepted = late
+        .push_evaluated(&from_one)
+        .expect("a series may start at any position of its grid")
+        .expect("the closing chunk is always handed out");
+    assert!(accepted.is_last);
+
+    // The same series pushed from position 0 has to agree on every position it covers: the late
+    // start is a property of the input, not a different evaluation.
+    let mut whole = evaluated_evaluator(grid(0, 10, 4), outer_grid(), outer_window());
+    let from_zero = values_chunk(&schema, 0, &[None, Some(1.0), Some(2.0), Some(3.0)], true);
+    let expected = whole
+        .push_evaluated(&from_zero)
+        .expect("a missing first sample is not a late start")
+        .expect("the closing chunk is always handed out");
+    // Both forms settle the same positions: the undelivered prefix is reported as decided, which
+    // is why this compares the dense rows instead of going through the trimming assertion.
+    assert_eq!(accepted.range().start(), 0);
+    assert_eq!(accepted.range().len(), 4);
+    assert_eq!(expand(&accepted.series), expand(&expected.series));
 }

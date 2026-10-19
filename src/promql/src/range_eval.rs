@@ -254,10 +254,15 @@ fn flush_batch(
 }
 
 struct SeriesState {
-    /// `None` for evaluated input, which arrives as one complete series.
+    /// `None` for evaluated input, which is identified by its labels instead of a primary key.
     primary_key: Option<Buffer>,
     metric: MetricName,
     last_ts: i64,
+    /// Grid index after the last input position consumed. The chunks of one evaluated series tile
+    /// the input grid, so this is where the next one has to start. Unlike `completed`, it counts
+    /// positions of the *input* grid, which is a different grid whenever the input is itself
+    /// evaluated.
+    input_end: usize,
     /// Next grid index to evaluate.
     cursor: usize,
     /// Grid index after the last position the evaluator has decided, whether it holds a value or
@@ -525,39 +530,97 @@ impl RangeEvaluator {
         self.close_series()
     }
 
-    /// Evaluates one complete evaluated series, such as the inner result of a subquery: the
-    /// value at each grid point is a sample at that time. Stale markers are kept as values,
+    /// Consumes the next chunk of one evaluated series, such as the inner result of a subquery:
+    /// the value at each grid point is a sample at that time. Stale markers are kept as values,
     /// since the input is computed.
     ///
-    /// The input arrives complete, so its result is one closing chunk.
-    pub fn push_series(&mut self, series: &Series) -> Result<Option<EvaluatedChunk>> {
-        let TimeAxis::Grid(range) = &series.time else {
+    /// The first chunk opens the series with its labels, each later one starts exactly where the
+    /// previous one ended, and the one marked `is_last` closes it. The first chunk may begin at any
+    /// position of the input grid: a producer that trims its output starts at its first row
+    /// holding a value, and the positions before it carry no sample rather than a missing one.
+    ///
+    /// A chunk reports the positions it decided, whether they hold a value or not, so a position
+    /// an inner evaluation settled without a result crosses this layer too; as on the raw path,
+    /// what became final is handed out and the closing chunk always is. An empty chunk decides
+    /// nothing and is only legal as that closing chunk.
+    ///
+    /// The evaluator must not be reused after an error.
+    pub fn push_evaluated(&mut self, chunk: &EvaluatedChunk) -> Result<Option<EvaluatedChunk>> {
+        if self.input_grid.is_none() {
             return Err(DataFusionError::Execution(
-                "evaluated range input must be a grid series".into(),
+                "evaluated chunk pushed to an evaluator of raw series".into(),
+            ));
+        }
+        let TimeAxis::Grid(range) = &chunk.series.time else {
+            return Err(DataFusionError::Execution(
+                "an evaluated chunk must be addressed on a grid".into(),
             ));
         };
         if self.input_grid != Some(range.grid().spec())
-            || series.fields.len() != self.fields.len()
-            || series.fields.iter().any(|field| field.len() != range.len())
+            || chunk.series.fields.len() != self.fields.len()
+            || chunk
+                .series
+                .fields
+                .iter()
+                .any(|field| field.len() != range.len())
         {
             return Err(DataFusionError::Execution(
-                "evaluated series does not match the input schema".into(),
+                "evaluated chunk does not match the input schema".into(),
             ));
         }
-        if self.series.is_some() {
-            return Err(DataFusionError::Execution(
-                "evaluated series pushed inside a raw series".into(),
-            ));
+        if range.is_empty() && !chunk.is_last {
+            return Err(DataFusionError::Execution(format!(
+                "empty evaluated chunk at {} that does not close its series",
+                range.start()
+            )));
         }
-        self.series = Some(SeriesState {
-            primary_key: None,
-            metric: series.metric.clone(),
-            last_ts: 0,
-            cursor: 0,
-            completed: 0,
-            emitted_end: 0,
-        });
-        self.ingest(&range.timestamps(), &series.fields, false)?;
+        // Every chunk after the first has to continue exactly where the previous one ended, so the
+        // positions of one series never repeat or leave a gap. The first chunk is not constrained:
+        // a producer that trims its output to the rows holding a value begins at its first such
+        // row, and the positions before it carry no sample rather than a missing one. Reporting
+        // them as decided is still correct, because no input ever arrives there, so a window over
+        // them can never gain a sample.
+        if let Some(state) = &self.series
+            && range.start() != state.input_end
+        {
+            return Err(DataFusionError::Execution(format!(
+                "evaluated chunks are out of order: {} does not continue from {}",
+                range.start(),
+                state.input_end
+            )));
+        }
+        if let Some(state) = &self.series {
+            if state.metric != chunk.series.metric {
+                return Err(DataFusionError::Execution(format!(
+                    "evaluated series label set changed before its last chunk: {:?} after {:?}",
+                    chunk.series.metric, state.metric
+                )));
+            }
+        } else {
+            self.series = Some(SeriesState {
+                primary_key: None,
+                metric: chunk.series.metric.clone(),
+                last_ts: 0,
+                input_end: 0,
+                cursor: 0,
+                completed: 0,
+                emitted_end: 0,
+            });
+        }
+        self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
+        // Advanced only now: `ingest` may fail on a sample it cannot shift or convert.
+        self.series
+            .as_mut()
+            .expect("opened at the entry of this push")
+            .input_end = range.start() + range.len();
+        if !chunk.is_last {
+            // `ready` is in the shifted sample domain, so it is the last grid timestamp this
+            // chunk carries plus the offset its samples were shifted by: every point up to there
+            // can no longer gain a sample.
+            let last = range.grid().timestamps()[range.start() + range.len() - 1];
+            self.evaluate(Some(i128::from(last) + i128::from(self.window.offset_ms)))?;
+            return self.emit(false);
+        }
         self.close_series()
     }
 
@@ -661,6 +724,7 @@ impl RangeEvaluator {
                     primary_key: Some(chunk.primary_key.clone()),
                     metric,
                     last_ts: time[time.len() - 1],
+                    input_end: 0,
                     cursor: 0,
                     completed: 0,
                     emitted_end: 0,

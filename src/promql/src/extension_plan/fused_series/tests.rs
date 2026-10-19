@@ -57,10 +57,9 @@ use store_api::region_engine::RawLabelSource;
 use crate::grid_series::reference::OwnedHistogram;
 
 use super::{
-    FusedSeriesExec, MAX_CHUNKS_PER_POLL, apply_maps, classify_output, series_to_record_batch,
-    trim_to_values,
+    FusedSeriesExec, MAX_CHUNKS_PER_POLL, classify_output, series_to_record_batch, trim_to_values,
 };
-use crate::map::MathOp;
+use crate::map::{MathOp, map_chunk};
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 
 const TIME: &str = "time";
@@ -354,12 +353,12 @@ impl Case {
             let Some(evaluated) = evaluator.push(chunk).unwrap() else {
                 continue;
             };
-            let Some(series) = apply_maps(&evaluator, &self.maps, evaluated.series).unwrap() else {
-                continue;
-            };
+            let evaluated = map_chunk(evaluator.output_schema(), &evaluated, &self.maps).unwrap();
             // The node trims a chunk to the rows holding a value before emitting it, because the
             // chunk's span reports decided positions rather than valued ones.
-            let Some(series) = trim_to_values(evaluator.output_schema(), &series).unwrap() else {
+            let Some(series) =
+                trim_to_values(evaluator.output_schema(), &evaluated.series).unwrap()
+            else {
                 continue;
             };
             let batch =
