@@ -16,8 +16,9 @@
 //!
 //! A node is identified by its structural position — `root`, `.input`, `.left`, `.right` — rather
 //! than by an id it carries. The position is not stored on the node: it is derived while walking
-//! the tree, which is the same walk that both `DisplayAs` and run-time construction use, so the
-//! name shown and the name registered cannot disagree.
+//! the tree, which is the one traversal rule run-time construction uses. A tree description
+//! rendered from the same walk — intended for `EXPLAIN` and `ANALYZE`, neither of which renders a
+//! native tree today — would show the positions that were registered.
 //!
 //! The position stays in the metric name because the collector aggregates by name first: two
 //! `rate` nodes sharing a bare name would be merged into one number. Positions are only an
@@ -31,7 +32,7 @@ use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, Time,
 };
 
-use super::plan::{NativeExpr, NativeNode};
+use crate::native::plan::{NativeExpr, NativeNode};
 
 /// The reserved first segment of every native metric name.
 const NATIVE_PREFIX: &str = "native";
@@ -91,8 +92,9 @@ impl std::fmt::Display for NodePath {
 
 /// Visits every node of `root` with its position, outermost first.
 ///
-/// This is the one traversal rule: `DisplayAs` and run-time construction both call it, so a node
-/// cannot be shown at one position and registered at another.
+/// This is the one traversal rule: [`register_tree`] calls it when the run-time state is created,
+/// and a tree description is intended to render from it, so a node cannot be shown at one position
+/// and registered at another.
 pub fn walk(root: &NativeNode, visit: &mut dyn FnMut(&NativeNode, &NodePath)) {
     fn go(node: &NativeNode, path: &NodePath, visit: &mut dyn FnMut(&NativeNode, &NodePath)) {
         visit(node, path);
@@ -113,8 +115,9 @@ pub fn walk(root: &NativeNode, visit: &mut dyn FnMut(&NativeNode, &NodePath)) {
 
 /// The metric names one node reports.
 ///
-/// [`Self::ALL`] is the single list both registration and documentation read, so a metric cannot be
-/// registered without being named here.
+/// [`Self::ALL`] is the list a reader should treat as complete: [`NodeMetrics::register`] names each
+/// handle itself, and `registered_metrics_are_exactly_the_declared_set` fails when the two sides
+/// drift apart.
 pub struct NodeMetric;
 
 impl NodeMetric {
@@ -550,6 +553,41 @@ mod tests {
         assert_eq!(NodeMetric::ALL.len(), 11);
         assert!(NodeMetric::ALL.contains(&NodeMetric::SELF_COMPUTE_TIME_NS));
         assert!(NodeMetric::ALL.contains(&NodeMetric::PEAK_RESERVED_BYTES));
+    }
+
+    /// Registration reports exactly the metrics `ALL` declares, in both directions.
+    ///
+    /// The names are read back from the set a node registered in, so the check is against what
+    /// registration actually did, not against `ALL` itself. Adding a metric to `ALL` without
+    /// registering it in `register`, or registering a metric that `ALL` does not list, fails this
+    /// test: it compares the two sides instead of trusting either.
+    #[test]
+    fn registered_metrics_are_exactly_the_declared_set() {
+        let root = map(window(input()));
+        let set = ExecutionPlanMetricsSet::new();
+        register_tree(&root, &set, 0);
+
+        // One node reports each metric once; the node paths and the partition prefix separate
+        // nodes, so the bare name is the last dot-separated segment.
+        let set = set.clone_inner();
+        let mut registered: Vec<&str> = set
+            .iter()
+            .map(|metric| {
+                metric
+                    .value()
+                    .name()
+                    .rsplit('.')
+                    .next()
+                    .expect("a metric name has a last segment")
+            })
+            .collect();
+        registered.sort_unstable();
+        registered.dedup();
+
+        let mut declared: Vec<&str> = NodeMetric::ALL.to_vec();
+        declared.sort_unstable();
+
+        assert_eq!(registered, declared);
     }
 
     /// A peak is a high-water mark of one node, so it survives a later drop in reservations.

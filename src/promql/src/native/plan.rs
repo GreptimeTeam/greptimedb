@@ -89,7 +89,8 @@ impl NativeType {
     ///
     /// Bindings are compared by allocation identity, because a compiler that meant one schema or
     /// one state has no reason to allocate it twice. A scalar is produced by a node and never
-    /// handed to one by a source, so it never matches.
+    /// handed to one by a source, so it never matches. This is about the binding itself: grids are
+    /// aligned by [`EvalGrid::spec`] everywhere else, here and in the kernels.
     fn same_binding(&self, other: &NativeType) -> bool {
         match (self, other) {
             (Self::Samples(mine), Self::Samples(theirs)) => Arc::ptr_eq(mine, theirs),
@@ -115,8 +116,9 @@ pub struct AggregateStateSchema {
 
 /// A scan or exchange boundary bound as a node input.
 ///
-/// The binding records what the input already guarantees, so the compiler can check a consumer's
-/// requirement instead of assuming it.
+/// The binding records what the input was created for: the output a consumer type-checks against,
+/// and the ordering it guarantees. No consumer reads the ordering today; it is recorded so a
+/// consumer that needs one can check it instead of assuming it.
 #[derive(Clone, Debug)]
 pub struct BoundInput {
     /// What the input produces: raw samples from a scan, or state from an exchange boundary.
@@ -258,7 +260,8 @@ impl NativeTree {
     /// Creates a tree over `root`, checking that every node's contract holds.
     ///
     /// A rejected tree is a compiler defect rather than a query error: the compiler only builds a
-    /// node after deciding that this combination is supported.
+    /// node after deciding that this combination is supported, so the error is
+    /// [`DataFusionError::Internal`] and not a statement the client wrote wrong.
     pub fn try_new(root: NativeNode) -> Result<Self> {
         root.validate()?;
         Ok(Self { root })
@@ -306,6 +309,10 @@ impl NativeNode {
                     }
                 }
                 ensure_samples(&self.output, "an instant selection")?;
+                // A selection is one source row per grid point: `select_instants` picks row
+                // indices and every field is taken at them, so it carries one value per input
+                // field.
+                ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
             }
             NativeExpr::Window { input, op } => {
@@ -322,7 +329,7 @@ impl NativeNode {
                 // window would read positions the input never wrote.
                 match (op.input_grid.as_ref(), schema.eval_grid.as_ref()) {
                     (None, None) => {}
-                    (Some(bound), Some(actual)) if Arc::ptr_eq(bound, actual) => {}
+                    (Some(bound), Some(actual)) if bound.spec() == actual.spec() => {}
                     _ => {
                         return Err(invalid(
                             "a window's declared input grid is not the input's grid",
@@ -337,7 +344,7 @@ impl NativeNode {
                 input.validate()?;
                 // A map is point-wise over an evaluated vector: raw samples have no shared
                 // positions to be point-wise over, and a scalar is not a vector.
-                let Some(input_grid) = evaluated_grid(&input.output) else {
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
                     return Err(invalid(&format!(
                         "a map consumes an evaluated vector, not {}",
                         input.output.describe()
@@ -358,20 +365,23 @@ impl NativeNode {
                 match op.stage {
                     AggregateStage::Complete => {
                         // Every contribution lies within this execution: vector in, vector out,
-                        // both on the input's grid.
-                        let Some(input_grid) = evaluated_grid(&input.output) else {
+                        // both on the input's grid, one value per input field.
+                        let Some((_, input_grid)) = evaluated_vector(&input.output) else {
                             return Err(invalid(&format!(
                                 "a complete aggregate consumes an evaluated vector, not {}",
                                 input.output.describe()
                             )));
                         };
                         ensure_samples(&self.output, "a complete aggregate")?;
+                        ensure_same_fields(&input.output, &self.output, "a complete aggregate")?;
                         ensure_grid(&self.output, input_grid, "a complete aggregate")?;
                     }
                     AggregateStage::Partial => {
                         // Only this execution's contributions were seen, so the output is state
-                        // for a later merge: on the input's grid, grouped the same way.
-                        let Some(input_grid) = evaluated_grid(&input.output) else {
+                        // for a later merge: on the input's grid, grouped the same way, one
+                        // accumulator per input field.
+                        let Some((input_schema, input_grid)) = evaluated_vector(&input.output)
+                        else {
                             return Err(invalid(&format!(
                                 "a partial aggregate consumes an evaluated vector, not {}",
                                 input.output.describe()
@@ -383,7 +393,12 @@ impl NativeNode {
                                 self.output.describe()
                             )));
                         };
-                        if !Arc::ptr_eq(&state.grid, input_grid) {
+                        ensure_field_count(
+                            state.accumulators.len(),
+                            input_schema.fields.len(),
+                            "a partial aggregate",
+                        )?;
+                        if state.grid.spec() != input_grid.spec() {
                             return Err(invalid(
                                 "aggregate state is indexed on a grid the input does not produce",
                             ));
@@ -404,7 +419,13 @@ impl NativeNode {
                         if state.group != op.group {
                             return Err(invalid("aggregate state groups differ from the binding"));
                         }
-                        ensure_samples(&self.output, "a final aggregate")?;
+                        let output = ensure_samples(&self.output, "a final aggregate")?;
+                        // The merged value carries one value per accumulator the state holds.
+                        ensure_field_count(
+                            output.fields.len(),
+                            state.accumulators.len(),
+                            "a final aggregate",
+                        )?;
                         ensure_grid(&self.output, &state.grid, "a final aggregate")?;
                     }
                 }
@@ -427,13 +448,13 @@ impl NativeNode {
                         right.output.describe()
                     )));
                 };
-                if !Arc::ptr_eq(left_grid, right_grid) {
+                if left_grid.spec() != right_grid.spec() {
                     return Err(invalid("a binary operation aligns two different grids"));
                 }
                 match (&left.output, &right.output) {
                     // Two scalars make a scalar: there is nothing to match and nothing to keep.
                     (NativeType::Scalar(_), NativeType::Scalar(_)) => {
-                        if !matches!(&self.output, NativeType::Scalar(grid) if Arc::ptr_eq(grid, left_grid))
+                        if !matches!(&self.output, NativeType::Scalar(grid) if grid.spec() == left_grid.spec())
                         {
                             return Err(invalid(
                                 "two scalars do not produce a scalar on the statement's grid",
@@ -458,14 +479,20 @@ impl NativeNode {
                             ));
                         }
                     }
-                    // Two vectors are matched by `matching` on the grid they share.
-                    (NativeType::Samples(_), NativeType::Samples(_)) => {
-                        if self.output.samples().is_none() {
+                    // Two vectors are matched by `matching` on the grid they share, and the match
+                    // pairs fields by position, so it keeps the shorter side's fields.
+                    (NativeType::Samples(left_vector), NativeType::Samples(right_vector)) => {
+                        let Some(output) = self.output.samples() else {
                             return Err(invalid(&format!(
                                 "a binary operation over two vectors produces samples, not {}",
                                 self.output.describe()
                             )));
-                        }
+                        };
+                        ensure_field_count(
+                            output.fields.len(),
+                            left_vector.fields.len().min(right_vector.fields.len()),
+                            "a binary operation over two vectors",
+                        )?;
                         ensure_grid(&self.output, left_grid, "a binary operation")?;
                     }
                     // Both sides carry a grid, so this is state, which the checks above reject.
@@ -482,45 +509,61 @@ impl NativeNode {
     }
 }
 
-/// The grid of an evaluated vector, or `None` when `ty` is raw samples, a scalar or state.
+/// The schema and grid of an evaluated vector, or `None` when `ty` is raw samples, a scalar or
+/// state.
 ///
 /// An operation over values needs both halves: that its input is samples at all, which rules out
-/// a scalar, and that those samples are stamped onto a grid, which rules out raw samples.
-fn evaluated_grid(ty: &NativeType) -> Option<&Arc<EvalGrid>> {
-    ty.samples().and_then(|schema| schema.eval_grid.as_ref())
+/// a scalar, and that those samples are stamped onto a grid, which rules out raw samples. The
+/// schema comes back with the grid because a consumer that needs the grid also declares a field
+/// layout for the fields the schema carries.
+fn evaluated_vector(ty: &NativeType) -> Option<(&Arc<SeriesSchema>, &Arc<EvalGrid>)> {
+    let schema = ty.samples().filter(|schema| schema.eval_grid.is_some())?;
+    Some((schema, schema.eval_grid.as_ref()?))
 }
 
-/// Checks that a node declares the field layout it consumes.
+/// Checks that a node declares the field layout its input produces.
 ///
-/// A window and a map both report one value per input field, so they keep the layout of their
-/// input. A node that declares a different number of fields than it consumes describes a
-/// computation this model has no meaning for, and letting it through would only surface at run
-/// time as a field count mismatch against a schema the tree was supposed to have validated.
+/// A window, a map, an instant selection and a complete aggregate all report one value per input
+/// field, so they keep the layout of their input. A node that declares a different number of
+/// fields than it consumes describes a computation this model has no meaning for, and letting it
+/// through would only surface at run time as a field count mismatch against a schema the tree was
+/// supposed to have validated.
 fn ensure_same_fields(input: &NativeType, output: &NativeType, what: &str) -> Result<()> {
     let (NativeType::Samples(input), NativeType::Samples(output)) = (input, output) else {
         return Ok(());
     };
-    if input.fields.len() != output.fields.len() {
+    ensure_field_count(output.fields.len(), input.fields.len(), what)
+}
+
+/// Checks that a node declares `declared` fields where its input provides `expected`.
+///
+/// Some nodes compute their layout instead of keeping their input's: a final aggregate produces one
+/// value per accumulator the state holds, and a vector-vector binary operation produces one field
+/// per matched pair, which is the shorter side's count. Both are checked against the count the
+/// kernel produces, so the message names the node and both numbers.
+fn ensure_field_count(declared: usize, expected: usize, what: &str) -> Result<()> {
+    if declared != expected {
         return Err(invalid(&format!(
-            "{what} declares {} field(s) and consumes {}",
-            output.fields.len(),
-            input.fields.len()
+            "{what} declares {declared} field(s) but its input provides {expected}"
         )));
     }
     Ok(())
 }
 
-fn ensure_samples(ty: &NativeType, what: &str) -> Result<()> {
-    if matches!(ty, NativeType::Samples(_)) {
-        Ok(())
-    } else {
-        Err(invalid(&format!("{what} does not produce samples")))
-    }
+/// Checks that `ty` produces samples and returns them.
+fn ensure_samples<'a>(ty: &'a NativeType, what: &str) -> Result<&'a Arc<SeriesSchema>> {
+    ty.samples()
+        .ok_or_else(|| invalid(&format!("{what} does not produce samples")))
 }
 
+/// Checks that `ty` is evaluated on the grid `expected` describes.
+///
+/// The comparison is by [`EvalGrid::spec`], not by allocation: that is the rule the kernels apply
+/// (`vector_match::same_grid`), so a compiler that allocates one grid per window but binds equal
+/// specs produces a tree the kernel runs correctly.
 fn ensure_grid(ty: &NativeType, expected: &Arc<EvalGrid>, what: &str) -> Result<()> {
     match ty.grid() {
-        Some(actual) if Arc::ptr_eq(actual, expected) => Ok(()),
+        Some(actual) if actual.spec() == expected.spec() => Ok(()),
         Some(_) => Err(invalid(&format!(
             "{what} declares a grid its output does not carry"
         ))),
@@ -530,8 +573,9 @@ fn ensure_grid(ty: &NativeType, expected: &Arc<EvalGrid>, what: &str) -> Result<
 
 fn invalid(reason: &str) -> DataFusionError {
     // A rejected tree is a compiler defect, not a query error: the compiler only builds a node
-    // after deciding that this combination is supported.
-    DataFusionError::Plan(reason.to_string())
+    // after deciding that this combination is supported. `Internal` keeps that meaning on the wire
+    // instead of reporting a mistake in the client's statement, which `Plan` would.
+    DataFusionError::Internal(reason.to_string())
 }
 
 #[cfg(test)]

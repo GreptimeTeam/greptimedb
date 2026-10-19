@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use datatypes::series::SeriesOrdering;
-use datatypes::series::samples::SeriesSchema;
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
@@ -40,6 +40,16 @@ fn evaluated(
     }))
 }
 
+/// `count` fields named `f0`, `f1`, ..., which is the layout a multi-field source has.
+fn fields(count: usize) -> Arc<[FieldSpec]> {
+    (0..count)
+        .map(|index| FieldSpec {
+            name: Arc::from(format!("f{index}")),
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
 fn raw() -> NativeType {
     NativeType::Samples(Arc::new(SeriesSchema {
         fields: Arc::new([]),
@@ -59,13 +69,28 @@ fn input() -> NativeNode {
 }
 
 fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
-    // One allocation shared by the binding and the output: `validate` checks allocation identity,
-    // because a compiler that meant one grid has no reason to allocate it twice.
+    // One schema allocation shared by the binding and the output: `validate` checks that the output
+    // is the binding it was bound to, which is about the binding itself, not the grid's spec.
     let output = evaluated(Arc::new([]), grid);
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
             ordering: SeriesOrdering::Contiguous,
+        }),
+        output,
+    }
+}
+
+/// A scan of `count` fields, so a consumer's field check has something to disagree with.
+fn input_with_fields(count: usize) -> NativeNode {
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: fields(count),
+        eval_grid: None,
+    }));
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            ordering: SeriesOrdering::KeyThenTime,
         }),
         output,
     }
@@ -127,6 +152,27 @@ fn final_aggregate(state: NativeNode) -> NativeNode {
 
 fn window_over(inner: NativeNode, input_grid: Option<Arc<EvalGrid>>) -> NativeNode {
     window_on(inner, input_grid, grid(0, 60_000, 4))
+}
+
+/// A window over `inner` that produces `count` fields on `out`, so a consumer of it can be given a
+/// layout the window itself holds legally.
+fn window_fields(inner: NativeNode, out: Arc<EvalGrid>, count: usize) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(count), out),
+    }
 }
 
 /// A window over `inner` that produces `out`, so two windows can be given the same grid.
@@ -265,7 +311,12 @@ fn a_map_cannot_change_the_field_count() {
         ),
     };
     let error = node.validate().unwrap_err();
-    assert!(error.to_string().contains("field(s)"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("a map declares 1 field(s) but its input provides 0"),
+        "{error}"
+    );
 }
 
 /// A window reports one value per input field, so it carries the same rule as a map.
@@ -297,7 +348,39 @@ fn a_window_cannot_change_the_field_count() {
         ),
     };
     let error = node.validate().unwrap_err();
-    assert!(error.to_string().contains("field(s)"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("a window declares 1 field(s) but its input provides 0"),
+        "{error}"
+    );
+}
+
+/// An instant selection picks one row of the source per grid point, so it carries one value per
+/// input field. A tree that declares anything else would only fail at run time, against a schema
+/// the tree was supposed to have validated.
+#[test]
+fn an_instant_selection_cannot_change_the_field_count() {
+    let out = grid(0, 60_000, 4);
+    // The source has two fields; the selection declares one value.
+    let node = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(2)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), out),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("an instant selection declares 1 field(s) but its input provides 2"),
+        "{error}"
+    );
 }
 
 /// An instant selection reads raw samples; feeding it evaluated values would re-anchor a grid
@@ -420,6 +503,36 @@ fn a_binary_operation_over_one_grid_is_valid() {
     assert!(node.validate().is_ok());
 }
 
+/// A compiler that allocates one grid per window still produces one grid: the kernel aligns
+/// operands by `EvalGrid::spec` (`vector_match::same_grid`), so `validate` compares specs too and
+/// does not reject a tree the runtime would run correctly.
+#[test]
+fn a_binary_operation_aligns_separately_allocated_equal_specs() {
+    // Two windows, one fresh `EvalGrid` each, and the statement's grid a third: equal specs, no
+    // shared allocation anywhere in the tree.
+    let node = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(window_on(input(), None, grid(0, 60_000, 4))),
+            right: Box::new(window_on(input(), None, grid(0, 60_000, 4))),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
+
+    // The same tree with a different spec is still rejected: the kernel rejects that pair too.
+    let node = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(window_on(input(), None, grid(0, 60_000, 4))),
+            right: Box::new(window_on(input(), None, grid(30_000, 60_000, 4))),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(error.to_string().contains("different grids"), "{error}");
+}
+
 /// A scalar side is broadcast, not matched: `sum by(job)(rate(x[5m])) + time()` has no labels to
 /// line up, so `matching` is not consulted and the output keeps the vector side's fields.
 #[test]
@@ -446,6 +559,41 @@ fn a_binary_operation_broadcasts_a_scalar() {
         output: evaluated(Arc::new([]), Arc::clone(&shared)),
     };
     assert!(node.validate().is_ok());
+}
+
+/// Two vectors pair their fields by position, so the match reports the shorter side's count
+/// (`vector_match::binary_output_schema` takes `min(lhs, rhs)`); a tree declaring anything else is
+/// rejected instead of failing at run time.
+#[test]
+fn a_binary_operation_over_two_vectors_matches_the_shorter_side() {
+    let shared = grid(0, 60_000, 4);
+    // Two fields matched against one: the match produces one field, not two.
+    let node = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(window_fields(input_with_fields(2), Arc::clone(&shared), 2)),
+            right: Box::new(window_fields(input_with_fields(1), Arc::clone(&shared), 1)),
+            matching: add(),
+        },
+        output: evaluated(fields(2), Arc::clone(&shared)),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "a binary operation over two vectors declares 2 field(s) but its input provides 1"
+        ),
+        "{error}"
+    );
+
+    // Declaring the shorter side's count is the legal tree, so the check is not vacuous.
+    let node = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(window_fields(input_with_fields(2), Arc::clone(&shared), 2)),
+            right: Box::new(window_fields(input_with_fields(1), Arc::clone(&shared), 1)),
+            matching: add(),
+        },
+        output: evaluated(fields(1), shared),
+    };
+    assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
 }
 
 /// Two scalars make a scalar, because there is nothing to attach labels or fields to.
@@ -521,6 +669,32 @@ fn an_aggregate_output_matches_its_stage() {
     assert!(partial.validate().is_ok());
 }
 
+/// A complete aggregate folds each field on its own, so it reports one value per input field
+/// (`aggregate::aggregate_float` builds its rows from the input schema's fields).
+#[test]
+fn a_complete_aggregate_cannot_change_the_field_count() {
+    let out = grid(0, 60_000, 4);
+    // The input is a legal two-field window; the aggregate declares one value.
+    let node = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Arc::new(["job".into()]),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(fields(1), out),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a complete aggregate declares 1 field(s) but its input provides 2"),
+        "{error}"
+    );
+}
+
 /// Declaring a value where the stage produces state is a compiler mistake, and is rejected.
 #[test]
 fn an_aggregate_stage_must_agree_with_its_type() {
@@ -553,6 +727,36 @@ fn a_partial_aggregate_produces_state() {
     assert!(matches!(state.output, NativeType::AggregateState(_)));
 }
 
+/// A `Partial` aggregate keeps one accumulator per input field (`aggregate_float` lays its state
+/// out in `schema.fields.len()`-sized points), so state declaring another count is rejected.
+#[test]
+fn a_partial_aggregate_cannot_change_the_accumulator_count() {
+    let out = grid(0, 60_000, 4);
+    // The input is a legal two-field window; the state declares one accumulator.
+    let node = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Arc::new(["job".into()]),
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+            group: Arc::new(["job".into()]),
+            accumulators: fields(1),
+            grid: out,
+        })),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a partial aggregate declares 1 field(s) but its input provides 2"),
+        "{error}"
+    );
+}
+
 /// A `Final` aggregate consumes the state a `Partial` produced, which is what an exchange
 /// boundary hands over between the two stages.
 #[test]
@@ -563,6 +767,54 @@ fn a_final_aggregate_merges_partial_state() {
     assert!(merged.validate().is_ok());
     assert!(
         matches!(&merged.output, NativeType::Samples(schema) if schema.eval_grid.as_ref().is_some_and(|grid| Arc::ptr_eq(grid, &shared)))
+    );
+}
+
+/// A `Final` aggregate merges the state into one value per accumulator, so it reports the state's
+/// count and nothing else.
+#[test]
+fn a_final_aggregate_cannot_change_the_field_count() {
+    let out = grid(0, 60_000, 4);
+    // A legal partial aggregate: two input fields, two accumulators.
+    let state = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Arc::new(["job".into()]),
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+            group: Arc::new(["job".into()]),
+            accumulators: fields(2),
+            grid: Arc::clone(&out),
+        })),
+    };
+    assert!(
+        state.validate().is_ok(),
+        "{}",
+        state.validate().unwrap_err()
+    );
+
+    // The merge declares one value for the state's two accumulators.
+    let node = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(state),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Arc::new(["job".into()]),
+                stage: AggregateStage::Final,
+            },
+        },
+        output: evaluated(fields(1), out),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a final aggregate declares 1 field(s) but its input provides 2"),
+        "{error}"
     );
 }
 
@@ -616,8 +868,8 @@ fn a_complete_aggregate_cannot_consume_state() {
 /// for composition.
 #[test]
 fn the_walkthrough_shapes_are_trees() {
-    // Every node in one query evaluates on the statement's grid, so the compiler binds one grid
-    // and shares it; `validate` checks that identity.
+    // Every node in one query evaluates on the statement's grid; `validate` compares the specs of
+    // the grids, not their allocations, which is the rule the kernels apply.
     let statement_grid = grid(0, 60_000, 4);
 
     // `abs(rate(x[5m]))`
