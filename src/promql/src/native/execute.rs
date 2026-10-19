@@ -335,7 +335,13 @@ impl Emitted {
             for (index, runs) in occupied.iter().enumerate() {
                 let stored = history.fields.get(index).map_or(&[][..], Vec::as_slice);
                 for run in runs {
-                    if let Some(previous) = stored.iter().find(|stored| stored.overlaps(*run)) {
+                    // The stored runs are sorted and disjoint, so only the one holding `run.start`
+                    // or the one just before it can share a position. Scanning them all would make
+                    // a sparse series split across chunks cost a pass over its whole history per
+                    // chunk.
+                    let at = stored.partition_point(|stored| stored.end <= run.start);
+                    let previous = stored.get(at).filter(|stored| stored.overlaps(*run));
+                    if let Some(previous) = previous {
                         return Err(occupied_position(path, &labels, index, run, previous));
                     }
                 }
