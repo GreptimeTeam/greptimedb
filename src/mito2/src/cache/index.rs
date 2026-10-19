@@ -25,7 +25,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::Buffer;
 
-use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
+use crate::cache::load::{CacheLoad, CacheLoads};
+use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_LOAD_BYTES, CACHE_LOAD_EVENTS, CACHE_MISS};
 
 /// Metrics for index metadata.
 const INDEX_METADATA_TYPE: &str = "index_metadata";
@@ -92,6 +93,8 @@ pub struct IndexCache<K, M> {
     index_metadata: moka::sync::Cache<K, Arc<M>>,
     /// Cache for index content.
     index: moka::sync::Cache<(K, PageKey), Bytes>,
+    /// Pending page reads shared by single-range and batched readers.
+    page_loads: Arc<CacheLoads<(K, PageKey), Bytes>>,
     // Page size for index content.
     page_size: u64,
 
@@ -142,6 +145,7 @@ where
         Self {
             index_metadata,
             index: index_cache,
+            page_loads: Arc::default(),
             page_size,
             weight_of_content,
             weight_of_metadata,
@@ -180,58 +184,11 @@ where
         Fut: Future<Output = Result<Vec<Bytes>, E>>,
         E: std::error::Error,
     {
-        let mut metrics = IndexCacheMetrics::default();
-        let page_keys =
-            PageKey::generate_page_keys(offset, size, self.page_size).collect::<Vec<_>>();
-        // Size is 0, return empty data.
-        if page_keys.is_empty() {
-            return Ok((Vec::new(), metrics));
-        }
-        metrics.num_pages = page_keys.len();
-        let mut data = Vec::with_capacity(page_keys.len());
-        data.resize(page_keys.len(), Bytes::new());
-        let mut cache_miss_range = vec![];
-        let mut cache_miss_idx = vec![];
-        let last_index = page_keys.len() - 1;
-        // TODO: Avoid copy as much as possible.
-        for (i, page_key) in page_keys.iter().enumerate() {
-            match self.get_page(key, *page_key) {
-                Some(page) => {
-                    CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-                    metrics.cache_hit += 1;
-                    metrics.page_bytes += page.len() as u64;
-                    data[i] = page;
-                }
-                None => {
-                    CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
-                    metrics.cache_miss += 1;
-                    let base_offset = page_key.page_id * self.page_size;
-                    let pruned_size = if i == last_index {
-                        prune_size(page_keys.iter(), file_size, self.page_size)
-                    } else {
-                        self.page_size
-                    };
-                    cache_miss_range.push(base_offset..base_offset + pruned_size);
-                    cache_miss_idx.push(i);
-                }
-            }
-        }
-        if !cache_miss_range.is_empty() {
-            let pages = load(cache_miss_range).await?;
-            for (i, page) in cache_miss_idx.into_iter().zip(pages) {
-                let page_key = page_keys[i];
-                metrics.page_bytes += page.len() as u64;
-                data[i] = page.clone();
-                self.put_page(key, page_key, page.clone());
-            }
-        }
-        let buffer = Buffer::from_iter(data);
-        Ok((
-            buffer
-                .slice(PageKey::calculate_range(offset, size, self.page_size))
-                .to_vec(),
-            metrics,
-        ))
+        let range = offset..offset + u64::from(size);
+        let (pages, metrics) = self
+            .get_or_load_vec(key, file_size, std::slice::from_ref(&range), load)
+            .await?;
+        Ok((pages[0].to_vec(), metrics))
     }
 
     /// Like [`IndexCache::get_or_load`] for several ranges, but loads the missing pages of
@@ -245,7 +202,7 @@ where
         load: F,
     ) -> Result<(Vec<Bytes>, IndexCacheMetrics), E>
     where
-        F: FnOnce(Vec<Range<u64>>) -> Fut,
+        F: Fn(Vec<Range<u64>>) -> Fut,
         Fut: Future<Output = Result<Vec<Bytes>, E>>,
         E: std::error::Error,
     {
@@ -278,19 +235,81 @@ where
 
         if !missing.is_empty() {
             missing.sort_unstable();
-            let load_ranges = missing
-                .iter()
-                .map(|page_id| {
-                    let start = page_id * self.page_size;
-                    start..(start + self.page_size).min(file_size)
-                })
-                .collect();
-            let loaded = load(load_ranges).await?;
-            debug_assert_eq!(loaded.len(), missing.len());
-            for (page_id, page) in missing.into_iter().zip(loaded) {
-                metrics.page_bytes += page.len() as u64;
-                self.put_page(key, PageKey { page_id }, page.clone());
-                pages.insert(page_id, page);
+            let mut owned = Vec::new();
+            let mut waiting = Vec::new();
+            for page_id in missing {
+                let page_key = PageKey { page_id };
+                match self.page_loads.start((key, page_key), INDEX_CONTENT_TYPE) {
+                    CacheLoad::Load(guard) => {
+                        // Close the race between the cache lookup and registration.
+                        if let Some(page) = self.get_page(key, page_key) {
+                            guard.finish(page.clone());
+                            metrics.page_bytes += page.len() as u64;
+                            pages.insert(page_id, page);
+                        } else {
+                            owned.push((page_id, guard));
+                        }
+                    }
+                    CacheLoad::Wait(waiter) => waiting.push((page_id, waiter)),
+                }
+            }
+            // Publish owned pages before awaiting others to avoid circular waits
+            // between overlapping batches. Keep owned reads in a single batch.
+            if !owned.is_empty() {
+                let ranges = owned
+                    .iter()
+                    .map(|(id, _)| self.page_range(*id, file_size))
+                    .collect();
+                CACHE_LOAD_EVENTS
+                    .with_label_values(&[INDEX_CONTENT_TYPE, "read_page"])
+                    .inc_by(owned.len() as u64);
+                CACHE_LOAD_EVENTS
+                    .with_label_values(&[INDEX_CONTENT_TYPE, "read_batch"])
+                    .inc();
+                let loaded = load(ranges).await?;
+                debug_assert_eq!(loaded.len(), owned.len());
+                for ((page_id, guard), page) in owned.into_iter().zip(loaded) {
+                    CACHE_LOAD_BYTES
+                        .with_label_values(&[INDEX_CONTENT_TYPE])
+                        .inc_by(page.len() as u64);
+                    metrics.page_bytes += page.len() as u64;
+                    let page = self.put_page(key, PageKey { page_id }, page);
+                    guard.finish(page.clone());
+                    pages.insert(page_id, page);
+                }
+            }
+            let mut retry = Vec::new();
+            for (page_id, waiter) in waiting {
+                if let Some(page) = waiter.wait().await {
+                    metrics.page_bytes += page.len() as u64;
+                    pages.insert(page_id, page);
+                } else {
+                    retry.push(page_id);
+                }
+            }
+            // Retry cancelled or failed producers as one batch without joining
+            // another generation of pending reads.
+            if !retry.is_empty() {
+                let ranges = retry
+                    .iter()
+                    .map(|id| self.page_range(*id, file_size))
+                    .collect();
+                CACHE_LOAD_EVENTS
+                    .with_label_values(&[INDEX_CONTENT_TYPE, "read_page"])
+                    .inc_by(retry.len() as u64);
+                CACHE_LOAD_EVENTS
+                    .with_label_values(&[INDEX_CONTENT_TYPE, "read_batch"])
+                    .inc();
+                let loaded = load(ranges).await?;
+                debug_assert_eq!(loaded.len(), retry.len());
+                for (page_id, page) in retry.into_iter().zip(loaded) {
+                    CACHE_LOAD_BYTES
+                        .with_label_values(&[INDEX_CONTENT_TYPE])
+                        .inc_by(page.len() as u64);
+                    metrics.page_bytes += page.len() as u64;
+                    let page = self.put_page(key, PageKey { page_id }, page);
+                    pages.insert(page_id, page);
+                }
             }
         }
 
@@ -313,17 +332,23 @@ where
         Ok((result, metrics))
     }
 
+    fn page_range(&self, page_id: u64, file_size: u64) -> Range<u64> {
+        let start = page_id * self.page_size;
+        start..(start + self.page_size).min(file_size)
+    }
+
     fn get_page(&self, key: K, page_key: PageKey) -> Option<Bytes> {
         self.index.get(&(key, page_key))
     }
 
-    fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
+    fn put_page(&self, key: K, page_key: PageKey, value: Bytes) -> Bytes {
         // Clones the value to ensure it doesn't reference a larger buffer.
         let value = Bytes::from(value.to_vec());
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());
-        self.index.insert((key, page_key), value);
+        self.index.insert((key, page_key), value.clone());
+        value
     }
 
     /// Invalidates all cache entries whose keys satisfy `predicate`.
@@ -344,15 +369,82 @@ where
     }
 }
 
-/// Prunes the size of the last page based on the indexes.
-/// We have following cases:
-/// 1. The rest file size is less than the page size, read to the end of the file.
-/// 2. Otherwise, read the page size.
-fn prune_size<'a>(
-    indexes: impl Iterator<Item = &'a PageKey>,
-    file_size: u64,
-    page_size: u64,
-) -> u64 {
-    let last_page_start = indexes.last().map(|i| i.page_id * page_size).unwrap_or(0);
-    page_size.min(file_size - last_page_start)
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    fn read_pages(ranges: Vec<Range<u64>>) -> Vec<Bytes> {
+        ranges
+            .into_iter()
+            .map(|range| Bytes::from(range.map(|byte| byte as u8).collect::<Vec<_>>()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn overlapping_reads_publish_owned_pages_before_waiting() {
+        for capacity in [0, 1024] {
+            for outcome in ["complete", "error", "cancel"] {
+                let cache = IndexCache::<u64, ()>::new_with_weighter(
+                    1024,
+                    capacity,
+                    4,
+                    "test",
+                    |_, _| 1,
+                    |_, page| page.len() as u32,
+                );
+                let release = Notify::new();
+                let mut producer = Box::pin(cache.get_or_load(1, 16, 0, 8, |ranges| {
+                    let release = &release;
+                    async move {
+                        assert_eq!(ranges, vec![0..4, 4..8]);
+                        release.notified().await;
+                        if outcome == "error" {
+                            return Err(std::io::Error::other("injected failure"));
+                        }
+                        Ok(read_pages(ranges))
+                    }
+                }));
+                assert!(futures::poll!(&mut producer).is_pending());
+                let reads = Mutex::new(Vec::new());
+                let requested = 4..12;
+                let mut consumer = Box::pin(cache.get_or_load_vec(
+                    1,
+                    16,
+                    std::slice::from_ref(&requested),
+                    |ranges| {
+                        reads.lock().unwrap().push(ranges.clone());
+                        std::future::ready(Ok::<_, std::io::Error>(read_pages(ranges)))
+                    },
+                ));
+                assert!(futures::poll!(&mut consumer).is_pending());
+                // It reads its own page before waiting for the shared page.
+                assert_eq!(*reads.lock().unwrap(), vec![vec![8..12]]);
+                if outcome == "cancel" {
+                    drop(producer);
+                } else {
+                    release.notify_one();
+                    let result = producer.await;
+                    assert_eq!(result.is_err(), outcome == "error");
+                    if let Ok((data, _)) = result {
+                        assert_eq!(data, (0..8).collect::<Vec<u8>>());
+                    }
+                }
+                let (data, _) = tokio::time::timeout(std::time::Duration::from_secs(5), consumer)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(data, vec![Bytes::from((4..12).collect::<Vec<u8>>())]);
+                let expected = if outcome == "complete" {
+                    vec![vec![8..12]]
+                } else {
+                    vec![vec![8..12], vec![4..8]]
+                };
+                assert_eq!(*reads.lock().unwrap(), expected);
+            }
+        }
+    }
 }

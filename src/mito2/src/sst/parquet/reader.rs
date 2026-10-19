@@ -803,18 +803,18 @@ impl ParquetReaderBuilder {
             .with_label_values(&["read_parquet_metadata"])
             .start_timer();
 
-        if let Some(metadata) = self.cache_strategy.get_cached_sst_meta(
-            self.file_handle.file_id(),
-            page_index_policy,
-            cache_metrics,
-        ) {
+        if let Some(metadata) = self
+            .cache_strategy
+            .get_cached_sst_meta(self.file_handle.file_id(), page_index_policy, cache_metrics)
+            .await
+        {
             cache_metrics.metadata_load_cost += start.elapsed();
             return Ok((metadata, false));
         }
 
         let result = self
             .cache_strategy
-            .coalesce_sst_meta_load(
+            .get_or_load_sst_meta(
                 self.file_handle.file_id(),
                 page_index_policy,
                 self.read_parquet_metadata_inner(
@@ -865,7 +865,8 @@ impl ParquetReaderBuilder {
             match metadata {
                 SstMetaPreparation::Prepared(metadata) => {
                     self.cache_strategy
-                        .put_prepared_sst_meta(file_id, metadata, true);
+                        .put_prepared_sst_meta(file_id, metadata, false)
+                        .await;
                 }
                 SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
                     warn!(
@@ -2483,7 +2484,7 @@ mod tests {
     use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use object_store::layers::mock::{self, MockLayerBuilder};
+    use object_store::layers::mock::MockLayerBuilder;
     use object_store::services::Memory;
     use parquet::arrow::ArrowWriter;
     use parquet::arrow::arrow_reader::RowSelector;
@@ -2496,39 +2497,12 @@ mod tests {
 
     use super::*;
     use crate::cache::CacheManager;
-    use crate::cache::test_util::parquet_file_data_with_region_metadata;
+    use crate::cache::test_util::{GatedStorageReader, parquet_file_data_with_region_metadata};
     use crate::sst::parquet::metadata::MetadataLoader;
     use crate::sst::parquet::prefilter::{build_reader_filter_plan, execute_prefilter};
     use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
     use crate::sst::parquet::row_group::ParquetFetchMetrics;
     use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
-
-    /// Holds storage reads until every concurrent caller has been polled.
-    struct GatedMetadataReader {
-        inner: mock::oio::Reader,
-        gate: Arc<tokio::sync::Semaphore>,
-        reads: Arc<AtomicUsize>,
-    }
-
-    impl mock::oio::Read for GatedMetadataReader {
-        async fn open(
-            &self,
-            range: mock::BytesRange,
-        ) -> object_store::Result<(mock::RpRead, Box<dyn mock::oio::ReadStreamDyn>)> {
-            self.reads.fetch_add(1, Ordering::Relaxed);
-            self.gate.acquire().await.unwrap().forget();
-            self.inner.open(range).await
-        }
-
-        async fn read(
-            &self,
-            range: mock::BytesRange,
-        ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
-            self.reads.fetch_add(1, Ordering::Relaxed);
-            self.gate.acquire().await.unwrap().forget();
-            self.inner.read(range).await
-        }
-    }
 
     #[tokio::test]
     #[allow(
@@ -2552,7 +2526,7 @@ mod tests {
                         let reads = reads.clone();
                         let gate = gate.clone();
                         move |_, _, inner| {
-                            Box::new(GatedMetadataReader {
+                            Box::new(GatedStorageReader {
                                 inner,
                                 reads: reads.clone(),
                                 gate: gate.clone(),
@@ -2629,14 +2603,6 @@ mod tests {
                         assert!(Arc::ptr_eq(value, &results[0].0.0));
                     }
                 }
-                // A decoded cache hit must not wait for an in-progress load of the same key.
-                let strategy = CacheStrategy::EnableAll(cache.clone());
-                let mut pending_load = Box::pin(strategy.coalesce_sst_meta_load(
-                    file_handle.file_id(),
-                    PageIndexPolicy::Skip,
-                    std::future::pending(),
-                ));
-                assert!(futures::poll!(&mut pending_load).is_pending());
                 let mut warm_metrics = MetadataCacheMetrics::default();
                 let (_, miss) = tokio::time::timeout(
                     Duration::from_secs(5),

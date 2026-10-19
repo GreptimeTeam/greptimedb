@@ -853,7 +853,7 @@ mod tests {
             .with_files(files)
             .with_append_mode(true)
             .build();
-        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input).await);
         let pruner = Arc::new(Pruner::new_with_options(
             stream_ctx,
             1,
@@ -912,7 +912,7 @@ mod tests {
             .with_predicate(predicate)
             .with_append_mode(true)
             .build();
-        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input).await);
         let pruner = Arc::new(Pruner::new(stream_ctx, 1));
         (env, pruner)
     }

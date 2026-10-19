@@ -14,11 +14,13 @@
 
 //! Utilities for the partition range scan result cache.
 
+use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem;
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use common_telemetry::warn;
+use common_telemetry::{trace, warn};
 use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
@@ -36,6 +38,7 @@ use table::predicate::is_string_timestamp_literal;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cache::CacheStrategy;
+use crate::cache::load::{CacheLoad, CacheWork};
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::BoxedRecordBatchStream;
 use crate::read::read_columns::ReadColumns;
@@ -237,6 +240,28 @@ pub(crate) struct RangeScanCacheKey {
 }
 
 impl RangeScanCacheKey {
+    /// Diagnostic hashes are log fields, never Prometheus labels.
+    pub(crate) fn trace_event(&self, event: &'static str) {
+        fn digest(value: &impl Hash) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+        trace!(
+            target: "mito_range_cache",
+            event,
+            key_hash = digest(self),
+            region_id = self.region_id.as_u64(),
+            row_groups_hash = digest(&self.row_groups),
+            row_groups = self.row_groups.len(),
+            scan_hash = digest(&self.scan),
+            projection_filters_hash = digest(&self.scan.inner),
+            time_filters_hash = digest(&self.scan.time_filters),
+            stage = ?self.scan.stage,
+            "Range cache lookup and publication"
+        );
+    }
+
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.row_groups.capacity() * mem::size_of::<(FileId, i64)>()
@@ -593,6 +618,106 @@ fn build_range_cache_key_inner(
     })
 }
 
+/// Shares a complete range before constructing duplicate readers. The owner drives
+/// its stream here rather than waiting for the caller's final merge to poll it.
+/// Optional staging reservations never wait: lack of budget falls back to streaming.
+pub(crate) async fn get_or_load_range_result<F, Fut>(
+    strategy: &CacheStrategy,
+    key: RangeScanCacheKey,
+    part_metrics: &PartitionMetrics,
+    build: F,
+) -> Result<(BoxedRecordBatchStream, usize)>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
+{
+    if let Some(value) = strategy.get_range_result(&key) {
+        part_metrics.inc_range_cache_hit();
+        return Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE));
+    }
+    part_metrics.inc_range_cache_miss();
+    let guard = match strategy.start_range_load(&key) {
+        Some(CacheLoad::Load(guard)) => guard,
+        Some(CacheLoad::Wait(waiter)) => {
+            return match waiter.wait().await {
+                Some(value) => Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE)),
+                None => build().await,
+            };
+        }
+        None => return build().await,
+    };
+    if let Some(value) = strategy.get_cached_range_result(&key) {
+        guard.finish(value.clone());
+        return Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE));
+    }
+    let Some(limiter) = strategy.range_result_load_limiter() else {
+        return build().await;
+    };
+    let (mut stream, estimated_batch_size) = build().await?;
+    let mut batches = Vec::new();
+    let mut permits = Vec::new();
+    let mut bytes = 0usize;
+    let mut work = CacheWork::new("range_result", "shared_build");
+    while let Some(batch) = stream.try_next().await? {
+        let batch_bytes = batch.get_array_memory_size();
+        let charge = batch_bytes
+            .saturating_add(mem::size_of::<CachedBatchSlice>() + mem::size_of::<usize>());
+        let Some(permit) = limiter.try_acquire_owned(charge) else {
+            crate::metrics::CACHE_LOAD_EVENTS
+                .with_label_values(&["range_result", "budget_fallback"])
+                .inc();
+            // Wake peers before returning the prefix. They rebuild independently,
+            // without waiting for this caller's consumer to drain the stream.
+            drop(guard);
+            let fallback = Box::pin(try_stream! {
+                let reserved = permits;
+                let tracker = work;
+                for cached in batches {
+                    yield cached;
+                }
+                drop(reserved);
+                drop(tracker);
+                yield batch;
+                while let Some(batch) = stream.try_next().await? {
+                    yield batch;
+                }
+            });
+            return Ok((fallback, estimated_batch_size));
+        };
+        permits.push(permit);
+        bytes += batch_bytes;
+        work.set_bytes(bytes);
+        batches.push(batch);
+    }
+    key.trace_event("scan_complete");
+    let batches = batches
+        .into_iter()
+        .map(|batch| {
+            let rows = batch.num_rows();
+            CachedBatchSlice {
+                batch,
+                slice_lengths: vec![rows],
+            }
+        })
+        .collect();
+    let mut value = RangeScanCacheValue::new(batches, bytes);
+    if let Some(limiter) = strategy.range_result_memory_limiter() {
+        let mut compacted = CacheConcatState::default();
+        match compacted.compact_range(&value, limiter).await {
+            Ok(()) => value = compacted.finish(),
+            // Compaction is optional. Keep the complete scan result if it fails.
+            Err(err) => warn!(err; "Failed to compact shared range cache batches"),
+        }
+    }
+    let value = Arc::new(value);
+    part_metrics.inc_range_cache_size(key.estimated_size() + value.estimated_size());
+    strategy.put_range_result(key, value.clone());
+    guard.finish(value.clone());
+    // Construction is over; normal cache/query ownership now retains the value.
+    drop(permits);
+    Ok((cached_flat_range_stream(value), estimated_batch_size))
+}
+
 /// Returns a stream that replays cached record batches.
 pub(crate) fn cached_flat_range_stream(value: Arc<RangeScanCacheValue>) -> BoxedRecordBatchStream {
     Box::pin(try_stream! {
@@ -607,9 +732,10 @@ pub(crate) fn cached_flat_range_stream(value: Arc<RangeScanCacheValue>) -> Boxed
 }
 
 enum CacheConcatCommand {
-    Compact(Vec<RecordBatch>),
+    Compact(Vec<RecordBatch>, CacheWork),
     Finish {
         pending: Vec<RecordBatch>,
+        work: CacheWork,
         key: RangeScanCacheKey,
         cache_strategy: CacheStrategy,
         part_metrics: PartitionMetrics,
@@ -617,10 +743,20 @@ enum CacheConcatCommand {
     },
 }
 
-#[derive(Default)]
 struct CacheConcatState {
+    work: CacheWork,
     cached_batches: Vec<CachedBatchSlice>,
     estimated_size: usize,
+}
+
+impl Default for CacheConcatState {
+    fn default() -> Self {
+        Self {
+            cached_batches: Vec::new(),
+            estimated_size: 0,
+            work: CacheWork::new("range_result", "compact_output"),
+        }
+    }
 }
 
 impl CacheConcatState {
@@ -637,17 +773,54 @@ impl CacheConcatState {
             .iter()
             .map(RecordBatch::get_array_memory_size)
             .sum::<usize>();
-        let _permit = limiter.acquire(input_size).await?;
-
-        let compacted = compact_record_batches(batches)?;
+        let _permit = {
+            let _timer = crate::metrics::CACHE_WORK_ELAPSED
+                .with_label_values(&["range_result", "limiter_wait"])
+                .start_timer();
+            limiter.acquire(input_size).await?
+        };
+        let compacted = {
+            let _timer = crate::metrics::CACHE_WORK_ELAPSED
+                .with_label_values(&["range_result", "compact"])
+                .start_timer();
+            compact_record_batches(batches)?
+        };
         self.estimated_size += compacted.batch.get_array_memory_size();
         self.cached_batches.push(compacted);
+        self.work.set_bytes(self.estimated_size);
         Ok(())
+    }
+
+    /// Uses the same compaction groups as the streaming cache writer. Keep the
+    /// source intact until success so optional compaction cannot fail a query.
+    async fn compact_range(
+        &mut self,
+        value: &RangeScanCacheValue,
+        limiter: &crate::cache::RangeResultMemoryLimiter,
+    ) -> Result<()> {
+        let mut pending = Vec::new();
+        let mut rows = 0;
+        let mut bytes = 0;
+        for cached in &value.cached_batches {
+            rows += cached.batch.num_rows();
+            bytes += cached.batch.get_array_memory_size();
+            pending.push(cached.batch.clone());
+            if should_compact_batches(pending.len(), rows, bytes) {
+                self.compact(mem::take(&mut pending), limiter).await?;
+                rows = 0;
+                bytes = 0;
+            }
+        }
+        self.compact(pending, limiter).await
     }
 
     fn finish(self) -> RangeScanCacheValue {
         RangeScanCacheValue::new(self.cached_batches, self.estimated_size)
     }
+}
+
+fn should_compact_batches(batches: usize, rows: usize, bytes: usize) -> bool {
+    batches > 1 && (rows > DEFAULT_READ_BATCH_SIZE || bytes > RANGE_CACHE_COMPACT_THRESHOLD_BYTES)
 }
 
 fn compact_record_batches(batches: Vec<RecordBatch>) -> Result<CachedBatchSlice> {
@@ -683,7 +856,8 @@ async fn run_cache_concat_task(
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            CacheConcatCommand::Compact(batches) => {
+            CacheConcatCommand::Compact(batches, mut work) => {
+                work.transition("compact_input");
                 if let Err(err) = state.compact(batches, &limiter).await {
                     warn!(err; "Failed to compact range cache batches");
                     return;
@@ -691,16 +865,21 @@ async fn run_cache_concat_task(
                 // Close the channel to stop further work as soon as the cached
                 // size exceeds the configured cache budget.
                 if state.estimated_size > skip_threshold_bytes {
+                    crate::metrics::CACHE_LOAD_EVENTS
+                        .with_label_values(&["range_result", "oversize"])
+                        .inc();
                     return;
                 }
             }
             CacheConcatCommand::Finish {
                 pending,
+                mut work,
                 key,
                 cache_strategy,
                 part_metrics,
                 result_tx,
             } => {
+                work.transition("compact_input");
                 let compact_result = state
                     .compact(pending, &limiter)
                     .await
@@ -732,6 +911,7 @@ async fn run_cache_concat_task(
 }
 
 struct CacheBatchBuffer {
+    work: CacheWork,
     buffered_batches: Vec<RecordBatch>,
     buffered_rows: usize,
     buffered_size: usize,
@@ -758,6 +938,7 @@ impl CacheBatchBuffer {
             .unzip();
 
         Self {
+            work: CacheWork::new("range_result", "buffer"),
             buffered_batches: Vec::new(),
             buffered_rows: 0,
             buffered_size: 0,
@@ -773,12 +954,14 @@ impl CacheBatchBuffer {
 
         self.buffered_rows += batch.num_rows();
         self.buffered_size += batch.get_array_memory_size();
+        self.work.set_bytes(self.buffered_size);
         self.buffered_batches.push(batch);
 
-        if self.buffered_batches.len() > 1
-            && (self.buffered_rows > DEFAULT_READ_BATCH_SIZE
-                || self.buffered_size > RANGE_CACHE_COMPACT_THRESHOLD_BYTES)
-        {
+        if should_compact_batches(
+            self.buffered_batches.len(),
+            self.buffered_rows,
+            self.buffered_size,
+        ) {
             self.notify_compact();
         }
 
@@ -791,13 +974,18 @@ impl CacheBatchBuffer {
         }
 
         let batches = mem::take(&mut self.buffered_batches);
+        let mut work = mem::replace(&mut self.work, CacheWork::new("range_result", "buffer"));
+        work.transition("queue");
         self.buffered_rows = 0;
         self.buffered_size = 0;
 
         let Some(sender) = &self.sender else {
             return;
         };
-        if sender.send(CacheConcatCommand::Compact(batches)).is_err() {
+        if sender
+            .send(CacheConcatCommand::Compact(batches, work))
+            .is_err()
+        {
             self.sender = None;
         }
     }
@@ -809,13 +997,17 @@ impl CacheBatchBuffer {
         part_metrics: PartitionMetrics,
         result_tx: Option<oneshot::Sender<Result<Arc<RangeScanCacheValue>>>>,
     ) {
+        key.trace_event("scan_complete");
         let Some(sender) = self.sender.take() else {
             return;
         };
 
+        let mut work = mem::replace(&mut self.work, CacheWork::new("range_result", "buffer"));
+        work.transition("queue");
         if sender
             .send(CacheConcatCommand::Finish {
                 pending: mem::take(&mut self.buffered_batches),
+                work,
                 key,
                 cache_strategy,
                 part_metrics,
@@ -1558,6 +1750,191 @@ mod tests {
         let values = (0..rows).map(|_| payload.as_slice()).collect::<Vec<_>>();
 
         RecordBatch::try_new(schema, vec![Arc::new(BinaryArray::from_vec(values))]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn shared_ranges_build_once_before_consumers_poll() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        for enabled in [false, true] {
+            let strategy = CacheStrategy::EnableAll(Arc::new(
+                CacheManager::builder()
+                    .range_result_cache_size(if enabled { 1024 * 1024 } else { 0 })
+                    .build(),
+            ));
+            let (key, metrics) = test_cache_context(&strategy);
+            let builds = AtomicUsize::new(0);
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let batch = make_batch(&[1, 2, 3]);
+            let mut requests = (0..8)
+                .map(|_| {
+                    Box::pin(get_or_load_range_result(
+                        &strategy,
+                        key.clone(),
+                        &metrics,
+                        || async {
+                            builds.fetch_add(1, Ordering::Relaxed);
+                            let batch = batch.clone();
+                            let gate = gate.clone();
+                            let stream = Box::pin(try_stream! {
+                                gate.acquire().await.unwrap().forget();
+                                yield batch;
+                            });
+                            Ok((stream as BoxedRecordBatchStream, 3))
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if enabled {
+                for request in &mut requests {
+                    assert!(futures::poll!(request).is_pending());
+                }
+            }
+            gate.add_permits(8);
+            // Polling all builders to completion must not require consuming any
+            // returned stream, matching the series distributor's construction order.
+            let streams = tokio::time::timeout(
+                Duration::from_secs(5),
+                futures::future::join_all(&mut requests),
+            )
+            .await
+            .unwrap();
+            assert_eq!(builds.load(Ordering::Relaxed), if enabled { 1 } else { 8 });
+            for stream in streams {
+                let (stream, _) = stream.unwrap();
+                assert_eq!(
+                    stream.try_collect::<Vec<_>>().await.unwrap(),
+                    vec![batch.clone()]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_range_compaction_releases_sliced_buffers_and_preserves_batches() {
+        let strategy = test_cache_strategy();
+        let (key, metrics) = test_cache_context(&strategy);
+        // Small slices retain the original large allocation until concatenated.
+        let source = make_large_binary_batch(128, 1024);
+        let expected = vec![source.slice(1, 1), source.slice(10, 2)];
+        let original_bytes = expected
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .sum::<usize>();
+        let input = expected.clone();
+        let (stream, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            Ok((
+                Box::pin(futures::stream::iter(input.into_iter().map(Ok)))
+                    as BoxedRecordBatchStream,
+                3,
+            ))
+        })
+        .await
+        .unwrap();
+        assert_eq!(stream.try_collect::<Vec<_>>().await.unwrap(), expected);
+        let cached = strategy.get_range_result(&key).unwrap();
+        assert!(cached.estimated_batches_size < original_bytes / 4);
+        assert_eq!(
+            cached_flat_range_stream(cached)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_range_budget_fallback_preserves_prefix_and_releases_reservations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .range_result_cache_size(1024)
+                .build(),
+        ));
+        let (key, metrics) = test_cache_context(&strategy);
+        let expected = vec![make_batch(&[1]), make_batch(&[2, 3]), make_batch(&[4])];
+        let reads = Arc::new(AtomicUsize::new(0));
+        let input = expected.clone();
+        let count = reads.clone();
+        let (stream, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async move {
+                let stream = futures::stream::iter(input.into_iter().map(move |batch| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Ok(batch)
+                }));
+                Ok((Box::pin(stream) as BoxedRecordBatchStream, 3))
+            })
+            .await
+            .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        let limiter = strategy.range_result_load_limiter().unwrap();
+        assert_eq!(limiter.available_permits(), 0);
+        assert!(strategy.get_range_result(&key).is_none());
+        assert_eq!(stream.try_collect::<Vec<_>>().await.unwrap(), expected);
+        assert_eq!(reads.load(Ordering::Relaxed), 3);
+        assert_eq!(limiter.available_permits(), 1);
+        assert!(matches!(
+            strategy.start_range_load(&key),
+            Some(CacheLoad::Load(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_failed_shared_range_releases_waiters_and_memory() {
+        use std::time::Duration;
+        for cancel in [false, true] {
+            let strategy = test_cache_strategy();
+            let (key, metrics) = test_cache_context(&strategy);
+            let limiter = strategy.range_result_load_limiter().unwrap();
+            let initial_permits = limiter.available_permits();
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let reader_gate = gate.clone();
+            let mut producer = Box::pin(get_or_load_range_result(
+                &strategy,
+                key.clone(),
+                &metrics,
+                || async move {
+                    let stream = Box::pin(try_stream! {
+                        yield make_batch(&[1]);
+                        reader_gate.acquire().await.unwrap().forget();
+                        Err(crate::error::UnexpectedSnafu { reason: "injected range failure" }.build())?;
+                    });
+                    Ok((stream as BoxedRecordBatchStream, 1))
+                },
+            ));
+            assert!(futures::poll!(&mut producer).is_pending());
+            assert!(limiter.available_permits() < initial_permits);
+            let mut consumer = Box::pin(get_or_load_range_result(
+                &strategy,
+                key.clone(),
+                &metrics,
+                || async {
+                    Ok((
+                        Box::pin(futures::stream::iter(vec![Ok(make_batch(&[7]))]))
+                            as BoxedRecordBatchStream,
+                        1,
+                    ))
+                },
+            ));
+            assert!(futures::poll!(&mut consumer).is_pending());
+            if cancel {
+                drop(producer);
+            } else {
+                gate.add_permits(1);
+                assert!(producer.await.is_err());
+            }
+            let (stream, _) = tokio::time::timeout(Duration::from_secs(5), consumer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stream.try_collect::<Vec<_>>().await.unwrap(),
+                vec![make_batch(&[7])]
+            );
+            assert_eq!(limiter.available_permits(), initial_permits);
+            assert!(strategy.get_range_result(&key).is_none());
+        }
     }
 
     #[test]

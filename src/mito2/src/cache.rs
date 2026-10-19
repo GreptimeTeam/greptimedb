@@ -18,14 +18,18 @@ pub(crate) mod cache_size;
 
 pub(crate) mod file_cache;
 pub(crate) mod index;
+pub(crate) mod load;
 pub(crate) mod manifest_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
 
+use crate::cache::load::{CacheLoad, CacheLoads};
+
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
 use bytes::Bytes;
@@ -64,7 +68,7 @@ use crate::error::{
     JoinSnafu, ReadParquetSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::memtable::record_batch_estimated_size;
-use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
+use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_LOAD_EVENTS, CACHE_MISS};
 use crate::read::Batch;
 use crate::read::range_cache::{RangeScanCacheKey, RangeScanCacheValue};
 use crate::read::read_columns::JsonTargetTypes;
@@ -127,6 +131,16 @@ impl RangeResultMemoryLimiter {
             #[cfg(test)]
             waited_acquires: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Reserves optional cache construction memory without parking a query.
+    pub(crate) fn try_acquire_owned(
+        &self,
+        bytes: usize,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let permits = bytes.div_ceil(self.permit_bytes).max(1);
+        let permits = u32::try_from(permits).ok()?;
+        self.semaphore.clone().try_acquire_many_owned(permits).ok()
     }
 
     #[cfg(test)]
@@ -696,9 +710,8 @@ impl CacheStrategy {
         }
     }
 
-    /// Shares an in-progress metadata load with requests for the same file and policy.
-    /// Completed values remain owned by the existing metadata caches, not this coordinator.
-    pub(crate) async fn coalesce_sst_meta_load<F>(
+    /// Loads and caches decoded metadata, sharing concurrent loads for the same file and policy.
+    pub(crate) async fn get_or_load_sst_meta<F>(
         &self,
         file_id: RegionFileId,
         page_index_policy: PageIndexPolicy,
@@ -707,21 +720,30 @@ impl CacheStrategy {
     where
         F: std::future::Future<Output = Result<(Arc<CachedSstMeta>, bool)>>,
     {
-        let loads = match self {
-            Self::EnableAll(manager) | Self::Compaction(manager) => manager.sst_meta_loads.as_ref(),
+        let cache = match self {
+            Self::EnableAll(manager) | Self::Compaction(manager) => {
+                manager.sst_decoded_meta_cache.as_ref()
+            }
             Self::Disabled => None,
         };
-        let Some(loads) = loads else {
+        let Some(cache) = cache else {
             return load.await;
         };
-        let key = (
-            SstMetaKey(file_id.region_id(), file_id.file_id()),
-            mem::discriminant(&page_index_policy),
-        );
-        loads
-            .try_get_with(key, load)
+        let key = SstDecodedMetaKey::new(file_id, page_index_policy);
+        let value = cache
+            .try_get_with(key.clone(), async {
+                let (metadata, cache_miss) = load.await?;
+                let value = SstMetaLoadResult::new(
+                    &key,
+                    metadata,
+                    cache_miss,
+                    CACHE_BYTES.with_label_values(&[SST_META_DECODED_TYPE]),
+                );
+                Ok(value)
+            })
             .await
-            .context(crate::error::LoadSstMetaSnafu)
+            .context(crate::error::LoadSstMetaSnafu)?;
+        Ok((value.metadata.clone(), value.cache_miss))
     }
 
     /// Gets fused SST metadata with cache metrics tracking.
@@ -751,7 +773,7 @@ impl CacheStrategy {
 
     /// Returns decoded metadata immediately when cached, recording only hits.
     /// Misses are accounted for by the coordinated load's cache lookup.
-    pub(crate) fn get_cached_sst_meta(
+    pub(crate) async fn get_cached_sst_meta(
         &self,
         file_id: RegionFileId,
         page_index_policy: PageIndexPolicy,
@@ -761,8 +783,9 @@ impl CacheStrategy {
             Self::EnableAll(manager) | Self::Compaction(manager) => manager,
             Self::Disabled => return None,
         };
-        let metadata =
-            manager.get_sst_meta_data_from_mem_cache_inner(file_id, page_index_policy)?;
+        let metadata = manager
+            .get_sst_meta_data_from_mem_cache_inner(file_id, page_index_policy)
+            .await?;
         CACHE_HIT.with_label_values(&[SST_META_TYPE]).inc();
         CACHE_HIT.with_label_values(&[SST_META_DECODED_TYPE]).inc();
         metrics.mem_cache_hit += 1;
@@ -770,30 +793,33 @@ impl CacheStrategy {
     }
 
     /// Calls [CacheManager::get_sst_meta_data_from_mem_cache()].
-    pub(crate) fn get_sst_meta_data_from_mem_cache(
+    pub(crate) async fn get_sst_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_sst_meta_data_from_mem_cache(file_id, page_index_policy)
+                cache_manager
+                    .get_sst_meta_data_from_mem_cache(file_id, page_index_policy)
+                    .await
             }
             CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::get_parquet_meta_data_from_mem_cache()].
-    pub fn get_parquet_meta_data_from_mem_cache(
+    pub async fn get_parquet_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
         self.get_sst_meta_data_from_mem_cache(file_id, PageIndexPolicy::Skip)
+            .await
             .map(|metadata| metadata.parquet_metadata())
     }
 
     /// Puts compact and decoded forms of SST metadata into the shared cache capacity.
-    pub(crate) fn put_prepared_sst_meta(
+    pub(crate) async fn put_prepared_sst_meta(
         &self,
         file_id: RegionFileId,
         metadata: PreparedSstMeta,
@@ -801,14 +827,16 @@ impl CacheStrategy {
     ) {
         match self {
             CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.put_prepared_sst_meta(file_id, metadata, retain_decoded);
+                cache_manager
+                    .put_prepared_sst_meta(file_id, metadata, retain_decoded)
+                    .await;
             }
             CacheStrategy::Disabled => {}
         }
     }
 
     /// Calls [CacheManager::put_parquet_meta_data()].
-    pub fn put_parquet_meta_data(
+    pub async fn put_parquet_meta_data(
         &self,
         file_id: RegionFileId,
         metadata: Arc<ParquetMetaData>,
@@ -816,7 +844,9 @@ impl CacheStrategy {
     ) {
         match self {
             CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.put_parquet_meta_data(file_id, metadata, region_metadata);
+                cache_manager
+                    .put_parquet_meta_data(file_id, metadata, region_metadata)
+                    .await;
             }
             CacheStrategy::Disabled => {}
         }
@@ -840,13 +870,13 @@ impl CacheStrategy {
     }
 
     /// Calls [CacheManager::remove_parquet_meta_data()].
-    pub fn remove_parquet_meta_data(&self, file_id: RegionFileId) {
+    pub async fn remove_parquet_meta_data(&self, file_id: RegionFileId) {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.remove_parquet_meta_data(file_id);
+                cache_manager.remove_parquet_meta_data(file_id).await;
             }
             CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.remove_parquet_meta_data(file_id);
+                cache_manager.remove_parquet_meta_data(file_id).await;
             }
             CacheStrategy::Disabled => {}
         }
@@ -889,6 +919,41 @@ impl CacheStrategy {
             }
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
+    }
+
+    /// Coordinates identical missing byte ranges while the page cache is enabled.
+    pub(crate) fn start_page_load(
+        &self,
+        file_id: FileId,
+        row_group_idx: usize,
+        range: &Range<u64>,
+    ) -> Option<CacheLoad<PageFragmentKey, Bytes>> {
+        let Self::EnableAll(manager) = self else {
+            return None;
+        };
+        let cache = manager.page_cache.as_ref()?;
+        Some(cache.loads.start(
+            PageFragmentKey::new(file_id, row_group_idx, range),
+            PAGE_TYPE,
+        ))
+    }
+
+    /// Looks up an exact fragment when joining or publishing a shared range load.
+    /// This internal lookup is not a query cache hit and does not update hit metrics.
+    pub(crate) fn get_cached_page_range(
+        &self,
+        file_id: FileId,
+        row_group_idx: usize,
+        range: &Range<u64>,
+    ) -> Option<Bytes> {
+        let Self::EnableAll(manager) = self else {
+            return None;
+        };
+        manager
+            .page_cache
+            .as_ref()?
+            .cache
+            .get(&PageFragmentKey::new(file_id, row_group_idx, range))
     }
 
     /// Calls [CacheManager::put_page_ranges()].
@@ -954,6 +1019,41 @@ impl CacheStrategy {
             CacheStrategy::EnableAll(cache_manager) => cache_manager.get_range_result(key),
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
+    }
+
+    /// Joins a range load before constructing its storage readers.
+    pub(crate) fn start_range_load(
+        &self,
+        key: &RangeScanCacheKey,
+    ) -> Option<CacheLoad<RangeScanCacheKey, Arc<RangeScanCacheValue>>> {
+        let Self::EnableAll(manager) = self else {
+            return None;
+        };
+        manager.range_result_cache.as_ref()?;
+        Some(
+            manager
+                .range_result_loads
+                .start(key.clone(), RANGE_RESULT_TYPE),
+        )
+    }
+
+    /// Closes the load-registration race without counting another query lookup.
+    pub(crate) fn get_cached_range_result(
+        &self,
+        key: &RangeScanCacheKey,
+    ) -> Option<Arc<RangeScanCacheValue>> {
+        let Self::EnableAll(manager) = self else {
+            return None;
+        };
+        manager.range_result_cache.as_ref()?.get(key)
+    }
+
+    pub(crate) fn range_result_load_limiter(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
+        let Self::EnableAll(manager) = self else {
+            return None;
+        };
+        manager.range_result_cache.as_ref()?;
+        Some(&manager.range_result_load_memory_limiter)
     }
 
     /// Calls [CacheManager::put_range_result()].
@@ -1066,8 +1166,6 @@ impl CacheStrategy {
 /// All caches are disabled by default.
 #[derive(Default)]
 pub struct CacheManager {
-    /// Zero-capacity cache used only to share in-progress metadata loads.
-    sst_meta_loads: Option<SstMetaLoads>,
     /// Cache for compact, authoritative SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
     /// Cache for decoded SST metadata, used only as an acceleration tier.
@@ -1088,6 +1186,10 @@ pub struct CacheManager {
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
     range_result_cache: Option<RangeResultCache>,
+    /// In-flight complete range results, independent of cache admission.
+    range_result_loads: Arc<CacheLoads<RangeScanCacheKey, Arc<RangeScanCacheValue>>>,
+    /// Shared staging budget, separate from the background concat limiter.
+    range_result_load_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Configured capacity for range scan outputs in flat format.
     range_result_cache_size: u64,
     /// Shared memory limiter for async range-result cache tasks.
@@ -1120,7 +1222,8 @@ impl CacheManager {
             .get_compact_sst_meta(&cache_key)
             .filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy));
         let decoded = self
-            .get_decoded_sst_meta(&cache_key)
+            .get_decoded_sst_meta(file_id, page_index_policy)
+            .await
             .filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy));
 
         if let Some(compact) = compact {
@@ -1134,12 +1237,11 @@ impl CacheManager {
             CACHE_MISS.with_label_values(&[SST_META_DECODED_TYPE]).inc();
             match compact.decode(runtime).await {
                 Ok(decoded) => {
-                    self.put_sst_meta_data(file_id, decoded.clone());
                     return Some(decoded);
                 }
                 Err(err) => {
                     warn!(err; "Failed to decode compact SST metadata, region_id: {}, file_id: {}", file_id.region_id(), file_id.file_id());
-                    self.remove_parquet_meta_data(file_id);
+                    self.remove_parquet_meta_data(file_id).await;
                 }
             }
         } else if let Some(decoded) = decoded {
@@ -1165,7 +1267,7 @@ impl CacheManager {
                     let decoded = metadata.decoded();
                     match metadata {
                         SstMetaPreparation::Prepared(metadata) => {
-                            self.put_prepared_sst_meta(file_id, metadata, true);
+                            self.put_prepared_sst_meta(file_id, metadata, false).await;
                         }
                         SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
                             warn!(
@@ -1193,48 +1295,56 @@ impl CacheManager {
 
     /// Gets cached fused SST metadata from in-memory cache.
     /// This method does not perform I/O.
-    pub(crate) fn get_sst_meta_data_from_mem_cache(
+    pub(crate) async fn get_sst_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
-        let value = self.get_sst_meta_data_from_mem_cache_inner(file_id, page_index_policy);
+        let value = self
+            .get_sst_meta_data_from_mem_cache_inner(file_id, page_index_policy)
+            .await;
         update_hit_miss(value, SST_META_DECODED_TYPE)
     }
 
-    fn get_sst_meta_data_from_mem_cache_inner(
+    async fn get_sst_meta_data_from_mem_cache_inner(
         &self,
         file_id: RegionFileId,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
-        let key = SstMetaKey(file_id.region_id(), file_id.file_id());
-        self.get_decoded_sst_meta(&key)
-            .filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy))
+        self.get_decoded_sst_meta(file_id, page_index_policy).await
     }
 
     /// Gets cached [ParquetMetaData] from in-memory cache.
     /// This method does not perform I/O.
-    pub fn get_parquet_meta_data_from_mem_cache(
+    pub async fn get_parquet_meta_data_from_mem_cache(
         &self,
         file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
         self.get_sst_meta_data_from_mem_cache(file_id, PageIndexPolicy::Skip)
+            .await
             .map(|metadata| metadata.parquet_metadata())
     }
 
     /// Puts fused SST metadata into the cache.
-    pub(crate) fn put_sst_meta_data(&self, file_id: RegionFileId, metadata: Arc<CachedSstMeta>) {
+    pub(crate) async fn put_sst_meta_data(
+        &self,
+        file_id: RegionFileId,
+        metadata: Arc<CachedSstMeta>,
+    ) {
         if let Some(cache) = &self.sst_decoded_meta_cache {
-            let key = SstMetaKey(file_id.region_id(), file_id.file_id());
-            CACHE_BYTES
-                .with_label_values(&[SST_META_DECODED_TYPE])
-                .add(decoded_meta_cache_weight(&key, &metadata).into());
-            cache.insert(key, metadata);
+            let key = SstDecodedMetaKey::new(file_id, metadata.page_index_policy);
+            let value = SstMetaLoadResult::new(
+                &key,
+                metadata,
+                false,
+                CACHE_BYTES.with_label_values(&[SST_META_DECODED_TYPE]),
+            );
+            cache.insert(key, value).await;
         }
     }
 
     /// Puts a compact metadata entry and optionally retains its decoded acceleration entry.
-    pub(crate) fn put_prepared_sst_meta(
+    pub(crate) async fn put_prepared_sst_meta(
         &self,
         file_id: RegionFileId,
         metadata: PreparedSstMeta,
@@ -1248,7 +1358,7 @@ impl CacheManager {
             cache.insert(key.clone(), metadata.compact);
         }
         if retain_decoded {
-            self.put_sst_meta_data(file_id, metadata.decoded);
+            self.put_sst_meta_data(file_id, metadata.decoded).await;
         }
     }
 
@@ -1256,8 +1366,24 @@ impl CacheManager {
         self.sst_meta_cache.as_ref()?.get(key)
     }
 
-    fn get_decoded_sst_meta(&self, key: &SstMetaKey) -> Option<Arc<CachedSstMeta>> {
-        self.sst_decoded_meta_cache.as_ref()?.get(key)
+    async fn get_decoded_sst_meta(
+        &self,
+        file_id: RegionFileId,
+        requested: PageIndexPolicy,
+    ) -> Option<Arc<CachedSstMeta>> {
+        let cache = self.sst_decoded_meta_cache.as_ref()?;
+        for policy in [
+            PageIndexPolicy::Skip,
+            PageIndexPolicy::Optional,
+            PageIndexPolicy::Required,
+        ] {
+            if satisfies_page_index_policy(policy, requested)
+                && let Some(value) = cache.get(&SstDecodedMetaKey::new(file_id, policy)).await
+            {
+                return Some(value.metadata.clone());
+            }
+        }
+        None
     }
 
     /// Gets and decodes only the compact tier without promoting into the decoded cache.
@@ -1277,14 +1403,14 @@ impl CacheManager {
             Ok(metadata) => Some(metadata),
             Err(err) => {
                 warn!(err; "Failed to decode compact SST metadata, region_id: {}, file_id: {}", file_id.region_id(), file_id.file_id());
-                self.remove_parquet_meta_data(file_id);
+                self.remove_parquet_meta_data(file_id).await;
                 None
             }
         }
     }
 
     /// Puts [ParquetMetaData] into the cache.
-    pub fn put_parquet_meta_data(
+    pub async fn put_parquet_meta_data(
         &self,
         file_id: RegionFileId,
         metadata: Arc<ParquetMetaData>,
@@ -1301,7 +1427,7 @@ impl CacheManager {
                 Arc::unwrap_or_clone(metadata),
                 region_metadata,
             ) {
-                Ok(metadata) => self.put_sst_meta_data(file_id, Arc::new(metadata)),
+                Ok(metadata) => self.put_sst_meta_data(file_id, Arc::new(metadata)).await,
                 Err(err) => warn!(
                     err; "Failed to decode region metadata while caching parquet metadata, region_id: {}, file_id: {}",
                     file_id.region_id(),
@@ -1312,13 +1438,21 @@ impl CacheManager {
     }
 
     /// Removes [ParquetMetaData] from the cache.
-    pub fn remove_parquet_meta_data(&self, file_id: RegionFileId) {
+    pub async fn remove_parquet_meta_data(&self, file_id: RegionFileId) {
         let key = SstMetaKey(file_id.region_id(), file_id.file_id());
         if let Some(cache) = &self.sst_meta_cache {
             cache.remove(&key);
         }
         if let Some(cache) = &self.sst_decoded_meta_cache {
-            cache.remove(&key);
+            for policy in [
+                PageIndexPolicy::Skip,
+                PageIndexPolicy::Optional,
+                PageIndexPolicy::Required,
+            ] {
+                cache
+                    .invalidate(&SstDecodedMetaKey::new(file_id, policy))
+                    .await;
+            }
         }
     }
 
@@ -1408,7 +1542,7 @@ impl CacheManager {
         }
 
         if let Some(cache) = &self.puffin_metadata_cache {
-            cache.remove(&file_id.to_string());
+            cache.remove(&file_id.to_string()).await;
         }
 
         if let Some(write_cache) = &self.write_cache {
@@ -1451,9 +1585,12 @@ impl CacheManager {
         &self,
         key: &RangeScanCacheKey,
     ) -> Option<Arc<RangeScanCacheValue>> {
-        self.range_result_cache
+        let result = self
+            .range_result_cache
             .as_ref()
-            .and_then(|cache| update_hit_miss(cache.get(key), RANGE_RESULT_TYPE))
+            .and_then(|cache| update_hit_miss(cache.get(key), RANGE_RESULT_TYPE));
+        key.trace_event(if result.is_some() { "hit" } else { "miss" });
+        result
     }
 
     /// Puts range scan result into cache.
@@ -1463,6 +1600,10 @@ impl CacheManager {
         result: Arc<RangeScanCacheValue>,
     ) {
         if let Some(cache) = &self.range_result_cache {
+            key.trace_event("submit");
+            CACHE_LOAD_EVENTS
+                .with_label_values(&[RANGE_RESULT_TYPE, "submit"])
+                .inc();
             CACHE_BYTES
                 .with_label_values(&[RANGE_RESULT_TYPE])
                 .add(range_result_cache_weight(&key, &result).into());
@@ -1643,14 +1784,11 @@ impl CacheManagerBuilder {
                 .build()
         });
         let sst_decoded_meta_cache = (decoded_meta_capacity != 0).then(|| {
-            Cache::builder()
+            moka::future::Cache::builder()
                 .max_capacity(decoded_meta_capacity)
                 .weigher(decoded_meta_cache_weight)
-                .eviction_listener(|k, v, cause| {
-                    let size = decoded_meta_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[SST_META_DECODED_TYPE])
-                        .sub(size.into());
+                .eviction_listener(|_k, v, cause| {
+                    v.release_accounting();
                     CACHE_EVICTION
                         .with_label_values(&[SST_META_DECODED_TYPE, removal_cause_str(cause)])
                         .inc();
@@ -1721,10 +1859,7 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-        let sst_meta_loads = (sst_meta_cache.is_some() || sst_decoded_meta_cache.is_some())
-            .then(|| moka::future::Cache::new(0));
         CacheManager {
-            sst_meta_loads,
             sst_meta_cache,
             sst_decoded_meta_cache,
             vector_cache,
@@ -1735,6 +1870,11 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
+            range_result_loads: Arc::default(),
+            range_result_load_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
+                self.range_result_cache_size as usize,
+                RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
+            )),
             range_result_cache_size: self.range_result_cache_size,
             range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
                 self.range_result_cache_size as usize,
@@ -1753,8 +1893,11 @@ fn meta_cache_weight(k: &SstMetaKey, v: &Arc<CompactSstMeta>) -> u32 {
     u32::try_from(size).unwrap_or(u32::MAX)
 }
 
-fn decoded_meta_cache_weight(k: &SstMetaKey, v: &Arc<CachedSstMeta>) -> u32 {
-    let size = k.estimated_size() + v.parquet_metadata_size + v.region_metadata_weight;
+fn decoded_meta_cache_weight(k: &SstDecodedMetaKey, v: &Arc<SstMetaLoadResult>) -> u32 {
+    let size = size_of_val(k)
+        + size_of::<SstMetaLoadResult>()
+        + v.metadata.parquet_metadata_size
+        + v.metadata.region_metadata_weight;
     u32::try_from(size).unwrap_or(u32::MAX)
 }
 
@@ -1871,6 +2014,7 @@ type PageFragmentIndex = HashMap<PageFragmentGroupKey, PageFragmentRangeIndex>;
 /// Byte-fragment cache for Parquet row-group reads.
 pub struct PageRangeCache {
     cache: Cache<PageFragmentKey, Bytes>,
+    loads: Arc<CacheLoads<PageFragmentKey, Bytes>>,
     index: RwLock<PageFragmentIndex>,
 }
 
@@ -1900,6 +2044,7 @@ impl PageRangeCache {
 
             PageRangeCache {
                 cache,
+                loads: Arc::default(),
                 index: RwLock::new(HashMap::new()),
             }
         })
@@ -2142,19 +2287,67 @@ impl SelectorResultValue {
     }
 }
 
-/// Coordinates in-progress SST metadata loads.
-///
-/// Capacity is zero: Moka shares the initializer result with current waiters, but does
-/// not retain it afterward. In particular, decoded metadata cannot bypass its budget.
-type SstMetaLoads = moka::future::Cache<
-    (SstMetaKey, mem::Discriminant<PageIndexPolicy>),
-    (Arc<CachedSstMeta>, bool),
->;
+/// Metadata returned by a shared load. Cache hits ignore the original load's miss flag.
+struct SstMetaLoadResult {
+    metadata: Arc<CachedSstMeta>,
+    /// Preserves background-download eligibility for all requests sharing a storage load.
+    cache_miss: bool,
+    accounted_bytes: AtomicU32,
+    bytes_metric: prometheus::IntGauge,
+}
+
+impl SstMetaLoadResult {
+    fn new(
+        key: &SstDecodedMetaKey,
+        metadata: Arc<CachedSstMeta>,
+        cache_miss: bool,
+        bytes_metric: prometheus::IntGauge,
+    ) -> Arc<Self> {
+        let value = Arc::new(Self {
+            metadata,
+            cache_miss,
+            accounted_bytes: AtomicU32::new(0),
+            bytes_metric,
+        });
+        let bytes = decoded_meta_cache_weight(key, &value);
+        value.bytes_metric.add(bytes.into());
+        value.accounted_bytes.store(bytes, Ordering::Relaxed);
+        value
+    }
+
+    fn release_accounting(&self) {
+        self.bytes_metric
+            .sub(self.accounted_bytes.swap(0, Ordering::Relaxed).into());
+    }
+}
+
+impl Drop for SstMetaLoadResult {
+    fn drop(&mut self) {
+        // A cancelled asynchronous insertion might never reach the eviction listener.
+        self.release_accounting();
+    }
+}
+
+/// Separates loads that require different page-index guarantees.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SstDecodedMetaKey {
+    file: SstMetaKey,
+    policy: mem::Discriminant<PageIndexPolicy>,
+}
+
+impl SstDecodedMetaKey {
+    fn new(file: RegionFileId, policy: PageIndexPolicy) -> Self {
+        Self {
+            file: SstMetaKey(file.region_id(), file.file_id()),
+            policy: mem::discriminant(&policy),
+        }
+    }
+}
 
 /// Maps (region id, file id) to fused SST metadata.
 type SstMetaCache = Cache<SstMetaKey, Arc<CompactSstMeta>>;
-/// Maps (region id, file id) to decoded SST metadata retained as an acceleration tier.
-type SstDecodedMetaCache = Cache<SstMetaKey, Arc<CachedSstMeta>>;
+/// Retains decoded metadata and coalesces asynchronous loads within its memory budget.
+type SstDecodedMetaCache = moka::future::Cache<SstDecodedMetaKey, Arc<SstMetaLoadResult>>;
 /// Maps [Value] to a vector that holds this value repeatedly.
 ///
 /// e.g. `"hello" => ["hello", "hello", "hello"]`
@@ -2201,7 +2394,7 @@ mod tests {
         let file_id = RegionFileId::new(region_id, FileId::random());
         let metadata = parquet_meta();
         let mut metrics = MetadataCacheMetrics::default();
-        cache.put_parquet_meta_data(file_id, metadata, None);
+        cache.put_parquet_meta_data(file_id, metadata, None).await;
         assert!(
             cache
                 .get_sst_meta_data(
@@ -2242,7 +2435,7 @@ mod tests {
     async fn test_sst_meta_load_coalescing() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let manager = Arc::new(CacheManager::builder().sst_meta_cache_size(2000).build());
+        let manager = Arc::new(CacheManager::builder().sst_meta_cache_size(2).build());
         let strategy = CacheStrategy::EnableAll(manager.clone());
         let (metadata, region) = sst_parquet_meta();
         let metadata = Arc::new(
@@ -2257,9 +2450,9 @@ mod tests {
             Ok((metadata.clone(), true))
         };
         let mut first =
-            Box::pin(strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, load()));
+            Box::pin(strategy.get_or_load_sst_meta(file_id, PageIndexPolicy::Skip, load()));
         let mut second =
-            Box::pin(strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, load()));
+            Box::pin(strategy.get_or_load_sst_meta(file_id, PageIndexPolicy::Skip, load()));
         assert!(futures::poll!(&mut first).is_pending());
         assert!(futures::poll!(&mut second).is_pending());
         assert_eq!(1, calls.load(Ordering::Relaxed));
@@ -2273,19 +2466,135 @@ mod tests {
             "all waiters preserve the remote miss flag"
         );
 
-        // A completed load must not become an unbudgeted decoded metadata cache.
-        let mut next =
-            Box::pin(strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, load()));
-        assert!(futures::poll!(&mut next).is_pending());
-        assert_eq!(2, calls.load(Ordering::Relaxed));
-        drop(next);
+        // Moka applies capacity limits during maintenance, not synchronously on insertion.
         manager
-            .sst_meta_loads
+            .sst_decoded_meta_cache
             .as_ref()
             .unwrap()
             .run_pending_tasks()
             .await;
-        assert_eq!(0, manager.sst_meta_loads.as_ref().unwrap().entry_count());
+        // An entry larger than the decoded reservation must not be retained.
+        let mut next =
+            Box::pin(strategy.get_or_load_sst_meta(file_id, PageIndexPolicy::Skip, load()));
+        assert!(futures::poll!(&mut next).is_pending());
+        assert_eq!(2, calls.load(Ordering::Relaxed));
+        drop(next);
+        manager
+            .sst_decoded_meta_cache
+            .as_ref()
+            .unwrap()
+            .run_pending_tasks()
+            .await;
+        assert_eq!(
+            0,
+            manager
+                .sst_decoded_meta_cache
+                .as_ref()
+                .unwrap()
+                .entry_count()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sst_meta_cancelled_insertion_accounting() {
+        let (metadata, region) = sst_parquet_meta();
+        let metadata =
+            Arc::new(CachedSstMeta::try_new("test.parquet", (*metadata).clone()).unwrap());
+        let key = SstDecodedMetaKey::new(
+            RegionFileId::new(region.region_id, FileId::random()),
+            PageIndexPolicy::Skip,
+        );
+        let metric = prometheus::IntGauge::new("test_meta_bytes", "Test metadata bytes").unwrap();
+        let mut insertion = Box::pin(async {
+            let _value = SstMetaLoadResult::new(&key, metadata.clone(), true, metric.clone());
+            // Model cancellation after initialization but before Moka can complete insertion.
+            std::future::pending::<()>().await;
+        });
+        assert!(futures::poll!(&mut insertion).is_pending());
+        assert!(metric.get() > 0);
+        drop(insertion);
+        assert_eq!(0, metric.get());
+
+        let value = SstMetaLoadResult::new(&key, metadata, true, metric.clone());
+        let waiter = value.clone();
+        // Eviction releases cache accounting even while a waiter still holds the result.
+        value.release_accounting();
+        assert_eq!(0, metric.get());
+        drop(value);
+        drop(waiter);
+        assert_eq!(0, metric.get());
+    }
+
+    #[tokio::test]
+    async fn test_async_sst_meta_policy_reuse_and_invalidation() {
+        let manager = Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(1024 * 1024)
+                .build(),
+        );
+        let strategy = CacheStrategy::EnableAll(manager.clone());
+        let (parquet_metadata, region) = sst_parquet_meta();
+        let file_id = RegionFileId::new(region.region_id, FileId::random());
+        let policies = [
+            PageIndexPolicy::Skip,
+            PageIndexPolicy::Optional,
+            PageIndexPolicy::Required,
+        ];
+        for loaded in policies {
+            let metadata = Arc::new(
+                CachedSstMeta::try_new_with_page_index_policy(
+                    "test.parquet",
+                    (*parquet_metadata).clone(),
+                    None,
+                    loaded,
+                )
+                .unwrap(),
+            );
+            let (result, miss) = strategy
+                .get_or_load_sst_meta(file_id, loaded, async { Ok((metadata.clone(), true)) })
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&metadata, &result));
+            assert!(miss);
+            for requested in policies {
+                let mut metrics = MetadataCacheMetrics::default();
+                let cached = strategy
+                    .get_cached_sst_meta(file_id, requested, &mut metrics)
+                    .await;
+                assert_eq!(
+                    satisfies_page_index_policy(loaded, requested),
+                    cached.is_some()
+                );
+                if let Some(cached) = cached {
+                    assert!(Arc::ptr_eq(&metadata, &cached));
+                    assert_eq!(1, metrics.mem_cache_hit);
+                }
+            }
+            manager.remove_parquet_meta_data(file_id).await;
+        }
+
+        // Populate all policy keys before removing the file, not just the last inserted key.
+        for loaded in policies {
+            let metadata = Arc::new(
+                CachedSstMeta::try_new_with_page_index_policy(
+                    "test.parquet",
+                    (*parquet_metadata).clone(),
+                    None,
+                    loaded,
+                )
+                .unwrap(),
+            );
+            manager.put_sst_meta_data(file_id, metadata).await;
+        }
+        manager.remove_parquet_meta_data(file_id).await;
+        for requested in policies {
+            assert!(
+                manager
+                    .get_sst_meta_data_from_mem_cache(file_id, requested)
+                    .await
+                    .is_none()
+            );
+        }
     }
 
     #[tokio::test]
@@ -2298,7 +2607,7 @@ mod tests {
             CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap(),
         );
         let file_id = RegionFileId::new(region.region_id, FileId::random());
-        let mut first = Box::pin(strategy.coalesce_sst_meta_load(
+        let mut first = Box::pin(strategy.get_or_load_sst_meta(
             file_id,
             PageIndexPolicy::Skip,
             std::future::pending(),
@@ -2314,12 +2623,11 @@ mod tests {
             ),
         ] {
             let mut independent = Box::pin(
-                strategy
-                    .coalesce_sst_meta_load(id, policy, async { Ok((metadata.clone(), false)) }),
+                strategy.get_or_load_sst_meta(id, policy, async { Ok((metadata.clone(), false)) }),
             );
             assert!(futures::poll!(&mut independent).is_ready());
         }
-        let mut waiter = Box::pin(strategy.coalesce_sst_meta_load(
+        let mut waiter = Box::pin(strategy.get_or_load_sst_meta(
             file_id,
             PageIndexPolicy::Skip,
             async { Ok((metadata.clone(), false)) },
@@ -2347,7 +2655,7 @@ mod tests {
         let gate = tokio::sync::Notify::new();
         let mut first =
             Box::pin(
-                strategy.coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, async {
+                strategy.get_or_load_sst_meta(file_id, PageIndexPolicy::Skip, async {
                     gate.notified().await;
                     UnexpectedSnafu {
                         reason: "load failed",
@@ -2355,7 +2663,7 @@ mod tests {
                     .fail()
                 }),
             );
-        let mut waiter = Box::pin(strategy.coalesce_sst_meta_load(
+        let mut waiter = Box::pin(strategy.get_or_load_sst_meta(
             file_id,
             PageIndexPolicy::Skip,
             async { panic!("waiter must share the failure") },
@@ -2375,7 +2683,7 @@ mod tests {
         }
         assert!(
             strategy
-                .coalesce_sst_meta_load(file_id, PageIndexPolicy::Skip, async {
+                .get_or_load_sst_meta(file_id, PageIndexPolicy::Skip, async {
                     Ok((metadata.clone(), true))
                 })
                 .await
@@ -2386,13 +2694,13 @@ mod tests {
             CacheStrategy::Disabled,
             CacheStrategy::EnableAll(Arc::new(CacheManager::default())),
         ] {
-            let mut blocked = Box::pin(strategy.coalesce_sst_meta_load(
+            let mut blocked = Box::pin(strategy.get_or_load_sst_meta(
                 file_id,
                 PageIndexPolicy::Skip,
                 std::future::pending(),
             ));
             assert!(futures::poll!(&mut blocked).is_pending());
-            let mut independent = Box::pin(strategy.coalesce_sst_meta_load(
+            let mut independent = Box::pin(strategy.get_or_load_sst_meta(
                 file_id,
                 PageIndexPolicy::Skip,
                 async { Ok((metadata.clone(), true)) },
@@ -2443,7 +2751,7 @@ mod tests {
                 .is_none()
         );
         let (metadata, region_metadata) = sst_parquet_meta();
-        cache.put_parquet_meta_data(file_id, metadata, None);
+        cache.put_parquet_meta_data(file_id, metadata, None).await;
         let cached = cache
             .get_sst_meta_data(
                 file_id,
@@ -2465,7 +2773,7 @@ mod tests {
                         .all(|key_value| key_value.key != PARQUET_METADATA_KEY)
                 })
         );
-        cache.remove_parquet_meta_data(file_id);
+        cache.remove_parquet_meta_data(file_id).await;
         assert!(
             cache
                 .get_sst_meta_data(
@@ -2487,7 +2795,9 @@ mod tests {
         let file_id = RegionFileId::new(region_id, FileId::random());
         let (metadata, region_metadata) = sst_parquet_meta();
 
-        cache.put_parquet_meta_data(file_id, metadata, Some(region_metadata.clone()));
+        cache
+            .put_parquet_meta_data(file_id, metadata, Some(region_metadata.clone()))
+            .await;
 
         let cached = cache
             .get_sst_meta_data(
@@ -2547,7 +2857,7 @@ mod tests {
         };
 
         // Retain only the compact form so the lookup must exercise decompression and decoding.
-        cache.put_prepared_sst_meta(file_id, prepared, false);
+        cache.put_prepared_sst_meta(file_id, prepared, false).await;
         let mut metrics = MetadataCacheMetrics::default();
         let cached = cache
             .get_sst_meta_data(
@@ -2631,7 +2941,7 @@ mod tests {
             )
             .unwrap(),
         );
-        cache.put_sst_meta_data(file_id, skip_metadata);
+        cache.put_sst_meta_data(file_id, skip_metadata).await;
 
         let mut metrics = MetadataCacheMetrics::default();
         assert!(
@@ -2656,7 +2966,7 @@ mod tests {
             )
             .unwrap(),
         );
-        cache.put_sst_meta_data(file_id, optional_metadata);
+        cache.put_sst_meta_data(file_id, optional_metadata).await;
 
         let mut metrics = MetadataCacheMetrics::default();
         assert!(
@@ -2695,12 +3005,24 @@ mod tests {
         let cached = Arc::new(
             CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap(),
         );
-        let key = SstMetaKey(region_metadata.region_id, FileId::random());
+        let key = SstDecodedMetaKey::new(
+            RegionFileId::new(region_metadata.region_id, FileId::random()),
+            PageIndexPolicy::Skip,
+        );
+        let value = SstMetaLoadResult::new(
+            &key,
+            cached.clone(),
+            false,
+            prometheus::IntGauge::new("test_meta_bytes", "Test metadata bytes").unwrap(),
+        );
 
         assert!(cached.region_metadata_weight > json_len);
         assert_eq!(
-            decoded_meta_cache_weight(&key, &cached) as usize,
-            key.estimated_size() + cached.parquet_metadata_size + cached.region_metadata_weight
+            decoded_meta_cache_weight(&key, &value) as usize,
+            size_of_val(&key)
+                + size_of::<SstMetaLoadResult>()
+                + cached.parquet_metadata_size
+                + cached.region_metadata_weight
         );
         assert_eq!(
             cached.parquet_metadata_size,
@@ -2716,9 +3038,18 @@ mod tests {
             CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap();
         cached.region_metadata_weight = u32::MAX as usize + 1;
         let cached = Arc::new(cached);
-        let key = SstMetaKey(region_metadata.region_id, FileId::random());
+        let key = SstDecodedMetaKey::new(
+            RegionFileId::new(region_metadata.region_id, FileId::random()),
+            PageIndexPolicy::Skip,
+        );
+        let value = SstMetaLoadResult::new(
+            &key,
+            cached.clone(),
+            false,
+            prometheus::IntGauge::new("test_meta_bytes", "Test metadata bytes").unwrap(),
+        );
 
-        assert_eq!(u32::MAX, decoded_meta_cache_weight(&key, &cached));
+        assert_eq!(u32::MAX, decoded_meta_cache_weight(&key, &value));
     }
 
     #[test]
@@ -3173,7 +3504,9 @@ mod tests {
             blobs: Vec::new(),
             properties: HashMap::new(),
         });
-        puffin_metadata_cache.put_metadata(file_id_str.clone(), metadata);
+        puffin_metadata_cache
+            .put_metadata(file_id_str.clone(), metadata)
+            .await;
 
         assert!(bloom_cache.get_metadata(bloom_key).is_some());
         assert!(
@@ -3182,7 +3515,12 @@ mod tests {
                 .is_some()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_some());
-        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_some());
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&file_id_str)
+                .await
+                .is_some()
+        );
 
         cache.evict_puffin_cache(index_id).await;
 
@@ -3193,7 +3531,12 @@ mod tests {
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
-        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&file_id_str)
+                .await
+                .is_none()
+        );
 
         // Refill caches and evict via CacheStrategy to ensure delegation works.
         bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
@@ -3206,13 +3549,15 @@ mod tests {
             index_id.file_id(),
             Arc::new(RowGroupSelection::default()),
         );
-        puffin_metadata_cache.put_metadata(
-            file_id_str.clone(),
-            Arc::new(FileMetadata {
-                blobs: Vec::new(),
-                properties: HashMap::new(),
-            }),
-        );
+        puffin_metadata_cache
+            .put_metadata(
+                file_id_str.clone(),
+                Arc::new(FileMetadata {
+                    blobs: Vec::new(),
+                    properties: HashMap::new(),
+                }),
+            )
+            .await;
 
         let strategy = CacheStrategy::EnableAll(cache.clone());
         strategy.evict_puffin_cache(index_id).await;
@@ -3224,7 +3569,12 @@ mod tests {
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
-        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&file_id_str)
+                .await
+                .is_none()
+        );
     }
 
     fn wide_region_metadata(column_count: u32) -> RegionMetadata {

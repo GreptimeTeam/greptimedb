@@ -280,6 +280,49 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    /// Scanner construction counts, not executions or completed scans.
+    pub static ref SCANNER_CREATED: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_scanner_created_total",
+        "Scanners created by scan type, not executions",
+        &[TYPE_LABEL]
+    ).unwrap();
+    /// Bytes returned by loaders, excluding cache hits and shared results.
+    pub static ref CACHE_LOAD_BYTES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_load_bytes_total",
+        "Bytes returned by cache loaders, excluding shared results",
+        &[TYPE_LABEL]
+    ).unwrap();
+    /// Pending cache load lifecycle, with bounded cache type and event labels.
+    pub static ref CACHE_LOAD_EVENTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_load_events_total",
+        "Cache load lifecycle and loader batch/page attempts; shared counts successful reuse",
+        &[TYPE_LABEL, "event"]
+    ).unwrap();
+    /// Time spent awaiting a shared cache load, including scheduler delay.
+    pub static ref CACHE_LOAD_WAIT_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_cache_load_wait_seconds",
+        "Time spent awaiting a shared cache load",
+        &[TYPE_LABEL],
+        exponential_buckets(0.0001, 10.0, 6).unwrap()
+    ).unwrap();
+    /// Live cache work, including queued work that is not yet an admitted entry.
+    pub static ref CACHE_WORK_ACTIVE: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_cache_work_active", "Live cache work by bounded stage",
+        &[TYPE_LABEL, STAGE_LABEL]
+    ).unwrap();
+    /// Referenced Arrow buffer sizes; shared allocations can be counted more than once.
+    pub static ref CACHE_WORK_BYTES: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_cache_work_bytes", "Estimated referenced bytes in live cache work, not unique allocations",
+        &[TYPE_LABEL, STAGE_LABEL]
+    ).unwrap();
+    pub static ref CACHE_WORK_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_cache_work_seconds", "Cache work stage lifetime, including queueing and cancellation",
+        &[TYPE_LABEL, STAGE_LABEL], exponential_buckets(0.0001, 10.0, 6).unwrap()
+    ).unwrap();
+    pub static ref PARQUET_DECODE_OUTPUT: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_parquet_decode_output_total", "Decoded output batches, rows, and referenced bytes before downstream filtering",
+        &["unit"]
+    ).unwrap();
     /// Cache size in bytes.
     pub static ref CACHE_BYTES: IntGaugeVec = register_int_gauge_vec!(
         "greptime_mito_cache_bytes",

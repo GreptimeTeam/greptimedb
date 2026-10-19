@@ -167,17 +167,13 @@ where
         reader: &mut PuffinFileReader<F::Reader>,
     ) -> Result<Arc<FileMetadata>> {
         let id = self.handle.to_string();
-        if let Some(cache) = self.puffin_file_metadata_cache.as_ref()
-            && let Some(metadata) = cache.get_metadata(&id)
-        {
-            return Ok(metadata);
-        }
-
-        let metadata = Arc::new(reader.metadata().await?);
         if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
-            cache.put_metadata(id, metadata.clone());
+            cache
+                .get_or_load(&id, async { reader.metadata().await.map(Arc::new) })
+                .await
+        } else {
+            reader.metadata().await.map(Arc::new)
         }
-        Ok(metadata)
     }
 
     async fn get_blob_metadata(

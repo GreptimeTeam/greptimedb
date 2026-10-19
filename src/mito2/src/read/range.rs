@@ -15,6 +15,7 @@
 //! Structs for partition ranges.
 
 use common_time::Timestamp;
+use futures::future::BoxFuture;
 use smallvec::{SmallVec, smallvec};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::TimeSeriesDistribution;
@@ -105,20 +106,24 @@ impl RangeMeta {
     }
 
     /// Creates a list of ranges from the `input` for unordered scan.
-    pub(crate) fn unordered_scan_ranges(input: &ScanInput) -> Vec<RangeMeta> {
-        let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
-        Self::push_unordered_mem_ranges(&input.memtables, &mut ranges);
-        Self::push_unordered_file_ranges(
-            input.memtables.len(),
-            &input.files,
-            &input.cache_strategy,
-            &mut ranges,
-        );
+    pub(crate) fn unordered_scan_ranges(input: &ScanInput) -> BoxFuture<'_, Vec<RangeMeta>> {
+        // Keep Moka's async lookup type out of callers' nested scanner futures.
+        Box::pin(async move {
+            let mut ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
+            Self::push_unordered_mem_ranges(&input.memtables, &mut ranges);
+            Self::push_unordered_file_ranges(
+                input.memtables.len(),
+                &input.files,
+                &input.cache_strategy,
+                &mut ranges,
+            )
+            .await;
 
-        #[cfg(feature = "enterprise")]
-        Self::push_extension_ranges(input, &mut ranges);
+            #[cfg(feature = "enterprise")]
+            Self::push_extension_ranges(input, &mut ranges);
 
-        ranges
+            ranges
+        })
     }
 
     /// Returns true if the time range of given `meta` overlaps with the time range of this meta.
@@ -203,7 +208,7 @@ impl RangeMeta {
         }
     }
 
-    fn push_unordered_file_ranges(
+    async fn push_unordered_file_ranges(
         num_memtables: usize,
         files: &[FileHandle],
         cache: &CacheStrategy,
@@ -213,7 +218,9 @@ impl RangeMeta {
         for (i, file) in files.iter().enumerate() {
             let file_index = num_memtables + i;
             // Get parquet meta from the cache.
-            let parquet_meta = cache.get_parquet_meta_data_from_mem_cache(file.file_id());
+            let parquet_meta = cache
+                .get_parquet_meta_data_from_mem_cache(file.file_id())
+                .await;
             if let Some(parquet_meta) = parquet_meta {
                 // Scans each row group.
                 for row_group_index in 0..file.meta_ref().num_row_groups {
