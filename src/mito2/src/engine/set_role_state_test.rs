@@ -1423,9 +1423,10 @@ async fn test_downgrading_leader_during_alter_stops_writes() {
 }
 
 /// The datanode's downgrade steps (DowngradingLeader, Flush, Follower) with
-/// the DowngradingLeader step overlapping an ALTER. A migration candidate
-/// opens the region from the object store with its own local WAL, so it must
-/// see every write the old leader acknowledged.
+/// the DowngradingLeader step overlapping an ALTER. The region accepts writes
+/// until a downgrade takes effect. A migration candidate opens the region from
+/// the object store with its own local WAL, so the final flush must carry
+/// every write the old leader acknowledged.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_downgrade_during_alter_keeps_acknowledged_writes_with_local_wal() {
     common_telemetry::init_default_ut_logging();
@@ -1449,6 +1450,16 @@ async fn test_downgrade_during_alter_keeps_acknowledged_writes_with_local_wal() 
         .unwrap();
     listener.wake_notify();
     tokio::time::timeout(WAIT, alter).await.unwrap().unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 5),
+        },
+    )
+    .await;
+    let mut acknowledged_rows = 5;
     if let SetRegionRoleStateResponse::InvalidTransition(err) = &response {
         assert_eq!(RetryHint::Retryable, err.retry_hint(), "{err:?}");
         response = engine
@@ -1464,13 +1475,12 @@ async fn test_downgrade_during_alter_keeps_acknowledged_writes_with_local_wal() 
         )
         .await
         .unwrap();
-    let mut acknowledged_rows = 3;
     if let Ok(output) = engine
         .handle_request(
             region_id,
             put_request(Rows {
                 schema: column_schemas,
-                rows: build_rows(3, 6),
+                rows: build_rows(5, 8),
             }),
         )
         .await
