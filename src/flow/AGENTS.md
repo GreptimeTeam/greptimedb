@@ -7,29 +7,33 @@ Repo-wide rules that apply to here: [`.agents/architecture-invariants.md`](../..
 
 ## What this crate does
 
-Flownode provides two flow profiles:
+Flownode runs **one** flow execution profile: the batching scheduler.
 
-- **Streaming mode**: a single stateless DataFusion query profile. Each mirror
-  insert is materialized as a transient input table, executed against the
-  retained logical plan, and written directly to the sink through
-  `batching_mode::frontend_client::FrontendClient`.
-- **Batching mode**: splits data into time windows and periodically runs
-  aggregation SQL through the frontend, writing results back to a sink table.
+- **Batching mode** (`batching_mode`): splits data into time windows and
+  periodically runs aggregation SQL through the frontend, writing results back
+  to a sink table. A flow whose SQL has no usable time window runs as an
+  explicit full-query flow and needs `EVAL INTERVAL`.
 
-Users cannot select a mode directly: `flow_type` is a reserved internal option.
+The legacy streaming executor (per-insert stateless DataFusion query) has been
+removed. There is no mode selection left: `FlowEngine` in
+`src/flow/src/engine.rs` is implemented by `FlownodeEngine`
+(`adapter/flownode_impl.rs`), which forwards everything to `BatchingEngine`.
 `StatementExecutor::determine_flow_type` in `src/operator/src/statement/ddl.rs`
-owns current mode selection. `FlowDualEngine` defaults missing internal
-`flow_type` metadata to batching for compatibility. Read those paths before
-changing routing rules.
+now only *validates* a flow definition and always reports batching.
+
+Historical `flow_type: streaming` metadata stays readable and droppable, but it
+must never reach a runtime: `FlownodeEngine::create_flow` rejects it with a
+"recreate this flow" error. Do not delete `FlowType::Streaming` or
+`get_flow_type_from_options` — old persisted options and old procedure data
+must keep deserializing.
 
 ## Module map
 
 | Module | Path | Purpose |
 | --- | --- | --- |
 | `engine` | `src/flow/src/engine.rs` | `FlowEngine` lifecycle contract |
-| `adapter` | `src/flow/src/adapter.rs`, `src/flow/src/adapter/` | Stateless streaming execution, dual-engine dispatch, shared source schema/default normalization, and sink creation |
+| `adapter` | `src/flow/src/adapter.rs`, `src/flow/src/adapter/` | `FlownodeEngine` (create/drop/flush/recover, insert routing), auto-column constants shared with batching, and the retained-plan → sink-schema helper |
 | `batching_mode` | `src/flow/src/batching_mode.rs`, `src/flow/src/batching_mode/` | `BatchingEngine`, scheduling, time windows, frontend client, and checkpoints |
-| `repr` | `src/flow/src/repr.rs` | Shared row and relation schema representations |
 | `server` | `src/flow/src/server.rs` | gRPC `Flow` service and flownode builders |
 | `heartbeat` | `src/flow/src/heartbeat.rs` | Reports flownode state/stats to metasrv |
 
@@ -38,24 +42,22 @@ Flow metadata lives in `common-meta`, not here:
 
 ## Data flow
 
-`Frontend → Flownode (gRPC)` → `FlowService` (`server.rs`) → `FlowDualEngine`
-(`adapter/flownode_impl.rs`) routes by `FlowType`:
+`Frontend → Flownode (gRPC)` → `FlowService` (`server.rs`) → `FlownodeEngine`
+(`adapter/flownode_impl.rs`) → `BatchingEngine`.
 
-- Streaming: mirror rows are normalized against the source schema, evaluated by
-  the retained stateless DataFusion plan, and sent to the sink via
-  `FrontendClient`.
-- Batching: marks dirty windows; a task later runs aggregation SQL via the
-  frontend client and writes the sink table.
-
-`FlowType::Streaming` and mirror routing are shared contracts; preserve both
-when changing dispatch. Preserve batching behavior and the shared schema,
-default, and sink-creation helpers.
+- `FlowService::handle_mirror_request` → `FlowEngine::handle_flow_inserts` →
+  `BatchingEngine::handle_inserts_inner`. The mirrored full-row payload is how
+  batching marks dirty windows (and `set_dirty()` for flows without a time
+  window). **Keep this RPC and this path**: it is not a leftover of the removed
+  streaming executor.
+- A flow round later runs its SQL through the frontend client and writes the
+  sink table.
 
 ## Public surface
 
 - gRPC `Flow` service in `src/flow/src/server.rs`.
-- Local streaming sink writes and batching query execution use `Channel::Internal`
-  so meter collectors can account for sink writes without charging ingestion quota.
+- Batching query execution uses `Channel::Internal` so meter collectors can
+  account for sink writes without charging ingestion quota.
 - `FlowEngine` trait in `src/flow/src/engine.rs`.
 - Started from the `cmd` crate via `FlownodeBuilder` / `FlownodeInstance`.
 
@@ -65,12 +67,18 @@ default, and sink-creation helpers.
 cargo nextest run -p flow
 ```
 
-Stateless streaming tests are under `src/flow/src/adapter/stateless.rs`.
+There are no stateless streaming tests left; adapter tests cover the retained
+plan-to-schema helper shared with batching.
 
 ## Gotchas
 
-- Batching and streaming differ in latency and state. Confirm the selected mode
-  before reasoning about a flow.
-- Streaming is finite and stateless per mirror request; it has no worker graph,
-  background runtime, or replay state.
 - Internal flow timestamps and table time columns are separate contracts.
+- `adapter.rs` still owns `AUTO_CREATED_PLACEHOLDER_TS_COL` /
+  `AUTO_CREATED_UPDATE_AT_TS_COL` and `output_column_schemas`; batching imports
+  them. Do not move or delete them without updating `batching_mode`.
+- Recovery collects per-flow errors and logs them
+  (`adapter/flownode_impl.rs`): one rejected (old streaming) flow must not stop
+  the other flows from recovering.
+- `flow_type` is still written into flow options so the metadata shape does not
+  change; it is a reserved internal key and must stay out of `SHOW CREATE FLOW`
+  rendering.

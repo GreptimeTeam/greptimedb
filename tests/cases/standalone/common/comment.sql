@@ -66,6 +66,7 @@ CREATE TABLE flow_sink_comment_test (
 
 CREATE FLOW flow_comment_test
 SINK TO flow_sink_comment_test
+EVAL INTERVAL '1h'
 AS
 SELECT desc_str, ts FROM flow_source_comment_test;
 

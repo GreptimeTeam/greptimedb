@@ -26,18 +26,16 @@ pub(crate) mod batching_mode;
 mod df_optimizer;
 pub(crate) mod engine;
 pub mod error;
-mod expr;
 pub mod heartbeat;
 mod metrics;
-mod repr;
 mod server;
 mod utils;
 
 #[cfg(test)]
 mod test_utils;
 
-pub use adapter::flownode_impl::FlowDualEngineRef;
-pub use adapter::{FlowConfig, FlowStreamingEngineRef, StreamingEngine};
+pub use adapter::FlowConfig;
+pub use adapter::flownode_impl::FlownodeEngineRef;
 pub use batching_mode::BatchingModeOptions;
 pub use batching_mode::batching_execution::{BatchingExecution, BatchingExecutionFactory};
 pub use batching_mode::frontend_client::{

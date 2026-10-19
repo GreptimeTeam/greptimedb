@@ -39,59 +39,55 @@ use itertools::Itertools;
 use operator::utils::try_to_session_query_context;
 use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::{RegionId, TableId};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::adapter::{CreateFlowArgs, StreamingEngine};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, FlowNotRecoveredSnafu,
-    IllegalCheckTaskStateSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
-    NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnsupportedSnafu,
+    IllegalCheckTaskStateSnafu, InternalSnafu, ListFlowsSnafu, NoAvailableFrontendSnafu,
+    SyncCheckTaskSnafu, UnsupportedSnafu,
 };
 use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_TASK_COUNT};
 use crate::utils::StateReportHandler;
-use crate::{Error, FlowId};
+use crate::{CreateFlowArgs, Error, FlowId};
 
-/// Ref to [`FlowDualEngine`]
-pub type FlowDualEngineRef = Arc<FlowDualEngine>;
+/// Ref to [`FlownodeEngine`]
+pub type FlownodeEngineRef = Arc<FlownodeEngine>;
 
-/// Manage both streaming and batching mode engine
+/// Manage the batching flow engine
 ///
 /// including create/drop/flush flow
-/// and redirect insert requests to the appropriate engine
-pub struct FlowDualEngine {
-    streaming_engine: Arc<StreamingEngine>,
+/// and redirect insert requests to the batching engine
+pub struct FlownodeEngine {
     batching_engine: Arc<BatchingEngine>,
     /// receive a oneshot sender to send state report
     state_report_handler: RwLock<Option<StateReportHandler>>,
-    /// helper struct for faster query flow by table id or vice versa
-    src_table2flow: RwLock<SrcTableToFlow>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
     catalog_manager: Arc<dyn CatalogManager>,
     check_task: tokio::sync::Mutex<Option<ConsistentCheckTask>>,
     plugins: Plugins,
+    /// `Some` in distributed mode, `None` in standalone mode
+    node_id: Option<u32>,
     done_recovering: AtomicBool,
 }
 
-impl FlowDualEngine {
+impl FlownodeEngine {
     pub fn new(
-        streaming_engine: Arc<StreamingEngine>,
+        node_id: Option<u32>,
         batching_engine: Arc<BatchingEngine>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
         catalog_manager: Arc<dyn CatalogManager>,
         plugins: Plugins,
     ) -> Self {
         Self {
-            streaming_engine,
             batching_engine,
             state_report_handler: Default::default(),
-            src_table2flow: RwLock::new(SrcTableToFlow::default()),
             flow_metadata_manager,
             catalog_manager,
             check_task: Mutex::new(None),
             plugins,
+            node_id,
             done_recovering: AtomicBool::new(false),
         }
     }
@@ -99,7 +95,7 @@ impl FlowDualEngine {
     /// Set `done_recovering` to true
     /// indicate that we are ready to handle requests
     pub fn set_done_recovering(&self) {
-        info!("FlowDualEngine done recovering");
+        info!("FlownodeEngine done recovering");
         self.done_recovering
             .store(true, std::sync::atomic::Ordering::Release);
     }
@@ -117,7 +113,7 @@ impl FlowDualEngine {
         }
 
         warn!(
-            "FlowDualEngine is not done recovering, {} insert request waiting for recovery",
+            "FlownodeEngine is not done recovering, {} insert request waiting for recovery",
             waiting_req_cnt
         );
         // wait 3 seconds, check every 1 second
@@ -126,7 +122,7 @@ impl FlowDualEngine {
         let max_retry = 3;
         while retry < max_retry && !self.is_recover_done() {
             warn!(
-                "FlowDualEngine is not done recovering, retry {} in 1s",
+                "FlownodeEngine is not done recovering, retry {} in 1s",
                 retry
             );
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -135,7 +131,7 @@ impl FlowDualEngine {
         if retry == max_retry {
             return FlowNotRecoveredSnafu.fail();
         } else {
-            info!("FlowDualEngine is done recovering");
+            info!("FlownodeEngine is done recovering");
         }
         // TODO(discord9): also put to centralized logging for flow once it implemented
         Ok(())
@@ -147,11 +143,7 @@ impl FlowDualEngine {
 
     /// Determine if the engine is in distributed mode
     pub fn is_distributed(&self) -> bool {
-        self.streaming_engine.node_id.is_some()
-    }
-
-    pub fn streaming_engine(&self) -> Arc<StreamingEngine> {
-        self.streaming_engine.clone()
+        self.node_id.is_some()
     }
 
     pub fn batching_engine(&self) -> Arc<BatchingEngine> {
@@ -278,7 +270,7 @@ impl FlowDualEngine {
         allow_drop: bool,
     ) -> Result<(), Error> {
         // use nodeid to determine if this is standalone/distributed mode, and retrieve all flows in this node(in distributed mode)/or all flows(in standalone mode)
-        let nodeid = self.streaming_engine.node_id;
+        let nodeid = self.node_id;
         let should_exists: Vec<_> = if let Some(nodeid) = nodeid {
             // nodeid is available, so we only need to check flows on this node
             // which also means we are in distributed mode
@@ -493,7 +485,7 @@ struct ConsistentCheckTask {
 }
 
 impl ConsistentCheckTask {
-    async fn start_check_task(engine: &Arc<FlowDualEngine>) -> Result<Self, Error> {
+    async fn start_check_task(engine: &Arc<FlownodeEngine>) -> Result<Self, Error> {
         let engine = engine.clone();
         let min_refresh_duration = engine
             .batching_engine()
@@ -586,230 +578,89 @@ impl ConsistentCheckTask {
     }
 }
 
-#[derive(Default)]
-struct SrcTableToFlow {
-    /// mapping of table ids to flow ids for streaming mode
-    stream: HashMap<TableId, HashSet<FlowId>>,
-    /// mapping of table ids to flow ids for batching mode
-    batch: HashMap<TableId, HashSet<FlowId>>,
-    /// mapping of flow ids to (flow type, source table ids)
-    flow_infos: HashMap<FlowId, (FlowType, Vec<TableId>)>,
-}
-
-impl SrcTableToFlow {
-    fn in_stream(&self, table_id: TableId) -> bool {
-        self.stream.contains_key(&table_id)
-    }
-    fn in_batch(&self, table_id: TableId) -> bool {
-        self.batch.contains_key(&table_id)
-    }
-    fn add_flow(&mut self, flow_id: FlowId, flow_type: FlowType, src_table_ids: Vec<TableId>) {
-        let mapping = match flow_type {
-            FlowType::Streaming => &mut self.stream,
-            FlowType::Batching => &mut self.batch,
-        };
-
-        for src_table in src_table_ids.clone() {
-            mapping
-                .entry(src_table)
-                .and_modify(|flows| {
-                    flows.insert(flow_id);
-                })
-                .or_insert_with(|| {
-                    let mut set = HashSet::new();
-                    set.insert(flow_id);
-                    set
-                });
-        }
-        self.flow_infos.insert(flow_id, (flow_type, src_table_ids));
-    }
-
-    fn remove_flow(&mut self, flow_id: FlowId) {
-        let mapping = match self.get_flow_type(flow_id) {
-            Some(FlowType::Streaming) => &mut self.stream,
-            Some(FlowType::Batching) => &mut self.batch,
-            None => return,
-        };
-        if let Some((_, src_table_ids)) = self.flow_infos.remove(&flow_id) {
-            for src_table in src_table_ids {
-                if let Some(flows) = mapping.get_mut(&src_table) {
-                    flows.remove(&flow_id);
-                }
-            }
-        }
-    }
-
-    fn get_flow_type(&self, flow_id: FlowId) -> Option<FlowType> {
-        self.flow_infos
-            .get(&flow_id)
-            .map(|(flow_type, _)| flow_type)
-            .cloned()
-    }
-}
-
-impl FlowEngine for FlowDualEngine {
+impl FlowEngine for FlownodeEngine {
     async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
-        let flow_type = args
-            .flow_options
-            .get(FlowType::FLOW_TYPE_KEY)
-            .map(|s| s.as_str());
-
-        let flow_type = match flow_type {
-            Some(FlowType::BATCHING) => FlowType::Batching,
-            Some(FlowType::STREAMING) => FlowType::Streaming,
-            None => FlowType::Batching,
-            Some(flow_type) => {
-                return InternalSnafu {
-                    reason: format!("Invalid flow type: {}", flow_type),
+        if let Some(flow_type) = args.flow_options.get(FlowType::FLOW_TYPE_KEY) {
+            match flow_type.as_str() {
+                FlowType::BATCHING => {}
+                FlowType::STREAMING => {
+                    return UnsupportedSnafu {
+                        reason: format!(
+                            "Flow {} was created with the legacy streaming flow type, which is no longer supported; drop and recreate the flow so it runs with the batching scheduler",
+                            args.flow_id
+                        ),
+                    }
+                    .fail();
                 }
-                .fail();
+                other => {
+                    return UnsupportedSnafu {
+                        reason: format!(
+                            "Flow {} has unknown flow type `{other}`; only batching flows are supported, drop and recreate the flow",
+                            args.flow_id
+                        ),
+                    }
+                    .fail();
+                }
             }
-        };
+        }
 
-        let flow_id = args.flow_id;
-        let src_table_ids = args.source_table_ids.clone();
-
-        let res = match flow_type {
-            FlowType::Batching => self.batching_engine.create_flow(args).await,
-            FlowType::Streaming => self.streaming_engine.create_flow(args).await,
-        }?;
-
-        self.src_table2flow
-            .write()
-            .await
-            .add_flow(flow_id, flow_type, src_table_ids);
-
-        Ok(res)
+        self.batching_engine.create_flow(args).await
     }
 
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
-        let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
-        let flow_type = match flow_type {
-            Some(flow_type) => Some(flow_type),
-            None if self.streaming_engine.flow_exist(flow_id).await? => Some(FlowType::Streaming),
-            None => None,
-        };
+        if !self.batching_engine.flow_exist(flow_id).await? {
+            // this can happen if flownode just restart, and is stilling creating the flow
+            // since now that this flow should dropped, we need to trigger the consistent check and allow drop
+            // this rely on drop flow ddl delete metadata first, see src/common/meta/src/ddl/drop_flow.rs
+            warn!(
+                "Flow {} is not exist in the underlying engine, but exist in metadata",
+                flow_id
+            );
+            self.try_sync_with_check_task(flow_id, true).await?;
 
-        match flow_type {
-            Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
-            Some(FlowType::Streaming) => self.streaming_engine.remove_flow(flow_id).await,
-            None => {
-                // this can happen if flownode just restart, and is stilling creating the flow
-                // since now that this flow should dropped, we need to trigger the consistent check and allow drop
-                // this rely on drop flow ddl delete metadata first, see src/common/meta/src/ddl/drop_flow.rs
-                warn!(
-                    "Flow {} is not exist in the underlying engine, but exist in metadata",
-                    flow_id
-                );
-                self.try_sync_with_check_task(flow_id, true).await?;
+            return Ok(());
+        }
 
-                Ok(())
-            }
-        }?;
-        // remove mapping
-        self.src_table2flow.write().await.remove_flow(flow_id);
-        Ok(())
+        self.batching_engine.remove_flow(flow_id).await
     }
 
     async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
         // sync with check task
         self.try_sync_with_check_task(flow_id, false).await?;
-        let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
-        match flow_type {
-            Some(FlowType::Batching) => self.batching_engine.flush_flow(flow_id).await,
-            Some(FlowType::Streaming) => self.streaming_engine.flush_flow(flow_id).await,
-            None => {
-                warn!(
-                    "Currently flow={flow_id} doesn't exist in flownode, ignore flush_flow request"
-                );
-                Ok(0)
-            }
+        if !self.batching_engine.flow_exist(flow_id).await? {
+            warn!("Currently flow={flow_id} doesn't exist in flownode, ignore flush_flow request");
+            return Ok(0);
         }
+
+        self.batching_engine.flush_flow(flow_id).await
     }
 
     async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
-        let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
-        // Check the underlying registry so stateless flows survive a missing
-        // routing-map entry during recovery.
-        match flow_type {
-            Some(FlowType::Batching) => self.batching_engine.flow_exist(flow_id).await,
-            Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,
-            None => self.streaming_engine.flow_exist(flow_id).await,
-        }
+        self.batching_engine.flow_exist(flow_id).await
     }
 
     async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
-        let stream_flows = self.streaming_engine.list_flows().await?;
-        let batch_flows = self.batching_engine.list_flows().await?;
-
-        Ok(stream_flows.into_iter().chain(batch_flows))
+        self.batching_engine.list_flows().await
     }
 
+    /// Handle mirrored inserts: the batching engine uses them to mark dirty windows, so this
+    /// path must be kept even though there is no streaming executor anymore.
     async fn handle_flow_inserts(
         &self,
         request: api::v1::region::InsertRequests,
     ) -> Result<(), Error> {
         self.wait_for_all_flow_recover(request.requests.len())
             .await?;
-        // TODO(discord9): make as little clone as possible
-        let mut to_stream_engine = Vec::with_capacity(request.requests.len());
-        let mut to_batch_engine = request.requests;
-
-        let mut batching_row_cnt = 0;
-        let mut streaming_row_cnt = 0;
-
-        {
-            // not locking this, or recover flows will be starved when also handling flow inserts
-            let src_table2flow = self.src_table2flow.read().await;
-            to_batch_engine.retain(|req| {
-                let region_id = RegionId::from(req.region_id);
-                let table_id = region_id.table_id();
-                let is_in_stream = src_table2flow.in_stream(table_id);
-                let is_in_batch = src_table2flow.in_batch(table_id);
-                if is_in_stream {
-                    streaming_row_cnt += req.rows.as_ref().map(|rs| rs.rows.len()).unwrap_or(0);
-                    to_stream_engine.push(req.clone());
-                }
-                if is_in_batch {
-                    batching_row_cnt += req.rows.as_ref().map(|rs| rs.rows.len()).unwrap_or(0);
-                    return true;
-                }
-                if !is_in_batch && !is_in_stream {
-                    // TODO(discord9): also put to centralized logging for flow once it implemented
-                    warn!("Table {} is not any flow's source table", table_id)
-                }
-                false
-            });
-            // drop(src_table2flow);
-            // can't use drop due to https://github.com/rust-lang/rust/pull/128846
-        }
-
-        METRIC_FLOW_ROWS
-            .with_label_values(&["in-streaming"])
-            .inc_by(streaming_row_cnt as u64);
-
+        let row_cnt = request
+            .requests
+            .iter()
+            .map(|req| req.rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0))
+            .sum::<usize>();
         METRIC_FLOW_ROWS
             .with_label_values(&["in-batching"])
-            .inc_by(batching_row_cnt as u64);
+            .inc_by(row_cnt as u64);
 
-        let streaming_engine = self.streaming_engine.clone();
-        let stream_handler: JoinHandle<Result<(), Error>> =
-            common_runtime::spawn_global(async move {
-                streaming_engine
-                    .handle_flow_inserts(api::v1::region::InsertRequests {
-                        requests: to_stream_engine,
-                    })
-                    .await?;
-                Ok(())
-            });
-        self.batching_engine
-            .handle_flow_inserts(api::v1::region::InsertRequests {
-                requests: to_batch_engine,
-            })
-            .await?;
-        stream_handler.await.context(JoinTaskSnafu)??;
-
-        Ok(())
+        self.batching_engine.handle_flow_inserts(request).await
     }
 
     async fn handle_mark_window_dirty(
@@ -821,7 +672,7 @@ impl FlowEngine for FlowDualEngine {
 }
 
 #[async_trait::async_trait]
-impl common_meta::node_manager::Flownode for FlowDualEngine {
+impl common_meta::node_manager::Flownode for FlownodeEngine {
     async fn handle(&self, request: FlowRequest) -> MetaResult<FlowResponse> {
         let query_ctx = request
             .header
@@ -969,53 +820,101 @@ fn to_meta_err(
     }
 }
 
-impl FlowEngine for StreamingEngine {
-    async fn create_flow(&self, args: CreateFlowArgs) -> Result<Option<FlowId>, Error> {
-        self.create_flow_inner(args).await
-    }
-
-    async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
-        self.remove_flow_inner(flow_id).await
-    }
-
-    async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
-        self.flush_flow_inner(flow_id).await
-    }
-
-    async fn flow_exist(&self, flow_id: FlowId) -> Result<bool, Error> {
-        self.flow_exist_inner(flow_id).await
-    }
-
-    async fn list_flows(&self) -> Result<impl IntoIterator<Item = FlowId>, Error> {
-        Ok(self.stateless_flow_ids().await)
-    }
-
-    async fn handle_flow_inserts(
-        &self,
-        request: api::v1::region::InsertRequests,
-    ) -> Result<(), Error> {
-        self.handle_inserts_inner(request).await
-    }
-
-    async fn handle_mark_window_dirty(
-        &self,
-        _req: api::v1::flow::DirtyWindowRequests,
-    ) -> Result<(), Error> {
-        UnsupportedSnafu {
-            reason: "handle_mark_window_dirty in streaming engine",
-        }
-        .fail()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
+    use catalog::memory::new_memory_catalog_manager;
+    use common_base::Plugins;
     use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use query::options::QueryOptions;
 
-    use super::decode_internal_eval_schedule;
+    use super::{FlownodeEngine, decode_internal_eval_schedule};
+    use crate::CreateFlowArgs;
+    use crate::batching_mode::BatchingModeOptions;
+    use crate::batching_mode::engine::BatchingEngine;
+    use crate::batching_mode::frontend_client::FrontendClient;
+    use crate::engine::FlowEngine;
     use crate::error::Error;
+
+    async fn new_test_engine() -> FlownodeEngine {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend));
+        let catalog_manager = new_memory_catalog_manager().unwrap();
+        let query_engine = crate::test_utils::create_test_query_engine();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+        let batching = Arc::new(BatchingEngine::new(
+            Arc::new(frontend_client),
+            query_engine,
+            flow_meta.clone(),
+            table_meta,
+            catalog_manager.clone(),
+            BatchingModeOptions::default(),
+        ));
+
+        FlownodeEngine::new(None, batching, flow_meta, catalog_manager, Plugins::new())
+    }
+
+    fn create_flow_args(flow_type: Option<&str>) -> CreateFlowArgs {
+        let mut flow_options = HashMap::new();
+        if let Some(flow_type) = flow_type {
+            flow_options.insert("flow_type".to_string(), flow_type.to_string());
+        }
+
+        CreateFlowArgs {
+            flow_id: 1024,
+            sink_table_name: [
+                "greptime_public".to_string(),
+                "public".to_string(),
+                "old_sink".to_string(),
+            ],
+            source_table_ids: vec![],
+            create_if_not_exists: false,
+            or_replace: false,
+            expire_after: None,
+            eval_interval: Some(60),
+            comment: None,
+            sql: "SELECT 1".to_string(),
+            flow_options,
+            query_ctx: None,
+            eval_schedule: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_old_streaming_metadata_asks_for_recreation() {
+        let engine = new_test_engine().await;
+
+        // A flow persisted by the removed streaming executor must not run as batching: the
+        // recovery path goes through `create_flow`, so it reports that the flow needs recreation
+        // instead of silently executing different SQL semantics.
+        let err = engine
+            .create_flow(create_flow_args(Some("streaming")))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Unsupported { .. }),
+            "unexpected error: {err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("no longer supported"), "unexpected: {msg}");
+        assert!(msg.contains("recreate"), "unexpected: {msg}");
+        assert!(!engine.flow_exist(1024).await.unwrap());
+
+        // `batching` and absent `flow_type` still reach the batching engine.
+        for flow_type in [Some("batching"), None] {
+            let err = engine.create_flow(create_flow_args(flow_type)).await;
+            let msg = err.err().map(|err| err.to_string()).unwrap_or_default();
+            assert!(!msg.contains("no longer supported"), "unexpected: {msg}");
+        }
+    }
 
     #[test]
     fn test_malformed_internal_eval_schedule_json_is_error() {
