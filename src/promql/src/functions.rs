@@ -49,7 +49,6 @@ use datatypes::arrow::datatypes::{DataType, Int64Type};
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub(crate) use edge_count::{EdgeKind, count_edges};
-pub(crate) use extrapolate_rate::add_counter_resets;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
 pub(crate) use idelta::instant_delta;

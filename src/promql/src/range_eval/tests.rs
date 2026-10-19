@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use datafusion::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray, UInt32Array};
@@ -36,7 +36,10 @@ use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::{FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel, subquery_grid};
+use super::{
+    CounterReset, FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel,
+    subquery_grid,
+};
 use crate::functions::{
     Changes, CountOverTime, IDelta, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Resets,
 };
@@ -67,7 +70,23 @@ fn probe(window: FloatWindow<'_>) -> Option<f64> {
         mix(*timestamp as u64);
         mix(value.to_bits());
     }
+    // The reference builds these by scanning the window, so hashing them turns every random
+    // differential test into a check of the evaluator's reset index as well.
+    for reset in window.counter_resets {
+        mix(reset.previous_value.to_bits());
+    }
     Some((hash >> 11) as f64)
+}
+
+/// The resets of a window by scanning it, the way the kernels used to before the index.
+fn scanned_resets(values: &[f64]) -> Vec<CounterReset> {
+    (1..values.len())
+        .filter(|&index| values[index] < values[index - 1])
+        .map(|index| CounterReset {
+            position: index as u64,
+            previous_value: values[index - 1],
+        })
+        .collect()
 }
 
 fn raw_schema(fields: usize) -> SeriesSchema {
@@ -99,7 +118,7 @@ fn metric(host: u64) -> MetricName {
 
 fn probe_evaluator(fields: usize, grid: Arc<EvalGrid>, window: RangeWindow) -> RangeEvaluator {
     let kernel: WindowKernel = Box::new(probe);
-    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, true).unwrap()
+    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, true, true).unwrap()
 }
 
 /// A probe evaluator whose anchored result is evaluated at every point, like `predict_linear`.
@@ -109,7 +128,7 @@ fn per_point_probe_evaluator(
     window: RangeWindow,
 ) -> RangeEvaluator {
     let kernel: WindowKernel = Box::new(probe);
-    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, false).unwrap()
+    RangeEvaluator::with_kernel(&raw_schema(fields), grid, window, kernel, false, true).unwrap()
 }
 
 /// The metric of a result of `function` over the series of `metric(host)`.
@@ -293,10 +312,12 @@ fn reference(
                         .iter()
                         .filter_map(|(timestamp, row)| Some((*timestamp, row[field]?)))
                         .unzip();
+                    let counter_resets = scanned_resets(&values);
                     (!timestamps.is_empty()).then(|| {
                         probe(FloatWindow {
                             timestamps: &timestamps,
                             values: &values,
+                            counter_resets: &counter_resets,
                             eval_ts: if step_invariant {
                                 window_end(grid, window, eval_ts)
                             } else {
@@ -687,6 +708,222 @@ fn retains_only_samples_later_windows_need() {
     }
 }
 
+/// A counter whose every window contains resets, so the index holds entries the way a real
+/// counter does, still releases them as the samples they reach back to are dropped.
+#[test]
+fn reset_index_is_released_with_the_samples_it_reaches_back_to() {
+    let window = RangeWindow {
+        range_ms: 50,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, 1_000), window);
+    // A sawtooth that resets every 10 samples.
+    let rows: Vec<Row> = (0..10_000)
+        .map(|i| (i, vec![Some((i % 10) as f64)]))
+        .collect();
+    for (index, piece) in rows.chunks(100).enumerate() {
+        evaluator
+            .push(&chunk(piece, 1, 0, (index + 1) * 100 == rows.len()))
+            .unwrap();
+        // Resets are released with the samples behind the next window, so they stay bounded by
+        // the same window plus one grid step the samples do, one reset per 10 samples.
+        assert!(
+            evaluator.fields[0].resets.len() <= 6,
+            "{} resets after {} chunks: the index kept history no window can reach",
+            evaluator.fields[0].resets.len(),
+            index + 1
+        );
+    }
+}
+
+/// The reset index, not a rescan of the window, decides which samples a window corrects. The
+/// samples are laid out so each rule is visible point by point: a reset is the first sample of a
+/// later chunk, a reset's predecessor sits exactly on a window's left edge and must not count,
+/// and a reset enters a window whole. The reported resets are compared instead of the function's
+/// output so a wrong position cannot hide inside a float's last bits.
+#[test]
+fn counter_resets_follow_the_window_and_survive_chunking() {
+    // A counter that drops at index 3 (20 -> 5) and again at index 6 (25 -> 7), one sample per
+    // 10 s.
+    let counter = [0.0, 10.0, 20.0, 5.0, 15.0, 25.0, 7.0, 17.0, 27.0, 37.0];
+    // A field that only rises, so its windows never correct anything.
+    let rising = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0];
+    let rows: Vec<Row> = (0..10)
+        .map(|index| {
+            (
+                index as i64 * 10_000,
+                vec![Some(counter[index]), Some(rising[index])],
+            )
+        })
+        .collect();
+    let grid = grid(30_000, 10_000, 4);
+    let window = RangeWindow {
+        range_ms: 20_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    // Every chunk starts on a sample an earlier window corrected, so the index has to reach
+    // across the chunk boundary.
+    let pieces = [(0, 3), (3, 6), (6, 10)];
+
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut evaluator = {
+        let sink = recorded.clone();
+        let record = move |window: FloatWindow<'_>| {
+            sink.lock().unwrap().push((
+                window.timestamps.to_vec(),
+                window
+                    .counter_resets
+                    .iter()
+                    .map(|reset| reset.previous_value)
+                    .collect::<Vec<_>>(),
+            ));
+            Some(window.values[0])
+        };
+        let mut evaluator = RangeEvaluator::with_kernel(
+            &raw_schema(2),
+            grid.clone(),
+            window,
+            Box::new(record),
+            true,
+            true,
+        )
+        .unwrap();
+        for (start, end) in pieces {
+            let last = end == rows.len();
+            let result = evaluator
+                .push(&chunk(&rows[start..end], 2, 0, last))
+                .unwrap();
+            assert_eq!(
+                result.is_some(),
+                last,
+                "the series must finish on its last chunk"
+            );
+        }
+        evaluator
+    };
+
+    // Windows (10 s, 30 s], (20 s, 40 s], (30 s, 50 s] and (40 s, 60 s].
+    // The first holds 20 and 5, so the reset at index 3 corrects it. The second's left edge is
+    // the sample before that reset, which a left-open window excludes, so the same reset must not
+    // count there. The fourth holds 25 and 7, corrected by the reset at index 6. The second field
+    // never corrects anything.
+    let expected = [
+        (vec![20_000, 30_000], vec![20.0], vec![]),
+        (vec![30_000, 40_000], vec![], vec![]),
+        (vec![40_000, 50_000], vec![], vec![]),
+        (vec![50_000, 60_000], vec![25.0], vec![]),
+    ];
+    let first = recorded.lock().unwrap().clone();
+    assert_eq!(first.len(), 8, "four grid points, two fields");
+    for (index, (pair, (timestamps, counter_resets, rising_resets))) in
+        first.chunks(2).zip(expected.iter().cloned()).enumerate()
+    {
+        assert_eq!(
+            pair[0],
+            (timestamps.clone(), counter_resets),
+            "field 0 at grid point {index}"
+        );
+        assert_eq!(
+            pair[1],
+            (timestamps, rising_resets),
+            "field 1 at grid point {index}"
+        );
+    }
+
+    // The same samples pushed as a second series through the same evaluator: no buffer, cursor or
+    // index state of the first series may survive, so the second series reports exactly the same
+    // windows and resets.
+    recorded.lock().unwrap().clear();
+    let mut result = None;
+    for (start, end) in pieces {
+        assert!(result.is_none(), "a result before the last chunk");
+        result = evaluator
+            .push(&chunk(&rows[start..end], 2, 1, end == rows.len()))
+            .unwrap();
+    }
+    assert_eq!(*recorded.lock().unwrap(), recorded_of(&expected));
+    evaluator.finish().unwrap();
+}
+
+/// The per-call recordings `counter_resets_follow_the_window_and_survive_chunking` expects, in
+/// kernel-call order: field 0 then field 1 for each grid point.
+fn recorded_of(expected: &[(Vec<i64>, Vec<f64>, Vec<f64>)]) -> Vec<(Vec<i64>, Vec<f64>)> {
+    expected
+        .iter()
+        .flat_map(|(timestamps, counter, rising)| {
+            [
+                (timestamps.clone(), counter.clone()),
+                (timestamps.clone(), rising.clone()),
+            ]
+        })
+        .collect()
+}
+
+/// Missing samples shift which neighbours a reset sits between, and the shift differs per
+/// field. The resets each window reports are checked position by position instead of through a
+/// function's output, so a field paying for another field's resets shows up directly.
+#[test]
+fn nulls_change_the_reset_positions_of_each_field_independently() {
+    let rows: Vec<Row> = vec![
+        (0, vec![Some(0.0), Some(0.0)]),
+        (10_000, vec![Some(20.0), Some(20.0)]),
+        (20_000, vec![None, Some(15.0)]),
+        (30_000, vec![Some(5.0), Some(5.0)]),
+        (40_000, vec![Some(5.0), Some(5.0)]),
+    ];
+    let grid = grid(0, 10_000, 5);
+    // Every window is wider than the series, so each grid point sees every sample up to it.
+    let window = RangeWindow {
+        range_ms: 100_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+
+    // One entry per kernel call, in field order within each grid point.
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = reported.clone();
+        let record = move |window: FloatWindow<'_>| {
+            sink.lock().unwrap().push(
+                window
+                    .counter_resets
+                    .iter()
+                    .map(|reset| reset.previous_value)
+                    .collect::<Vec<_>>(),
+            );
+            Some(window.values[0])
+        };
+        let mut evaluator =
+            RangeEvaluator::with_kernel(&raw_schema(2), grid, window, Box::new(record), true, true)
+                .unwrap();
+        for (start, end) in [(0, 2), (2, 5)] {
+            evaluator
+                .push(&chunk(&rows[start..end], 2, 0, end == rows.len()))
+                .unwrap();
+        }
+        evaluator.finish().unwrap();
+    }
+
+    // Field 0 never sees the missing 15, so 20 is followed directly by 5 and it resets once.
+    // Field 1 keeps the 15 and resets twice: 20 -> 15 and 15 -> 5. Both fields report their own
+    // resets even though they share a window and a chunk.
+    let reported = reported.lock().unwrap().clone();
+    assert_eq!(reported.len(), 10, "five grid points, two fields");
+    let expected = [
+        (vec![], vec![]),
+        (vec![], vec![]),
+        (vec![], vec![20.0]),
+        (vec![20.0], vec![20.0, 15.0]),
+        (vec![20.0], vec![20.0, 15.0]),
+    ];
+    for (index, (pair, (field0, field1))) in reported.chunks(2).zip(expected).enumerate() {
+        assert_eq!(pair[0], field0, "field 0 at grid point {index}");
+        assert_eq!(pair[1], field1, "field 1 at grid point {index}");
+    }
+}
+
 /// A random evaluated series on `grid`; values may carry the stale bit pattern, which computed
 /// input keeps as an ordinary NaN.
 fn random_evaluated(
@@ -737,9 +974,15 @@ fn subquery_series_match_references() {
         let (Some(series), rows) = random_evaluated(&mut rng, &inner, fields, seed) else {
             continue;
         };
-        let mut probe =
-            RangeEvaluator::with_kernel(&schema, outer.clone(), window, Box::new(probe), true)
-                .unwrap();
+        let mut probe = RangeEvaluator::with_kernel(
+            &schema,
+            outer.clone(),
+            window,
+            Box::new(probe),
+            true,
+            true,
+        )
+        .unwrap();
         let expected = reference(&rows, &outer, window, fields, false, true);
         assert_series_eq(
             probe.push_series(&series).unwrap().as_ref(),
