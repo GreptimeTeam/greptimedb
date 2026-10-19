@@ -679,7 +679,7 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
     // decided, which can include leading and trailing positions holding no value, while the
     // comparison is against the trimmed series the per-window path produced.
     let schema = batch.output_schema();
-    let batched = fold_chunks(std::slice::from_ref(&batched), &schema);
+    let batched = fold_chunks(std::slice::from_ref(&batched), schema);
     let expected = expand(&expected.series);
     assert_series_eq(
         batched.as_ref(),
