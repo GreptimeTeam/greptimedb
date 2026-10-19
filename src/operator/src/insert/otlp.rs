@@ -42,6 +42,26 @@ pub struct MetricInsertPreflight {
     pub physical_tables: std::collections::HashMap<String, String>,
 }
 
+struct PhysicalColumns {
+    by_name: HashMap<String, (DataColumn, SemanticType)>,
+    fields: Vec<String>,
+}
+
+impl PhysicalColumns {
+    fn new(columns: Vec<(DataColumn, SemanticType)>) -> Self {
+        let fields = columns
+            .iter()
+            .filter(|(_, semantic)| *semantic == SemanticType::Field)
+            .map(|(column, _)| column.name.clone())
+            .collect();
+        let by_name = columns
+            .into_iter()
+            .map(|(column, semantic)| (column.name.clone(), (column, semantic)))
+            .collect();
+        Self { by_name, fields }
+    }
+}
+
 impl Inserter {
     /// Validate each point independently against a single catalog snapshot.
     /// Fresh cross-point conflicts are resolved by the converter after this pass.
@@ -83,6 +103,8 @@ impl Inserter {
                 }
             }
         }
+        // Shared schemas accumulate tags across logical tables; index them once per request.
+        let mut physical_columns = HashMap::new();
         for backing in physical_tables.values() {
             if !tables.contains_key(backing) {
                 let table = self
@@ -90,6 +112,14 @@ impl Inserter {
                     .await?;
                 tables.insert(backing.clone(), table);
             }
+            physical_columns.entry(backing.as_str()).or_insert_with(|| {
+                PhysicalColumns::new(
+                    tables[backing]
+                        .as_ref()
+                        .map(table_columns)
+                        .unwrap_or_else(default_physical_columns),
+                )
+            });
         }
         // Match ordinary insertion: impure defaults are evaluated once per table
         // and request, while supplied nulls remain supplied nulls.
@@ -229,17 +259,18 @@ impl Inserter {
                     let Some(rows) = &mut request.rows else {
                         continue;
                     };
-                    if backing.is_some() {
-                        let physical_columns = physical
-                            .map(table_columns)
-                            .unwrap_or_else(default_physical_columns);
+                    if let Some(backing) = backing {
                         // Logical tag nullability follows the shared physical schema.
                         for (column, semantic) in &mut columns {
                             if *semantic == SemanticType::Tag {
                                 column.set_nullable();
                             }
                         }
-                        validate_physical_columns(rows, &physical_columns, auto_create)?;
+                        validate_physical_columns(
+                            rows,
+                            &physical_columns[backing.as_str()],
+                            auto_create,
+                        )?;
                     }
                     if let Some(table) = target {
                         if !fillers.contains_key(&request.table_name) {
@@ -293,6 +324,7 @@ fn column_definition(def: &ColumnDef) -> Result<(DataColumn, SemanticType)> {
 
 fn table_columns(table: &TableRef) -> Vec<(DataColumn, SemanticType)> {
     let info = table.table_info();
+    let primary_keys: HashSet<_> = info.meta.primary_key_indices.iter().copied().collect();
     info.meta
         .schema
         .column_schemas()
@@ -301,7 +333,7 @@ fn table_columns(table: &TableRef) -> Vec<(DataColumn, SemanticType)> {
         .map(|(index, column)| {
             let semantic = if column.is_time_index() {
                 SemanticType::Timestamp
-            } else if info.meta.primary_key_indices.contains(&index) {
+            } else if primary_keys.contains(&index) {
                 SemanticType::Tag
             } else {
                 SemanticType::Field
@@ -353,12 +385,11 @@ fn check_definition(
 
 fn validate_physical_columns(
     rows: &Rows,
-    columns: &[(DataColumn, SemanticType)],
+    columns: &PhysicalColumns,
     auto_create: bool,
 ) -> Result<()> {
     for source in &rows.schema {
-        if let Some((target, semantic)) = columns.iter().find(|(c, _)| c.name == source.column_name)
-        {
+        if let Some((target, semantic)) = columns.by_name.get(&source.column_name) {
             check_definition(source, target, *semantic)?;
         } else {
             ensure!(
@@ -384,10 +415,9 @@ fn validate_physical_columns(
             );
         }
     }
-    for (column, semantic) in columns {
-        if *semantic == SemanticType::Field
-            && !rows.schema.iter().any(|c| c.column_name == column.name)
-        {
+    for name in &columns.fields {
+        if !rows.schema.iter().any(|c| c.column_name == *name) {
+            let (column, _) = &columns.by_name[name];
             ensure!(
                 !column.is_default_impure(),
                 InvalidInsertRequestSnafu {
@@ -549,11 +579,66 @@ mod tests {
             }
             assert!(validate_and_fill_rows(&mut invalid, &columns).is_err());
         }
+        let columns = PhysicalColumns::new(columns);
         rows.schema[1].column_name = "new_field".into();
         assert!(validate_physical_columns(&rows, &columns, true).is_err());
         rows.schema[1].semantic_type = SemanticType::Tag as i32;
         rows.schema[1].datatype = ColumnDataType::String as i32;
         assert!(validate_physical_columns(&rows, &columns, false).is_err());
         assert!(validate_physical_columns(&rows, &columns, true).is_ok());
+    }
+
+    #[test]
+    fn test_preflight_shared_physical_field_defaults() {
+        let rows = Rows {
+            schema: vec![api::v1::helper::time_index_column_schema(
+                greptime_timestamp(),
+                ColumnDataType::TimestampMillisecond,
+            )],
+            ..Default::default()
+        };
+        let required = DataColumn::new("required", ConcreteDataType::float64_datatype(), false);
+        let defaulted = required
+            .clone()
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(DataValue::Float64(
+                1.0.into(),
+            ))))
+            .unwrap();
+        let impure = DataColumn::new(
+            "impure",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_default_constraint(Some(ColumnDefaultConstraint::Function(
+            "current_timestamp()".into(),
+        )))
+        .unwrap();
+        for (field, error) in [
+            (required, Some("missing required physical field `required`")),
+            (defaulted, None),
+            (impure, Some("impure default for physical field `impure`")),
+        ] {
+            let mut columns = default_physical_columns();
+            columns.extend((0..1024).map(|index| {
+                (
+                    DataColumn::new(
+                        format!("unrelated_tag_{index}"),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    SemanticType::Tag,
+                )
+            }));
+            columns.push((field, SemanticType::Field));
+            let columns = PhysicalColumns::new(columns);
+            for auto_create in [false, true] {
+                let result = validate_physical_columns(&rows, &columns, auto_create);
+                if let Some(error) = error {
+                    assert!(result.unwrap_err().to_string().contains(error));
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
     }
 }
