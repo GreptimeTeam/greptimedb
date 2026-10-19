@@ -18,16 +18,19 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use common_query::prometheus::is_prometheus_stale_nan;
-use datafusion::arrow::array::Array;
+use datafusion::arrow::array::{Array, Float64Array};
 use datafusion::arrow::buffer::Buffer;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::histogram::CounterResetHint;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesFields, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datatypes::series::samples::{
+    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
-use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS};
+use crate::evaluated::EvaluatedChunk;
+use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS, external};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
 mod function;
@@ -106,9 +109,14 @@ pub(crate) type BatchKernel = Box<dyn FnMut(&FloatWindows<'_>, &mut Vec<Option<f
 /// column buffers in cache while staying large enough to amortise the call.
 const EVALUATION_BATCH: usize = 512;
 
-/// Evaluates range windows over raw series, one series at a time.
+/// Evaluates range windows over raw series, one series at a time, handing out its results as they
+/// become final.
 ///
-/// Each series is pushed as its chunks in order and completes on the chunk marked `is_last`.
+/// Each series is pushed as its chunks in order. A push evaluates the grid points whose windows
+/// the pushed samples complete, and hands them out as an [`EvaluatedChunk`], so a consumer can
+/// stream a long series instead of waiting for its last chunk. The series closes on a chunk marked
+/// `is_last`, which is handed out even when it holds no position.
+///
 /// Fields are evaluated independently over their own valid samples; a row holding a stale
 /// marker in any field is dropped, as the ordinary range selector does. Only the samples later
 /// windows can still use are retained. Native histogram samples need a [`RangeFunction`]; an
@@ -258,6 +266,12 @@ struct SeriesState {
     last_ts: i64,
     /// Next grid index to evaluate.
     cursor: usize,
+    /// Grid index after the last position the evaluator has decided, whether it holds a value or
+    /// not. This is what a consumer needs in order to advance, so it is reported as the chunk
+    /// span even where no value was produced.
+    completed: usize,
+    /// Grid index after the last position handed out to the consumer.
+    emitted_end: usize,
 }
 
 /// How the windows of an `@`-anchored selector map to the grid.
@@ -525,11 +539,16 @@ impl RangeEvaluator {
 
     /// Consumes the next chunk of the current series, or starts a new series.
     ///
-    /// Returns the evaluated series on its `is_last` chunk, or `None` there when no grid point
-    /// has a result.
+    /// Returns the grid points this chunk decided, as one chunk whose range is absolute on the
+    /// evaluation grid; `None` when it decided no new point. A decided point whose window has no
+    /// result is a missing value inside the range, as it is in a whole series; the range is what
+    /// tells a consumer that the point is settled rather than still waiting for input.
+    ///
+    /// The last chunk of a series is always returned, empty when it decided nothing new, because
+    /// that chunk is what closes the series for the consumer.
     ///
     /// The evaluator must not be reused after an error.
-    pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<Series>> {
+    pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<EvaluatedChunk>> {
         if self.input_grid.is_some() {
             return Err(DataFusionError::Execution(
                 "raw series chunk pushed to an evaluator of evaluated series".into(),
@@ -543,15 +562,17 @@ impl RangeEvaluator {
             self.evaluate(Some(
                 i128::from(last_ts) + i128::from(self.window.offset_ms),
             ))?;
-            return Ok(None);
+            return self.emit(false);
         }
-        self.finish_series()
+        self.close_series()
     }
 
     /// Evaluates one complete evaluated series, such as the inner result of a subquery: the
     /// value at each grid point is a sample at that time. Stale markers are kept as values,
     /// since the input is computed.
-    pub fn push_series(&mut self, series: &Series) -> Result<Option<Series>> {
+    ///
+    /// The input arrives complete, so its result is one closing chunk.
+    pub fn push_series(&mut self, series: &Series) -> Result<Option<EvaluatedChunk>> {
         let TimeAxis::Grid(range) = &series.time else {
             return Err(DataFusionError::Execution(
                 "evaluated range input must be a grid series".into(),
@@ -575,18 +596,76 @@ impl RangeEvaluator {
             metric: series.metric.clone(),
             last_ts: 0,
             cursor: 0,
+            completed: 0,
+            emitted_end: 0,
         });
         self.ingest(&range.timestamps(), &series.fields, false)?;
-        self.finish_series()
+        self.close_series()
     }
 
-    fn finish_series(&mut self) -> Result<Option<Series>> {
+    /// Evaluates the rest of the series of the last input chunk and closes it.
+    fn close_series(&mut self) -> Result<Option<EvaluatedChunk>> {
         self.evaluate(None)?;
-        let mut state = self.series.take().expect("set by the caller");
-        if self.drops_metric_name {
-            state.metric.remove_all(&METADATA_LABELS);
+        let chunk = self.emit(true)?;
+        self.series = None;
+        Ok(chunk)
+    }
+
+    /// Hands out the positions decided since the last chunk, if any.
+    ///
+    /// The span covers everything decided, so a position decided to hold no value travels with
+    /// the chunk that decided it: a consumer needs that progress to advance, and to tell a
+    /// finished position from one still waiting for input. `is_last` closes the series, and then a
+    /// chunk is always handed out, empty when there is nothing left to report.
+    fn emit(&mut self, is_last: bool) -> Result<Option<EvaluatedChunk>> {
+        let Some(state) = self.series.as_ref() else {
+            return Ok(None);
+        };
+        let (start, end) = (state.emitted_end, state.completed);
+        // `evaluate` opens the builder's span at the first not-yet-handed-out position even when
+        // this push completed nothing, so finishing here would produce a zero-length chunk that
+        // claims progress the push did not make. Only the last chunk is handed out regardless.
+        if end == start && !is_last {
+            return Ok(None);
         }
-        self.output.finish(state.metric)
+        let mut metric = state.metric.clone();
+        if self.drops_metric_name {
+            metric.remove_all(&METADATA_LABELS);
+        }
+        if end > start {
+            // Every decided position joins the span, including the ones without a value.
+            self.output.cover_from(start)?;
+            self.output.cover_through(end)?;
+        }
+        let Some(series) = self.output.finish(metric)? else {
+            debug_assert_eq!(end, start, "a decided position widens the span");
+            return if is_last {
+                self.empty_chunk(start)
+            } else {
+                Ok(None)
+            };
+        };
+        self.series
+            .as_mut()
+            .expect("checked at the entry of emit")
+            .emitted_end = end;
+        EvaluatedChunk::try_new(series, is_last).map(Some)
+    }
+
+    /// A closing chunk without values, addressed after the last position handed out.
+    fn empty_chunk(&self, at: usize) -> Result<Option<EvaluatedChunk>> {
+        let state = self.series.as_ref().expect("checked by the caller");
+        let mut metric = state.metric.clone();
+        if self.drops_metric_name {
+            metric.remove_all(&METADATA_LABELS);
+        }
+        let empty = Samples::from_float(Float64Array::from(Vec::<f64>::new()));
+        let fields = SeriesFields::try_from_vec(vec![empty; self.output_schema.fields.len()])
+            .map_err(external)?;
+        let time = GridRange::try_new(self.grid.clone(), at, 0).map_err(external)?;
+        let series = Series::try_new(&self.output_schema, metric, TimeAxis::Grid(time), fields)
+            .map_err(external)?;
+        EvaluatedChunk::try_new(series, true).map(Some)
     }
 
     /// Checks that the input did not end inside a series.
@@ -625,6 +704,8 @@ impl RangeEvaluator {
                     metric,
                     last_ts: time[time.len() - 1],
                     cursor: 0,
+                    completed: 0,
+                    emitted_end: 0,
                 });
             }
             Some(state) => {
@@ -763,11 +844,20 @@ impl RangeEvaluator {
     /// Evaluates grid points up to `ready` on the evaluation timeline, or all remaining points
     /// when `ready` is `None`.
     fn evaluate(&mut self, ready: Option<i128>) -> Result<()> {
+        // Positions handed out so far stay behind the builder's span, so a chunk never repeats or
+        // reorders them.
+        let emitted = self
+            .series
+            .as_ref()
+            .expect("checked by check_chunk")
+            .emitted_end;
+        self.output.cover_from(emitted)?;
         let points_read = self.points_read();
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
         let grid = self.grid.timestamps();
         let range = i128::from(self.window.range_ms);
+        let mut empty_tail = false;
         while state.cursor < points_read {
             let eval_ts = grid[state.cursor];
             let lower = i128::from(eval_ts) - range;
@@ -792,8 +882,10 @@ impl RangeEvaluator {
             if ready.is_some_and(|ready| i128::from(eval_ts) > ready) {
                 break;
             }
-            // No retained sample: either the series is done or the next one is not here yet.
+            // No retained sample: every point from here on is decided too. A sample that still
+            // has to arrive lies beyond the window of every one of them, so none can gain a value.
             let Some(earliest) = earliest else {
+                empty_tail = true;
                 break;
             };
             if earliest > eval_ts {
@@ -893,6 +985,44 @@ impl RangeEvaluator {
                 &mut self.batch_calls,
             )?;
         }
+        // How far the series is decided. A point is decided once it has been evaluated, once its
+        // window can no longer gain a sample, or -- at the end of the series or of what the input
+        // has reached -- once no retained sample reaches it. The last case matters: the loop stops
+        // at the first such point instead of walking the rest of the grid, so the points behind it
+        // still have to be reported as decided, or a consumer waits for input that decided them.
+        let completed = if empty_tail {
+            match self.replay {
+                Replay::PerPoint => {
+                    let mut decided = state.cursor;
+                    if let Some(ready) = ready {
+                        while decided < points_read && i128::from(grid[decided]) <= ready {
+                            decided += 1;
+                        }
+                    } else {
+                        decided = points_read;
+                    }
+                    // Later rounds start evaluating from here, and none of these points can gain
+                    // a value, so the cursor may skip them.
+                    state.cursor = decided;
+                    decided
+                }
+                // An anchored selector broadcasts its one window over the whole grid, so deciding
+                // that window decides every point. Its window ends at the grid's start rather than
+                // at each point, so it is decided once the input has ended or has passed that end.
+                Replay::Once | Replay::EveryPoint => match ready {
+                    None => grid.len(),
+                    Some(ready) if ready >= i128::from(spec.start_ms) => grid.len(),
+                    Some(_) => state.completed,
+                },
+            }
+        } else if matches!(self.replay, Replay::PerPoint) {
+            state.cursor
+        } else if state.cursor > 0 {
+            grid.len()
+        } else {
+            0
+        };
+        state.completed = state.completed.max(completed);
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.

@@ -14,6 +14,7 @@
 
 pub mod aggregate;
 pub mod error;
+pub mod evaluated;
 pub mod extension_plan;
 pub mod functions;
 mod go_sort;
