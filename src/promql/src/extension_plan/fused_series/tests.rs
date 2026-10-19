@@ -50,7 +50,8 @@ use futures::{Stream, StreamExt};
 use store_api::region_engine::RawLabelSource;
 
 use super::{
-    FusedSeriesExec, MAX_CHUNKS_PER_POLL, apply_maps, classify_output, series_to_record_batch,
+    FusedSeriesExec, MAX_CHUNKS_PER_POLL, apply_maps, classify_output, occupied_runs,
+    series_to_record_batch,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
@@ -412,6 +413,72 @@ fn grid_range(series: &Series) -> (usize, usize) {
         panic!("expected a grid series, got {:?}", series.time);
     };
     (range.start(), range.len())
+}
+
+/// A single dense, null-free float field covers every row of the range, so the fast path must
+/// report exactly one run spanning it, in absolute grid indices.
+#[test]
+fn a_single_dense_float_field_occupies_the_whole_range() {
+    let chunks = vec![chunk(
+        1,
+        "a",
+        &[
+            (300_000, Some(1.0)),
+            (360_000, Some(2.0)),
+            (420_000, Some(3.0)),
+        ],
+        true,
+    )];
+    let case = Case::new(
+        &["host"],
+        RangeWindow {
+            range_ms: 60_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::SumOverTime,
+        vec![],
+    );
+    let reference = case.reference(&chunks);
+    let (series, _) = &reference[0];
+    let (start, len) = grid_range(series);
+    assert_eq!(len, 3, "the fixture must cover three grid points");
+    assert_eq!(
+        occupied_runs(series).unwrap(),
+        vec![(start, start + len)],
+        "one dense float field occupies the whole range"
+    );
+}
+
+/// A field with a missing sample does not cover the range, so the scan reports the runs it finds
+/// rather than the whole range.
+#[test]
+fn a_field_with_a_missing_sample_occupies_only_its_runs() {
+    let chunks = vec![chunk(
+        1,
+        "a",
+        &[(300_000, Some(1.0)), (360_000, None), (420_000, Some(3.0))],
+        true,
+    )];
+    let case = Case::new(
+        &["host"],
+        RangeWindow {
+            range_ms: 60_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::SumOverTime,
+        vec![],
+    );
+    let reference = case.reference(&chunks);
+    let (series, _) = &reference[0];
+    let (start, len) = grid_range(series);
+    assert_eq!(len, 3);
+    assert_eq!(
+        occupied_runs(series).unwrap(),
+        vec![(start, start + 1), (start + 2, start + 3)],
+        "the missing point splits the range into two runs"
+    );
 }
 
 /// Asserts the node emitted exactly the reference batches, comparing values bit for bit.

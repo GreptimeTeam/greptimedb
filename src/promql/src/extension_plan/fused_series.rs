@@ -670,14 +670,29 @@ fn render_labels(metric: &MetricName) -> String {
 /// Each run is `(start, end_exclusive)` over absolute grid indices. A row whose every field is
 /// missing is not occupied: Prometheus has no point there, so it cannot collide with another
 /// series.
-fn occupied_runs(series: &Series) -> Result<Vec<(usize, usize)>> {
+pub(crate) fn occupied_runs(series: &Series) -> Result<Vec<(usize, usize)>> {
     let TimeAxis::Grid(range) = &series.time else {
         return Err(DataFusionError::Execution(
             "FusedSeriesExec requires evaluated series on a time grid".into(),
         ));
     };
+    let rows = range.len();
+    // A series with one dense, null-free float field holds a value on every row, so the whole
+    // range is one occupied run and no row has to be inspected. This is the shape the fused
+    // evaluator produces for a range function over ordinary float samples.
+    if series.fields.len() == 1
+        && let Some(DenseSamplesRef::Float(values)) =
+            series.fields.iter().next().and_then(Samples::dense)
+        && values.len() == rows
+        && values.null_count() == 0
+    {
+        return Ok((rows > 0)
+            .then(|| (range.start(), range.start() + rows))
+            .into_iter()
+            .collect());
+    }
     let mut runs: Vec<(usize, usize)> = Vec::new();
-    for offset in 0..range.len() {
+    for offset in 0..rows {
         if !series
             .fields
             .iter()
