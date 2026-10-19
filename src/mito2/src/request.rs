@@ -759,7 +759,7 @@ pub(crate) enum WorkerRequest {
     Write(SenderWriteRequest),
 
     /// Writes of one request to regions of the same worker.
-    Writes(Vec<SenderWriteRequest>),
+    BatchWrite(Vec<SenderWriteRequest>),
 
     /// Ddl request to a region.
     Ddl(SenderDdlRequest),

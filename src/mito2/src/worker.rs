@@ -329,7 +329,7 @@ impl WorkerGroup {
             writes_by_worker.entry(index).or_default().push(write);
         }
         join_all(writes_by_worker.into_iter().map(|(index, writes)| {
-            self.workers[index].submit_request(WorkerRequest::Writes(writes))
+            self.workers[index].submit_request(WorkerRequest::BatchWrite(writes))
         }))
         .await;
     }
@@ -1073,7 +1073,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                             match request_with_time.request {
                                 WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
-                                WorkerRequest::Writes(sender_reqs) => write_req_buffer.extend(sender_reqs),
+                                WorkerRequest::BatchWrite(sender_reqs) => write_req_buffer.extend(sender_reqs),
                                 WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
                                 WorkerRequest::BulkInserts(bulk_insert) => {
                                     bulk_insert_req_num += 1;
@@ -1127,7 +1127,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                         match request_with_time.request {
                             WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
-                            WorkerRequest::Writes(sender_reqs) => {
+                            WorkerRequest::BatchWrite(sender_reqs) => {
                                 write_req_buffer.extend(sender_reqs)
                             }
                             WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
@@ -1204,7 +1204,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ) {
         for worker_req in general_requests.drain(..) {
             match worker_req {
-                WorkerRequest::Write(_) | WorkerRequest::Writes(_) | WorkerRequest::Ddl(_) => {
+                WorkerRequest::Write(_) | WorkerRequest::BatchWrite(_) | WorkerRequest::Ddl(_) => {
                     // These requests are categorized before dispatching general requests.
                     continue;
                 }
