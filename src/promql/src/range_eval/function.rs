@@ -250,24 +250,47 @@ fn extrapolated_rate<const IS_COUNTER: bool, const IS_RATE: bool>(
         eval_ts,
         range_ms,
     } = window;
-    let samples_minus_one = values.len().checked_sub(1).filter(|n| *n > 0)?;
-    let first = values[0];
-    let mut result = values[samples_minus_one] - first;
-    if IS_COUNTER {
+    let end = values.len().checked_sub(1).filter(|n| *n > 0)?;
+    extrapolated_rate_of(
+        (timestamps[0], timestamps[end]),
+        (values[0], values[end]),
+        end,
+        counter_resets.iter().map(|reset| reset.previous_value),
+        eval_ts,
+        range_ms,
+        (IS_COUNTER, IS_RATE),
+    )
+}
+
+/// The arithmetic of [`extrapolated_rate`], over a window's endpoints and the previous values of
+/// its resets.
+///
+/// Both callers reach it: the per-window form with a slice of the field, the batch form with the
+/// field's own arrays. Keeping it in one place is what holds their results equal; the two differ
+/// only in how they find the endpoints.
+fn extrapolated_rate_of(
+    (first_t, last_t): (i64, i64),
+    (first, last): (f64, f64),
+    samples_minus_one: usize,
+    resets: impl Iterator<Item = f64>,
+    eval_ts: i64,
+    range_ms: i64,
+    (is_counter, is_rate): (bool, bool),
+) -> Option<f64> {
+    let mut result = last - first;
+    if is_counter {
         // The same additions in the same order as scanning the window for resets, reached
         // through the evaluator's per-field reset index instead of the whole window.
-        result = counter_resets
-            .iter()
-            .fold(result, |result, reset| result + reset.previous_value);
+        result = resets.fold(result, |result, previous_value| result + previous_value);
     }
-    let zero_point = (IS_COUNTER && result > 0.0 && first >= 0.0).then(|| first / result);
+    let zero_point = (is_counter && result > 0.0 && first >= 0.0).then(|| first / result);
     let factor = extrapolation_factor(
-        (timestamps[0], timestamps[samples_minus_one]),
+        (first_t, last_t),
         samples_minus_one,
         eval_ts,
         range_ms,
-        IS_COUNTER,
-        IS_RATE,
+        is_counter,
+        is_rate,
         zero_point,
     );
     Some(result * factor)
@@ -286,34 +309,23 @@ pub(crate) fn extrapolated_rate_batch<const IS_COUNTER: bool, const IS_RATE: boo
     out.clear();
     out.reserve(batch.windows.len());
     for (index, span) in batch.windows.iter().enumerate() {
-        let samples_minus_one = span.len().checked_sub(1).filter(|n| *n > 0);
-        let Some(samples_minus_one) = samples_minus_one else {
+        let Some(samples_minus_one) = span.len().checked_sub(1).filter(|n| *n > 0) else {
             out.push(None);
             continue;
         };
         let (start, last) = (span.start, span.end - 1);
-        let (first_t, last_t) = (batch.timestamps[start], batch.timestamps[last]);
-        let first = batch.values[start];
-        let mut result = batch.values[last] - first;
-        if IS_COUNTER {
-            // The same additions in the same order as the per-window form, reached through the
-            // evaluator's per-field reset index.
-            result = batch
+        out.push(extrapolated_rate_of(
+            (batch.timestamps[start], batch.timestamps[last]),
+            (batch.values[start], batch.values[last]),
+            samples_minus_one,
+            batch
                 .resets_of(index)
                 .iter()
-                .fold(result, |result, reset| result + reset.previous_value);
-        }
-        let zero_point = (IS_COUNTER && result > 0.0 && first >= 0.0).then(|| first / result);
-        let factor = extrapolation_factor(
-            (first_t, last_t),
-            samples_minus_one,
+                .map(|reset| reset.previous_value),
             batch.eval_ts[index],
             batch.range_ms,
-            IS_COUNTER,
-            IS_RATE,
-            zero_point,
-        );
-        out.push(Some(result * factor));
+            (IS_COUNTER, IS_RATE),
+        ));
     }
 }
 
