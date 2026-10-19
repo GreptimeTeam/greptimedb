@@ -58,7 +58,7 @@ pub fn compile(
     input: Arc<SeriesSchema>,
     ordering: SeriesOrdering,
 ) -> Result<NativeTree> {
-    let PromExpr::Call(Call { func, args }) = &stmt.expr else {
+    let PromExpr::Call(Call { func, args }) = unparen(&stmt.expr) else {
         return Err(not_implemented(&format!("the expression `{}`", stmt.expr)));
     };
     let Some(function) = range_function(func.name) else {
@@ -74,7 +74,7 @@ pub fn compile(
             args.args.len()
         )));
     };
-    let PromExpr::MatrixSelector(MatrixSelector { vs, range }) = argument.as_ref() else {
+    let PromExpr::MatrixSelector(MatrixSelector { vs, range }) = unparen(argument) else {
         return Err(not_implemented(&format!(
             "a call to `{}` whose argument is `{}`",
             func.name, argument
@@ -226,6 +226,18 @@ fn range_function(name: &str) -> Option<RangeFunction> {
         "deriv" => Some(RangeFunction::Deriv),
         _ => None,
     }
+}
+
+/// The expression a parenthesised one wraps, however many parentheses were written.
+///
+/// Parentheses group, so they say nothing about the expression inside them: `rate((x[5m]))` asks
+/// for exactly what `rate(x[5m])` asks for. Refusing it would reject a statement on the way it was
+/// typed rather than on what it means.
+fn unparen(mut expr: &PromExpr) -> &PromExpr {
+    while let PromExpr::Paren(paren) = expr {
+        expr = &paren.expr;
+    }
+    expr
 }
 
 /// A rejection of a shape outside [`SUPPORTED`].
