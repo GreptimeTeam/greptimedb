@@ -293,11 +293,7 @@ impl TwcsPicker {
             None
         } else {
             let settling = !self.all_windows_inactive
-                && active_window
-                    .zip(time_window_size)
-                    .is_some_and(|(active, size)| {
-                        (1..=size).contains(&(active - window.time_window))
-                    });
+                && is_settling_window(window.time_window, active_window, time_window_size);
             self.pick_inactive_window(l0_files, l1_files, mapper, settling, quiet)
         }
     }
@@ -364,6 +360,8 @@ impl TwcsPicker {
     /// every late flush, so it waits until the window is `quiet`: the region
     /// has written a window's worth of rows elsewhere since the window last
     /// received data. Each quiet period then pays for at most one such rewrite.
+    /// A manual compaction is a one-off request to resolve overlaps, so it does
+    /// not wait.
     ///
     /// Without new writes each pick consumes an L0 file or makes progress on
     /// the closed merge's termination measure, so the window stops compacting.
@@ -401,7 +399,7 @@ impl TwcsPicker {
                 limits: self.closed_merge_limits(),
                 allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
                 allow_conflicts: !settling,
-                allow_unbalanced: quiet && !settling,
+                allow_unbalanced: (quiet || self.all_windows_inactive) && !settling,
             },
         )?;
         let (class, branch) = if pick.reduces_files {
@@ -1048,6 +1046,23 @@ impl Window {
     }
 }
 
+/// Whether `window` is the one right before `active_window`, where late data
+/// still lands.
+fn is_settling_window(
+    window: i64,
+    active_window: Option<i64>,
+    time_window_size: Option<i64>,
+) -> bool {
+    active_window
+        .zip(time_window_size)
+        .is_some_and(|(active, size)| {
+            // Windows at the timestamp limits may be too far apart to subtract.
+            active
+                .checked_sub(window)
+                .is_some_and(|distance| (1..=size).contains(&distance))
+        })
+}
+
 /// Whether the region has written at least as many rows as `files` hold, and at
 /// least one row, since the newest of them was written. Sequences are assigned
 /// per row and compaction keeps the inputs' maximum, so this needs no state.
@@ -1685,6 +1700,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_settling_window_at_timestamp_limits() {
+        assert!(is_settling_window(0, Some(60), Some(60)));
+        assert!(!is_settling_window(60, Some(60), Some(60)));
+        assert!(!is_settling_window(-60, Some(60), Some(60)));
+        assert!(!is_settling_window(0, None, Some(60)));
+        // The distance between these windows does not fit in an i64.
+        assert!(!is_settling_window(i64::MAX, Some(i64::MIN), Some(1)));
+        assert!(!is_settling_window(i64::MIN, Some(i64::MAX), Some(1)));
     }
 
     #[test]
@@ -4131,7 +4157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_quiet_window_resolves_dominant_run_overlap() {
+    async fn test_quiet_or_manual_window_resolves_dominant_run_overlap() {
         let file_size = 512 * 1024 * 1024;
         // A run of eight key-sliced files and one small file overlapping all of
         // them: resolving the overlap rewrites the run for its small peer.
@@ -4158,26 +4184,29 @@ mod tests {
             file_size / 8,
             pk_range(b"a0", b"h9"),
         ));
-        let picker = TwcsPicker {
-            trigger_file_num: 4,
-            active_window_l1_merge_trigger: 4,
-            inactive_window_trigger_file_num: 2,
-            inactive_window_l1_merge_trigger: 16,
-            time_window_seconds: Some(60),
-            max_output_file_size: Some(file_size),
-            append_mode: false,
-            max_background_tasks: Some(1),
-            time_range: None,
-            all_windows_inactive: false,
-        };
         let expected = window_files
             .iter()
             .map(FileHandle::file_id)
             .collect::<HashSet<_>>();
 
         // The newest file of the region is written after the window (quiet) or
-        // with it (still receiving data).
-        for (newer_sequence, quiet) in [(100, false), (101, true)] {
+        // with it (still receiving data). A manual compaction does not wait,
+        // even for the active window.
+        for (newer_sequence, manual, resolves) in
+            [(100, false, false), (101, false, true), (100, true, true)]
+        {
+            let picker = TwcsPicker {
+                trigger_file_num: 4,
+                active_window_l1_merge_trigger: 4,
+                inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 16,
+                time_window_seconds: Some(60),
+                max_output_file_size: Some(file_size),
+                append_mode: false,
+                max_background_tasks: Some(1),
+                time_range: None,
+                all_windows_inactive: manual,
+            };
             let mut files = window_files.clone();
             files.push(new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
@@ -4192,7 +4221,7 @@ mod tests {
                 .build_output_with_time_range(
                     RegionId::from_u64(0),
                     assign_to_windows(files.iter(), 60),
-                    None,
+                    manual.then_some(0),
                     Some(60),
                 )
                 .await
@@ -4201,8 +4230,8 @@ mod tests {
                 .iter()
                 .flat_map(|output| output.inputs.iter().map(FileHandle::file_id))
                 .collect::<HashSet<_>>();
-            if quiet {
-                assert_eq!(expected, actual);
+            if resolves {
+                assert_eq!(expected, actual, "manual: {manual}");
             } else {
                 assert!(actual.is_empty(), "{actual:?}");
             }

@@ -74,11 +74,14 @@ pub(crate) struct PickLimits {
 }
 
 impl PickLimits {
-    /// Upper bound of the outputs of compacting `size` bytes: the writer only
-    /// starts a new file after the current one reaches the threshold.
-    fn predicted_outputs(&self, size: u64) -> usize {
+    /// Upper bound of the outputs of compacting an interval: the writer only
+    /// starts a new file after the current one reaches the threshold, and never
+    /// splits a series, so files of a single primary key compact into one file.
+    fn predicted_outputs(&self, stats: &IntervalStats) -> usize {
         match self.max_output_file_size {
-            Some(max) if max > 0 => size.div_ceil(max).max(1) as usize,
+            Some(max) if max > 0 && stats.single_key.is_none() => {
+                stats.size.div_ceil(max).max(1) as usize
+            }
             _ => 1,
         }
     }
@@ -115,11 +118,13 @@ pub(crate) struct UnitPick {
 
 /// Picks L1 files of the active window whose compaction removes files.
 ///
-/// Units are groups of mutually conflicting files, so a merge does not leave a
-/// file behind while rewriting its overlapping peers. A group larger than the
-/// input limit is split back into single files. Intervals follow
-/// [`sort_units`]; the pick removes the most files, then rewrites the fewest
-/// bytes.
+/// Units are groups of conflicting files, so a merge does not leave a file
+/// behind while rewriting its overlapping peers. A group larger than the input
+/// limit is split back into single files. If no interval of groups qualifies,
+/// for example because a large file dominates its group, the groups are split
+/// into single files, so the smaller files can still be merged. Intervals
+/// follow [`sort_units`]; the pick removes the most files, then rewrites the
+/// fewest bytes.
 pub(crate) fn pick_active_l1(
     l1_files: &[FileHandle],
     mapper: &PrimaryKeyRangeMapper,
@@ -128,13 +133,30 @@ pub(crate) fn pick_active_l1(
     let extents = extents_of(l1_files, mapper);
     let mut units = conflict_units(l1_files, &extents);
     split_oversized_units(&mut units, l1_files, &extents, options.max_input_files);
-    sort_units(&mut units);
+    if let Some(pick) = pick_reducing_interval(&mut units, l1_files, &extents, options) {
+        return Some(pick);
+    }
+    if units.len() == l1_files.len() {
+        return None;
+    }
+    split_oversized_units(&mut units, l1_files, &extents, 1);
+    pick_reducing_interval(&mut units, l1_files, &extents, options)
+}
 
+/// Picks the interval of `units` that removes the most files within the
+/// rewrite budget, then rewrites the fewest bytes.
+fn pick_reducing_interval(
+    units: &mut [Unit],
+    files: &[FileHandle],
+    extents: &[Extent],
+    options: PickLimits,
+) -> Option<UnitPick> {
+    sort_units(units);
     let mut best: Option<(usize, u64, Range<usize>)> = None;
-    for_each_interval(&units, &extents, options.max_input_files, |range, stats| {
+    for_each_interval(units, extents, options.max_input_files, |range, stats| {
         let reduction = stats
             .num_files
-            .saturating_sub(options.predicted_outputs(stats.size));
+            .saturating_sub(options.predicted_outputs(stats));
         if stats.num_files < 2
             || reduction == 0
             || !options.within_reduction_cost(stats.size, reduction)
@@ -151,7 +173,7 @@ pub(crate) fn pick_active_l1(
     });
 
     best.map(|(_, _, range)| UnitPick {
-        inputs: collect_inputs(&units[range], l1_files),
+        inputs: collect_inputs(&units[range], files),
         reduces_files: true,
         units: units.len(),
     })
@@ -203,7 +225,7 @@ pub(crate) fn pick_closed_merge(
         if stats.num_files < 2 {
             return;
         }
-        let outputs = limits.predicted_outputs(stats.size);
+        let outputs = limits.predicted_outputs(stats);
         if outputs > stats.num_files + 1 {
             return;
         }
@@ -388,6 +410,15 @@ impl Unit {
     fn first_key(&self) -> Option<&Bytes> {
         self.extent.primary_key.as_ref().map(|(min, _)| min)
     }
+
+    /// The primary key of a unit whose files all hold that single key.
+    fn single_key(&self) -> Option<&Bytes> {
+        self.extent
+            .primary_key
+            .as_ref()
+            .filter(|range| is_single_key(range))
+            .map(|(min, _)| min)
+    }
 }
 
 /// Groups files into connected components of [`Extent::conflicts`], each with
@@ -509,21 +540,23 @@ fn close_units(units: &mut Vec<Unit>, extents: &[Extent]) {
 
 /// Totals of a contiguous interval of units.
 #[derive(Debug, Default)]
-struct IntervalStats {
+struct IntervalStats<'a> {
     num_files: usize,
     size: u64,
     largest_file_size: u64,
     conflicts: usize,
+    /// The primary key of an interval whose files all hold that single key.
+    single_key: Option<&'a Bytes>,
 }
 
 /// Visits every contiguous interval of units with at most `max_input_files`
 /// files: O(U · K) intervals for an input limit K. Conflicts among split files
 /// are counted pairwise, which takes O(U · K²) checks at most.
-fn for_each_interval(
-    units: &[Unit],
+fn for_each_interval<'a>(
+    units: &'a [Unit],
     extents: &[Extent],
     max_input_files: usize,
-    mut visit: impl FnMut(Range<usize>, &IntervalStats),
+    mut visit: impl FnMut(Range<usize>, &IntervalStats<'a>),
 ) {
     let mut split_files = Vec::new();
     for left in 0..units.len() {
@@ -537,6 +570,13 @@ fn for_each_interval(
             stats.size += unit.size;
             stats.largest_file_size = stats.largest_file_size.max(unit.largest_file_size);
             stats.conflicts += unit.conflicts;
+            stats.single_key = if right == left {
+                unit.single_key()
+            } else {
+                stats
+                    .single_key
+                    .filter(|&key| unit.single_key() == Some(key))
+            };
             if unit.split {
                 // Files of different units never conflict, only split files may.
                 let i = unit.files[0];
@@ -782,6 +822,29 @@ mod tests {
     }
 
     #[test]
+    fn test_active_l1_merges_small_files_beside_dominant_file() {
+        // All files overlap. Merging the group would rewrite the large file for
+        // its small peers, so only the small files are merged.
+        let mut files = vec![file(0, 1000, b"a", b"z", 1024)];
+        files.extend((1..16).map(|start| file(start, 1000, b"a", b"z", 1)));
+        let pick = pick_active_l1(&files, &primary_key_mapper_for_test(), limits(512)).unwrap();
+        assert_eq!(ids(&files[1..]), ids(&pick.inputs));
+    }
+
+    #[test]
+    fn test_merges_of_a_single_key_write_one_file() {
+        // The writer never splits a series, so the overlapping files of one key
+        // compact into a single file however large they are.
+        let files = vec![file(0, 100, b"m", b"m", 32), file(50, 150, b"m", b"m", 32)];
+        let mapper = primary_key_mapper_for_test();
+        let pick = closed_merge(&files, MAX_OUTPUT).unwrap();
+        assert_eq!(ids(&files), ids(&pick.inputs));
+        assert!(pick.reduces_files);
+        let pick = pick_active_l1(&files, &mapper, limits(MAX_OUTPUT)).unwrap();
+        assert_eq!(ids(&files), ids(&pick.inputs));
+    }
+
+    #[test]
     fn test_closed_merge_does_not_enclose_other_files() {
         let a = file(0, 10, b"a", b"c", 10);
         let b = file(0, 10, b"x", b"z", 10);
@@ -865,8 +928,8 @@ mod tests {
         files.push(file(7, 10_000, b"m", b"r", size));
         // A separate balanced pair is still resolved.
         let pair = [
-            file(14, 10_000, b"x", b"x", size),
-            file(15, 10_000, b"x", b"x", size),
+            file(14, 10_000, b"x", b"y", size),
+            file(15, 10_000, b"x", b"y", size),
         ];
         files.extend(pair.clone());
 
@@ -934,8 +997,13 @@ mod tests {
             .unwrap();
         let slot_time = |slot: u64| start + (end - start) * slot as i64 / SLOTS as i64;
         let size: u64 = inputs.iter().map(|file| file.handle.size()).sum();
-        // Outputs may be fewer than predicted, never more.
-        let predicted = size.div_ceil(MAX_OUTPUT).max(1);
+        // Outputs may be fewer than predicted, never more. A single key is
+        // never split.
+        let predicted = if min == max {
+            1
+        } else {
+            size.div_ceil(MAX_OUTPUT).max(1)
+        };
         let outputs = predicted - rng.next(2).min(predicted - 1);
         let cells = (max - min + 1) * SLOTS;
         (0..outputs)
