@@ -16,6 +16,7 @@ mod trace_ingest;
 pub mod trace_semconv;
 pub mod trace_types;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
@@ -126,13 +127,47 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_ctx.is_legacy = is_legacy;
         metric_ctx.resource_info = self.otlp_resource_info;
 
+        let mut prepared = otlp::metrics::prepare_metrics(request, &mut metric_ctx)?;
+        // Check all destinations before preflight can expose schemas or discard points.
+        let targets = {
+            let catalog = ctx.current_catalog();
+            let schema = ctx.current_schema();
+            let mut table_names = HashSet::new();
+            prepared
+                .requests
+                .iter()
+                .flat_map(|requests| &requests.inserts)
+                .filter(|request| table_names.insert(request.table_name.as_str()))
+                .map(|request| PermissionTableTarget::new(catalog, &schema, &request.table_name))
+                .collect()
+        };
+        self.check_table_permission(
+            &ctx,
+            PermissionReq::Action(OTLP_WRITE),
+            PermissionTableTargets::resolved(targets),
+        )
+        .context(AuthSnafu)?;
+
+        let preflight = self
+            .inserter
+            .preflight_otlp_metrics(
+                &mut prepared.requests,
+                &ctx,
+                !is_legacy && metric_ctx.with_metric_engine,
+                ctx.extension(PHYSICAL_TABLE_PARAM)
+                    .unwrap_or(GREPTIME_PHYSICAL_TABLE),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
         let otlp::metrics::MetricsConversion {
             requests,
             rows,
             semantic_index,
             resource_info,
             mut outcome,
-        } = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
+            input_names,
+        } = prepared.finish(preflight.rejections, &preflight.physical_tables)?;
         if outcome.rejected_data_points > 0 {
             warn!(
                 "Rejected {} OTLP metrics data points: {}",
@@ -144,8 +179,6 @@ impl OpenTelemetryProtocolHandler for Instance {
             return Ok(outcome);
         }
 
-        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
-            .context(AuthSnafu)?;
         let ctx = admit_write(rows as u64, &ctx)
             .await
             .map_err(BoxedError::new)

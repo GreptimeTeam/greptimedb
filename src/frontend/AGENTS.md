@@ -74,6 +74,9 @@ including caches owned by pipeline and protocol handlers.
   These tables are ingestion-managed; manual mutation requires restarting
   serving frontends.
 
+- **OTLP metrics** (`instance/otlp.rs`): authorize all emitted destinations before
+  schema preflight can reject points or expose destination schemas.
+
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
   writes. Downstream routers can initialize it when enabling replacement endpoints.

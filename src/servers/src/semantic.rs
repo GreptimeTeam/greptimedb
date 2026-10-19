@@ -108,7 +108,7 @@ impl SemanticIndex {
         serde_json::to_string(&BTreeMap::from([(schema, &self.tables)])).ok()
     }
 
-    fn merge_from(&mut self, other: &SemanticIndex) {
+    pub(crate) fn merge_from(&mut self, other: &SemanticIndex) {
         for (table, scalars) in &other.tables {
             for (key, value) in scalars {
                 self.record_scalar(table, key, value);

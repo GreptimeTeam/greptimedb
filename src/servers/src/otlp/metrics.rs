@@ -28,7 +28,6 @@ use common_query::prelude::{
     greptime_timestamp, greptime_value,
 };
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
-use common_telemetry::warn;
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
@@ -51,7 +50,10 @@ use crate::semantic::{
     METRIC_TYPE_UPDOWN_COUNTER,
 };
 
+mod prepare;
 mod resource_info;
+
+pub use prepare::{PreparedMetrics, prepare_metrics};
 mod translator;
 
 pub use resource_info::OTEL_RESOURCE_INFO_TABLE_NAME;
@@ -118,6 +120,8 @@ pub struct MetricsConversion {
     /// metric data. See [`resource_info`].
     pub resource_info: Option<RowInsertRequests>,
     pub outcome: MetricsIngestOutcome,
+    /// Original input names with surviving points, for compatibility-mode caching.
+    pub input_names: Vec<String>,
 }
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
@@ -129,90 +133,9 @@ pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
     metric_ctx: &mut OtlpMetricCtx,
 ) -> Result<MetricsConversion> {
-    let mut table_writer = MultiTableData::default();
-    let mut semantic_index = SemanticIndex::default();
-    let mut outcome = MetricsIngestOutcome::default();
-    let mut resource_info = ResourceInfoData::default();
-
-    for resource in &request.resource_metrics {
-        if metric_ctx.resource_info
-            && !metric_ctx.is_legacy
-            && let Some(r) = resource.resource.as_ref()
-        {
-            resource_info.observe(&r.attributes, resource);
-        }
-
-        let resource_attrs = resource.resource.as_ref().map(|r| {
-            let mut attrs = r.attributes.clone();
-            process_resource_attrs(&mut attrs, metric_ctx);
-            attrs
-        });
-
-        for scope in &resource.scope_metrics {
-            let scope_attrs = process_scope_attrs(scope, metric_ctx);
-
-            for metric in &scope.metrics {
-                if metric.data.is_none() {
-                    continue;
-                }
-                if let Some(t) = metric.data.as_ref().map(from_metric_type) {
-                    metric_ctx.set_metric_type(t);
-                }
-
-                encode_metrics(
-                    &mut table_writer,
-                    metric,
-                    resource_attrs.as_ref(),
-                    scope_attrs.as_ref(),
-                    metric_ctx,
-                    &mut semantic_index,
-                    &mut outcome,
-                )?;
-            }
-        }
-    }
-
-    let (requests, rows) = table_writer.into_row_insert_requests();
-
-    validate_sample_kinds(&requests)?;
-
-    // The metric and the descriptor would fight over the same table across
-    // two engines. The user's metric wins.
-    let resource_info = if !metric_ctx.resource_info {
-        None
-    } else if requests
-        .inserts
-        .iter()
-        .any(|r| r.table_name == OTEL_RESOURCE_INFO_TABLE_NAME)
-    {
-        warn!(
-            "Skipping OTLP resource descriptor synthesis: the request writes \
-             a metric named `{OTEL_RESOURCE_INFO_TABLE_NAME}`"
-        );
-        None
-    } else {
-        resource_info.into_row_insert_requests()?
-    };
-    if resource_info.is_some() {
-        semantic_index.record_scalar(
-            OTEL_RESOURCE_INFO_TABLE_NAME,
-            SEMANTIC_METRIC_TYPE,
-            crate::semantic::METRIC_TYPE_INFO,
-        );
-        semantic_index.record_scalar(
-            OTEL_RESOURCE_INFO_TABLE_NAME,
-            SEMANTIC_METRIC_METADATA_QUALITY,
-            METADATA_QUALITY_DECLARED,
-        );
-    }
-
-    Ok(MetricsConversion {
-        requests,
-        rows,
-        semantic_index,
-        outcome,
-        resource_info,
-    })
+    let prepared = prepare_metrics(request, metric_ctx)?;
+    let rejections = vec![None; prepared.requests.len()];
+    prepared.finish(rejections, &std::collections::HashMap::new())
 }
 
 fn validate_sample_kinds(requests: &RowInsertRequests) -> Result<()> {
@@ -302,9 +225,8 @@ fn record_metric_semantics(
     index: &mut SemanticIndex,
     metric: &Metric,
     name: &str,
-    metric_ctx: &OtlpMetricCtx,
+    emitted: &[(String, &str)],
 ) {
-    let emitted = emitted_semantic_tables(&metric_ctx.metric_type, metric_ctx.is_legacy, name);
     if emitted.is_empty() {
         return;
     }
@@ -314,7 +236,7 @@ fn record_metric_semantics(
     // `original_name` is meaningful only when translation renamed the metric.
     let original_name = (name != metric.name.as_str()).then_some(metric.name.as_str());
 
-    for (table, metric_type) in &emitted {
+    for (table, metric_type) in emitted {
         index.record_scalar(table, SEMANTIC_METRIC_TYPE, metric_type);
         index.record_scalar(
             table,
@@ -464,7 +386,6 @@ fn encode_metrics(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
-    semantic_index: &mut SemanticIndex,
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<()> {
     let name = if metric_ctx.is_legacy {
@@ -477,7 +398,7 @@ fn encode_metrics(
         )
     };
 
-    let emitted = if let Some(data) = &metric.data {
+    if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
                 encode_gauge(
@@ -537,11 +458,6 @@ fn encode_metrics(
     } else {
         false
     };
-
-    if emitted {
-        // Stamp semantic metadata only after at least one row was accepted.
-        record_metric_semantics(semantic_index, metric, &name, metric_ctx);
-    }
 
     Ok(())
 }
@@ -632,15 +548,18 @@ fn encode_exponential_histogram(
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<bool> {
-    if let Err(rejection) = exponential_histogram_gate(histogram) {
-        reject_data_points(outcome, histogram.data_points.len(), || {
-            rejection.message(name)
-        })?;
-        OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS
-            .with_label_values(&[rejection.reason_label()])
-            .inc_by(histogram.data_points.len() as u64);
-        return Ok(false);
-    }
+    let temporality = match exponential_histogram_gate(histogram) {
+        Ok(temporality) => temporality,
+        Err(rejection) => {
+            reject_data_points(outcome, histogram.data_points.len(), || {
+                rejection.message(name)
+            })?;
+            OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS
+                .with_label_values(&[rejection.reason_label()])
+                .inc_by(histogram.data_points.len() as u64);
+            return Ok(false);
+        }
+    };
 
     let column_schema = native_histogram_column_schema().map_err(|error| {
         error::InternalSnafu {
@@ -650,7 +569,7 @@ fn encode_exponential_histogram(
     })?;
     let mut emitted = false;
     for (index, data_point) in histogram.data_points.iter().enumerate() {
-        let (value, timestamp_nanos) = match exponential_histogram_value(data_point) {
+        let (value, timestamp_nanos) = match exponential_histogram_value(data_point, temporality) {
             Ok(value) => value,
             Err(reason) => {
                 reject_data_points(outcome, 1, || {
@@ -678,6 +597,11 @@ fn encode_exponential_histogram(
             timestamp_nanos,
             metric_ctx,
         )?;
+        write_temporality_tag(
+            table,
+            &mut row,
+            temporality == AggregationTemporality::Delta,
+        )?;
         row_writer::write_by_schema(
             table,
             std::iter::once((column_schema.clone(), Some(value))),
@@ -691,48 +615,42 @@ fn encode_exponential_histogram(
     Ok(emitted)
 }
 
+#[derive(Debug)]
 pub(crate) enum ExponentialHistogramRejection {
-    DeltaTemporality,
     UnspecifiedTemporality,
 }
 
 impl ExponentialHistogramRejection {
     fn reason_label(&self) -> &'static str {
         match self {
-            Self::DeltaTemporality => "delta_temporality",
             Self::UnspecifiedTemporality => "unspecified_temporality",
         }
     }
 
     fn message(&self, name: &str) -> String {
         match self {
-            Self::DeltaTemporality => format!(
-                "metric `{name}` uses delta OTLP exponential histograms; only cumulative temporality is supported"
-            ),
             Self::UnspecifiedTemporality => format!(
-                "metric `{name}` has unspecified OTLP exponential histogram temporality; cumulative temporality is required"
+                "metric `{name}` has unspecified OTLP exponential histogram temporality; delta or cumulative temporality is required"
             ),
         }
     }
 }
 
-/// Whole-metric acceptance, decided once for the encoder and for the resource
-/// descriptor, which must not describe a resource whose data was rejected.
-/// Individual points can still fail [`exponential_histogram_value`].
-/// Raw-delta storage currently supports sums and explicit histograms; exponential
-/// histograms still require cumulative input. Delta-to-cumulative conversion is out of scope.
+/// Validate temporality before processing points; delta values remain raw intervals.
 pub(crate) fn exponential_histogram_gate(
     histogram: &ExponentialHistogram,
-) -> std::result::Result<(), ExponentialHistogramRejection> {
+) -> std::result::Result<AggregationTemporality, ExponentialHistogramRejection> {
     match AggregationTemporality::try_from(histogram.aggregation_temporality) {
-        Ok(AggregationTemporality::Cumulative) => Ok(()),
-        Ok(AggregationTemporality::Delta) => Err(ExponentialHistogramRejection::DeltaTemporality),
+        Ok(temporality @ (AggregationTemporality::Cumulative | AggregationTemporality::Delta)) => {
+            Ok(temporality)
+        }
         _ => Err(ExponentialHistogramRejection::UnspecifiedTemporality),
     }
 }
 
 pub(crate) fn exponential_histogram_value(
     data_point: &ExponentialHistogramDataPoint,
+    temporality: AggregationTemporality,
 ) -> std::result::Result<(ValueData, i64), String> {
     if data_point.start_time_unix_nano > data_point.time_unix_nano {
         return Err(format!(
@@ -747,13 +665,18 @@ pub(crate) fn exponential_histogram_value(
     let start_timestamp =
         timestamp_millis(data_point.start_time_unix_nano, "start_time_unix_nano")?;
 
+    let reset_hint = if temporality == AggregationTemporality::Delta {
+        ResetHint::Gauge
+    } else {
+        ResetHint::Unspecified
+    } as i32;
     let no_recorded_value = data_point.flags & DataPointFlags::NoRecordedValueMask as u32 != 0;
     let histogram = if no_recorded_value {
         PromHistogram {
             sum: f64::from_bits(PROMETHEUS_STALE_NAN_BITS),
             schema: 0,
             zero_threshold: 0.0,
-            reset_hint: ResetHint::Unspecified as i32,
+            reset_hint,
             timestamp,
             start_timestamp,
             count: Some(PromCount::CountInt(0)),
@@ -817,7 +740,7 @@ pub(crate) fn exponential_histogram_value(
             negative_deltas,
             positive_spans,
             positive_deltas,
-            reset_hint: ResetHint::Unspecified as i32,
+            reset_hint,
             timestamp,
             start_timestamp,
             count: Some(PromCount::CountInt(data_point.count)),
@@ -1675,6 +1598,47 @@ mod tests {
     }
 
     #[test]
+    fn test_descriptors_exclude_points_rejected_by_destination_preflight() {
+        let mut request = gauge_request(vec![keyvalue("service.name", "api")], "accepted");
+        let mut rejected = request.resource_metrics[0].clone();
+        let metric = &mut rejected.scope_metrics[0].metrics[0];
+        metric.name = "rejected".into();
+        let Some(metric::Data::Gauge(gauge)) = metric.data.as_mut() else {
+            unreachable!()
+        };
+        gauge.data_points[0].time_unix_nano =
+            2 * common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS as u64;
+        request.resource_metrics.push(rejected);
+        let prepared = prepare_metrics(request, &mut descriptor_ctx()).unwrap();
+        let conversion = prepared
+            .finish(
+                vec![None, Some("incompatible schema".into())],
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                conversion.outcome.accepted_data_points,
+                conversion.outcome.rejected_data_points
+            ),
+            (1, 1)
+        );
+        assert_eq!(conversion.input_names, vec!["accepted"]);
+        let descriptors = conversion.resource_info.unwrap();
+        let rows = descriptors.inserts[0].rows.as_ref().unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        let timestamp = rows
+            .schema
+            .iter()
+            .position(|c| c.column_name == greptime_timestamp())
+            .unwrap();
+        assert_eq!(
+            rows.rows[0].values[timestamp].value_data,
+            Some(ValueData::TimestampMillisecondValue(1))
+        );
+    }
+
+    #[test]
     fn test_conversion_skips_descriptor_for_legacy_mode() {
         set_default_prefix(None).unwrap();
         let request = gauge_request(
@@ -2134,7 +2098,12 @@ mod tests {
             ..Default::default()
         };
         let mut index = SemanticIndex::default();
-        record_metric_semantics(&mut index, metric, name, &ctx);
+        record_metric_semantics(
+            &mut index,
+            metric,
+            name,
+            &emitted_semantic_tables(&ctx.metric_type, ctx.is_legacy, name),
+        );
         index
     }
 
@@ -2471,7 +2440,8 @@ mod tests {
             negative: Some(buckets),
             ..Default::default()
         };
-        let (value, _) = exponential_histogram_value(&point).unwrap();
+        let (value, _) =
+            exponential_histogram_value(&point, AggregationTemporality::Cumulative).unwrap();
         assert_eq!(
             native_field(&value, COUNT_I64_FIELD),
             Some(ValueData::I64Value(point.count as i64))
@@ -2505,7 +2475,9 @@ mod tests {
             ZERO_COUNT_I64_FIELD,
         };
 
-        let (value, timestamp_nanos) = exponential_histogram_value(&exponential_point()).unwrap();
+        let (value, timestamp_nanos) =
+            exponential_histogram_value(&exponential_point(), AggregationTemporality::Cumulative)
+                .unwrap();
 
         assert_eq!(timestamp_nanos, 2_000_000);
         assert_eq!(
@@ -2559,7 +2531,8 @@ mod tests {
             zero_threshold: f64::NAN,
             ..Default::default()
         };
-        let (value, _) = exponential_histogram_value(&point).unwrap();
+        let (value, _) =
+            exponential_histogram_value(&point, AggregationTemporality::Cumulative).unwrap();
 
         assert_eq!(
             native_field(&value, SCHEMA_FIELD),
@@ -2592,7 +2565,8 @@ mod tests {
             sum: Some(f64::from_bits(PROMETHEUS_STALE_NAN_BITS)),
             ..Default::default()
         };
-        let (value, _) = exponential_histogram_value(&point).unwrap();
+        let (value, _) =
+            exponential_histogram_value(&point, AggregationTemporality::Cumulative).unwrap();
         let Some(ValueData::F64Value(sum)) = native_field(&value, SUM_FIELD) else {
             panic!("expected histogram sum");
         };
@@ -2636,7 +2610,8 @@ mod tests {
         cases.push((point, "shifted bucket index overflows i32"));
 
         for (point, expected) in cases {
-            let error = exponential_histogram_value(&point).unwrap_err();
+            let error = exponential_histogram_value(&point, AggregationTemporality::Cumulative)
+                .unwrap_err();
             assert!(
                 error.contains(expected),
                 "expected {expected:?}, got {error}"
@@ -2803,9 +2778,9 @@ mod tests {
             (
                 AggregationTemporality::Delta,
                 vec![exponential_point(); 2],
-                "delta_temporality",
-                0,
+                "invalid_data_point",
                 2,
+                0,
             ),
             (
                 AggregationTemporality::Unspecified,
@@ -2886,20 +2861,17 @@ mod tests {
             ..
         } = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
 
-        assert_eq!(outcome.accepted_data_points, 2);
-        assert_eq!(outcome.rejected_data_points, 1);
-        assert!(
-            outcome
-                .error_message
-                .as_deref()
-                .unwrap()
-                .contains("only cumulative temporality is supported")
-        );
-        assert_eq!(requests.inserts.len(), 2);
+        assert_eq!(outcome.accepted_data_points, 3);
+        assert_eq!(outcome.rejected_data_points, 0);
+        assert!(outcome.error_message.is_none());
+        assert_eq!(requests.inserts.len(), 3);
         let semantics = decode(&semantic_index);
         assert!(semantics.contains_key("temperature"));
         assert!(semantics.contains_key("latency"));
-        assert!(!semantics.contains_key("delta_latency"));
+        assert_eq!(
+            semantics["delta_latency"][SEMANTIC_METRIC_TEMPORALITY],
+            "delta"
+        );
 
         let empty = metrics_request(vec![exponential_metric(
             "empty",
@@ -2934,12 +2906,10 @@ mod tests {
         ]);
         let mut ctx = OtlpMetricCtx::default();
 
-        let error = to_grpc_insert_requests(request, &mut ctx).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("cannot mix native histogram and float sample fields")
-        );
+        let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
+        assert_eq!(conversion.outcome.accepted_data_points, 0);
+        assert_eq!(conversion.outcome.rejected_data_points, 2);
+        assert!(conversion.requests.inserts.is_empty());
     }
 
     #[test]
@@ -2954,12 +2924,10 @@ mod tests {
         ]);
         let mut ctx = OtlpMetricCtx::default();
 
-        let error = to_grpc_insert_requests(request, &mut ctx).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("cannot mix native histogram and float sample fields")
-        );
+        let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
+        assert_eq!(conversion.outcome.accepted_data_points, 0);
+        assert_eq!(conversion.outcome.rejected_data_points, 2);
+        assert!(conversion.requests.inserts.is_empty());
     }
 
     #[test]
@@ -3008,30 +2976,25 @@ mod tests {
             flags: DataPointFlags::NoRecordedValueMask as u32,
             ..Default::default()
         };
-        for temporality in [
-            AggregationTemporality::Delta,
+        let request = metrics_request(vec![exponential_metric(
+            "latency",
+            vec![stale],
             AggregationTemporality::Unspecified,
-        ] {
-            let request = metrics_request(vec![exponential_metric(
-                "latency",
-                vec![stale.clone()],
-                temporality,
-            )]);
-            let mut ctx = OtlpMetricCtx::default();
-            let MetricsConversion {
-                requests,
-                rows,
-                semantic_index,
-                outcome,
-                ..
-            } = to_grpc_insert_requests(request, &mut ctx).unwrap();
+        )]);
+        let mut ctx = OtlpMetricCtx::default();
+        let MetricsConversion {
+            requests,
+            rows,
+            semantic_index,
+            outcome,
+            ..
+        } = to_grpc_insert_requests(request, &mut ctx).unwrap();
 
-            assert_eq!(outcome.accepted_data_points, 0);
-            assert_eq!(outcome.rejected_data_points, 1);
-            assert_eq!(rows, 0);
-            assert!(requests.inserts.is_empty());
-            assert!(semantic_index.is_empty());
-        }
+        assert_eq!(outcome.accepted_data_points, 0);
+        assert_eq!(outcome.rejected_data_points, 1);
+        assert_eq!(rows, 0);
+        assert!(requests.inserts.is_empty());
+        assert!(semantic_index.is_empty());
     }
 
     #[test]
@@ -3102,7 +3065,7 @@ mod tests {
         let request = metrics_request(vec![exponential_metric(
             "x".repeat(1_000),
             vec![ExponentialHistogramDataPoint::default()],
-            AggregationTemporality::Delta,
+            AggregationTemporality::Unspecified,
         )]);
         let outcome = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default())
             .unwrap()

@@ -570,6 +570,26 @@ impl MetricEngine {
     }
 }
 
+/// Shared definitions must agree before CREATE/ALTER mutates either region.
+fn validate_shared_column(
+    region_id: store_api::storage::RegionId,
+    existing: &store_api::metadata::ColumnMetadata,
+    proposed: &store_api::metadata::ColumnMetadata,
+) -> crate::error::Result<()> {
+    snafu::ensure!(
+        existing.column_schema.data_type == proposed.column_schema.data_type
+            && existing.semantic_type == proposed.semantic_type,
+        crate::error::InvalidRequestSnafu {
+            region_id,
+            reason: format!(
+                "incompatible shared physical column `{}`",
+                proposed.column_schema.name
+            ),
+        }
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 impl MetricEngine {
     pub async fn scan_to_stream(

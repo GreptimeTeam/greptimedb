@@ -85,6 +85,10 @@ impl WindowedSortPhysicalRule {
                     let Some(scanner_info) = fetch_partition_range(sort_input.clone())? else {
                         return Ok(Transformed::no(plan));
                     };
+                    // File-engine scans do not expose ranges for windowed sorting.
+                    if scanner_info.partition_ranges.is_empty() {
+                        return Ok(Transformed::no(plan));
+                    }
                     let input_schema = sort_input.schema();
 
                     let first_sort_expr = sort_exec.expr().first();
@@ -349,6 +353,21 @@ mod test {
     use store_api::storage::{RegionId, ScanRequest};
 
     use super::*;
+
+    #[test]
+    fn test_keep_ordinary_sort_when_scan_has_no_partition_ranges() {
+        let ordering = datafusion_physical_expr::LexOrdering::new([
+            datafusion_physical_expr::PhysicalSortExpr {
+                expr: Arc::new(PhysicalColumn::new("ts", 1)),
+                options: Default::default(),
+            },
+        ])
+        .unwrap();
+        let sort = Arc::new(SortExec::new(ordering, new_region_scan()));
+        let optimized =
+            WindowedSortPhysicalRule::do_optimize(sort, &ConfigOptions::default()).unwrap();
+        assert!(optimized.is::<SortExec>());
+    }
 
     #[test]
     fn test_is_time_index_expr_tracks_aliases_through_projection() {

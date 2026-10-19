@@ -14,6 +14,9 @@
 
 #[cfg(feature = "enterprise")]
 mod flow_write;
+mod otlp;
+
+pub use otlp::MetricInsertPreflight;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -601,22 +604,30 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        // check and create physical table
-        let physical_table_ref = self
-            .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
-            .await?;
-
-        // check and create logical tables; `create_or_alter_tables_on_demand`
-        // aligns each request's time index unit with the unit of the table it
-        // targets, inside its existing table lookups: existing tables keep
-        // their own unit (which matches the physical table they are bound
-        // to), and new tables use the selected physical table's unit (from
-        // `physical_table_ref`). Ingestion endpoints encode timestamps in a
-        // fixed unit (prometheus remote write always uses millisecond; OTLP
-        // keeps nanosecond precision on the metric engine path), and the
-        // metric engine requires each logical table's requests to match its
-        // time index unit. Narrowing conversions truncate the sub-unit part
-        // (floor), following `Timestamp::convert_to`.
+        // The selected backing table is needed only by new logical targets.
+        let mut has_new_tables = false;
+        for request in &requests.inserts {
+            if self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &request.table_name,
+                )
+                .await?
+                .is_none()
+            {
+                has_new_tables = true;
+                break;
+            }
+        }
+        let new_table_unit = if has_new_tables {
+            let physical = self
+                .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
+                .await?;
+            table_time_index_unit(&physical)
+        } else {
+            None
+        };
         let CreateAlterTableResult {
             instant_table_ids,
             table_infos,
@@ -628,7 +639,7 @@ impl Inserter {
                 statement_executor,
                 true,
                 true,
-                table_time_index_unit(&physical_table_ref),
+                new_table_unit,
             )
             .await?;
         let name_to_info = table_infos
@@ -1123,7 +1134,7 @@ impl Inserter {
                 // Metric path: an existing destination table keeps its own
                 // time index unit (it may be bound to another physical
                 // table than the one selected by this request).
-                if align_time_index_unit.is_some()
+                if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
                     && let Some(rows) = req.rows.as_mut()
                     && let Some(target_unit) = table_time_index_unit(&table)
                 {
@@ -1167,7 +1178,7 @@ impl Inserter {
                     // Metric path: an existing destination table keeps its
                     // own time index unit (it may be bound to another
                     // physical table than the one selected by this request).
-                    if align_time_index_unit.is_some()
+                    if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
                         && let Some(rows) = req.rows.as_mut()
                         && let Some(target_unit) = table_time_index_unit(&table)
                     {
@@ -1612,12 +1623,6 @@ impl Inserter {
             .iter()
             .filter(|col| col.semantic_type == SemanticType::Field as i32)
             .count();
-        let column_exprs = ColumnExpr::from_column_schemas(request_schema);
-        let add_columns = expr_helper::extract_add_columns_expr(&table.schema(), column_exprs)?;
-        let Some(mut add_columns) = add_columns else {
-            return Ok(None);
-        };
-
         if is_single_value {
             let request_is_native_histogram = request_is_native_histogram(request_schema);
             let table_is_native_histogram = table_is_native_histogram(table);
@@ -1630,6 +1635,12 @@ impl Inserter {
                 }
             );
         }
+
+        let column_exprs = ColumnExpr::from_column_schemas(request_schema);
+        let add_columns = expr_helper::extract_add_columns_expr(&table.schema(), column_exprs)?;
+        let Some(mut add_columns) = add_columns else {
+            return Ok(None);
+        };
 
         // If accommodate_existing_schema is true, update request schema for Timestamp/Field columns
         if accommodate_existing_schema {
