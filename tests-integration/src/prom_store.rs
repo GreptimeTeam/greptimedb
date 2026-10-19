@@ -858,15 +858,15 @@ mod tests {
             assert_eq!(*expected, names, "{matchers:?}");
         }
 
-        // Logical metric tables also merge into a single query result.
+        // Discovery includes logical metrics but excludes their internal physical table.
         let mut query = remote_query("metric1");
-        query.matchers = vec![name(MatcherType::Re, "metric1|metric3")];
+        query.matchers = vec![name(MatcherType::Nre, "invalid_metric")];
         let response = post_remote_read(client, vec![query]).await;
         assert_eq!(response.status(), 200, "{}", response.text().await);
         let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
         let response = ReadResponse::decode(&body[..]).unwrap();
         assert_eq!(response.results.len(), 1);
-        assert_eq!(response.results[0].timeseries.len(), 2);
+        assert_eq!(response.results[0].timeseries.len(), 3);
 
         // An empty EQ must not bypass matcher validation.
         let mut query = remote_query("");

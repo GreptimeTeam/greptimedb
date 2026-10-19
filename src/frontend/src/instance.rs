@@ -3274,12 +3274,15 @@ mod tests {
             fn check_permission_with_table_targets(
                 &self,
                 _: UserInfoRef,
-                _: PermissionReq,
+                req: PermissionReq,
                 targets: PermissionTableTargets,
             ) -> auth::error::Result<PermissionResp> {
+                assert!(matches!(req, PermissionReq::Action(auth::PROM_STORE_READ)));
                 self.0.lock().unwrap().push(targets.clone());
                 Ok(match targets {
-                    PermissionTableTargets::Resolved(tables) if tables.is_empty() => {
+                    PermissionTableTargets::Resolved(tables)
+                        if tables.iter().all(|table| table.table == "target") =>
+                    {
                         PermissionResp::Allow
                     }
                     _ => PermissionResp::Reject,
@@ -3294,9 +3297,26 @@ mod tests {
                 disallow_cross_catalog_query: true,
             },
         );
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![0])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
         let instance = test_instance_with_plugins(
-            test_table(1024, "source")?,
-            test_table(1025, "target")?,
+            MemTable::table("source", batch.clone()),
+            MemTable::table("target", batch),
             plugins,
         )
         .await?;
@@ -3306,28 +3326,60 @@ mod tests {
             r#type: op as i32,
         };
         for matchers in [vec![name(PromMatcherType::Re, ".*")], vec![]] {
+            let response = PromStoreProtocolHandler::read(
+                &instance,
+                ReadRequest {
+                    queries: vec![RemoteQuery {
+                        matchers,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                test_query_ctx(1),
+            )
+            .await
+            .unwrap();
+            let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+            let response = ReadResponse::decode(body.as_slice()).unwrap();
+            assert_eq!(response.results[0].timeseries.len(), 1);
+            assert!(
+                response.results[0].timeseries[0]
+                    .labels
+                    .iter()
+                    .any(|label| label.name == servers::prom_store::METRIC_NAME_LABEL
+                        && label.value == "target")
+            );
+        }
+        // Existing inaccessible names and nonexistent names have identical responses.
+        for metric in ["source", "missing"] {
+            let request = |op| ReadRequest {
+                queries: vec![RemoteQuery {
+                    matchers: vec![name(op, metric)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let response = PromStoreProtocolHandler::read(
+                &instance,
+                request(PromMatcherType::Re),
+                test_query_ctx(1),
+            )
+            .await
+            .unwrap();
+            let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+            let response = ReadResponse::decode(body.as_slice()).unwrap();
+            assert_eq!(response.results.len(), 1);
+            assert!(response.results[0].timeseries.is_empty());
             assert_permission_denied(
                 PromStoreProtocolHandler::read(
                     &instance,
-                    ReadRequest {
-                        queries: vec![RemoteQuery {
-                            matchers,
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    },
+                    request(PromMatcherType::Eq),
                     test_query_ctx(1),
                 )
                 .await,
             );
-            assert_eq!(
-                checker.0.lock().unwrap().pop().unwrap(),
-                PermissionTableTargets::resolved(vec![
-                    PermissionTableTarget::new("greptime", "public", "source"),
-                    PermissionTableTarget::new("greptime", "public", "target"),
-                ])
-            );
         }
+        checker.0.lock().unwrap().clear();
         // Empty matches still invoke the operation/table permission check.
         PromStoreProtocolHandler::read(
             &instance,

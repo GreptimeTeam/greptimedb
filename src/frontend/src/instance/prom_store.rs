@@ -29,7 +29,8 @@ use auth::{
 };
 use client::OutputData;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
@@ -493,12 +494,17 @@ impl Instance {
             names.retain(|name| !name.is_empty() && matchers.matches(name));
             names.sort_unstable();
             names.dedup();
-            query_targets.push(
-                names
-                    .into_iter()
-                    .map(|name| PermissionTableTarget::new(&target.catalog, &target.schema, name))
-                    .collect(),
-            );
+            let mut targets = Vec::with_capacity(names.len());
+            for name in names {
+                let target = PermissionTableTarget::new(&target.catalog, &target.schema, name);
+                if matchers.exact_name().is_none()
+                    && !self.is_visible_remote_read_target(&target, ctx).await?
+                {
+                    continue;
+                }
+                targets.push(target);
+            }
+            query_targets.push(targets);
         }
         Ok(query_targets)
     }
@@ -554,6 +560,37 @@ impl Instance {
         }
         Ok(results)
     }
+
+    /// Discovery hides inaccessible and internal physical tables. Explicit EQ targets
+    /// bypass this filter and retain the existing query permission checks.
+    async fn is_visible_remote_read_target(
+        &self,
+        target: &PermissionTableTarget,
+        ctx: &QueryContextRef,
+    ) -> ServerResult<bool> {
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        if checker.as_ref().uses_table_targets() {
+            match checker
+                .as_ref()
+                .check_permission_with_table_targets(
+                    ctx.current_user(),
+                    PermissionReq::Action(PROM_STORE_READ),
+                    PermissionTableTargets::resolved(vec![target.clone()]),
+                )
+                .context(AuthSnafu)
+            {
+                Ok(_) => {}
+                Err(error) if error.status_code() == StatusCode::PermissionDenied => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(!self
+            .is_physical_query_permission_target(target, ctx)
+            .await?)
+    }
+
     #[tracing::instrument(skip_all)]
     async fn handle_remote_query(
         &self,
