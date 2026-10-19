@@ -25,47 +25,13 @@
 //!   prefix still has to be followed by a final chunk even when that chunk holds no values, so a
 //!   consumer can tell "nothing more here" from "no more input".
 
-use datafusion::error::{DataFusionError, Result};
-use datatypes::series::samples::Series;
-use datatypes::series::time::TimeAxis;
+//!
+//! The chunk type itself is [`crate::evaluated::EvaluatedChunk`]: one chunk protocol serves both the
+//! evaluator that produces chunks and the native nodes that consume them. Defining a second one
+//! here would let the two drift apart, and a chunk produced by the evaluator could not be handed to
+//! a node without translation.
 
-/// One slice of one evaluated series.
-///
-/// The series' [`TimeAxis::Grid`] covers the positions this chunk has finished evaluating. Those
-/// positions are absolute on the grid, and they are contiguous with the previous chunk of the same
-/// series.
-#[derive(Clone, Debug)]
-pub struct EvaluatedChunk {
-    /// The evaluated values, addressed on their absolute grid positions.
-    pub series: Series,
-    /// Whether this is the final chunk of this series.
-    pub is_last: bool,
-}
-
-impl EvaluatedChunk {
-    /// Wraps `series`, checking that it is addressed on a grid.
-    pub fn try_new(series: Series, is_last: bool) -> Result<Self> {
-        if !matches!(series.time, TimeAxis::Grid(_)) {
-            return Err(DataFusionError::Execution(
-                "an evaluated chunk must be addressed on a grid".to_string(),
-            ));
-        }
-        Ok(Self { series, is_last })
-    }
-
-    /// The absolute grid range this chunk covers.
-    ///
-    /// An empty range is meaningful: it reports that the chunk closed a prefix of the grid without
-    /// producing new values, which a consumer needs in order to advance.
-    pub fn range(&self) -> &datatypes::series::time::GridRange {
-        match &self.series.time {
-            TimeAxis::Grid(range) => range,
-            // `try_new` rejects anything else, and `series` is public, so a chunk built by struct
-            // literal is checked here rather than trusted.
-            _ => unreachable!("an evaluated chunk is always addressed on a grid"),
-        }
-    }
-}
+pub use crate::evaluated::EvaluatedChunk;
 
 #[cfg(test)]
 mod tests {
