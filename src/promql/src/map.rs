@@ -20,12 +20,16 @@
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
+
 use datafusion::error::{DataFusionError, Result};
-use datatypes::arrow::array::Float64Array;
-use datatypes::series::samples::{DenseSamplesRef, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{
+    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::TimeAxis;
 
 use crate::functions::Round;
+use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS};
 
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug)]
@@ -42,66 +46,107 @@ pub enum MathOp {
     Round { nearest: f64 },
 }
 
-/// Applies float math to every field of one evaluated series, preserving its labels.
+/// Applies float math to every field of one evaluated series.
 ///
-/// The explicit schema and actual grid range are preserved. Fields are processed in their own
-/// chunk boundaries, without expanding to the full grid or densifying chunked samples. Missing
-/// samples stay missing; ordinary NaNs remain values. An empty or all-missing input is valid.
+/// This follows Prometheus `simpleFloatFunc`: the metadata labels (`__name__`, `__type__`,
+/// `__unit__`) are dropped and only float samples are mapped. Histogram samples are skipped
+/// rather than rejected, because a field's sample types are known only at run time
+/// (`abs(rate(native_histogram[5m]))` holds histograms only after evaluation); the result is
+/// `None` when no float value survives.
+///
+/// The explicit schema and actual grid range are preserved, except that trailing and leading
+/// rows without any value are trimmed when histograms leave holes. Fields are processed in their
+/// own chunk boundaries, without expanding to the full grid or densifying chunked samples.
+/// Missing samples stay missing; ordinary NaNs remain values.
+///
+/// Dropping the reserved labels means two input series that differ only in them now share a
+/// label set, which Prometheus rejects for one vector. Callers must run
+/// [`merge_same_labelset`](crate::grid_series::merge_same_labelset) on the results, as the
+/// planning/output layer does for other label-rewriting kernels.
 ///
 /// Eval must resolve raw staleness before calling this kernel. Evaluated samples use validity,
 /// not NaN payloads, for missingness: arithmetic can produce the reserved stale bit pattern too.
-/// Raw time axes and histogram/mixed segments are rejected. Unsupported query types must be
-/// admitted to the ordinary path before execution; this function neither falls back nor returns
-/// partial results.
-pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Series> {
-    if !matches!(series.time, TimeAxis::Grid(_)) {
+/// Raw time axes are rejected.
+pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Option<Series>> {
+    let TimeAxis::Grid(range) = &series.time else {
         return Err(DataFusionError::Execution(
             "Map math requires an evaluated grid time axis".into(),
         ));
-    }
-    let fields = series
-        .fields
-        .iter()
-        .map(|samples| map_samples(samples, op))
-        .collect::<Result<Vec<_>>>()?;
-    let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
-    // Ordinary math calls preserve the metric name (unlike binary arithmetic): the HTTP
-    // adapter's collect_metric_names follows Call arguments. Keep that compatibility here.
-    Series::try_new(schema, series.metric.clone(), series.time.clone(), fields)
-        .map_err(series_error)
-}
-
-impl MathOp {
-    fn apply(self, floats: &Float64Array) -> Float64Array {
-        match self {
-            Self::Abs => floats.unary(f64::abs),
-            Self::Ceil => floats.unary(f64::ceil),
-            Self::Floor => floats.unary(f64::floor),
-            Self::Sqrt => floats.unary(f64::sqrt),
-            Self::Round { nearest } => {
-                floats.unary(|sample| Round::round_to_nearest(sample, nearest))
-            }
-        }
-    }
-}
-
-fn map_samples(samples: &Samples, op: MathOp) -> Result<Samples> {
-    let chunks = samples
-        .segments()
-        .iter()
-        .map(|segment| map_float_segment(segment, op))
-        .collect::<Result<Vec<_>>>()?;
-    Samples::try_from_chunks(chunks).map_err(series_error)
-}
-
-fn map_float_segment(segment: &Samples, op: MathOp) -> Result<Samples> {
-    let Some(DenseSamplesRef::Float(floats)) = segment.dense() else {
-        return Err(DataFusionError::NotImplemented(
-            "Map math supports only float samples; histogram/mixed samples are not supported"
-                .into(),
-        ));
     };
-    Ok(Samples::from_float(op.apply(floats)))
+    let mut metric = series.metric.clone();
+    metric.remove_all(&METADATA_LABELS);
+
+    let all_floats = series.fields.iter().all(|samples| {
+        samples
+            .segments()
+            .iter()
+            .all(|segment| matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
+    });
+    if all_floats {
+        // Dense floats can still be entirely null. Prometheus emits no series then, and the
+        // per-point path below reports the same input as `None`.
+        if !series
+            .fields
+            .iter()
+            .any(|samples| samples.segments().iter().any(has_float_value))
+        {
+            return Ok(None);
+        }
+        let fields = series
+            .fields
+            .iter()
+            .map(|samples| {
+                let segments = samples
+                    .segments()
+                    .iter()
+                    .map(|segment| {
+                        let Some(DenseSamplesRef::Float(floats)) = segment.dense() else {
+                            unreachable!("checked above");
+                        };
+                        Samples::from_float(floats.unary(|value| apply(op, value)))
+                    })
+                    .collect();
+                Samples::try_from_chunks(segments).map_err(series_error)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
+        return Series::try_new(schema, metric, series.time.clone(), fields)
+            .map(Some)
+            .map_err(series_error);
+    }
+
+    // Histogram samples leave holes, which may move the ends of the series.
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
+    let mut values = vec![None; series.fields.len()];
+    for row in 0..range.len() {
+        for (value, samples) in values.iter_mut().zip(series.fields.iter()) {
+            *value = match samples.sample(row) {
+                SampleRef::Float(sample) => Some(apply(op, sample)),
+                SampleRef::Missing | SampleRef::Histogram(_) => None,
+            };
+        }
+        builder.push(range.start() + row, &values)?;
+    }
+    builder.finish(metric)
+}
+
+/// The float math `op` applies to one value.
+fn apply(op: MathOp, value: f64) -> f64 {
+    match op {
+        MathOp::Abs => value.abs(),
+        MathOp::Ceil => value.ceil(),
+        MathOp::Floor => value.floor(),
+        MathOp::Sqrt => value.sqrt(),
+        MathOp::Round { nearest } => Round::round_to_nearest(value, nearest),
+    }
+}
+
+/// Whether `segment` holds a float value; every segment is dense here.
+fn has_float_value(segment: &Samples) -> bool {
+    let Some(DenseSamplesRef::Float(floats)) = segment.dense() else {
+        return false;
+    };
+    floats.iter().any(|value| value.is_some())
 }
 
 fn series_error(error: datatypes::error::Error) -> DataFusionError {

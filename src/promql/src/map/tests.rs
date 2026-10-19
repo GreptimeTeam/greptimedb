@@ -19,7 +19,7 @@ use datafusion::functions::math;
 use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs};
-use datatypes::arrow::array::{AsArray, UInt32Array};
+use datatypes::arrow::array::{AsArray, Float64Array, UInt32Array};
 use datatypes::arrow::buffer::NullBuffer;
 use datatypes::arrow::datatypes::{DataType, Field, Float64Type};
 use datatypes::series::histogram::{
@@ -180,7 +180,7 @@ fn math_preserves_missing_and_uses_ieee_float_semantics() {
         ),
     ];
     for (op, expected) in cases {
-        let output = map_math(&schema, &input, op).unwrap();
+        let output = map_math(&schema, &input, op).unwrap().unwrap();
         let expected = expected
             .into_iter()
             .map(Some)
@@ -191,7 +191,7 @@ fn math_preserves_missing_and_uses_ieee_float_semantics() {
 }
 
 #[test]
-fn short_multifield_slices_keep_absolute_grid_and_labels() {
+fn short_multifield_slices_keep_absolute_grid_and_drop_metadata() {
     let schema = schema(&["left", "right"]);
     let first = floats(&[Some(99.0), Some(-1.2), None, Some(-3.2), Some(99.0)]);
     let second = floats(&[Some(99.0), Some(4.8), Some(-0.0), None, Some(99.0)]);
@@ -205,7 +205,7 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
         .unwrap(),
     ];
     let input = series(&schema, 7, fields);
-    let output = map_math(&schema, &input, MathOp::Floor).unwrap();
+    let output = map_math(&schema, &input, MathOp::Floor).unwrap().unwrap();
     let TimeAxis::Grid(range) = &output.time else {
         panic!("lost grid axis")
     };
@@ -216,9 +216,8 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
     ));
     assert_eq!(output.time.timestamp(0), Some(4500));
     assert_eq!(output.time.timestamp(2), Some(5500));
-    // Ordinary math calls retain the input metric name: collect_metric_names follows Call
-    // arguments, and the Prometheus response adapter emits it. Binary arithmetic differs.
-    assert_eq!(output.metric.name(), Some("requests"));
+    // Prometheus `simpleFloatFunc` drops the metric name, and only the ordinary labels survive.
+    assert_eq!(output.metric.name(), None);
     assert_eq!(output.metric.tags(), input.metric.tags());
     assert_eq!(input.metric.name(), Some("requests"));
     assert_floats(
@@ -250,7 +249,40 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
 }
 
 #[test]
-fn empty_and_all_missing_ranges_are_not_expanded() {
+fn metadata_labels_are_dropped_like_prometheus_simple_float_func() {
+    let schema = schema(&["value"]);
+    let base = series(&schema, 3, vec![floats(&[Some(-3.0), Some(4.0)])]);
+    let metric = MetricName::try_new(
+        Some("requests".into()),
+        vec![
+            Label {
+                name: "__type__".into(),
+                value: "gauge".into(),
+            },
+            Label {
+                name: "__unit__".into(),
+                value: "seconds".into(),
+            },
+            Label {
+                name: "host".into(),
+                value: "a".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let input = Series::try_new(&schema, metric, base.time.clone(), base.fields.clone()).unwrap();
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
+    // `DropReserved` with `DropName`: all three reserved labels go, ordinary labels stay.
+    assert_eq!(output.metric.name(), None);
+    assert_eq!(output.metric.get("__type__"), None);
+    assert_eq!(output.metric.get("__unit__"), None);
+    assert_eq!(output.metric.get("host"), Some("a"));
+    assert_eq!(output.metric.tags().len(), 1);
+    assert_floats(output.fields.get(0).unwrap(), &[Some(3.0), Some(4.0)]);
+}
+
+#[test]
+fn empty_and_all_missing_ranges_return_no_series() {
     let schema = schema(&["value"]);
     // Empty at grid end, one missing point, and a longer all-missing range.
     for (start, len) in [(64, 0), (9, 1), (2, 4)] {
@@ -262,14 +294,16 @@ fn empty_and_all_missing_ranges_are_not_expanded() {
             MathOp::Sqrt,
             MathOp::Round { nearest: 0.0 },
         ] {
-            let output = map_math(&schema, &input, op).unwrap();
-            let TimeAxis::Grid(range) = &output.time else {
-                panic!("lost grid axis")
-            };
-            assert_eq!((range.start(), range.len()), (start, len));
-            assert_floats(output.fields.get(0).unwrap(), &vec![None; len]);
+            // No point survives, so there is no series to return, as for the builder-based
+            // kernels; the input range is neither kept nor expanded.
+            assert!(map_math(&schema, &input, op).unwrap().is_none());
         }
     }
+
+    // NaN is a value: only absent samples make the whole series disappear.
+    let nan = series(&schema, 2, vec![floats(&[Some(f64::NAN)])]);
+    let output = map_math(&schema, &nan, MathOp::Abs).unwrap().unwrap();
+    assert_floats(output.fields.get(0).unwrap(), &[Some(f64::NAN)]);
 }
 
 #[test]
@@ -285,7 +319,7 @@ fn evaluated_missingness_depends_on_validity_not_nan_payloads() {
             Some(NullBuffer::from(vec![false, true, true])),
         ))],
     );
-    let output = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     assert_floats(
         output.fields.get(0).unwrap(),
         &[None, Some(ordinary_nan), Some(1.0)],
@@ -299,12 +333,12 @@ fn evaluated_missingness_depends_on_validity_not_nan_payloads() {
     // must not reinterpret that computed value as a missing sample or reject the evaluated input.
     let negative_nan = f64::from_bits(PROMETHEUS_STALE_NAN_BITS | (1_u64 << 63));
     let input = series(&schema, 1, vec![floats(&[Some(negative_nan)])]);
-    let absolute = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let absolute = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     let SampleRef::Float(computed_nan) = absolute.fields.get(0).unwrap().sample(0) else {
         panic!("lost computed NaN")
     };
     assert_eq!(computed_nan.to_bits(), PROMETHEUS_STALE_NAN_BITS);
-    let rounded = map_math(&schema, &absolute, MathOp::Ceil).unwrap();
+    let rounded = map_math(&schema, &absolute, MathOp::Ceil).unwrap().unwrap();
     assert_floats(rounded.fields.get(0).unwrap(), &[Some(f64::NAN)]);
 }
 
@@ -333,29 +367,58 @@ fn histogram_batch() -> Arc<HistogramBatch> {
 }
 
 #[test]
-fn histogram_and_mixed_fields_are_rejected_without_partial_success() {
+fn histogram_and_mixed_points_are_skipped_instead_of_failing_the_series() {
     let batch = histogram_batch();
     let histogram = Samples::try_from_histogram(UInt32Array::from(vec![0]), batch.clone()).unwrap();
+    let null_histogram =
+        Samples::try_from_histogram(UInt32Array::from(vec![None]), batch.clone()).unwrap();
+    let one_field = schema(&["value"]);
+    // A field holding only histogram positions has no float to map, so the series disappears.
+    for only_histograms in [histogram.clone(), null_histogram] {
+        let input = series(&one_field, 2, vec![only_histograms]);
+        assert!(map_math(&one_field, &input, MathOp::Abs).unwrap().is_none());
+    }
+
+    // Prometheus `simpleFloatFunc` maps float points and silently skips histogram points. The
+    // skipped position becomes missing, which neither moves nor shrinks its neighbours.
+    let chunked = Samples::try_from_chunks(vec![
+        floats(&[Some(-1.0)]),
+        histogram.clone(),
+        floats(&[Some(-9.0)]),
+    ])
+    .unwrap();
     let mixed = Samples::try_from_mixed(
-        Float64Array::from(vec![Some(1.0), None]),
-        HistogramSamples::try_new(UInt32Array::from(vec![None, Some(0)]), batch.clone()).unwrap(),
+        Float64Array::from(vec![Some(-2.0), None, Some(-3.0)]),
+        HistogramSamples::try_new(UInt32Array::from(vec![None, Some(0), None]), batch.clone())
+            .unwrap(),
     )
     .unwrap();
-    let null_histogram = Samples::try_from_histogram(UInt32Array::from(vec![None]), batch).unwrap();
-    let chunks = Samples::try_from_chunks(vec![floats(&[Some(-1.0)]), histogram.clone()]).unwrap();
-    let schema = schema(&["float", "unsupported"]);
-    for unsupported in [histogram, mixed, null_histogram, chunks] {
-        let prefix = floats(&vec![Some(-2.0); unsupported.len()]);
-        let input = series(&schema, 2, vec![prefix, unsupported]);
-        assert!(matches!(
-            map_math(&schema, &input, MathOp::Abs),
-            Err(DataFusionError::NotImplemented(_))
-        ));
-        assert_floats(
-            input.fields.get(0).unwrap(),
-            &vec![Some(-2.0); input.time.len()],
-        );
-    }
+    let two_fields = schema(&["chunked", "mixed"]);
+    let input = series(&two_fields, 4, vec![chunked, mixed]);
+    let output = map_math(&two_fields, &input, MathOp::Abs).unwrap().unwrap();
+    let TimeAxis::Grid(range) = &output.time else {
+        panic!("lost grid axis")
+    };
+    assert_eq!((range.start(), range.len()), (4, 3));
+    assert_floats(output.fields.get(0).unwrap(), &[Some(1.0), None, Some(9.0)]);
+    assert_floats(output.fields.get(1).unwrap(), &[Some(2.0), None, Some(3.0)]);
+
+    // A histogram-only field alongside a float field maps the floats and stays all-missing.
+    let two_fields = schema(&["float", "histogram"]);
+    let input = series(
+        &two_fields,
+        0,
+        vec![
+            floats(&[Some(-1.0), Some(-2.0), Some(-3.0)]),
+            Samples::try_from_histogram(UInt32Array::from(vec![0, 0, 0]), batch).unwrap(),
+        ],
+    );
+    let output = map_math(&two_fields, &input, MathOp::Abs).unwrap().unwrap();
+    assert_floats(
+        output.fields.get(0).unwrap(),
+        &[Some(1.0), Some(2.0), Some(3.0)],
+    );
+    assert_floats(output.fields.get(1).unwrap(), &[None, None, None]);
 }
 
 #[test]
@@ -493,12 +556,12 @@ fn math_matches_existing_udfs_across_float_and_round_boundaries() {
             .map(|nearest| MathOp::Round { nearest }),
         );
     for op in cases {
-        let output = map_math(&schema, &series, op).unwrap();
+        let output = map_math(&schema, &series, op).unwrap().unwrap();
         let expected = ordinary_math(op, input.clone()).iter().collect::<Vec<_>>();
         for field in output.fields.iter() {
             assert_floats(field, &expected);
         }
-        assert_eq!(output.metric.name(), series.metric.name());
+        assert_eq!(output.metric.name(), None);
         assert_eq!(output.metric.tags(), series.metric.tags());
         let TimeAxis::Grid(range) = output.time else {
             panic!("lost grid axis")
