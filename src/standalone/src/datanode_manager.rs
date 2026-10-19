@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::region::{RegionRequest, RegionResponse as RegionResponseV1};
+use api::v1::region::{RegionRequest, RegionResponse as RegionResponseV1, region_request};
 use async_trait::async_trait;
-use client::region::check_response_header;
+use client::region;
 use common_error::ext::BoxedError;
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::{
@@ -84,6 +84,11 @@ impl Datanode for RegionInvoker {
             })
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
+        let request_count = match request.body.as_ref() {
+            Some(region_request::Body::Inserts(requests)) => Some(requests.requests.len()),
+            Some(region_request::Body::Deletes(requests)) => Some(requests.requests.len()),
+            _ => None,
+        };
         let span = request
             .header
             .as_ref()
@@ -96,10 +101,7 @@ impl Datanode for RegionInvoker {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        check_response_header(&response.header)
-            .map_err(BoxedError::new)
-            .context(meta_error::ExternalSnafu)?;
-        Ok(RegionResponse::from_region_response(response))
+        region::decode_region_response(response, request_count).map_err(Into::into)
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {

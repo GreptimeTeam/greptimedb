@@ -29,7 +29,7 @@ use store_api::region_request::{
 };
 use store_api::storage::{RegionId, TableId};
 
-use crate::engine::MetricEngineInner;
+use crate::engine::{MetricEngineInner, PutGroupResult};
 use crate::error::{
     ColumnNotFoundSnafu, CreateDefaultSnafu, ForbiddenPhysicalWriteSnafu, InvalidRequestSnafu,
     LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, UnexpectedRequestSnafu,
@@ -38,6 +38,12 @@ use crate::error::{
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::row_modifier::{RowsIter, TableIdInput};
 use crate::utils::to_data_region_id;
+
+#[derive(Default)]
+struct PutGroup {
+    request_indices: Vec<usize>,
+    requests: Vec<(RegionId, RegionPutRequest)>,
+}
 
 impl MetricEngineInner {
     /// Dispatch region put request
@@ -97,31 +103,77 @@ impl MetricEngineInner {
             return self.put_logical_region(region_id, req).await;
         }
 
-        let mut requests_per_physical: HashMap<RegionId, Vec<(RegionId, RegionPutRequest)>> =
-            HashMap::new();
-        for (region_id, request) in requests {
-            let is_putting_physical_region =
-                self.state.read().unwrap().exist_physical_region(region_id);
-            if is_putting_physical_region {
-                FORBIDDEN_OPERATION_COUNT.inc();
-                return ForbiddenPhysicalWriteSnafu.fail();
-            }
-            let physical_region_id = self.find_physical_region_id(region_id)?;
-            requests_per_physical
-                .entry(physical_region_id)
-                .or_default()
-                .push((region_id, request));
+        let mut groups = HashMap::new();
+        for (index, (region_id, request)) in requests.enumerate() {
+            self.group_put_request(&mut groups, index, region_id, request)?;
         }
 
         let mut total_affected_rows: AffectedRows = 0;
-        for (physical_region_id, requests) in requests_per_physical {
+        for (physical_region_id, group) in groups {
             let affected_rows = self
-                .put_regions_batch_single_physical(physical_region_id, requests)
+                .put_regions_batch_single_physical(physical_region_id, group.requests)
                 .await?;
             total_affected_rows += affected_rows;
         }
 
         Ok(total_affected_rows)
+    }
+
+    /// Retains every group's outcome instead of returning on the first failure.
+    pub async fn put_regions_batch_with_results(
+        &self,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<PutGroupResult> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
+        if requests.len() == 1 {
+            return vec![PutGroupResult {
+                request_indices: vec![0],
+                result: self.put_regions_batch(requests.into_iter()).await,
+            }];
+        }
+        let _timer = MITO_OPERATION_ELAPSED
+            .with_label_values(&["put_batch"])
+            .start_timer();
+        let mut groups = HashMap::new();
+        let mut results = Vec::new();
+        for (index, (region_id, request)) in requests.into_iter().enumerate() {
+            if let Err(error) = self.group_put_request(&mut groups, index, region_id, request) {
+                results.push(PutGroupResult {
+                    request_indices: vec![index],
+                    result: Err(error),
+                });
+            }
+        }
+        for (physical_region_id, group) in groups {
+            let result = self
+                .put_regions_batch_single_physical(physical_region_id, group.requests)
+                .await;
+            results.push(PutGroupResult {
+                request_indices: group.request_indices,
+                result,
+            });
+        }
+        results
+    }
+
+    fn group_put_request(
+        &self,
+        groups: &mut HashMap<RegionId, PutGroup>,
+        index: usize,
+        region_id: RegionId,
+        request: RegionPutRequest,
+    ) -> Result<()> {
+        if self.state.read().unwrap().exist_physical_region(region_id) {
+            FORBIDDEN_OPERATION_COUNT.inc();
+            return ForbiddenPhysicalWriteSnafu.fail();
+        }
+        let physical_region_id = self.find_physical_region_id(region_id)?;
+        let group = groups.entry(physical_region_id).or_default();
+        group.request_indices.push(index);
+        group.requests.push((region_id, request));
+        Ok(())
     }
 
     /// Write a batch of requests that all belong to the same physical region.
@@ -1826,6 +1878,73 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+
+        let physical = env.default_physical_region_id();
+        let logical = env.default_logical_region_id();
+        let other_physical = RegionId::new(4096, 0);
+        let other_logical = RegionId::new(4097, 0);
+        env.create_physical_region(other_physical, "batch_results", vec![])
+            .await;
+        env.create_logical_region(other_physical, other_logical)
+            .await;
+        let request = |index: i64, version| {
+            let mut rows = test_util::build_rows(1, 1);
+            rows[0].values[0].value_data =
+                Some(api::v1::value::ValueData::TimestampMillisecondValue(index));
+            RegionPutRequest {
+                rows: Rows {
+                    schema: test_util::row_schema_with_tags(&["job"]),
+                    rows,
+                },
+                skip_wal: false,
+                hint: None,
+                partition_expr_version: version,
+            }
+        };
+        let mut results = env
+            .metric()
+            .put_regions_batch_with_results(vec![
+                (logical, request(0, None)),
+                (RegionId::new(9999, 0), request(1, None)),
+                (other_logical, request(2, Some(1))),
+                (other_logical, request(3, None)),
+                (logical, request(4, None)),
+                (physical, request(5, None)),
+            ])
+            .await;
+        results.sort_by_key(|result| result.request_indices[0]);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.request_indices.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![0, 4], vec![1], vec![2, 3], vec![5]]
+        );
+        assert_eq!(results[0].result.as_ref().unwrap(), &2);
+        assert!(results[1].result.is_err());
+        assert!(results[2].result.is_err());
+        assert!(matches!(
+            results[3].result,
+            Err(crate::error::Error::ForbiddenPhysicalWrite { .. })
+        ));
+        for (region, expected) in [(physical, 2), (other_physical, 0)] {
+            let stream = env
+                .metric()
+                .scan_to_stream(region, ScanRequest::default())
+                .await
+                .unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                expected
+            );
+        }
+        assert!(
+            env.metric()
+                .put_regions_batch_with_results(vec![])
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]

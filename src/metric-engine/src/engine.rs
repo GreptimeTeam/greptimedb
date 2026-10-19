@@ -488,6 +488,17 @@ impl RegionEngine for MetricEngine {
     }
 }
 
+/// Outcome of a group of input requests.
+///
+/// Requests rejected before physical-region grouping produce singleton failures.
+#[derive(Debug)]
+pub struct PutGroupResult {
+    /// Positions in the input batch, including separate entries for the same region.
+    pub request_indices: Vec<usize>,
+    /// Aggregate rows on success; no other physical group's outcome is implied.
+    pub result: Result<AffectedRows>,
+}
+
 impl MetricEngine {
     pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
         let metadata_region = MetadataRegion::new(mito.clone());
@@ -528,6 +539,14 @@ impl MetricEngine {
         requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
     ) -> Result<AffectedRows> {
         self.inner.put_regions_batch(requests).await
+    }
+
+    /// Writes all physical-region groups and retains each group's outcome.
+    pub async fn put_regions_batch_with_results(
+        &self,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<PutGroupResult> {
+        self.inner.put_regions_batch_with_results(requests).await
     }
 
     /// Returns all logical regions associated with the physical region.

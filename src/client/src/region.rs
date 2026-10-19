@@ -18,8 +18,9 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::region::RegionResponse;
+use api::region::{BatchRegionResponse, RegionResponse};
 use api::v1::ResponseHeader;
+use api::v1::region::RegionResponse as PbRegionResponse;
 use api::v1::region::{
     RegionRequest, RegionRequestHeader, RemoteDynFilterRequest, RemoteDynFilterUnregister,
     RemoteDynFilterUpdate, region_request, remote_dyn_filter_request,
@@ -49,7 +50,7 @@ use tonic::codec::CompressionEncoding;
 
 use crate::error::{
     self, FlightGetSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
-    MissingFieldSnafu, Result, ServerSnafu,
+    MissingFieldSnafu, Result,
 };
 use crate::flight::{FlightMessageReader, decode_flight_data};
 use crate::region::codec::RegionCodec;
@@ -180,6 +181,11 @@ impl RegionRequester {
             .body
             .as_ref()
             .context(MissingFieldSnafu { field: "body" })?;
+        let request_count = match request_body {
+            region_request::Body::Inserts(requests) => Some(requests.requests.len()),
+            region_request::Body::Deletes(requests) => Some(requests.requests.len()),
+            _ => None,
+        };
         let is_insert = matches!(
             request_body,
             region_request::Body::Inserts(_) | region_request::Body::BulkInsert(_)
@@ -223,9 +229,7 @@ impl RegionRequester {
         .map_err(|status| map_region_error(status, addr))?
         .into_inner();
 
-        check_response_header(&response.header)?;
-
-        Ok(RegionResponse::from_region_response(response))
+        decode_region_response(response, request_count)
     }
 }
 
@@ -385,6 +389,7 @@ fn build_remote_dyn_filter_request(
     }
 }
 
+/// Checks that the response contains a successful application status.
 pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
     let status = header
         .as_ref()
@@ -396,16 +401,83 @@ pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
     if StatusCode::is_success(status.status_code) {
         Ok(())
     } else {
-        let code =
-            StatusCode::from_u32(status.status_code).context(IllegalDatabaseResponseSnafu {
-                err_msg: format!("unknown server status: {:?}", status),
-            })?;
-        ServerSnafu {
-            code,
-            msg: status.err_msg.clone(),
-        }
-        .fail()
+        Err(error::Error::try_from_response_status(status)?)
     }
+}
+
+/// Decodes a region response, retaining partial failures for vector writes.
+///
+/// `request_count` is the original inserts/deletes entry count, or `None` for
+/// other request kinds. A failed single-entry request returns its underlying error.
+pub fn decode_region_response(
+    response: PbRegionResponse,
+    request_count: Option<usize>,
+) -> Result<RegionResponse> {
+    if response.failures.is_empty() {
+        if response
+            .header
+            .as_ref()
+            .and_then(|header| header.status.as_ref())
+            .is_some_and(|status| status.status_code == StatusCode::PartialFailure as u32)
+        {
+            return IllegalDatabaseResponseSnafu {
+                err_msg: "Partial failure has no failed entries",
+            }
+            .fail();
+        }
+        check_response_header(&response.header)?;
+        return Ok(RegionResponse::from_region_response(response));
+    }
+    let request_count = request_count.context(IllegalDatabaseResponseSnafu {
+        err_msg: "Failure details are only valid for inserts/deletes",
+    })?;
+    let status = response
+        .header
+        .as_ref()
+        .and_then(|header| header.status.as_ref())
+        .context(IllegalDatabaseResponseSnafu {
+            err_msg: "Missing region response status",
+        })?;
+    if status.status_code != StatusCode::PartialFailure as u32 {
+        return IllegalDatabaseResponseSnafu {
+            err_msg: "Failure details require a partial-failure status",
+        }
+        .fail();
+    }
+    let mut seen = std::collections::HashSet::with_capacity(response.failures.len());
+    let mut failures = Vec::with_capacity(response.failures.len());
+    for error in response.failures {
+        let index = error.request_index as usize;
+        if index >= request_count || !seen.insert(index) {
+            return IllegalDatabaseResponseSnafu {
+                err_msg: "Invalid or duplicate batch error index",
+            }
+            .fail();
+        }
+        let status = error.status.context(IllegalDatabaseResponseSnafu {
+            err_msg: "Missing batch error status",
+        })?;
+        if StatusCode::is_success(status.status_code) {
+            return IllegalDatabaseResponseSnafu {
+                err_msg: "Batch error contains a success status",
+            }
+            .fail();
+        }
+        failures.push((index, error::Error::try_from_response_status(&status)?));
+    }
+    // A single failed entry has no successful peers to preserve.
+    if request_count == 1
+        && let Some((_, error)) = failures.pop()
+    {
+        return Err(error);
+    }
+    Err(error::Error::PartialRegion {
+        response: Box::new(BatchRegionResponse {
+            affected_rows: response.affected_rows as _,
+            extensions: response.extensions,
+            failures,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -414,17 +486,19 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    use api::v1::ResponseHeader;
     use api::v1::region::region_server::{Region, RegionServer};
     use api::v1::region::{
-        BulkInsertRequest, InsertRequest, InsertRequests, RegionResponse as PbRegionResponse,
-        RemoteDynFilterUnregister, RemoteDynFilterUpdate, region_request,
-        remote_dyn_filter_request,
+        BulkInsertRequest, InsertRequest, InsertRequests, RegionRequestFailure,
+        RegionResponse as PbRegionResponse, RemoteDynFilterUnregister, RemoteDynFilterUpdate,
+        region_request, remote_dyn_filter_request,
     };
     use api::v1::value::ValueData;
     use api::v1::{
         ColumnDataType, ColumnSchema as PbColumnSchema, Row, Rows, Status as PbStatus, Value,
     };
     use common_error::ext::RetryHint;
+    use common_error::status_code::StatusCode;
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
     use common_recordbatch::adapter::RecordBatchMetrics;
     use datatypes::arrow::array::Int32Array;
@@ -1053,8 +1127,227 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn test_partial_response_validation_and_compression() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), true, true);
+        let mut request = build_insert_request();
+        if let Some(region_request::Body::Inserts(inserts)) = &mut request.body {
+            inserts.requests.push(inserts.requests[0].clone());
+        }
+        let request = Arc::new(request);
+        let failure = RegionRequestFailure {
+            request_index: 0,
+            status: Some(PbStatus {
+                status_code: StatusCode::RegionNotFound as u32,
+                err_msg: "moved".to_string(),
+                retry_hint: "retry_after_route_refresh".to_string(),
+            }),
+        };
+        for (failures, valid) in [
+            (vec![], true),
+            (vec![failure.clone()], true),
+            (vec![failure.clone(), failure.clone()], false),
+            (
+                vec![RegionRequestFailure {
+                    request_index: u32::MAX,
+                    ..failure.clone()
+                }],
+                false,
+            ),
+            (
+                vec![RegionRequestFailure {
+                    request_index: 0,
+                    status: None,
+                }],
+                false,
+            ),
+            (
+                vec![RegionRequestFailure {
+                    request_index: 0,
+                    status: Some(PbStatus::default()),
+                }],
+                false,
+            ),
+            (
+                vec![RegionRequestFailure {
+                    request_index: 0,
+                    status: Some(PbStatus {
+                        status_code: u32::MAX,
+                        ..Default::default()
+                    }),
+                }],
+                false,
+            ),
+        ] {
+            let has_error = !failures.is_empty();
+            server
+                .service
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(PbRegionResponse {
+                    header: Some(ResponseHeader {
+                        status: Some(PbStatus {
+                            status_code: if has_error {
+                                StatusCode::PartialFailure
+                            } else {
+                                StatusCode::Success
+                            } as u32,
+                            ..Default::default()
+                        }),
+                    }),
+                    affected_rows: 3,
+                    extensions: std::collections::HashMap::from([("test".to_string(), vec![1, 2])]),
+                    failures,
+                    ..Default::default()
+                }));
+            let response = requester.handle_inner(Arc::clone(&request)).await;
+            if valid {
+                if has_error {
+                    let error = response.unwrap_err();
+                    assert!(error.output_msg().contains("entry 0"));
+                    assert!(error.output_msg().contains("moved"));
+                    let error: common_meta::error::Error = error.into();
+                    assert!(error.output_msg().contains("moved"));
+                    let common_meta::error::Error::PartialRegion { response } = error else {
+                        panic!("Expected partial region failure");
+                    };
+                    assert_eq!(response.affected_rows, 3);
+                    assert_eq!(response.extensions["test"], vec![1, 2]);
+                    assert_eq!(
+                        response.failures[0].1.retry_hint(),
+                        RetryHint::RetryAfterRouteRefresh
+                    );
+                } else {
+                    let response = response.unwrap();
+                    assert_eq!(response.affected_rows, 3);
+                    assert_eq!(response.extensions["test"], vec![1, 2]);
+                }
+            } else {
+                assert!(matches!(
+                    response.unwrap_err(),
+                    Error::IllegalDatabaseResponse { .. }
+                ));
+            }
+        }
+        for (received, send, accept) in server.service.requests.lock().unwrap().iter() {
+            assert_eq!(received, request.as_ref());
+            assert!(*send && *accept);
+        }
+        assert_eq!(Arc::strong_count(&request), 1);
+    }
+
+    #[test]
+    fn test_partial_response_envelope() {
+        let failure = RegionRequestFailure {
+            request_index: 0,
+            status: Some(PbStatus {
+                status_code: StatusCode::RegionNotFound as u32,
+                retry_hint: RetryHint::RetryAfterRouteRefresh.as_str().to_string(),
+                ..Default::default()
+            }),
+        };
+        for (status, failures, count) in [
+            (Some(StatusCode::Success), vec![failure.clone()], Some(2)),
+            (Some(StatusCode::PartialFailure), vec![], Some(2)),
+            (
+                Some(StatusCode::PartialFailure),
+                vec![failure.clone()],
+                None,
+            ),
+            (None, vec![failure.clone()], Some(2)),
+        ] {
+            let response = PbRegionResponse {
+                header: status.map(|code| ResponseHeader {
+                    status: Some(PbStatus {
+                        status_code: code as u32,
+                        ..Default::default()
+                    }),
+                }),
+                failures,
+                ..Default::default()
+            };
+            assert!(matches!(
+                decode_region_response(response, count),
+                Err(Error::IllegalDatabaseResponse { .. })
+            ));
+        }
+        let response = PbRegionResponse {
+            header: Some(ResponseHeader {
+                status: Some(PbStatus {
+                    status_code: StatusCode::PartialFailure as u32,
+                    ..Default::default()
+                }),
+            }),
+            failures: vec![failure],
+            ..Default::default()
+        };
+        // Old clients check the header and cannot mistake partial failure for success.
+        assert!(check_response_header(&response.header).is_err());
+        let error = decode_region_response(response, Some(1)).unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::RegionNotFound);
+        assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+    }
+
+    #[tokio::test]
+    async fn test_region_rpc_errors() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        let request = Arc::new(build_insert_request());
+        let mut business_error = Status::unimplemented("unsupported write");
+        business_error.metadata_mut().insert(
+            common_error::GREPTIME_DB_HEADER_ERROR_CODE,
+            (StatusCode::Unsupported as u32)
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+        for status in [
+            Status::unimplemented("unknown method"),
+            business_error,
+            Status::unavailable("lost response"),
+            Status::deadline_exceeded("timeout"),
+        ] {
+            let code = status.code();
+            server
+                .service
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Err(status));
+            let error = requester
+                .handle_inner(Arc::clone(&request))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::RegionServer { code: actual, .. } if actual == code));
+        }
+        assert_eq!(server.service.requests.lock().unwrap().len(), 4);
+    }
+
     #[test]
     fn test_check_response_header() {
+        for (hint, expected) in [
+            ("retryable", RetryHint::Retryable),
+            (
+                "retry_after_route_refresh",
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            ("non_retryable", RetryHint::NonRetryable),
+            ("", RetryHint::NonRetryable),
+            ("future_hint", RetryHint::NonRetryable),
+        ] {
+            let error = check_response_header(&Some(ResponseHeader {
+                status: Some(PbStatus {
+                    status_code: StatusCode::RegionNotFound as u32,
+                    err_msg: "region moved".to_string(),
+                    retry_hint: hint.to_string(),
+                }),
+            }))
+            .unwrap_err();
+            assert_eq!(error.retry_hint(), expected, "{hint}");
+        }
+
         let result = check_response_header(&None);
         assert!(matches!(
             result.unwrap_err(),
@@ -1071,6 +1364,7 @@ mod tests {
             status: Some(PbStatus {
                 status_code: StatusCode::Success as u32,
                 err_msg: String::default(),
+                ..Default::default()
             }),
         }));
         assert!(result.is_ok());
@@ -1079,6 +1373,7 @@ mod tests {
             status: Some(PbStatus {
                 status_code: u32::MAX,
                 err_msg: String::default(),
+                ..Default::default()
             }),
         }));
         assert!(matches!(
@@ -1090,6 +1385,7 @@ mod tests {
             status: Some(PbStatus {
                 status_code: StatusCode::Internal as u32,
                 err_msg: "blabla".to_string(),
+                ..Default::default()
             }),
         }));
         let Error::Server { code, msg, .. } = result.unwrap_err() else {

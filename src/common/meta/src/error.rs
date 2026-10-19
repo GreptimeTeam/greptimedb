@@ -41,6 +41,15 @@ pub use retry_hint::{retry_hint_from_postgres_error, retry_hint_from_postgres_po
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display(
+        "Region request has {} failed entries; {}",
+        response.failures.len(),
+        response.failures.first().map(|(index, error)| format!("entry {index}: {}", error.output_msg())).unwrap_or_default()
+    ))]
+    PartialRegion {
+        response: Box<api::region::BatchRegionResponse<Error>>,
+    },
+
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey {
         #[snafu(implicit)]
@@ -1195,6 +1204,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            Error::PartialRegion { .. } => StatusCode::PartialFailure,
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
