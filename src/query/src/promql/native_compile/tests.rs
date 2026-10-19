@@ -251,6 +251,32 @@ fn a_parenthesised_quantile_binds_as_written() {
     assert_eq!(op.function, RangeFunction::QuantileOverTime(0.9));
 }
 
+/// The selector of a parameterised function is looked through its parentheses too, so the range
+/// function and the parameter are both read from a statement that was merely typed with grouping.
+#[test]
+fn a_parenthesised_selector_binds_as_written() {
+    let bare = compile(
+        &eval_stmt("quantile_over_time(0.9, x[5m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("the bare selector binds");
+
+    for query in [
+        "quantile_over_time(0.9, (x[5m]))",
+        "quantile_over_time((0.9), (x[5m]))",
+        "(quantile_over_time(0.9, (x[5m])))",
+    ] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(
+            tree.to_string(),
+            bare.to_string(),
+            "`{query}` did not compile to the tree `quantile_over_time(0.9, x[5m])` does"
+        );
+    }
+}
+
 /// A parameter computed at query time is refused, and the error names it: the tree binds a kernel's
 /// constant, so a quantile that would only exist at run time has no field to go in.
 #[test]
