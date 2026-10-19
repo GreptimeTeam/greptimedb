@@ -51,6 +51,10 @@ immutable `Version` (`region/version.rs`) → scans memtables and Parquet SSTs
 (`sst/parquet.rs`) → merges (`read/`) and dedups by sequence → projected,
 filtered `RecordBatch` stream.
 
+Internal series merges use the query runtime pool forwarded through
+`QueryScanContext`; reader and output-batch accounting uses the separate scan
+memory tracker. Direct scanner callers default to an unbounded operator pool.
+
 ## Public surface
 
 - Entry: `MitoEngine` in `src/mito2/src/engine.rs`, built via `MitoEngineBuilder`.
