@@ -31,7 +31,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -2236,15 +2236,17 @@ fn evaluated_evaluator(
     RangeEvaluator::with_kernel(&schema, grid, window, Box::new(probe), true, true).unwrap()
 }
 
-/// The inner layer of the chunked-consumption tests: one raw series on a 10 ms grid, pushed in
-/// three chunks and evaluated on that same grid.
-fn inner_layer() -> (RangeEvaluator, Vec<EvaluatedChunk>) {
-    let window = RangeWindow {
+/// The window the inner layer of the chunked-consumption tests reads its raw series with.
+fn inner_window() -> RangeWindow {
+    RangeWindow {
         range_ms: 30,
         offset_ms: 0,
         anchor_ms: None,
-    };
-    let mut inner = probe_evaluator(1, grid(0, 10, 8), window);
+    }
+}
+
+/// The raw chunks the inner layer of the chunked-consumption tests pushes, in order.
+fn inner_pieces() -> Vec<RawSeriesChunk> {
     let rows: Vec<Row> = vec![
         (0, vec![Some(1.0)]),
         (10, vec![Some(2.0)]),
@@ -2252,12 +2254,18 @@ fn inner_layer() -> (RangeEvaluator, Vec<EvaluatedChunk>) {
         (50, vec![Some(6.0)]),
         (70, vec![Some(8.0)]),
     ];
-    let pieces = [
+    vec![
         chunk(&rows[..2], 1, 0, false),
         chunk(&rows[2..3], 1, 0, false),
         chunk(&rows[3..], 1, 0, true),
-    ];
-    let chunks = collect_chunks(&mut inner, &pieces);
+    ]
+}
+
+/// The inner layer of the chunked-consumption tests: one raw series on a 10 ms grid, pushed in
+/// three chunks and evaluated on that same grid.
+fn inner_layer() -> (RangeEvaluator, Vec<EvaluatedChunk>) {
+    let mut inner = probe_evaluator(1, grid(0, 10, 8), inner_window());
+    let chunks = collect_chunks(&mut inner, &inner_pieces());
     (inner, chunks)
 }
 
@@ -2441,4 +2449,370 @@ fn a_series_may_begin_past_the_first_position_of_its_grid() {
     assert_eq!(accepted.range().start(), 0);
     assert_eq!(accepted.range().len(), 4);
     assert_eq!(expand(&accepted.series), expand(&expected.series));
+}
+
+/// Acceptance tests for the composed chain
+/// `raw -> inner window -> map -> outer window`.
+///
+/// Every test drives the chain one chunk at a time and compares the result with the same chain run
+/// on the whole inner series at once: a composition is sound only if streaming a prefix through it
+/// changes nothing but how soon the result appears.
+mod composition {
+    use super::*;
+
+    /// The metric the map chain leaves: `map_math` drops the metadata labels, so only the tags of
+    /// `metric(0)` survive.
+    fn mapped_metric() -> MetricName {
+        let mut metric = metric(0);
+        metric.remove("__name__");
+        metric
+    }
+
+    /// Hands one inner chunk through the map and then to the outer layer.
+    fn push_mapped(
+        inner_schema: &Arc<SeriesSchema>,
+        outer: &mut RangeEvaluator,
+        chunk: &EvaluatedChunk,
+        ops: &[MathOp],
+    ) -> Option<EvaluatedChunk> {
+        let mapped = map_chunk(inner_schema, chunk, ops).unwrap();
+        outer.push_evaluated(&mapped).unwrap()
+    }
+
+    /// Pushes one raw chunk into the inner layer and everything it hands out on through the map
+    /// into the outer layer, returning what each layer produced.
+    fn chain_push(
+        inner: &mut RangeEvaluator,
+        outer: &mut RangeEvaluator,
+        piece: &RawSeriesChunk,
+        ops: &[MathOp],
+    ) -> (Vec<EvaluatedChunk>, Vec<EvaluatedChunk>) {
+        let inner_schema = inner.output_schema().clone();
+        let inner_chunks: Vec<_> = inner.push(piece).unwrap().into_iter().collect();
+        let outer_chunks = inner_chunks
+            .iter()
+            .filter_map(|chunk| push_mapped(&inner_schema, outer, chunk, ops))
+            .collect();
+        (inner_chunks, outer_chunks)
+    }
+
+    /// The expected result of the chain: `series`, the whole inner result, handed over as one
+    /// closing chunk, mapped once, and pushed into a fresh outer evaluator.
+    fn chain_at_once(
+        inner_schema: &Arc<SeriesSchema>,
+        series: Series,
+        ops: &[MathOp],
+    ) -> Option<Series> {
+        let whole = EvaluatedChunk::try_new(series, true).unwrap();
+        let mapped = map_chunk(inner_schema, &whole, ops).unwrap();
+        let mut outer = evaluated_evaluator(
+            inner_schema.eval_grid.clone().expect("an inner grid"),
+            outer_grid(),
+            outer_window(),
+        );
+        let chunks: Vec<_> = outer.push_evaluated(&mapped).unwrap().into_iter().collect();
+        fold_chunks(&chunks, outer.output_schema())
+    }
+
+    /// Splits `series` at the grid positions `bounds` into evaluated chunks of the same series, the
+    /// last one closing it: the shape a layer hands out when it streams its own result.
+    fn split_chunks(
+        schema: &Arc<SeriesSchema>,
+        series: &Series,
+        bounds: &[usize],
+    ) -> Vec<EvaluatedChunk> {
+        let TimeAxis::Grid(range) = &series.time else {
+            panic!("the split series is addressed on a grid");
+        };
+        let count = bounds.len() - 1;
+        bounds
+            .windows(2)
+            .enumerate()
+            .map(|(index, bounds)| {
+                let (start, len) = (bounds[0], bounds[1] - bounds[0]);
+                let offset = start - range.start();
+                let fields = series
+                    .fields
+                    .iter()
+                    .map(|field| field.slice(offset, len).unwrap())
+                    .collect();
+                let time = GridRange::try_new(range.grid().clone(), start, len).unwrap();
+                let chunk = Series::try_new(
+                    schema,
+                    series.metric.clone(),
+                    TimeAxis::Grid(time),
+                    SeriesFields::try_from_vec(fields).unwrap(),
+                )
+                .unwrap();
+                EvaluatedChunk::try_new(chunk, index + 1 == count).unwrap()
+            })
+            .collect()
+    }
+
+    /// Whether every sample of every field is a native histogram sample.
+    fn all_histograms(series: &Series) -> bool {
+        series.fields.iter().all(|field| {
+            (0..field.len()).all(|index| matches!(field.sample(index), SampleRef::Histogram(_)))
+        })
+    }
+
+    /// The outer layer produces output from a prefix of the inner series, before the inner series
+    /// has ended: the chain streams instead of waiting for the whole input.
+    #[test]
+    fn a_prefix_reaches_the_outer_layer_before_the_inner_series_ends() {
+        let ops = [MathOp::Sqrt];
+        let mut inner = probe_evaluator(1, grid(0, 10, 8), inner_window());
+        let inner_schema = inner.output_schema().clone();
+        let mut outer = evaluated_evaluator(grid(0, 10, 8), outer_grid(), outer_window());
+        let mut inner_chunks: Vec<EvaluatedChunk> = Vec::new();
+        let mut outer_chunks: Vec<EvaluatedChunk> = Vec::new();
+        let mut while_open = 0;
+        for piece in &inner_pieces() {
+            let (handed_out, pushed) = chain_push(&mut inner, &mut outer, piece, &ops);
+            inner_chunks.extend(handed_out);
+            outer_chunks.extend(pushed);
+            if !piece.is_last {
+                // How far the chain got while the inner series had not closed yet.
+                while_open = outer_chunks.len();
+            }
+        }
+        assert!(
+            while_open > 0,
+            "the outer layer produced no chunk before the inner series ended"
+        );
+
+        let expected = chain_at_once(
+            &inner_schema,
+            fold_chunks(&inner_chunks, &inner_schema).expect("the inner series has values"),
+            &ops,
+        )
+        .expect("the reference has values");
+        let result = fold_chunks(&outer_chunks, outer.output_schema());
+        assert_series_eq(result.as_ref(), &expand(&expected), &mapped_metric());
+    }
+
+    /// A middle chunk that decides positions without any value still advances the outer window:
+    /// progress, not values, is what an outer window moves on.
+    ///
+    /// The middle chunk's samples land after every window of the inner grid, so the inner layer
+    /// settles the rest of its grid holding no value at all, and the map passes that on as a chunk
+    /// with a range but no values. The consumer tests only reach an all-null chunk as the closing
+    /// one, where the closing chunk advances the outer layer whatever its contents.
+    #[test]
+    fn an_all_null_middle_chunk_still_advances_the_outer_window() {
+        let ops = [MathOp::Sqrt];
+        // A window narrower than the step: a sample reaches the one grid point it falls on, so the
+        // samples below decide positions without ever becoming a value of them.
+        let window = RangeWindow {
+            range_ms: 5,
+            offset_ms: 0,
+            anchor_ms: None,
+        };
+        let mut inner = probe_evaluator(1, grid(0, 10, 8), window);
+        let inner_schema = inner.output_schema().clone();
+        let mut outer = evaluated_evaluator(grid(0, 10, 8), outer_grid(), outer_window());
+        // How far the outer layer has handed out positions, counted on the outer grid.
+        let extent = |chunks: &[EvaluatedChunk]| {
+            chunks
+                .iter()
+                .map(|chunk| chunk.range().start() + chunk.range().len())
+                .max()
+                .unwrap_or(0)
+        };
+        let mut inner_chunks: Vec<EvaluatedChunk> = Vec::new();
+        let mut outer_chunks: Vec<EvaluatedChunk> = Vec::new();
+
+        let early = chunk(&[(0, vec![Some(1.0)]), (10, vec![Some(2.0)])], 1, 0, false);
+        let (handed_out, pushed) = chain_push(&mut inner, &mut outer, &early, &ops);
+        inner_chunks.extend(handed_out);
+        outer_chunks.extend(pushed);
+        let before = extent(&outer_chunks);
+
+        // Every window of the inner grid ends at or before 70 ms, so these samples are outside all
+        // of them and no grid point can gain a value from them.
+        let middle = chunk(&[(2_000, vec![Some(3.0)])], 1, 0, false);
+        let (settled, pushed) = chain_push(&mut inner, &mut outer, &middle, &ops);
+        assert_eq!(
+            settled.len(),
+            1,
+            "the inner layer hands out one chunk per push"
+        );
+        assert!(
+            !settled[0].range().is_empty(),
+            "the inner chunk decided no position: the push reports absence, not progress"
+        );
+        assert!(
+            all_missing(&settled[0].series),
+            "the inner chunk holds a value the outer layer could advance on"
+        );
+        outer_chunks.extend(pushed);
+        let after = extent(&outer_chunks);
+        assert!(
+            after > before,
+            "the outer layer stalled at {before} across the all-null push instead of advancing: {after}"
+        );
+        inner_chunks.extend(settled);
+
+        let closing = chunk(&[(3_000, vec![Some(4.0)])], 1, 0, true);
+        let (handed_out, pushed) = chain_push(&mut inner, &mut outer, &closing, &ops);
+        inner_chunks.extend(handed_out);
+        outer_chunks.extend(pushed);
+
+        let expected = chain_at_once(
+            &inner_schema,
+            fold_chunks(&inner_chunks, &inner_schema).expect("the inner series has values"),
+            &ops,
+        )
+        .expect("the reference has values");
+        let result = fold_chunks(&outer_chunks, outer.output_schema());
+        assert_series_eq(result.as_ref(), &expand(&expected), &mapped_metric());
+    }
+
+    /// A map that skips every histogram still carries progress: the all-missing chunk it hands out
+    /// keeps its input's range, so the outer layer advances across it and the series closes exactly
+    /// once, at the end of the outer grid.
+    #[test]
+    fn a_map_chain_skipping_every_histogram_keeps_progress_and_the_closing_chunk() {
+        let reset = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+        let labels = BTreeMap::from([("job".to_string(), "x".to_string())]);
+        let floats = BTreeMap::from([
+            (0, 1.0f64.to_bits()),
+            (1, 4.0f64.to_bits()),
+            (4, 9.0f64.to_bits()),
+            (5, 16.0f64.to_bits()),
+        ]);
+        let histograms = BTreeMap::from([(2, reset.to_string()), (3, reset.to_string())]);
+        let schema = Arc::new(SeriesSchema {
+            fields: raw_schema(1).fields,
+            eval_grid: Some(grid(0, 10, 6)),
+        });
+        let series = mixed_series(&schema, &labels, &floats, &histograms)
+            .expect("the fixture covers six positions");
+        // A float chunk, then the middle chunk, whose points are histograms only, then floats.
+        let chunks = split_chunks(&schema, &series, &[0, 2, 4, 6]);
+        assert!(
+            all_histograms(&chunks[1].series),
+            "the middle chunk has to be the all-histogram one"
+        );
+
+        let ops = [MathOp::Sqrt];
+        // The middle chunk has no float for the map to produce, so the map empties it and keeps
+        // the positions it decided.
+        let mapped_middle =
+            map_chunk(&schema, &chunks[1], &ops).expect("a range map keeps a chunk");
+        assert!(all_missing(&mapped_middle.series));
+        assert!(!mapped_middle.is_last);
+        assert_eq!(
+            (mapped_middle.range().start(), mapped_middle.range().len()),
+            (chunks[1].range().start(), chunks[1].range().len()),
+            "the map shortened the range the inner layer decided"
+        );
+
+        let mut outer = evaluated_evaluator(grid(0, 10, 6), outer_grid(), outer_window());
+        let outer_chunks: Vec<_> = chunks
+            .iter()
+            .filter_map(|chunk| push_mapped(&schema, &mut outer, chunk, &ops))
+            .collect();
+        let closing: Vec<_> = outer_chunks.iter().filter(|chunk| chunk.is_last).collect();
+        assert_eq!(closing.len(), 1, "the outer series closes exactly once");
+        let last = outer_chunks
+            .last()
+            .expect("the outer series handed out one chunk");
+        assert!(last.is_last, "the closing chunk is not the last one");
+        assert_eq!(
+            last.range().start() + last.range().len(),
+            outer_grid().timestamps().len(),
+            "the outer series closed before the end of its grid"
+        );
+        let outer_schema = outer.output_schema().clone();
+        let result = fold_chunks(&outer_chunks, &outer_schema);
+        outer.finish().expect("the outer series closed");
+
+        let expected = chain_at_once(&schema, series, &ops).expect("the reference has values");
+        assert_series_eq(result.as_ref(), &expand(&expected), &metric_of(&labels));
+    }
+
+    /// Every chunk a layer hands out is addressed on that layer's own grid: an inner position is
+    /// never read as a row number of the outer grid.
+    ///
+    /// `inner_layer`'s grid is 0/10 and `outer_grid` is 5/20, so the two share no position: the
+    /// same index addresses a different timestamp on each, and reading an index on the wrong grid
+    /// lands on a timestamp the right one does not have. That is what makes the checks below catch
+    /// a layer reusing its input's row numbers.
+    #[test]
+    fn each_layer_indexes_its_own_grid() {
+        let ops = [MathOp::Sqrt];
+        let inner_grid = grid(0, 10, 8);
+        let (inner, inner_chunks) = inner_layer();
+        let inner_schema = inner.output_schema().clone();
+        let mut outer = evaluated_evaluator(inner_grid.clone(), outer_grid(), outer_window());
+        let outer_chunks: Vec<_> = inner_chunks
+            .iter()
+            .filter_map(|chunk| push_mapped(&inner_schema, &mut outer, chunk, &ops))
+            .collect();
+
+        assert_ne!(
+            inner_grid.spec(),
+            outer_grid().spec(),
+            "the fixture moves its input, or the layers share a grid"
+        );
+        // Without more than one chunk per layer the ordering below would hold for free.
+        assert!(
+            inner_chunks.len() > 1 && outer_chunks.len() > 1,
+            "{} inner chunks, {} outer chunks",
+            inner_chunks.len(),
+            outer_chunks.len()
+        );
+        for chunk in &inner_chunks {
+            assert_eq!(
+                chunk.range().grid().spec(),
+                inner_grid.spec(),
+                "an inner chunk is not addressed on the inner grid"
+            );
+        }
+        for chunk in &outer_chunks {
+            assert_eq!(
+                chunk.range().grid().spec(),
+                outer_grid().spec(),
+                "an outer chunk is not addressed on the outer grid"
+            );
+        }
+        // Positions of one layer only ever move forward, and each layer counts to the end of its
+        // own grid: eight inner positions against four outer ones.
+        let starts = |chunks: &[EvaluatedChunk]| -> Vec<usize> {
+            let starts: Vec<_> = chunks.iter().map(|chunk| chunk.range().start()).collect();
+            assert!(
+                starts.windows(2).all(|pair| pair[0] < pair[1]),
+                "positions restart or go back: {starts:?}"
+            );
+            starts
+        };
+        let inner_starts = starts(&inner_chunks);
+        let outer_starts = starts(&outer_chunks);
+        let end = |chunks: &[EvaluatedChunk]| {
+            let last = chunks.last().expect("a series hands out its closing chunk");
+            last.range().start() + last.range().len()
+        };
+        assert_eq!(end(&inner_chunks), inner_grid.timestamps().len());
+        assert_eq!(end(&outer_chunks), outer_grid().timestamps().len());
+        // An outer position is not an inner one: on the inner grid, outer position 2 would address
+        // 20 ms, while the outer grid addresses 45 ms there.
+        let inner_timestamps: BTreeSet<i64> = inner_grid.timestamps().iter().copied().collect();
+        for start in &outer_starts {
+            assert!(
+                !inner_timestamps.contains(&outer_grid().timestamps()[*start]),
+                "outer position {start} is an inner grid position"
+            );
+        }
+        assert_ne!(inner_starts, outer_starts, "the layers tiled the same grid");
+
+        let expected = chain_at_once(
+            &inner_schema,
+            fold_chunks(&inner_chunks, &inner_schema).expect("the inner series has values"),
+            &ops,
+        )
+        .expect("the reference has values");
+        let result = fold_chunks(&outer_chunks, outer.output_schema());
+        assert_series_eq(result.as_ref(), &expand(&expected), &mapped_metric());
+    }
 }
