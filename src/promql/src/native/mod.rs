@@ -16,8 +16,9 @@
 //!
 //! A query compiles to a [`plan::NativeTree`]: nodes whose operations, fields and grids are already
 //! bound. Nodes hand each other [`batch::EvaluatedChunk`]s as ordinary Rust values, so no row batch
-//! is materialised between them. [`metrics`] names each node after its position in that tree, so
-//! `EXPLAIN` and `ANALYZE` describe the same structure.
+//! is materialised between them. [`metrics`] names each node after its position in that tree,
+//! which is what an `EXPLAIN` or `ANALYZE` of a native plan is intended to render; no native plan
+//! renders one today.
 //!
 //! Three properties keep this apart from recognising a query shape in a finished physical plan:
 //!
