@@ -54,9 +54,13 @@ pub(crate) struct RemoteDynFilterPushdown {
     pub(crate) pushed_down: Vec<PushedDown>,
 }
 
+/// Captures `parent_filters` as remote dyn filters. `accepted` holds filters captured by
+/// another pushdown phase; they are sent in the same request, so the initial registration
+/// budget is checked against both and they are kept if the new filters do not fit.
 pub(crate) fn capture_remote_dyn_filters_for_pushdown(
     remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
     first_producer_local_ordinal: usize,
+    accepted: &[CapturedDynFilter],
     parent_filters: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
 ) -> RemoteDynFilterPushdown {
     let mut pushed_down = Vec::with_capacity(parent_filters.len());
@@ -97,7 +101,12 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
         }
     }
 
-    if let Err(error) = validate_initial_registrations_for_pushdown(&captured_dyn_filters) {
+    let combined = accepted
+        .iter()
+        .chain(&captured_dyn_filters)
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Err(error) = validate_initial_registrations_for_pushdown(&combined) {
         common_telemetry::warn!(error; "Remote dyn filters are not pushed down because initial registrations are invalid");
         return RemoteDynFilterPushdown {
             captured_dyn_filters: Vec::new(),
@@ -614,6 +623,7 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             parent_filters,
         );
 
@@ -633,6 +643,7 @@ mod tests {
         let captured = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             vec![host_eq_scalar_subquery(&results)],
         )
         .captured_dyn_filters;
@@ -684,6 +695,7 @@ mod tests {
         let captured = capture_remote_dyn_filters_for_pushdown(
             remote_dyn_filter_producer_id,
             0,
+            &[],
             parent_filters,
         )
         .captured_dyn_filters;
@@ -716,6 +728,7 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             remote_dyn_filter_producer_id,
             0,
+            &[],
             parent_filters,
         );
 
@@ -752,6 +765,7 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             parent_filters,
         );
 
@@ -770,6 +784,7 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             parent_filters,
         );
 
@@ -794,6 +809,7 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             parent_filters,
         );
 
@@ -824,10 +840,41 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             parent_filters,
         );
 
         assert_eq!(pushed_down(&pushdown), vec![false, false]);
+        assert!(pushdown.captured_dyn_filters.is_empty());
+    }
+
+    #[test]
+    fn capture_remote_dyn_filters_for_pushdown_keeps_accepted_filters_within_budget() {
+        const MAX_INITIAL_REGS: usize = 64;
+
+        let accepted = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            0,
+            &[],
+            (0..MAX_INITIAL_REGS)
+                .map(|ordinal| {
+                    test_dyn_filter_with_snapshot_payload(&format!("host_{ordinal}"), ordinal, 1)
+                        as Arc<dyn PhysicalExpr>
+                })
+                .collect(),
+        )
+        .captured_dyn_filters;
+        assert_eq!(accepted.len(), MAX_INITIAL_REGS);
+
+        let results = ScalarSubqueryResults::new(1);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            1 << 31,
+            &accepted,
+            vec![host_eq_scalar_subquery(&results)],
+        );
+
+        assert_eq!(pushed_down(&pushdown), vec![false]);
         assert!(pushdown.captured_dyn_filters.is_empty());
     }
 
@@ -845,6 +892,7 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             parent_filters,
         );
 
@@ -868,6 +916,7 @@ mod tests {
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
             0,
+            &[],
             parent_filters,
         );
 

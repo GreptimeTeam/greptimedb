@@ -1149,13 +1149,16 @@ impl ExecutionPlan for MergeScanExec {
                 updated_node: Some(new_self),
             });
         };
+        let slot = pushdown_phase_slot(phase);
+        let mut captured_remote_dyn_filters = self.captured_remote_dyn_filters.lock().unwrap();
         let remote_dyn_filter_pushdown = capture_remote_dyn_filters_for_pushdown(
             remote_dyn_filter_producer_id,
             first_producer_local_ordinal(phase),
+            &captured_remote_dyn_filters[1 - slot],
             parent_filters,
         );
-        self.captured_remote_dyn_filters.lock().unwrap()[pushdown_phase_slot(phase)] =
-            remote_dyn_filter_pushdown.captured_dyn_filters;
+        captured_remote_dyn_filters[slot] = remote_dyn_filter_pushdown.captured_dyn_filters;
+        drop(captured_remote_dyn_filters);
         let new_self = Arc::new(self.clone());
 
         Ok(FilterPushdownPropagation {
@@ -1728,6 +1731,7 @@ mod tests {
         let captured = capture_remote_dyn_filters_for_pushdown(
             RemoteDynFilterProducerId::new(42),
             0,
+            &[],
             vec![dyn_filter],
         );
         assert_eq!(captured.captured_dyn_filters.len(), 1);
