@@ -46,7 +46,7 @@ use crate::functions::{
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
     Dense, GoldenCase, OwnedHistogram, assert_histogram_close, assert_series_eq,
-    assert_series_eq_any_nan, close, golden_cases, labels_of, metric_of, mixed_series,
+    assert_series_eq_any_nan, close, expand, golden_cases, labels_of, metric_of, mixed_series,
     random_dense, special_value,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
@@ -596,6 +596,86 @@ fn rate_over_floats_is_evaluated_in_batches() {
     );
 }
 
+/// A batch spanning more grid points than `EVALUATION_BATCH` flushes in the middle of one
+/// evaluation, and each field's windows come from that field's own samples.
+///
+/// Both properties are invisible to value comparisons over small single-field inputs: every field
+/// sharing field 0's spans, or the mid-evaluation flush never running, would still pass the
+/// golden cases (at most 20 points, one field). The comparison is against the per-window path,
+/// which is the same kernel without batching, so a disagreement is the batching's fault alone.
+#[test]
+fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path() {
+    let points = 600;
+    let fields = 3;
+    let grid = grid(0, 10_000, points);
+    let window = RangeWindow {
+        range_ms: 30_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    // Counter-like values, each field resetting at a different point, growing at a different
+    // rate, and missing at a different interval. The gaps are what make the fields' windows
+    // differ: a field reading another field's windows would then get a different number, which a
+    // shared dense layout would hide.
+    let mut totals = [0.0f64; 3];
+    let rows: Vec<Row> = (0..points)
+        .map(|index| {
+            let values = (0..fields)
+                .map(|field| {
+                    let step = [1.0, 2.0, 0.5][field];
+                    totals[field] = if index == 100 * (field as u64 + 1) {
+                        step
+                    } else {
+                        totals[field] + step
+                    };
+                    // Field 0 keeps every sample; the others drop some, at different intervals.
+                    let gap = [0, 7, 5][field];
+                    (gap == 0 || index % gap != 0).then_some(totals[field])
+                })
+                .collect();
+            (index as i64 * 10_000, values)
+        })
+        .collect();
+
+    let mut batch = RangeEvaluator::try_new(
+        &raw_schema(fields),
+        grid.clone(),
+        window,
+        RangeFunction::Rate,
+    )
+    .unwrap();
+    let batched = batch
+        .push(&chunk(&rows, fields, 0, true))
+        .unwrap()
+        .expect("the series completes");
+    assert!(
+        batch.batch_call_count() > 1,
+        "the batch has to flush before the end of the series, not only on its last point"
+    );
+
+    let mut per_window = RangeEvaluator::with_kernel(
+        &raw_schema(fields),
+        grid,
+        window,
+        RangeFunction::Rate.kernel(0),
+        true,
+        true,
+    )
+    .unwrap();
+    let expected = per_window
+        .push(&chunk(&rows, fields, 0, true))
+        .unwrap()
+        .expect("the series completes");
+    assert_eq!(per_window.batch_call_count(), 0);
+
+    let expected = expand(&expected);
+    assert_series_eq(
+        Some(&batched),
+        &expected,
+        &output_metric(RangeFunction::Rate, 0),
+    );
+}
+
 /// A window holding a native histogram sample keeps its grid point on the per-window path, since
 /// the batch kernel reads the floats alone and cannot reproduce the mixed-window rules.
 ///
@@ -665,7 +745,6 @@ fn a_function_without_a_batch_form_stays_on_the_per_window_path() {
     .unwrap();
     evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
     assert_eq!(evaluator.batch_call_count(), 0);
-}
 }
 
 #[test]

@@ -819,11 +819,17 @@ impl RangeEvaluator {
                     // A window holding a native histogram is decided by the mixed-window rules,
                     // which the batch kernel -- reading floats alone -- cannot reproduce. Flush
                     // what is pending and decide this point on the per-window path.
-                    let histogram_window = self.fields.iter().any(|field| {
-                        field.histograms[field.histogram_head..]
-                            .iter()
-                            .any(|(timestamp, _)| i128::from(*timestamp) <= i128::from(eval_ts))
-                    });
+                    //
+                    // Histograms are retained in time order, so the first one still ahead of the
+                    // window head decides: a later one cannot be inside this window if this one
+                    // is not. The check runs only when a batch kernel is set, so a function
+                    // without one never pays for it.
+                    let histogram_window = self.batch.is_some()
+                        && self.fields.iter().any(|field| {
+                            field.histograms.get(field.histogram_head).is_some_and(
+                                |(timestamp, _)| i128::from(*timestamp) <= i128::from(eval_ts),
+                            )
+                        });
                     if let Some(kernel) = self.batch.as_mut()
                         && !histogram_window
                     {
