@@ -1044,11 +1044,13 @@ impl RegionServerHandler for RegionServer {
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
         let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
             .with_label_values(&[request.as_ref()]);
-        if matches!(
-            &request,
-            region_request::Body::Inserts(_) | region_request::Body::Deletes(_)
-        ) {
-            let result = self
+        let request_count = match &request {
+            region_request::Body::Inserts(requests) => Some(requests.requests.len()),
+            region_request::Body::Deletes(requests) => Some(requests.requests.len()),
+            _ => None,
+        };
+        if let Some(request_count) = request_count {
+            let mut result = self
                 .handle_requests_in_parallel(request)
                 .await
                 .map_err(BoxedError::new)
@@ -1056,6 +1058,12 @@ impl RegionServerHandler for RegionServer {
                 .context(ExecuteGrpcRequestSnafu)?;
             if !result.failures.is_empty() {
                 failed_requests_cnt.inc();
+                // Single-entry failures preserve the legacy tonic error and retry metadata.
+                if request_count == 1
+                    && let Some((_, error)) = result.failures.pop()
+                {
+                    return Err(BoxedError::new(error)).context(ExecuteGrpcRequestSnafu);
+                }
             }
             return Ok(encode_batch_write_response(result));
         }
