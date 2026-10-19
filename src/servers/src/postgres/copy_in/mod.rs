@@ -488,18 +488,23 @@ impl CopyHandler for PostgresServerHandlerInner {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let mut guard = self.copy_in_state.lock().await;
-        let Some(state) = guard.as_mut() else {
+        let Some(mut state) = guard.take() else {
             return Err(copy_in_error(
                 PgErrorCode::Ec08P01,
                 "CopyData message received outside COPY FROM STDIN",
             ));
         };
+        // The state is owned here: any parse, conversion or insert error
+        // below aborts the whole copy and drops the buffered data —
+        // otherwise a pooled connection would retain failed-import
+        // buffers until its next COPY. On success it is put back.
         state.feed(&copy_data.data)?;
         if state.should_flush() {
-            let rows = self.flush_copy_in(state).await?;
+            let rows = self.flush_copy_in(&mut state).await?;
             state.rows_written += rows;
             METRIC_POSTGRES_COPY_IN_ROWS.inc_by(rows);
         }
+        *guard = Some(state);
         Ok(())
     }
 
@@ -510,32 +515,31 @@ impl CopyHandler for PostgresServerHandlerInner {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let mut guard = self.copy_in_state.lock().await;
-        let Some(state) = guard.as_mut() else {
+        // Take ownership up front: even finalization failures (parse
+        // errors in the trailing record, insert errors) drop the state
+        // instead of retaining it on a long-lived connection.
+        let Some(mut state) = guard.take() else {
             return Err(copy_in_error(
                 PgErrorCode::Ec08P01,
                 "CopyDone message received outside COPY FROM STDIN",
             ));
         };
         state.finish()?;
-        let rows = self.flush_copy_in(state).await?;
+        let rows = self.flush_copy_in(&mut state).await?;
         state.rows_written += rows;
         METRIC_POSTGRES_COPY_IN_ROWS.inc_by(rows);
 
         let rows_written = state.rows_written;
+        let codec_name = state.codec_name;
         info!(
             "PostgreSQL COPY FROM STDIN (format {}) finished: {} rows written",
-            state.codec_name, rows_written
+            codec_name, rows_written
         );
         client
             .send(PgWireBackendMessage::CommandComplete(
                 Tag::new("COPY").with_rows(rows_written as usize).into(),
             ))
             .await?;
-
-        // Reset the copy state: the buffers are no longer needed and any
-        // stray CopyData now hits the protocol-violation error instead of
-        // a finished parser.
-        guard.take();
 
         // After a successful extended-protocol copy-in, pgwire leaves the
         // connection in `CopyInProgress(true)` and swallows the client's

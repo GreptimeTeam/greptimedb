@@ -32,11 +32,11 @@ use std::sync::Arc;
 use api::helper::vectors_to_rows;
 use arrow::csv::ReaderBuilder;
 use arrow::csv::reader::Decoder as CsvDecoder;
-use arrow_schema::ArrowError;
+use arrow_schema::{ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
-use datatypes::vectors::Helper;
+use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector};
 use pgwire::error::{PgWireError, PgWireResult};
 
 use crate::postgres::copy_in::codec::{CopyInCodec, ParsedRow, RecordParser};
@@ -120,12 +120,34 @@ impl CopyInCodec for CsvCodec {
         &self,
         columns: &[ColumnSchema],
     ) -> PgWireResult<Box<dyn RecordParser + Send>> {
-        // Reuse the greptime schema's arrow projection for decoding.
+        // Decode schema: the greptime schema's arrow projection, except
+        // Boolean columns decode as Utf8 — arrow-csv only accepts
+        // `true`/`false`, while PostgreSQL COPY IN accepts its full set
+        // of boolean spellings (`t`, `f`, `yes`, `on`, ...), which COPY
+        // OUT emits. The substitution is reverted in `flush_batch`.
+        let boolean_columns: Vec<usize> = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.data_type, ConcreteDataType::Boolean(_)))
+            .map(|(i, _)| i)
+            .collect();
         let arrow_schema = GreptimeSchema::try_new(columns.to_vec())
             .map_err(|e| unsupported(format!("invalid columns for format csv: {e}")))?
             .arrow_schema()
             .clone();
-        let mut builder = ReaderBuilder::new(arrow_schema)
+        let fields = arrow_schema
+            .fields()
+            .iter()
+            .zip(columns)
+            .map(|(field, column)| {
+                if matches!(column.data_type, ConcreteDataType::Boolean(_)) {
+                    Field::new(field.name(), ArrowDataType::Utf8, field.is_nullable())
+                } else {
+                    field.as_ref().clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut builder = ReaderBuilder::new(Arc::new(ArrowSchema::new(fields)))
             .with_header(self.header)
             .with_delimiter(self.delimiter)
             .with_quote(self.quote)
@@ -137,6 +159,7 @@ impl CopyInCodec for CsvCodec {
         }
         Ok(Box::new(CsvRecordParser {
             decoder: builder.build_decoder(),
+            boolean_columns,
         }))
     }
 }
@@ -144,6 +167,9 @@ impl CopyInCodec for CsvCodec {
 /// Incremental parser backed by arrow-csv's decoder.
 struct CsvRecordParser {
     decoder: CsvDecoder,
+    /// Indices of Boolean columns, decoded as Utf8 and converted by
+    /// [`flush_batch`] to accept PostgreSQL's boolean spellings.
+    boolean_columns: Vec<usize>,
 }
 
 impl RecordParser for CsvRecordParser {
@@ -154,7 +180,7 @@ impl RecordParser for CsvRecordParser {
             let consumed = self.decoder.decode(buf).map_err(decode_error)?;
             if consumed == 0 {
                 while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-                    rows.extend(flush_batch(&batch)?);
+                    rows.extend(flush_batch(&batch, &self.boolean_columns)?);
                 }
             } else {
                 buf = &buf[consumed..];
@@ -169,7 +195,7 @@ impl RecordParser for CsvRecordParser {
         self.decoder.decode(&[]).map_err(decode_error)?;
         let mut rows = Vec::new();
         while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-            rows.extend(flush_batch(&batch)?);
+            rows.extend(flush_batch(&batch, &self.boolean_columns)?);
         }
         Ok(rows)
     }
@@ -177,10 +203,48 @@ impl RecordParser for CsvRecordParser {
 
 /// Converts one decoded arrow batch into insertable rows with the shared
 /// [`vectors_to_rows`] helper.
-fn flush_batch(batch: &arrow::record_batch::RecordBatch) -> PgWireResult<Vec<ParsedRow>> {
-    let vectors = Helper::try_into_vectors(batch.columns())
+fn flush_batch(
+    batch: &arrow::record_batch::RecordBatch,
+    boolean_columns: &[usize],
+) -> PgWireResult<Vec<ParsedRow>> {
+    let mut vectors = Helper::try_into_vectors(batch.columns())
         .map_err(|e| bad_copy_data(format!("failed to convert decoded CSV batch: {e}")))?;
+    for &index in boolean_columns {
+        let Some(vector) = vectors[index].as_any().downcast_ref::<StringVector>() else {
+            return Err(bad_copy_data(
+                "expected boolean column to decode as a string vector",
+            ));
+        };
+        let mut values = Vec::with_capacity(batch.num_rows());
+        for row_index in 0..batch.num_rows() {
+            values.push(match vector.get(row_index) {
+                datatypes::value::Value::Null => None,
+                datatypes::value::Value::String(s) => Some(parse_pg_bool(s.as_utf8())?),
+                other => {
+                    return Err(bad_copy_data(format!(
+                        "expected string values in a boolean column, got {other:?}"
+                    )));
+                }
+            });
+        }
+        vectors[index] = Arc::new(BooleanVector::from(values));
+    }
     Ok(vectors_to_rows(vectors.iter(), batch.num_rows()))
+}
+
+/// Parses PostgreSQL's boolean spellings: `true`/`false`, `t`/`f`,
+/// `yes`/`no`, `on`/`off` and `1`/`0`, case-insensitive with surrounding
+/// whitespace allowed (see the BOOLEAN type's input grammar). COPY OUT
+/// emits `t`/`f`, so accepting them keeps both COPY directions
+/// round-trippable.
+fn parse_pg_bool(input: &str) -> PgWireResult<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "true" | "t" | "yes" | "y" | "on" | "1" => Ok(true),
+        "false" | "f" | "no" | "n" | "off" | "0" => Ok(false),
+        _ => Err(invalid_text_repr(format!(
+            "invalid input syntax for type boolean: \"{input}\""
+        ))),
+    }
 }
 
 fn decode_error(error: ArrowError) -> PgWireError {
@@ -493,6 +557,77 @@ mod tests {
             count += parser.finish().unwrap().len();
             assert_eq!(count, total - 1, "chunk={chunk} shifted");
         }
+    }
+
+    #[test]
+    fn test_csv_boolean_spellings() {
+        // PostgreSQL COPY OUT emits `t`/`f`; COPY IN accepts the full
+        // boolean input grammar.
+        let columns = vec![
+            ColumnSchema::new("flag", ConcreteDataType::boolean_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&columns)
+            .unwrap();
+        let rows = feed_all(
+            &mut parser,
+            &[b"t,2024-01-01 00:00:00\n\
+                 f,2024-01-01 00:00:01\n\
+                 TRUE,2024-01-01 00:00:02\n\
+                 no,2024-01-01 00:00:03\n\
+                 on,2024-01-01 00:00:04\n\
+                 0,2024-01-01 00:00:05\n\
+                 ,2024-01-01 00:00:06\n"],
+        );
+        let expected = [
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(false),
+            None,
+        ];
+        for (row, want) in rows.iter().zip(expected) {
+            assert_eq!(
+                row.values[0].value_data,
+                want.map(api::v1::value::ValueData::BoolValue),
+                "{:?}",
+                row.values[0].value_data
+            );
+        }
+    }
+
+    #[test]
+    fn test_csv_boolean_rejects_garbage() {
+        let columns = vec![
+            ColumnSchema::new("flag", ConcreteDataType::boolean_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&columns)
+            .unwrap();
+        parser.feed(b"maybe,2024-01-01 00:00:00\n").unwrap();
+        let err = match parser.finish() {
+            Ok(_) => panic!("expected parse error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string()
+                .contains("invalid input syntax for type boolean"),
+            "{err}"
+        );
     }
 
     #[test]

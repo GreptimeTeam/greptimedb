@@ -221,3 +221,121 @@ async fn test_postgres_copy_in_csv_options() {
 
     server.shutdown().await.unwrap();
 }
+
+/// COPY OUT → COPY IN round trip: PostgreSQL's COPY OUT emits `t`/`f`
+/// for booleans, which COPY IN must accept back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_bool_round_trip() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_bool_rt").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query(
+            "CREATE TABLE bool_src (flag BOOLEAN, ts TIMESTAMP, TIME INDEX(ts));
+             CREATE TABLE bool_dst (flag BOOLEAN, ts TIMESTAMP, TIME INDEX(ts));
+             INSERT INTO bool_src VALUES (true, '2024-01-01 00:00:00'), (false, '2024-01-01 00:00:01'), (true, '2024-01-01 00:00:02');",
+        )
+        .await
+        .unwrap();
+
+    // COPY OUT: collect the exported bytes.
+    let mut exported = Vec::new();
+    let mut out = Box::pin(
+        client
+            .copy_out(
+                "COPY (SELECT flag, ts FROM bool_src ORDER BY ts) TO STDOUT WITH (FORMAT csv)",
+            )
+            .await
+            .unwrap(),
+    );
+    use futures::StreamExt;
+    while let Some(chunk) = out.as_mut().next().await {
+        exported.extend_from_slice(&chunk.unwrap());
+    }
+    // The wire encoder emits PostgreSQL boolean spellings.
+    let text = String::from_utf8(exported.clone()).unwrap();
+    assert!(text.contains("t,"), "COPY OUT should emit t/f, got: {text}");
+    assert!(text.contains("f,"), "COPY OUT should emit t/f, got: {text}");
+
+    // COPY IN: the exact bytes must import back.
+    let rows = feed_copy_in(
+        &client,
+        "COPY bool_dst FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from(exported)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 3);
+
+    let messages = client
+        .simple_query("SELECT flag FROM bool_dst ORDER BY ts")
+        .await
+        .unwrap();
+    let flags: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .collect();
+    // The simple-query path also renders booleans in the t/f spelling.
+    assert_eq!(flags, vec!["t", "f", "t"]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// A failed COPY must release its state so a later COPY on the same
+/// connection works; this guards the error-path state drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_failed_copy_then_new_copy() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_fail_reuse").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query(
+            "CREATE TABLE copy_reuse (host STRING, val DOUBLE, ts TIMESTAMP, TIME INDEX(ts))",
+        )
+        .await
+        .unwrap();
+
+    // A copy that fails at CopyDone (bad double parsed at flush time).
+    let err = match feed_copy_in(
+        &client,
+        "COPY copy_reuse FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from_static(
+            b"host1,not_a_double,2024-01-01 00:00:00\n",
+        )],
+    )
+    .await
+    {
+        Ok(_) => panic!("expected COPY to fail"),
+        Err(e) => e,
+    };
+    assert!(err.as_db_error().is_some(), "{err}");
+
+    // The connection is usable and a NEW copy succeeds on it.
+    let rows = feed_copy_in(
+        &client,
+        "COPY copy_reuse FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from_static(b"host1,1.5,2024-01-01 00:00:01\n")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT host, val FROM copy_reuse")
+        .await
+        .unwrap();
+    let found: Vec<_> = messages
+        .iter()
+        .filter(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        .collect();
+    assert_eq!(found.len(), 1);
+
+    server.shutdown().await.unwrap();
+}
