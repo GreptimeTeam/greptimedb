@@ -301,8 +301,7 @@ impl Extent {
         self.time_overlaps(other)
             && match (&self.primary_key, &other.primary_key) {
                 (Some(lhs), Some(rhs)) => {
-                    let low = lhs.0.clone().max(rhs.0.clone());
-                    let high = lhs.1.clone().min(rhs.1.clone());
+                    let (low, high) = ((&lhs.0).max(&rhs.0), (&lhs.1).min(&rhs.1));
                     low < high || (low == high && is_single_key(lhs) && is_single_key(rhs))
                 }
                 _ => true,
@@ -315,8 +314,7 @@ impl Extent {
         self.time_overlaps(area)
             && match (&self.primary_key, &area.primary_key) {
                 (Some(lhs), Some(rhs)) => {
-                    let low = lhs.0.clone().max(rhs.0.clone());
-                    let high = lhs.1.clone().min(rhs.1.clone());
+                    let (low, high) = ((&lhs.0).max(&rhs.0), (&lhs.1).min(&rhs.1));
                     low < high || (low == high && is_single_key(lhs))
                 }
                 _ => true,
@@ -425,9 +423,12 @@ fn split_oversized_units(
 
 /// Merges units until no file intrudes on a unit it does not belong to.
 ///
-/// Each merge re-checks only the merged unit, so the closure takes O(U · N)
-/// intrusion checks for U initial units and N files.
+/// Each merge re-checks only the merged unit against the files starting before
+/// its end, so the closure takes at most O(U · N) intrusion checks for U initial
+/// units and N files.
 fn close_units(units: &mut Vec<Unit>, extents: &[Extent]) {
+    let mut by_start: Vec<usize> = (0..extents.len()).collect();
+    by_start.sort_by_key(|&i| extents[i].start);
     let mut owner = vec![0; extents.len()];
     for (u, unit) in units.iter().enumerate() {
         for &i in &unit.files {
@@ -440,8 +441,12 @@ fn close_units(units: &mut Vec<Unit>, extents: &[Extent]) {
         if !alive[u] {
             continue;
         }
-        let intruders = (0..extents.len())
-            .filter(|&i| owner[i] != u && extents[i].intrudes(&units[u].extent))
+        let area = &units[u].extent;
+        let candidates = by_start.partition_point(|&i| extents[i].start < area.end);
+        let intruders = by_start[..candidates]
+            .iter()
+            .copied()
+            .filter(|&i| owner[i] != u && extents[i].intrudes(area))
             .map(|i| owner[i])
             .collect::<std::collections::BTreeSet<_>>();
         if intruders.is_empty() {
