@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod arithmetic;
+mod broadcast;
+mod comparison;
+mod math_functions;
+mod prometheus;
+
 use std::sync::Arc;
 
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
@@ -30,8 +36,6 @@ use datatypes::series::{Label, MetricName};
 
 use super::*;
 use crate::functions::IeeeSqrt;
-
-mod prometheus;
 
 fn schema(names: &[&str]) -> SeriesSchema {
     SeriesSchema {
@@ -181,7 +185,7 @@ fn math_preserves_missing_and_uses_ieee_float_semantics() {
         ),
     ];
     for (op, expected) in cases {
-        let output = map_math(&schema, &input, op).unwrap();
+        let output = map_math(&schema, &input, op).unwrap().unwrap();
         let expected = expected
             .into_iter()
             .map(Some)
@@ -206,7 +210,7 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
         .unwrap(),
     ];
     let input = series(&schema, 7, fields);
-    let output = map_math(&schema, &input, MathOp::Floor).unwrap();
+    let output = map_math(&schema, &input, MathOp::Floor).unwrap().unwrap();
     let TimeAxis::Grid(range) = &output.time else {
         panic!("lost grid axis")
     };
@@ -262,7 +266,7 @@ fn empty_and_all_missing_ranges_are_not_expanded() {
             MathOp::Sqrt,
             MathOp::Round { nearest: 0.0 },
         ] {
-            let output = map_math(&schema, &input, op).unwrap();
+            let output = map_math(&schema, &input, op).unwrap().unwrap();
             let TimeAxis::Grid(range) = &output.time else {
                 panic!("lost grid axis")
             };
@@ -285,7 +289,7 @@ fn evaluated_missingness_depends_on_validity_not_nan_payloads() {
             Some(NullBuffer::from(vec![false, true, true])),
         ))],
     );
-    let output = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     assert_floats(
         output.fields.get(0).unwrap(),
         &[None, Some(ordinary_nan), Some(1.0)],
@@ -299,12 +303,12 @@ fn evaluated_missingness_depends_on_validity_not_nan_payloads() {
     // must not reinterpret that computed value as a missing sample or reject the evaluated input.
     let negative_nan = f64::from_bits(PROMETHEUS_STALE_NAN_BITS | (1_u64 << 63));
     let input = series(&schema, 1, vec![floats(&[Some(negative_nan)])]);
-    let absolute = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let absolute = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     let SampleRef::Float(computed_nan) = absolute.fields.get(0).unwrap().sample(0) else {
         panic!("lost computed NaN")
     };
     assert_eq!(computed_nan.to_bits(), PROMETHEUS_STALE_NAN_BITS);
-    let rounded = map_math(&schema, &absolute, MathOp::Ceil).unwrap();
+    let rounded = map_math(&schema, &absolute, MathOp::Ceil).unwrap().unwrap();
     assert_floats(rounded.fields.get(0).unwrap(), &[Some(f64::NAN)]);
 }
 
@@ -347,10 +351,12 @@ fn histogram_and_mixed_fields_are_rejected_without_partial_success() {
     for unsupported in [histogram, mixed, null_histogram, chunks] {
         let prefix = floats(&vec![Some(-2.0); unsupported.len()]);
         let input = series(&schema, 2, vec![prefix, unsupported]);
-        assert!(matches!(
-            map_math(&schema, &input, MathOp::Abs),
-            Err(DataFusionError::NotImplemented(_))
-        ));
+        for op in [MathOp::Abs, MathOp::Clamp { min: 2.0, max: 1.0 }] {
+            assert!(matches!(
+                map_math(&schema, &input, op),
+                Err(DataFusionError::NotImplemented(_))
+            ));
+        }
         assert_floats(
             input.fields.get(0).unwrap(),
             &vec![Some(-2.0); input.time.len()],
@@ -402,7 +408,7 @@ fn ordinary_math(op: MathOp, input: Float64Array) -> Float64Array {
         MathOp::Ceil => math::ceil(),
         MathOp::Floor => math::floor(),
         MathOp::Sqrt => Arc::new(IeeeSqrt::scalar_udf()),
-        MathOp::Round { .. } => unreachable!("round is checked against Prometheus fixtures"),
+        _ => unreachable!("main agrees with Prometheus only for abs, ceil, floor and sqrt"),
     };
     let arg_fields = args
         .iter()
@@ -471,7 +477,7 @@ fn math_matches_main_udfs_across_float_boundaries() {
     // Round shares its calculation with the UDF; the Prometheus fixtures check it instead.
     let cases = [MathOp::Abs, MathOp::Ceil, MathOp::Floor, MathOp::Sqrt];
     for op in cases {
-        let output = map_math(&schema, &series, op).unwrap();
+        let output = map_math(&schema, &series, op).unwrap().unwrap();
         let expected = ordinary_math(op, input.clone()).iter().collect::<Vec<_>>();
         for field in output.fields.iter() {
             assert_floats(field, &expected);
@@ -492,7 +498,7 @@ fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
     for label in ["__type__", "__unit__", "__other__"] {
         input.metric.set(label, "x".into()).unwrap();
     }
-    let output = map_math(&schema, &input, MathOp::Abs).unwrap();
+    let output = map_math(&schema, &input, MathOp::Abs).unwrap().unwrap();
     let names = output
         .metric
         .tags()
