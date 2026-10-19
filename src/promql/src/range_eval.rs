@@ -17,12 +17,13 @@
 use std::sync::Arc;
 
 use common_query::prometheus::is_prometheus_stale_nan;
+use datafusion::arrow::array::Array;
 use datafusion::arrow::buffer::Buffer;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::histogram::CounterResetHint;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
 
 use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS};
@@ -90,6 +91,10 @@ pub struct RangeEvaluator {
     drops_metric_name: bool,
     /// Raised by the first non-empty window, where Prometheus validates function arguments.
     window_error: Option<String>,
+    /// Chunks appended by the bulk path, so a test can prove that path is reached rather than
+    /// only that the output is right, which the per-sample path would also produce.
+    #[cfg(test)]
+    bulk_ingests: usize,
 }
 
 struct SeriesState {
@@ -179,6 +184,32 @@ impl FieldSamples {
         }
         self.timestamps.push(timestamp);
         self.values.push(value);
+    }
+
+    /// Appends samples that are all present, in bulk.
+    ///
+    /// Same result as calling [`push`](Self::push) once per sample, including the reset scan,
+    /// which stays per-sample for a field that maintains the index; the two appends become two
+    /// `memcpy`s.
+    fn push_bulk(&mut self, timestamps: &[i64], values: &[f64]) {
+        debug_assert_eq!(timestamps.len(), values.len());
+        if self.index_resets {
+            let start = self.values.len();
+            let mut previous = self.values.last().copied();
+            for (offset, &value) in values.iter().enumerate() {
+                if let Some(previous_value) = previous
+                    && value < previous_value
+                {
+                    self.resets.push(CounterReset {
+                        position: self.base + (start + offset) as u64,
+                        previous_value,
+                    });
+                }
+                previous = Some(value);
+            }
+        }
+        self.timestamps.extend_from_slice(timestamps);
+        self.values.extend_from_slice(values);
     }
 
     /// Drops the samples before `head` and the resets whose predecessor is one of them.
@@ -299,7 +330,17 @@ impl RangeEvaluator {
             row: Vec::with_capacity(input.fields.len()),
             drops_metric_name: false,
             window_error: None,
+            #[cfg(test)]
+            bulk_ingests: 0,
         })
+    }
+
+    /// Chunks appended without the per-sample loop. Test-only: both paths produce the same
+    /// output by construction, so a test that only compared output could not tell whether the
+    /// bulk path ran at all.
+    #[cfg(test)]
+    pub(crate) fn bulk_ingest_count(&self) -> usize {
+        self.bulk_ingests
     }
 
     /// Schema of the evaluated series: the input fields on the evaluation grid.
@@ -431,9 +472,65 @@ impl RangeEvaluator {
         Ok(())
     }
 
+    /// Appends the chunk in bulk when every field is an entirely present, unshifted float column.
+    ///
+    /// Returns `false` when any condition of the per-sample path applies, so the caller can run
+    /// it. A chunk carrying a stale marker takes that path too: the marker drops the whole row,
+    /// and reproducing that here would cost the same scan the loop already makes.
+    ///
+    /// A field mixing floats and native histograms never qualifies: `dense()` reports
+    /// [`DenseSamplesRef::Mixed`] for it, keeping its windows on the histogram path where the
+    /// mixed-window rules decide the result.
+    fn ingest_in_bulk(
+        &mut self,
+        timestamps: &[i64],
+        fields: &SeriesFields,
+        drop_stale: bool,
+    ) -> bool {
+        // Lengths are checked by `check_chunk` for raw input and by `push_series` for evaluated
+        // input, so only the shape of the columns is decided here.
+        if self.window.offset_ms != 0 {
+            return false;
+        }
+        let mut columns = Vec::with_capacity(fields.len());
+        for field in fields.iter() {
+            let Some(DenseSamplesRef::Float(values)) = field.dense() else {
+                return false;
+            };
+            if values.null_count() != 0 {
+                return false;
+            }
+            columns.push(values);
+        }
+        // A kept sample's shifted time must fit `i64`; with no offset it is the source timestamp,
+        // which `RawTimestamps` already validated as increasing and which the frame widened into
+        // this array without narrowing, so there is nothing left to check here.
+        if drop_stale
+            && columns.iter().any(|values| {
+                values
+                    .values()
+                    .iter()
+                    .any(|value| is_prometheus_stale_nan(*value))
+            })
+        {
+            return false;
+        }
+        for (field, values) in self.fields.iter_mut().zip(columns) {
+            field.push_bulk(timestamps, values.values());
+        }
+        #[cfg(test)]
+        {
+            self.bulk_ingests += 1;
+        }
+        true
+    }
+
     /// Retains the samples of `fields` at `timestamps`. From `raw` input a row holding a stale
     /// marker in any field is dropped; evaluated input keeps it as a value.
     fn ingest(&mut self, timestamps: &[i64], fields: &SeriesFields, raw: bool) -> Result<()> {
+        if self.ingest_in_bulk(timestamps, fields, raw) {
+            return Ok(());
+        }
         let mut samples: Vec<_> = fields.iter().map(|field| field.iter()).collect();
         let mut row = Vec::with_capacity(samples.len());
         for &timestamp in timestamps {
