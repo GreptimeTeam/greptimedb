@@ -197,6 +197,37 @@ impl PendingBatch {
             spans.clear();
         }
     }
+
+    /// The bytes the accumulated points hold in the vectors themselves, by capacity, because
+    /// clearing a batch keeps its allocation for the next one. Saturating, since the figure goes
+    /// into a memory reservation that must never wrap to a small number.
+    ///
+    /// The outer `spans` and `columns` vectors are not counted, only the buffers they hold, so this
+    /// is a lower bound on what the batch retains.
+    fn bytes(&self) -> usize {
+        self.indices
+            .capacity()
+            .saturating_mul(std::mem::size_of::<usize>())
+            .saturating_add(
+                self.eval_ts
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<i64>()),
+            )
+            .saturating_add(self.spans.iter().fold(0usize, |bytes, spans| {
+                bytes.saturating_add(
+                    spans
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Range<usize>>()),
+                )
+            }))
+            .saturating_add(self.columns.iter().fold(0usize, |bytes, column| {
+                bytes.saturating_add(
+                    column
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Option<f64>>()),
+                )
+            }))
+    }
 }
 
 /// Records one point for the next batch call: its evaluation timestamp and, per field, the range
@@ -279,6 +310,28 @@ struct SeriesState {
     completed: usize,
     /// Grid index after the last position handed out to the consumer.
     emitted_end: usize,
+}
+
+impl SeriesState {
+    /// The bytes this identity holds once the input chunk it came from is gone: the primary key
+    /// buffer and the metric's name and label strings. Saturating, because the figure goes into a
+    /// memory reservation.
+    ///
+    /// `Buffer::len` is the buffer's visible byte length, so the key term is those bytes; a buffer
+    /// sliced from a larger allocation leaves the backing beyond them uncounted. Neither the metric
+    /// nor its labels has a byte-length accessor, so the string contents are measured directly:
+    /// that counts every byte of every name and value, and leaves out the `Arc` headers and the
+    /// label slice they sit in, which are a small fixed amount per label rather than per byte.
+    fn identity_bytes(&self) -> usize {
+        let key = self.primary_key.as_ref().map_or(0, Buffer::len);
+        let name = self.metric.name().map_or(0, str::len);
+        let labels = self.metric.tags().iter().fold(0usize, |bytes, label| {
+            bytes
+                .saturating_add(label.name.len())
+                .saturating_add(label.value.len())
+        });
+        key.saturating_add(name).saturating_add(labels)
+    }
 }
 
 /// How the windows of an `@`-anchored selector map to the grid.
@@ -542,6 +595,76 @@ impl RangeEvaluator {
     /// Schema of the evaluated series: the input fields on the evaluation grid.
     pub fn output_schema(&self) -> &Arc<SeriesSchema> {
         &self.output_schema
+    }
+
+    /// The bytes this evaluator's storage is accounted at, as its buffers stand now: their
+    /// capacity, not the number of samples live in them, because a drained vector keeps its buffer.
+    ///
+    /// Counted, and this is what a window reserves for: the samples retained per field — each with
+    /// its own timestamps, values, reset index and native histograms, the histograms with the heap
+    /// they own beyond their slot — the row a push fills, the points accumulated for the next batch
+    /// call, and the identity the open series keeps once the input chunk it came from is gone.
+    /// Between pushes this total is what those buffers are accounted at, a lower bound on what they
+    /// hold; during one, it is what they stood at before the push, and the caller in
+    /// `native::execute` says what a push holds on top. Saturating throughout, so a pathological
+    /// input cannot wrap the figure to a small one.
+    ///
+    /// Two things are deliberately left out. The kernel's scratch — quantile's sorted copy, MAD's
+    /// two vectors — lives inside the closures behind [`WindowKernel`], which offer no accessor to
+    /// it; it is bounded by the retained samples of the one window being evaluated, which is the
+    /// quantity already counted above, so it is a constant factor of that storage rather than a term
+    /// growing with anything else. And `output` with `batch` holds nothing between pushes:
+    /// `GridSeriesBuilder::finish` moves its fields out into the series it returns, and the batch
+    /// kernels are plain functions capturing no state.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let fields = self.fields.iter().fold(0usize, |bytes, field| {
+            let slot = std::mem::size_of::<(i64, FloatHistogram)>();
+            // What each native histogram holds beyond the slot it occupies.
+            let payload = field
+                .histograms
+                .iter()
+                .fold(0usize, |held, (_, histogram)| {
+                    held.saturating_add(histogram.heap_bytes())
+                });
+            bytes
+                .saturating_add(
+                    field
+                        .timestamps
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<i64>()),
+                )
+                .saturating_add(
+                    field
+                        .values
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<f64>()),
+                )
+                .saturating_add(
+                    field
+                        .resets
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<CounterReset>()),
+                )
+                .saturating_add(field.histograms.capacity().saturating_mul(slot))
+                .saturating_add(payload)
+        });
+        // The row a push fills, one slot per field, and the boxed payload each buffered native
+        // histogram owns beyond the pointer its slot holds.
+        let row = self
+            .row
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Option<GridSample>>());
+        let row_payload = self.row.iter().fold(0usize, |held, sample| match sample {
+            Some(GridSample::Histogram(histogram)) => held
+                .saturating_add(std::mem::size_of::<FloatHistogram>())
+                .saturating_add(histogram.heap_bytes()),
+            _ => held,
+        });
+        fields
+            .saturating_add(row)
+            .saturating_add(row_payload)
+            .saturating_add(self.pending.bytes())
+            .saturating_add(self.series.as_ref().map_or(0, SeriesState::identity_bytes))
     }
 
     /// Consumes the next chunk of the current series, or starts a new series.

@@ -80,6 +80,31 @@ impl FloatHistogram {
         })
     }
 
+    /// The bytes this histogram owns outside its own `size_of`, from the vectors it holds.
+    ///
+    /// Capacity, not length: a bucket list that was drained keeps its buffer, so what the
+    /// reservation has to cover is what the vector still holds. Saturating, because the figure
+    /// goes into a memory reservation, which must never wrap to a small number.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let buckets = self
+            .positive
+            .capacity()
+            .saturating_add(self.negative.capacity())
+            .saturating_mul(std::mem::size_of::<(i32, f64)>());
+        let custom = self
+            .custom_values
+            .capacity()
+            .saturating_mul(std::mem::size_of::<f64>());
+        // Only a histogram read from a view keeps its span layout; a derived one holds none.
+        let layout = self.layout.as_ref().map_or(0, |[positive, negative]| {
+            positive
+                .capacity()
+                .saturating_add(negative.capacity())
+                .saturating_mul(std::mem::size_of::<(i32, i32)>())
+        });
+        buckets.saturating_add(custom).saturating_add(layout)
+    }
+
     /// The spans of each side.
     fn spans(&self) -> [Vec<(i32, i32)>; 2] {
         self.layout

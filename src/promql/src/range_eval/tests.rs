@@ -579,6 +579,239 @@ fn functions_match_range_udfs() {
     }
 }
 
+/// The retention figure of `evaluator` with the pending-batch and field-histogram terms left out,
+/// every remaining term added up here from the evaluator's own vectors: the capacity of each
+/// field's timestamps, values and reset index, the row a push fills with the heap of the histograms
+/// it holds, and the identity of the series still open.
+///
+/// The two terms left out are pinned by their own tests below, since neither is live in every
+/// evaluator.
+fn hand_summed_retention_without_batch_or_histograms(evaluator: &RangeEvaluator) -> usize {
+    let mut expected = 0;
+    for field in &evaluator.fields {
+        expected += field.timestamps.capacity() * std::mem::size_of::<i64>();
+        expected += field.values.capacity() * std::mem::size_of::<f64>();
+        expected += field.resets.capacity() * std::mem::size_of::<CounterReset>();
+    }
+    expected += evaluator.row.capacity() * std::mem::size_of::<Option<GridSample>>();
+    // The payload a histogram in the row owns beyond the slot the row holds it in.
+    expected += evaluator
+        .row
+        .iter()
+        .fold(0usize, |held, sample| match sample {
+            Some(GridSample::Histogram(histogram)) => {
+                held + std::mem::size_of::<FloatHistogram>() + histogram.heap_bytes()
+            }
+            _ => held,
+        });
+    // The identity of the open series: `chunk` holds the host it was built for as a `u64`, so the
+    // primary key is 8 bytes, and the metric is `http_requests` with the one label `host="h0"`.
+    expected + 8 + "http_requests".len() + "host".len() + "h0".len()
+}
+
+/// The bytes the native histograms the fields retain are worth, added up here from the evaluator's
+/// own vectors: the slot each occupies and the heap it owns beyond it.
+fn hand_summed_field_histograms(evaluator: &RangeEvaluator) -> usize {
+    evaluator
+        .fields
+        .iter()
+        .map(|field| {
+            field.histograms.capacity() * std::mem::size_of::<(i64, FloatHistogram)>()
+                + field
+                    .histograms
+                    .iter()
+                    .map(|(_, histogram)| histogram.heap_bytes())
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// The per-field float vectors and the reset index of an open series are pinned here, hand-summed.
+///
+/// The expectation is built from the evaluator's own vectors rather than from the routine under
+/// test: each term is a capacity read directly and multiplied by the size of what the vector holds.
+/// The kernel indexes counter resets, so the reset term is proven non-zero below rather than being
+/// zero by accident.
+///
+/// This evaluator keeps no histogram and no pending batch, so those terms are zero here and are
+/// pinned by `the_retained_bytes_of_an_evaluator_include_its_pending_batch` and
+/// `the_retained_bytes_of_an_evaluator_include_its_histograms` instead.
+#[test]
+fn the_retained_bytes_of_an_open_series_are_hand_summed() {
+    let mut evaluator = probe_evaluator(
+        2,
+        grid(0, 1, 2_000),
+        RangeWindow {
+            range_ms: 1_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+    );
+    // A counter resetting in both fields, sampled every 100 ms: the last decided point's window
+    // still holds every sample, so nothing is released before the figure is read.
+    let rows: Vec<Row> = [1.0, 2.0, 3.0, 0.5, 1.5, 2.5, 0.25, 1.0, 2.0, 3.0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (index as i64 * 100, vec![Some(value), Some(value * 10.0)]))
+        .collect();
+    evaluator.push(&chunk(&rows, 2, 0, false)).unwrap();
+    assert!(
+        evaluator
+            .fields
+            .iter()
+            .all(|field| field.values.len() == rows.len()),
+        "the evaluator released samples the window still needs"
+    );
+
+    // The sum, one term at a time: no term of it comes from the accounting routine.
+    let expected = hand_summed_retention_without_batch_or_histograms(&evaluator);
+    // The batch buffer of this evaluator is never filled, since the probe kernel has no batch
+    // form, so its term is zero and the sum above has to be the whole figure.
+    assert!(evaluator.pending.is_empty());
+    assert_eq!(evaluator.pending.bytes(), 0);
+    // The probe keeps floats only, so no histogram is retained and no histogram term is live here.
+    assert_eq!(hand_summed_field_histograms(&evaluator), 0);
+
+    let resets: usize = evaluator
+        .fields
+        .iter()
+        .map(|field| field.resets.capacity() * std::mem::size_of::<CounterReset>())
+        .sum();
+    assert!(
+        resets > 0,
+        "a counter-indexing kernel kept no reset, so dropping the reset term would pass"
+    );
+    assert_eq!(
+        evaluator.retained_bytes(),
+        expected,
+        "the retention figure is not the hand sum of the buffers it is made of"
+    );
+    let live: usize = evaluator
+        .fields
+        .iter()
+        .map(|field| field.values.len() * std::mem::size_of::<f64>())
+        .sum();
+    assert!(live > 0, "the evaluator retained no float sample");
+    assert!(
+        evaluator.retained_bytes() > live,
+        "the figure is no larger than the samples alone, so it counts no buffer"
+    );
+}
+
+/// The bytes the pending batch keeps between pushes are part of the retention figure.
+///
+/// A batchable function accumulates its points during a push and always flushes them before the
+/// push returns, so the batch holds no point here; but every vector it filled keeps the allocation
+/// for the next batch, and that allocation is what the reservation has to cover. The total is
+/// checked against the hand sum of the other terms plus this one, so dropping the term leaves the
+/// figure too small.
+#[test]
+fn the_retained_bytes_of_an_evaluator_include_its_pending_batch() {
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 1, 2_000),
+        RangeWindow {
+            range_ms: 1_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+    )
+    .unwrap();
+    // Sampled every 100 ms over a 1 s window: hundreds of points reach the batch in this one push.
+    let rows: Vec<Row> = (0..10)
+        .map(|index| (index as i64 * 100, vec![Some(index as f64 + 1.0)]))
+        .collect();
+    evaluator.push(&chunk(&rows, 1, 0, false)).unwrap();
+    assert!(
+        evaluator.pending.is_empty(),
+        "the batch still held points between pushes, so this test no longer describes one"
+    );
+    let pending = evaluator.pending.bytes();
+    assert!(
+        pending > 0,
+        "the batch grew no buffer, so the pending term is zero and nothing is pinned"
+    );
+
+    let other = hand_summed_retention_without_batch_or_histograms(&evaluator)
+        + hand_summed_field_histograms(&evaluator);
+    assert_eq!(
+        evaluator.retained_bytes(),
+        other + pending,
+        "the retention figure does not include the bytes of the pending batch"
+    );
+}
+
+/// The slots and heap of the retained native histograms are part of the retention figure.
+///
+/// One histogram sample, with a float behind it, pushed as a chunk that does not close the series.
+/// The grid reaches one step past the last sample, so the push stops before it evaluates the whole
+/// grid and neither the closing chunk nor the release past the last window drops the histogram
+/// before the figure is read. The total is strictly larger than the hand sum without the histogram
+/// terms, and equals that sum plus them.
+#[test]
+fn the_retained_bytes_of_an_evaluator_include_its_histograms() {
+    let histogram = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder
+        .push(OwnedHistogram::parse(histogram).view())
+        .unwrap();
+    let histograms = HistogramSamples::try_new(
+        UInt32Array::from(vec![Some(index), None]),
+        builder.finish().unwrap(),
+    )
+    .unwrap();
+    let samples =
+        Samples::try_from_mixed(Float64Array::from(vec![None, Some(2.0)]), histograms).unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &raw_schema(1),
+        Buffer::from(0u64.to_le_bytes().to_vec()),
+        Some(metric(0)),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![10_000, 20_000])).unwrap(),
+        SeriesFields::try_from_vec(vec![samples]).unwrap(),
+        false,
+    )
+    .unwrap();
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 10_000, 4),
+        RangeWindow {
+            range_ms: 30_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+    )
+    .unwrap();
+    evaluator.push(&chunk).unwrap();
+
+    assert!(
+        !evaluator.fields[0].histograms.is_empty(),
+        "the evaluator dropped the histogram, so every histogram term would be zero"
+    );
+    let payload: usize = evaluator.fields[0]
+        .histograms
+        .iter()
+        .map(|(_, histogram)| histogram.heap_bytes())
+        .sum();
+    assert!(
+        payload > 0,
+        "no retained histogram owns heap beyond its slot, so only the slot term is pinned"
+    );
+    let histogram_bytes = hand_summed_field_histograms(&evaluator);
+    let without =
+        hand_summed_retention_without_batch_or_histograms(&evaluator) + evaluator.pending.bytes();
+    assert!(
+        evaluator.retained_bytes() > without,
+        "the retention figure is what it is without the histograms, so it counts neither term"
+    );
+    assert_eq!(
+        evaluator.retained_bytes(),
+        without + histogram_bytes,
+        "the retention figure does not add up to the histograms' slots and heap"
+    );
+}
+
 /// A chunk of entirely present float columns is appended in bulk, and that is the path the test
 /// asserts: the per-sample loop produces the same output, so comparing values alone could not
 /// tell whether the bulk path ran.
