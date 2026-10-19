@@ -41,10 +41,9 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::Float64Array;
-use datatypes::series::MetricName;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridRange, TimeAxis};
+use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::map::{MathOp, map_math};
 use crate::native::batch::EvaluatedChunk;
@@ -222,183 +221,33 @@ struct MapRuntime {
 struct WindowRuntime {
     /// This window's own evaluator, with its own input and output grid; `None` once closed.
     evaluator: Option<RangeEvaluator>,
-    /// The schema of the chunks the input hands over.
-    input_schema: Arc<SeriesSchema>,
-    /// The series being assembled from an evaluated input; `None` between series and for raw input.
-    assembling: Option<SeriesAssembler>,
 }
 
 impl WindowRuntime {
     /// Feeds one input chunk to the evaluator and returns the chunk it yields, if any.
     fn push(&mut self, path: &NodePath, chunk: &NativeChunk) -> Result<Option<EvaluatedChunk>> {
+        let evaluator = self.evaluator.as_mut().ok_or_else(|| closed(path))?;
         match chunk {
             // Raw samples are read window by window by the evaluator itself.
-            NativeChunk::Raw(chunk) => {
-                let evaluator = self.evaluator.as_mut().ok_or_else(|| closed(path))?;
-                let series = evaluator.push(chunk)?;
-                to_output(series, chunk.is_last)
-            }
-            // An evaluated input is a series the window reads as computed samples: the chunks of
-            // one series are assembled into the series the evaluator consumes. Feeding each chunk
-            // to the evaluator on its own would evaluate a prefix as if it were the whole series.
-            NativeChunk::Evaluated(chunk) => {
-                if self.assembling.is_none() {
-                    self.assembling = Some(SeriesAssembler::new(Arc::clone(&self.input_schema)));
-                }
-                let ready = match self.assembling.as_mut() {
-                    Some(assembling) => assembling.add(chunk)?,
-                    None => {
-                        return Err(DataFusionError::Execution(format!(
-                            "the window at {path} holds no series to assemble"
-                        )));
-                    }
-                };
-                let Some(series) = ready else {
-                    return Ok(None);
-                };
-                // The series is complete, so what the assembler buffered for it is gone.
-                self.assembling = None;
-                let evaluator = self.evaluator.as_mut().ok_or_else(|| closed(path))?;
-                let series = evaluator.push_series(&series)?;
-                to_output(series, chunk.is_last)
-            }
+            NativeChunk::Raw(chunk) => evaluator.push(chunk),
+            // An evaluated input is read as computed samples, one chunk at a time: the evaluator
+            // carries the window state of one series across its chunks and closes it on the chunk
+            // that says so. Handing each chunk over as it arrives is what lets this window report a
+            // decision before its input series has ended; buffering the chunks into a whole series
+            // first would hold the input's bytes and delay every result to the end of the series.
+            NativeChunk::Evaluated(chunk) => evaluator.push_evaluated(chunk),
         }
     }
 
     /// Closes this window, reporting an input that ended mid-series.
-    fn finish(&mut self, path: &NodePath) -> Result<()> {
-        if self.assembling.take().is_some() {
-            return Err(DataFusionError::Execution(format!(
-                "the input of the window at {path} ended before the last chunk of a series"
-            )));
-        }
+    ///
+    /// The evaluator is what knows whether a series is still open, for evaluated input as much as
+    /// for raw: a chunk that did not say `is_last` leaves it holding the series.
+    fn finish(&mut self) -> Result<()> {
         match self.evaluator.take() {
             Some(evaluator) => evaluator.finish(),
             None => Ok(()),
         }
-    }
-}
-
-/// The evaluated chunks of one series, assembled into the series a window reads.
-///
-/// A window over an evaluated input reads one value per input grid point, so it consumes whole
-/// series. The child reports the series as slices of decided positions; the slices are collected
-/// here in grid order, and a gap between two of them becomes missing positions, which is exactly
-/// what a decided position without a value means.
-struct SeriesAssembler {
-    /// The schema of the evaluated input, which fixes the fields and the grid.
-    schema: Arc<SeriesSchema>,
-    /// Whether the first slice has been seen; until then there is no span to address.
-    started: bool,
-    /// The grid the series is addressed on, from its first slice.
-    grid: Option<Arc<EvalGrid>>,
-    /// The identity of the series being assembled.
-    metric: Option<MetricName>,
-    /// Absolute index of the first position the series decided.
-    start: usize,
-    /// Index after the last position collected so far.
-    end: usize,
-    /// Per field, the slices collected in grid order, with missing gaps between them.
-    fields: Vec<Vec<Samples>>,
-}
-
-impl SeriesAssembler {
-    fn new(schema: Arc<SeriesSchema>) -> Self {
-        Self {
-            schema,
-            started: false,
-            grid: None,
-            metric: None,
-            start: 0,
-            end: 0,
-            fields: Vec::new(),
-        }
-    }
-
-    /// Adds one slice, returning the series once the slice closes it.
-    fn add(&mut self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
-        let range = chunk.range();
-        if chunk.series.fields.len() != self.schema.fields.len() {
-            return Err(DataFusionError::Execution(format!(
-                "an evaluated chunk holds {} fields, not the {} of its schema",
-                chunk.series.fields.len(),
-                self.schema.fields.len()
-            )));
-        }
-        if !range.is_empty()
-            && chunk
-                .series
-                .fields
-                .iter()
-                .any(|field| field.len() != range.len())
-        {
-            return Err(DataFusionError::Execution(
-                "an evaluated chunk's fields do not cover its range".to_string(),
-            ));
-        }
-        if !self.started {
-            self.started = true;
-            self.start = range.start();
-            self.end = range.start();
-            self.grid = Some(Arc::clone(range.grid()));
-            self.metric = Some(chunk.series.metric.clone());
-            self.fields = vec![Vec::new(); self.schema.fields.len()];
-        }
-        // Identity and grid are what make two slices the same series; a change means the input
-        // closed a series without saying so.
-        if self.metric.as_ref() != Some(&chunk.series.metric) {
-            return Err(DataFusionError::Execution(
-                "an evaluated series changed identity before its last chunk".to_string(),
-            ));
-        }
-        match &self.grid {
-            Some(grid) if Arc::ptr_eq(grid, range.grid()) => {}
-            _ => {
-                return Err(DataFusionError::Execution(
-                    "an evaluated series changed grid before its last chunk".to_string(),
-                ));
-            }
-        }
-        if range.start() < self.end {
-            return Err(DataFusionError::Execution(format!(
-                "evaluated ranges of one series overlap: {} starts before {}",
-                range.start(),
-                self.end
-            )));
-        }
-        if range.start() > self.end {
-            let gap = range.start() - self.end;
-            for parts in &mut self.fields {
-                parts.push(Samples::from_float(Float64Array::new_null(gap)));
-            }
-        }
-        for (parts, field) in self.fields.iter_mut().zip(chunk.series.fields.iter()) {
-            parts.push(field.clone());
-        }
-        self.end = range.start() + range.len();
-        if !chunk.is_last {
-            return Ok(None);
-        }
-        self.finish()
-    }
-
-    /// Builds the complete series over the span the slices decided.
-    fn finish(&self) -> Result<Option<Series>> {
-        let (Some(grid), Some(metric)) = (self.grid.clone(), self.metric.clone()) else {
-            return Ok(None);
-        };
-        let fields = self
-            .fields
-            .iter()
-            .map(|parts| Samples::try_from_chunks(parts.clone()))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(series_error)?;
-        let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
-        let range =
-            GridRange::try_new(grid, self.start, self.end - self.start).map_err(series_error)?;
-        let series = Series::try_new(&self.schema, metric, TimeAxis::Grid(range), fields)
-            .map_err(series_error)?;
-        Ok(Some(series))
     }
 }
 
@@ -666,8 +515,6 @@ impl NativeExecutionState {
                     )?;
                     runtime.window = Some(WindowRuntime {
                         evaluator: Some(evaluator),
-                        input_schema,
-                        assembling: None,
                     });
                 }
             }
@@ -759,11 +606,9 @@ impl NativeExecutionState {
     /// everything the execution reserved.
     fn close(&mut self) -> Result<()> {
         let mut result = Ok(());
-        for index in 0..self.runtimes.len() {
-            let path = &self.paths[index];
-            let runtime = &mut self.runtimes[index];
+        for runtime in &mut self.runtimes {
             if let Some(window) = runtime.window.as_mut()
-                && let Err(error) = window.finish(path)
+                && let Err(error) = window.finish()
                 && result.is_ok()
             {
                 result = Err(error);
@@ -993,14 +838,6 @@ fn empty_like(schema: &SeriesSchema, series: &Series, range: &GridRange) -> Resu
         .map_err(series_error)?;
     Series::try_new(schema, series.metric.clone(), TimeAxis::Grid(range), fields)
         .map_err(series_error)
-}
-
-/// The chunks a series produced, wrapped as an evaluated chunk.
-fn to_output(series: Option<Series>, is_last: bool) -> Result<Option<EvaluatedChunk>> {
-    match series {
-        Some(series) => EvaluatedChunk::try_new(series, is_last).map(Some),
-        None => Ok(None),
-    }
 }
 
 /// The valid values a chunk holds: one per valid field sample.

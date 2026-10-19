@@ -26,7 +26,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{MetricName, SeriesOrdering};
 
 use super::{NativeExecutionState, NativeExecutor, map_chunk};
@@ -73,6 +73,18 @@ fn metric() -> MetricName {
 /// The raw source every supported tree starts from.
 fn input() -> NativeNode {
     let output = NativeType::Samples(raw_schema());
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            ordering: SeriesOrdering::KeyThenTime,
+        }),
+        output,
+    }
+}
+
+/// A source whose chunks are already evaluated, such as the inner result of a subquery.
+fn evaluated_input(grid: Arc<EvalGrid>) -> NativeNode {
+    let output = evaluated(grid);
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
@@ -152,6 +164,24 @@ fn raw_chunk(
     .unwrap()
 }
 
+/// One evaluated chunk of an input series: `values` at `start` and onwards on `schema`'s grid.
+fn evaluated_chunk(
+    schema: &SeriesSchema,
+    start: usize,
+    values: Vec<f64>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let samples = Samples::from_float(Float64Array::from(values));
+    let range =
+        GridRange::try_new(schema.eval_grid.clone().unwrap(), start, samples.len()).unwrap();
+    let series = Series {
+        metric: metric(),
+        time: TimeAxis::Grid(range),
+        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+    };
+    EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
 fn pool() -> Arc<dyn MemoryPool> {
     Arc::new(GreedyMemoryPool::new(1 << 20))
 }
@@ -174,8 +204,12 @@ fn run(executor: &mut NativeExecutor) -> Vec<EvaluatedChunk> {
     out
 }
 
-fn sample_values(series: &Series) -> Vec<Option<f64>> {
-    let field = series.fields.get(0).expect("these series have one field");
+fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
+    let field = chunk
+        .series
+        .fields
+        .get(0)
+        .expect("these series have one field");
     field
         .iter()
         .map(|sample| match sample {
@@ -185,18 +219,32 @@ fn sample_values(series: &Series) -> Vec<Option<f64>> {
         .collect()
 }
 
-fn series_start(series: &Series) -> usize {
-    match &series.time {
-        TimeAxis::Grid(range) => range.start(),
-        _ => panic!("an evaluated series is addressed on a grid"),
-    }
+fn series_start(chunk: &EvaluatedChunk) -> usize {
+    chunk.range().start()
 }
 
 /// The absolute start and the values of every chunk, which is what addressing means here.
 fn addressed(chunks: &[EvaluatedChunk]) -> Vec<(usize, Vec<Option<f64>>)> {
     chunks
         .iter()
-        .map(|chunk| (chunk.range().start(), sample_values(&chunk.series)))
+        .map(|chunk| (series_start(chunk), sample_values(chunk)))
+        .collect()
+}
+
+/// Every decided position of a chunk stream with its value, in absolute grid order.
+///
+/// Two streams that decided the same positions hold the same result however they were split into
+/// chunks, which is what "the same series, delivered differently" means.
+fn decided(chunks: &[EvaluatedChunk]) -> Vec<(usize, Option<f64>)> {
+    chunks
+        .iter()
+        .flat_map(|chunk| {
+            let start = series_start(chunk);
+            sample_values(chunk)
+                .into_iter()
+                .enumerate()
+                .map(move |(offset, value)| (start + offset, value))
+        })
         .collect()
 }
 
@@ -252,7 +300,7 @@ fn a_window_over_raw_input_evaluates_onto_its_own_grid() {
         .push(&chunk)
         .unwrap()
         .iter()
-        .map(|series| (series_start(series), sample_values(series)))
+        .map(|produced| (series_start(produced), sample_values(produced)))
         .collect();
     evaluator.finish().unwrap();
 
@@ -362,12 +410,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
     let inner_series = inner_evaluator.push(&chunk).unwrap().unwrap();
     inner_evaluator.finish().unwrap();
     let map_schema = evaluated_schema(Arc::clone(&inner_grid));
-    let mapped_chunk = map_chunk(
-        &map_schema,
-        &EvaluatedChunk::try_new(inner_series, true).unwrap(),
-        &[MathOp::Abs],
-    )
-    .unwrap();
+    let mapped_chunk = map_chunk(&map_schema, &inner_series, &[MathOp::Abs]).unwrap();
     assert!(
         Arc::ptr_eq(mapped_chunk.range().grid(), &inner_grid),
         "the map kernel moved the inner grid"
@@ -384,7 +427,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
     )
     .unwrap();
     let outer_series = outer_evaluator
-        .push_series(&mapped_chunk.series)
+        .push_evaluated(&mapped_chunk)
         .unwrap()
         .unwrap();
     outer_evaluator.finish().unwrap();
@@ -392,6 +435,111 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
         addressed(&out),
         vec![(series_start(&outer_series), sample_values(&outer_series))]
     );
+}
+
+/// A window over an evaluated input reports a decision before its input series has ended.
+///
+/// The inner series arrives in two pieces and the window is pulled after the first one, so the
+/// outer grid point whose window that piece settled has to come out then. A layer that collected
+/// the pieces into a whole series first could not produce anything here: its first answer would
+/// only exist once the piece carrying `is_last` had arrived, and the bytes of the whole series
+/// would be held until then.
+#[test]
+fn a_downstream_window_emits_before_its_input_series_ends() {
+    // 60 s inner grid, 120 s outer grid, so the inner series settles outer points as it arrives.
+    let inner_grid = grid(0, 60_000, 5);
+    let outer_grid = grid(0, 120_000, 3);
+    let tree = NativeTree::try_new(window_with(
+        evaluated_input(Arc::clone(&inner_grid)),
+        RangeFunction::LastOverTime,
+        240_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+
+    // The first piece covers inner positions 0..3; the series is still open after it.
+    let head = evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0], false);
+    let tail = evaluated_chunk(&schema, 3, vec![4.0, 5.0], true);
+
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, pool(), &set);
+    execution.push_evaluated(head).unwrap();
+
+    let mut early = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        early.push(chunk);
+    }
+    assert!(
+        !early.is_empty(),
+        "the outer window buffered its input: nothing came out before the series ended"
+    );
+    // The piece settled outer points 0 and 1: their windows end inside it, at the inner values
+    // 1.0 and 3.0.
+    assert_eq!(
+        decided(&early),
+        vec![(0, Some(1.0)), (1, Some(3.0))],
+        "the outer window did not report the points its input had already settled"
+    );
+    for chunk in &early {
+        assert!(
+            !chunk.is_last,
+            "the series cannot close before its last piece"
+        );
+    }
+    // The open outer series is still accounted for: the pieces handed over are what it holds.
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::COMPLETED_SERIES),
+        0,
+        "a series closed before its last piece arrived"
+    );
+
+    // The closing piece: the rest of the outer grid, and the one chunk that closes the series.
+    execution.push_evaluated(tail).unwrap();
+    let mut out = early;
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    out.extend(execution.finish().unwrap());
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(1.0)), (1, Some(3.0)), (2, Some(5.0)),]
+    );
+    assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+    assert!(out.last().unwrap().is_last);
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::COMPLETED_SERIES),
+        1,
+        "the outer series closed once per piece instead of once in total"
+    );
+
+    // The same chain with the whole series in one piece answers exactly the same.
+    let whole_tree = NativeTree::try_new(window_with(
+        evaluated_input(Arc::clone(&inner_grid)),
+        RangeFunction::LastOverTime,
+        240_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let mut whole = executor(&whole_tree, pool(), &ExecutionPlanMetricsSet::new());
+    whole
+        .push_evaluated(evaluated_chunk(
+            &schema,
+            0,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            true,
+        ))
+        .unwrap();
+    let whole = run(&mut whole);
+    assert_eq!(decided(&out), decided(&whole));
+    for chunk in &whole {
+        assert!(
+            Arc::ptr_eq(chunk.range().grid(), &outer_grid),
+            "the chain handed over a chunk that is not addressed on the outer grid"
+        );
+    }
 }
 
 /// Every node kind the runtime does not execute is rejected, naming the kind and its position.
@@ -479,9 +627,10 @@ fn an_unimplemented_node_is_reported_not_panicked() {
 
 /// Each node reports its own chunks, grid points and closed series, at its own position.
 ///
-/// The two windows see different traffic — the inner one three source chunks, the outer one the
-/// single series the inner one closed — so a single total for the tree cannot produce both
-/// numbers.
+/// The two windows decide different traffic — the inner one four grid points of its own grid, the
+/// outer one two of its own — so a single total for the tree cannot produce both numbers. They take
+/// and hand over the same number of chunks, which is what streaming means here: a node passes on one
+/// chunk per chunk it took in, instead of holding its input until a whole series is available.
 #[test]
 fn each_node_records_its_own_metrics() {
     let inner_grid = grid(0, 60_000, 4);
@@ -513,20 +662,28 @@ fn each_node_records_its_own_metrics() {
         .push_raw(raw_chunk(&schema, &[180_000], &[4.0], true))
         .unwrap();
     let out = run(&mut execution);
-    assert_eq!(addressed(&out), vec![(0, vec![Some(1.0), Some(3.0)])]);
+    // The outer window reports each point as the inner one settles it: one chunk per inner chunk,
+    // and an empty chunk that closes the series.
+    assert_eq!(
+        addressed(&out),
+        vec![(0, vec![Some(1.0)]), (1, vec![Some(3.0)]), (2, Vec::new()),]
+    );
+    assert!(out.last().unwrap().is_last);
 
     let outer = NodePath::root();
     let inner = outer.input();
     let source = inner.input();
 
-    // Three source chunks reach the inner window; one assembled series reaches the outer one.
+    // Three source chunks reach the inner window, and the chunks it hands over reach the outer one
+    // one for one, because neither window buffers.
     assert_eq!(count(&set, &source, NodeMetric::INPUT_BATCHES), 3);
     assert_eq!(count(&set, &source, NodeMetric::OUTPUT_BATCHES), 3);
     assert_eq!(count(&set, &inner, NodeMetric::INPUT_BATCHES), 3);
-    assert_eq!(count(&set, &outer, NodeMetric::INPUT_BATCHES), 1);
-    assert_eq!(count(&set, &inner, NodeMetric::OUTPUT_BATCHES), 1);
-    assert_eq!(count(&set, &outer, NodeMetric::OUTPUT_BATCHES), 1);
-    // The grid points each window decided, which is its own output range.
+    assert_eq!(count(&set, &outer, NodeMetric::INPUT_BATCHES), 3);
+    assert_eq!(count(&set, &inner, NodeMetric::OUTPUT_BATCHES), 3);
+    assert_eq!(count(&set, &outer, NodeMetric::OUTPUT_BATCHES), 3);
+    // The grid points each window decided, which is its own output range: four on the inner grid
+    // and two on the outer one, which is the figure that tells the two nodes apart.
     assert_eq!(count(&set, &inner, NodeMetric::EVALUATED_GRID_POINTS), 4);
     assert_eq!(count(&set, &outer, NodeMetric::EVALUATED_GRID_POINTS), 2);
     // The one series closes once, on the chunk carrying `is_last`.
@@ -535,8 +692,8 @@ fn each_node_records_its_own_metrics() {
     assert_eq!(count(&set, &outer, NodeMetric::COMPLETED_SERIES), 1);
     // Per node, not one total for the tree.
     assert_ne!(
-        count(&set, &inner, NodeMetric::INPUT_BATCHES),
-        count(&set, &outer, NodeMetric::INPUT_BATCHES)
+        count(&set, &inner, NodeMetric::EVALUATED_GRID_POINTS),
+        count(&set, &outer, NodeMetric::EVALUATED_GRID_POINTS)
     );
 }
 
@@ -557,7 +714,13 @@ fn an_error_releases_the_reservation() {
         pool.reserved() > 0,
         "the queued chunk has to be reserved for"
     );
-    assert!(execution.next_chunk().unwrap().is_none());
+    // The chunk settles the first grid points, so it comes out; the series it belongs to has not
+    // ended, so the node still holds what it buffered for it.
+    let settled = execution.next_chunk().unwrap();
+    assert!(
+        settled.is_some_and(|chunk| !chunk.is_last),
+        "a chunk that does not close its series was reported as closing it"
+    );
     let held = pool.reserved();
     assert!(held > 0, "the open series has to be reserved for");
 
@@ -588,7 +751,7 @@ fn an_error_releases_the_reservation() {
     unfinished
         .push_raw(raw_chunk(&schema, &[0], &[1.0], false))
         .unwrap();
-    assert!(unfinished.next_chunk().unwrap().is_none());
+    let _ = unfinished.next_chunk().unwrap();
     assert!(
         pool.reserved() > 0,
         "the open series has to be reserved for"
