@@ -344,10 +344,13 @@ impl Instance {
         Ok(results)
     }
 
-    /// Resolves matching tables for each query. The outer vector follows request query
-    /// order; each inner vector contains that query's table targets. Empty groups are
-    /// retained so execution produces one `QueryResult` per query, merging only tables
-    /// matched by the same query.
+    /// Resolves table targets per query after validating matchers and catalog scope.
+    /// An EQ fixes the candidate name; otherwise, names are listed in the selected
+    /// catalog/schema. All name matchers apply to candidates; only discovered targets
+    /// are filtered for visibility. Final permission checks remain the caller's job.
+    ///
+    /// The outer vector preserves query order, including empty groups; each inner
+    /// vector contains the tables whose results belong to that query.
     async fn resolve_remote_query_targets(
         &self,
         ctx: &QueryContextRef,
@@ -399,8 +402,9 @@ impl Instance {
         Ok(query_targets)
     }
 
-    /// Discovery hides inaccessible and internal physical tables. Explicit EQ targets
-    /// bypass this filter and retain the existing query permission checks.
+    /// Filters automatically discovered targets: returns false for tables denied
+    /// by Remote Read ACLs or marked as internal physical tables.
+    /// Other errors propagate. Explicit EQ targets bypass this filter.
     async fn is_visible_remote_read_target(
         &self,
         target: &PermissionTableTarget,
@@ -715,15 +719,19 @@ impl PromStoreProtocolHandler for Instance {
         interceptor_ref.pre_read(&request, ctx.clone())?;
         let ctx = Arc::new(ctx.fork());
 
+        // Select matching tables per query, filtering inaccessible and physical tables
+        // during automatic discovery.
         let query_targets = self
             .resolve_remote_query_targets(&ctx, &request.queries)
             .await?;
+
         let targets = self
             .resolve_query_permission_targets(
                 PermissionTableTargets::resolved(query_targets.iter().flatten().cloned().collect()),
                 &ctx,
             )
             .await?;
+
         self.check_table_permission(&ctx, PermissionReq::Action(PROM_STORE_READ), targets)
             .context(AuthSnafu)?;
 
