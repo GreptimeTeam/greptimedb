@@ -31,7 +31,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -51,6 +51,7 @@ use crate::grid_series::reference::{
 };
 use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
+use crate::map::{MathOp, map_chunk};
 use crate::range_array::RangeArray;
 use crate::select::{LabelMatcher, MatchOp, absent, absent_labels};
 
@@ -1472,8 +1473,9 @@ fn subquery_series_match_references() {
         )
         .unwrap();
         let expected = reference(&rows, &outer, window, fields, false, true);
+        let whole = EvaluatedChunk::try_new(series, true).unwrap();
         let evaluated = probe
-            .push_series(&series)
+            .push_evaluated(&whole)
             .unwrap()
             .expect("the input closes");
         assert!(evaluated.is_last);
@@ -1484,7 +1486,7 @@ fn subquery_series_match_references() {
                 RangeEvaluator::try_new(&schema, outer.clone(), window, function).unwrap();
             let expected = udf_reference(function, &rows, &outer, window, fields, false);
             let evaluated = evaluator
-                .push_series(&series)
+                .push_evaluated(&whole)
                 .unwrap()
                 .expect("the input closes");
             let result = fold_chunks(std::slice::from_ref(&evaluated), evaluator.output_schema());
@@ -1536,7 +1538,8 @@ fn rejects_input_of_the_other_kind() {
     let mut builder = GridSeriesBuilder::try_new(Arc::new(evaluated)).unwrap();
     builder.push(0, &[Some(1.0)]).unwrap();
     let series = builder.finish(metric(0)).unwrap().unwrap();
-    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
+    let chunk = EvaluatedChunk::try_new(series, true).unwrap();
+    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_evaluated(&chunk));
 }
 
 /// The range function a golden fixture names, with its constant arguments.
@@ -2276,9 +2279,697 @@ fn evaluated_histograms_drop_counter_reset_hints() {
     };
     let mut evaluator =
         RangeEvaluator::try_new(&schema, grid(10, 10, 1), window, RangeFunction::Resets).unwrap();
-    let result = evaluator.push_series(&series).unwrap().unwrap().series;
+    let chunk = EvaluatedChunk::try_new(series, true).unwrap();
+    let result = evaluator.push_evaluated(&chunk).unwrap().unwrap().series;
     assert!(matches!(
         result.fields.as_slice()[0].sample(0),
         SampleRef::Float(resets) if resets == 0.0
     ));
+}
+
+/// A window ending at its evaluation point, `range_ms` long: what `last_over_time` reads,
+/// `(E - range_ms, E]`.
+fn last_window(range_ms: i64) -> RangeWindow {
+    RangeWindow {
+        range_ms,
+        offset_ms: 0,
+        anchor_ms: None,
+    }
+}
+
+/// The raw chunks of the consumer fixtures: one sample per inner grid point, parted so that the
+/// inner layer hands the series out in three chunks.
+fn consumer_chunks() -> Vec<RawSeriesChunk> {
+    let rows: [Row; 5] = [
+        (0, vec![Some(4.0)]),
+        (10, vec![Some(5.0)]),
+        (20, vec![Some(6.0)]),
+        (30, vec![Some(7.0)]),
+        (40, vec![Some(8.0)]),
+    ];
+    vec![
+        chunk(&rows[..1], 1, 0, false),
+        chunk(&rows[1..3], 1, 0, false),
+        chunk(&rows[3..], 1, 0, true),
+    ]
+}
+
+/// The inner layer of the consumer fixtures: `last_over_time` over the 0/10 grid, so every grid
+/// point reads the sample at its own timestamp.
+fn inner_layer() -> RangeEvaluator {
+    RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 10, 5),
+        last_window(10),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap()
+}
+
+/// A consumer of evaluated series, windowing them onto `grid`.
+fn evaluated_layer(
+    input: &Arc<SeriesSchema>,
+    grid: Arc<EvalGrid>,
+    range_ms: i64,
+) -> RangeEvaluator {
+    RangeEvaluator::try_new(
+        input,
+        grid,
+        last_window(range_ms),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap()
+}
+
+/// The grid a consumer of the consumer fixtures is asked for: 5/20, a different start and step
+/// from the 0/10 grid the series it reads is indexed on.
+fn outer_grid() -> Arc<EvalGrid> {
+    grid(5, 20, 3)
+}
+
+/// A consumer of an evaluated series on the [`outer_grid`].
+fn outer_layer(input: &Arc<SeriesSchema>) -> RangeEvaluator {
+    evaluated_layer(input, outer_grid(), 10)
+}
+
+/// One evaluated chunk of `schema`, beginning at grid position `start`.
+fn evaluated_chunk(
+    schema: &SeriesSchema,
+    start: usize,
+    values: Vec<Option<f64>>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let grid = schema
+        .eval_grid
+        .clone()
+        .expect("an evaluated chunk is addressed on a grid");
+    let range = GridRange::try_new(grid, start, values.len()).unwrap();
+    let fields =
+        SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(values))]).unwrap();
+    let series = Series::try_new(schema, metric(0), TimeAxis::Grid(range), fields).unwrap();
+    EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
+/// Pushes `chunks` into a fresh consumer on the 5/20 grid and returns what it handed out together
+/// with the series those chunks fold into.
+fn consume(
+    input: &Arc<SeriesSchema>,
+    chunks: &[EvaluatedChunk],
+) -> (Vec<EvaluatedChunk>, Option<Series>) {
+    let mut consumer = outer_layer(input);
+    let schema = consumer.output_schema().clone();
+    let handed_out: Vec<_> = chunks
+        .iter()
+        .flat_map(|chunk| consumer.push_evaluated(chunk).unwrap())
+        .collect();
+    consumer.finish().expect("the series closed");
+    let series = fold_chunks(&handed_out, &schema);
+    (handed_out, series)
+}
+
+/// The chunks of one evaluated series pushed one at a time and the whole series pushed as one
+/// chunk reach the same consumer result, on a grid the series is not indexed on.
+///
+/// This is chunking invariance, not an independent oracle: both sides run the same outer layer,
+/// so it is the properties the other tests of this module name that pin the protocol itself.
+#[test]
+fn a_series_pushed_in_chunks_matches_the_whole_series() {
+    let mut inner = inner_layer();
+    let schema = inner.output_schema().clone();
+    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
+    inner.finish().expect("the inner series closed");
+    assert!(
+        inner_chunks.len() > 1,
+        "the fixture hands the inner series out as one chunk"
+    );
+
+    let (handed_out, chunked) = consume(&schema, &inner_chunks);
+
+    // The whole inner series as one chunk that closes it, the way a producer that never chunked
+    // would hand it over.
+    let whole = fold_chunks(&inner_chunks, &schema).expect("the fixture inner series holds values");
+    let whole = EvaluatedChunk::try_new(whole, true).unwrap();
+    let (_, at_once) = consume(&schema, std::slice::from_ref(&whole));
+
+    assert!(
+        handed_out.len() > 1,
+        "the chunked path handed out one chunk, exactly like the whole-series path"
+    );
+    assert_series_eq(
+        chunked.as_ref(),
+        &expand(at_once.as_ref().expect("both paths produce a value")),
+        &metric(0),
+    );
+}
+
+/// A chunk leaving the outer layer is addressed on the outer grid, and the starts of those chunks
+/// strictly increase: no row number of the inner grid leaks into the outer addressing.
+#[test]
+fn a_chunk_indexed_on_the_inner_grid_is_absolute_on_the_outer_one() {
+    let mut inner = inner_layer();
+    let schema = inner.output_schema().clone();
+    let inner_grid = schema.eval_grid.clone().unwrap();
+    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
+    inner.finish().expect("the inner series closed");
+
+    assert_ne!(
+        inner_grid.spec(),
+        outer_grid().spec(),
+        "the fixture evaluates both layers on one grid"
+    );
+    let mut consumer = outer_layer(&schema);
+    let mut starts = Vec::new();
+    for chunk in &inner_chunks {
+        let Some(handed_out) = consumer.push_evaluated(chunk).unwrap() else {
+            continue;
+        };
+        assert_eq!(
+            handed_out.range().grid().spec(),
+            outer_grid().spec(),
+            "a chunk is addressed on a grid other than the one its layer was asked for"
+        );
+        starts.push(handed_out.range().start());
+    }
+    consumer.finish().expect("the outer series closed");
+
+    assert!(
+        starts.len() > 1,
+        "one chunk makes the strict monotonicity below free"
+    );
+    assert!(
+        starts.windows(2).all(|pair| pair[0] < pair[1]),
+        "the outer chunk starts {starts:?} do not strictly increase"
+    );
+}
+
+/// A map chain that yields no value still carries progress: the chunk keeps the range the inner
+/// layer decided, and its consumer advances to its end rather than waiting for a value.
+#[test]
+fn a_map_chain_yielding_no_value_keeps_progress_and_the_closing_chunk() {
+    // `clamp` with `max < min` is the one kernel that yields no series in Prometheus, so it is how
+    // this layer drops every value of a chunk. Histogram and mixed samples are not mapped away
+    // here: `map_math` rejects them with `NotImplemented`, which is a boundary above this layer.
+    let ops = [MathOp::Clamp { min: 1.0, max: 0.0 }];
+    let mut inner = inner_layer();
+    let schema = inner.output_schema().clone();
+    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
+    inner.finish().expect("the inner series closed");
+    let mapped: Vec<_> = inner_chunks
+        .iter()
+        .map(|chunk| map_chunk(&schema, chunk, &ops).unwrap())
+        .collect();
+
+    // The chain drops the values, not the positions: a consumer needs the positions to advance.
+    for (input, mapped) in inner_chunks.iter().zip(&mapped) {
+        assert!(all_missing(&mapped.series), "the chain left a value behind");
+        assert_eq!(
+            (mapped.range().start(), mapped.range().len()),
+            (input.range().start(), input.range().len()),
+            "the chain shrank the range the inner layer decided"
+        );
+        assert_eq!(
+            mapped.is_last, input.is_last,
+            "the chain dropped the closing chunk"
+        );
+    }
+
+    // A consumer on the inner grid: it reports the settled positions as decided, and only a series
+    // that advanced can take the next chunk, which begins where the previous one ended.
+    let mut consumer = evaluated_layer(&schema, grid(0, 10, 5), 10);
+    let mut handed_out = Vec::new();
+    for chunk in &mapped {
+        handed_out.extend(consumer.push_evaluated(chunk).unwrap());
+    }
+    consumer.finish().expect("the series closed");
+
+    let pushed: Vec<_> = mapped
+        .iter()
+        .map(|chunk| (chunk.range().start(), chunk.range().len()))
+        .collect();
+    let decided: Vec<_> = handed_out
+        .iter()
+        .map(|chunk| (chunk.range().start(), chunk.range().len()))
+        .collect();
+    assert!(
+        handed_out.len() > 1,
+        "the closing chunk is the only one that came back"
+    );
+    assert_eq!(
+        decided, pushed,
+        "the consumer did not report the positions the mapped chunks decided"
+    );
+    assert!(
+        handed_out.iter().all(|chunk| all_missing(&chunk.series)),
+        "a consumer of a chunk without values reported a value"
+    );
+    assert!(
+        handed_out.last().expect("a series closes").is_last,
+        "the closing chunk is lost"
+    );
+}
+
+/// The chunks of one series are handed over once, in order: a chunk starting behind the end of the
+/// previous one is rejected, and the error names both positions.
+#[test]
+fn an_out_of_order_chunk_is_rejected() {
+    let mut inner = inner_layer();
+    let schema = inner.output_schema().clone();
+    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
+    inner.finish().expect("the inner series closed");
+
+    let mut consumer = evaluated_layer(&schema, grid(0, 10, 5), 10);
+    // The first two chunks cover 0..1 and 1..3, so the series has reached position 3.
+    for chunk in &inner_chunks[..2] {
+        consumer.push_evaluated(chunk).unwrap();
+    }
+    let overlapping = evaluated_chunk(&schema, 2, vec![Some(1.0)], false);
+    let error = consumer.push_evaluated(&overlapping).unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::Execution(_)),
+        "not an execution error: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("2 does not continue from 3"),
+        "the message does not name both positions: {message}"
+    );
+}
+
+/// A producer that trims its output starts at its first row holding a value. The consumer accepts
+/// that series and reports the positions before it as decided, so the undelivered prefix is not
+/// left waiting for input.
+#[test]
+fn a_series_may_begin_past_the_first_position_of_its_grid() {
+    let grid = grid(0, 10, 4);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(grid.clone()),
+    });
+    let window = last_window(10);
+    // The same evaluated series, once with the leading position trimmed and once with it carried
+    // as an explicit missing value.
+    let trimmed = evaluated_chunk(&schema, 1, vec![Some(2.0), Some(3.0), Some(4.0)], true);
+    assert_eq!(
+        trimmed.range().start(),
+        1,
+        "the fixture series does not begin past position 0"
+    );
+    let explicit = evaluated_chunk(
+        &schema,
+        0,
+        vec![None, Some(2.0), Some(3.0), Some(4.0)],
+        true,
+    );
+
+    let mut from_trimmed =
+        RangeEvaluator::try_new(&schema, grid.clone(), window, RangeFunction::LastOverTime)
+            .unwrap();
+    let accepted = from_trimmed
+        .push_evaluated(&trimmed)
+        .expect("a first chunk may begin past the start of its grid")
+        .expect("the last chunk closes the series");
+    from_trimmed.finish().expect("the series closed");
+
+    let mut from_explicit =
+        RangeEvaluator::try_new(&schema, grid.clone(), window, RangeFunction::LastOverTime)
+            .unwrap();
+    let carried = from_explicit
+        .push_evaluated(&explicit)
+        .expect("the input closes the series")
+        .expect("the last chunk closes the series");
+    from_explicit.finish().expect("the series closed");
+
+    // Dense rows rather than `assert_series_eq`, which also demands the range be trimmed to the
+    // rows holding a value: keeping the undelivered prefix in the range is the point here.
+    assert_eq!(
+        expand(&accepted.series),
+        expand(&carried.series),
+        "the trimmed series evaluates differently from the one carrying the missing value"
+    );
+    assert_eq!(
+        (accepted.range().start(), accepted.range().len()),
+        (0, 4),
+        "the undelivered prefix is not reported as a decided position"
+    );
+}
+
+/// Composed layers: an inner evaluator hands its chunks to a map chain and on to an outer
+/// evaluator, so the chunk protocol is exercised end to end instead of on one side alone.
+mod composition {
+    use super::*;
+
+    /// The kernels of the composed map chain: `abs` rewrites every value, so the layer between the
+    /// two windows is one the outer layer cannot do without.
+    const OPS: [MathOp; 1] = [MathOp::Abs];
+
+    /// A composed `Window -> Map -> Window` pipeline over one raw series.
+    ///
+    /// The inner layer windows raw samples onto the 0/10 grid, the map chain rewrites what it
+    /// hands out, and the outer layer windows those chunks onto the 5/20 grid: a different start
+    /// and step, so the outer positions (5, 25, 45) are no inner timestamps (0, 10, 20, 30, 40).
+    struct Pipeline {
+        inner: RangeEvaluator,
+        outer: RangeEvaluator,
+        /// The outer grid and window, kept so the reference can build its own outer layer.
+        grid: Arc<EvalGrid>,
+        window: RangeWindow,
+        /// Every chunk each layer handed out, in the order it was handed out.
+        inner_chunks: Vec<EvaluatedChunk>,
+        mapped_chunks: Vec<EvaluatedChunk>,
+        outer_chunks: Vec<EvaluatedChunk>,
+    }
+
+    /// The raw chunks of the composed fixtures: a sample at the first inner point, a push whose
+    /// samples fall into the 5 ms gaps the inner windows leave between grid points, a sample at
+    /// the third point, and a closing chunk whose sample lies past the fourth.
+    fn composed_raw() -> Vec<RawSeriesChunk> {
+        let rows: [Row; 5] = [
+            (0, vec![Some(1.0)]),
+            (3, vec![Some(2.0)]),
+            (12, vec![Some(3.0)]),
+            (20, vec![Some(4.0)]),
+            (40, vec![Some(5.0)]),
+        ];
+        vec![
+            chunk(&rows[..1], 1, 0, false),
+            chunk(&rows[1..3], 1, 0, false),
+            chunk(&rows[3..4], 1, 0, false),
+            chunk(&rows[4..], 1, 0, true),
+        ]
+    }
+
+    /// The labels a mapped series carries: the map chain drops the metadata labels, `__name__`
+    /// included, and the fixture metric carries no other one.
+    fn mapped_metric(host: u64) -> MetricName {
+        let mut metric = metric(host);
+        metric.remove("__name__");
+        metric
+    }
+
+    impl Pipeline {
+        fn new() -> Self {
+            let inner = RangeEvaluator::try_new(
+                &raw_schema(1),
+                grid(0, 10, 5),
+                last_window(5),
+                RangeFunction::LastOverTime,
+            )
+            .unwrap();
+            let grid = outer_grid();
+            let window = last_window(10);
+            let outer = RangeEvaluator::try_new(
+                inner.output_schema(),
+                grid.clone(),
+                window,
+                RangeFunction::LastOverTime,
+            )
+            .unwrap();
+            Self {
+                inner,
+                outer,
+                grid,
+                window,
+                inner_chunks: Vec::new(),
+                mapped_chunks: Vec::new(),
+                outer_chunks: Vec::new(),
+            }
+        }
+
+        /// Pushes one raw chunk through all three layers, keeping what each of them handed out.
+        fn push(&mut self, raw: &RawSeriesChunk) {
+            let inner = self.inner.push(raw).unwrap();
+            let mapped = match &inner {
+                Some(chunk) => Some(map_chunk(self.inner.output_schema(), chunk, &OPS).unwrap()),
+                None => None,
+            };
+            let outer = match &mapped {
+                Some(chunk) => self.outer.push_evaluated(chunk).unwrap(),
+                None => None,
+            };
+            self.inner_chunks.extend(inner);
+            self.mapped_chunks.extend(mapped);
+            self.outer_chunks.extend(outer);
+        }
+
+        /// The whole inner series, folded from the chunks the inner layer handed out.
+        fn inner_series(&self) -> Option<Series> {
+            fold_chunks(&self.inner_chunks, self.inner.output_schema())
+        }
+
+        /// How far the outer layer has reported progress: the end of the last position any of its
+        /// chunks decided.
+        fn outer_extent(&self) -> usize {
+            self.outer_chunks
+                .iter()
+                .map(|chunk| chunk.range().start() + chunk.range().len())
+                .max()
+                .unwrap_or(0)
+        }
+
+        /// The reference: the whole inner series pushed through the map chain and one outer layer
+        /// at once, as if neither the inner layer nor the chain had chunked it.
+        fn reference(&self, inner_series: Series) -> Option<Series> {
+            let whole = EvaluatedChunk::try_new(inner_series, true).unwrap();
+            let mapped = map_chunk(self.inner.output_schema(), &whole, &OPS).unwrap();
+            let mut outer = RangeEvaluator::try_new(
+                self.inner.output_schema(),
+                self.grid.clone(),
+                self.window,
+                RangeFunction::LastOverTime,
+            )
+            .unwrap();
+            let chunk = outer
+                .push_evaluated(&mapped)
+                .unwrap()
+                .expect("the input closes the series");
+            let result = fold_chunks(std::slice::from_ref(&chunk), outer.output_schema());
+            outer.finish().expect("the reference series closed");
+            result
+        }
+
+        /// Checks that both layers saw their series close.
+        fn finish(self) {
+            self.inner.finish().expect("the inner series closed");
+            self.outer.finish().expect("the outer series closed");
+        }
+    }
+
+    /// An empty map chain is the identity, and it has to be the identity on every chunk of one
+    /// series: the valued chunk and the zero-length closing one must carry the same labels, or
+    /// the consumer of the series rejects it as two.
+    ///
+    /// `last_over_time` keeps `__name__` -- it is one of the two range functions that do -- so this
+    /// series carries the metadata label a map chain rewrites, and the identity below is not
+    /// vacuous. Before `map_chunk` treated a chain without kernels as the identity it dropped the
+    /// metadata labels from the zero-length chunk alone, so the chunk that closed the series was
+    /// labelled differently from the chunk before it.
+    #[test]
+    fn an_empty_map_chain_keeps_the_chunk_identity() {
+        let window = RangeWindow {
+            range_ms: 10,
+            offset_ms: 0,
+            anchor_ms: None,
+        };
+        let inner_grid = grid(0, 10, 2);
+        let mut inner = RangeEvaluator::try_new(
+            &raw_schema(1),
+            inner_grid.clone(),
+            window,
+            RangeFunction::LastOverTime,
+        )
+        .unwrap();
+        let schema = inner.output_schema().clone();
+
+        // The sample at 10 ms settles both points of the two-point grid, and the point at 10 ms
+        // reads it, so this push hands out the whole grid with a value in it.
+        let first = chunk(&[(10, vec![Some(2.0)])], 1, 0, false);
+        let valued = inner
+            .push(&first)
+            .unwrap()
+            .expect("the windows of both points are complete");
+        assert!(!valued.is_last);
+        assert_eq!(
+            (valued.range().start(), valued.range().len()),
+            (0, inner_grid.timestamps().len()),
+            "the fixture does not decide the whole grid before the last chunk"
+        );
+
+        // The last sample lies past every window, so the closing chunk decides nothing new and
+        // reaches a consumer with no positions at all.
+        let last = chunk(&[(100, vec![Some(3.0)])], 1, 0, true);
+        let closing = inner.push(&last).unwrap().expect("a series closes");
+        assert!(closing.is_last);
+        assert!(
+            closing.range().is_empty(),
+            "the closing chunk decided a position: {} values",
+            closing.range().len()
+        );
+        inner.finish().expect("the inner series closed");
+
+        // Without a metadata label in the fixture both assertions below would hold for free.
+        assert_eq!(valued.series.metric.name(), Some("http_requests"));
+        assert_eq!(closing.series.metric.name(), Some("http_requests"));
+
+        // An empty chain maps nothing, so each chunk comes back exactly as it went in.
+        let mapped_valued = map_chunk(&schema, &valued, &[]).unwrap();
+        assert_eq!(
+            mapped_valued.series.metric, valued.series.metric,
+            "an empty chain rewrote the valued chunk's labels"
+        );
+        let mapped_closing = map_chunk(&schema, &closing, &[]).unwrap();
+        assert_eq!(
+            mapped_closing.series.metric, closing.series.metric,
+            "an empty chain rewrote the closing chunk's labels"
+        );
+
+        // Both chunks are one series to the consumer: the valued one opens it, the closing one is
+        // accepted after it, and the series ends.
+        let mut downstream =
+            RangeEvaluator::try_new(&schema, inner_grid, window, RangeFunction::LastOverTime)
+                .unwrap();
+        downstream
+            .push_evaluated(&mapped_valued)
+            .expect("the valued chunk opens the series");
+        let closed = downstream
+            .push_evaluated(&mapped_closing)
+            .expect("the closing chunk carries the labels of the chunk before it")
+            .expect("a series closes");
+        assert!(closed.is_last);
+        downstream.finish().expect("the series closed");
+    }
+
+    /// A prefix reaches the outer layer before the inner series ends: the composed pipeline streams
+    /// instead of buffering a whole series behind the map chain.
+    #[test]
+    fn a_prefix_reaches_the_outer_layer_before_the_inner_series_ends() {
+        let raw = composed_raw();
+        let (open, closing) = raw.split_at(raw.len() - 1);
+        assert!(
+            open.iter().all(|chunk| !chunk.is_last),
+            "the fixture closes the inner series before its last raw chunk"
+        );
+        let mut pipeline = Pipeline::new();
+        for raw in open {
+            pipeline.push(raw);
+        }
+        // The only chunk that closes the inner series has not been pushed, so what the outer layer
+        // has heard so far is its prefix.
+        assert!(
+            !pipeline.outer_chunks.is_empty(),
+            "the outer layer only hears from the series once it has ended"
+        );
+        for raw in closing {
+            pipeline.push(raw);
+        }
+        let chunked = fold_chunks(&pipeline.outer_chunks, pipeline.outer.output_schema());
+
+        // The reference differs in chunking alone: the same whole inner series, mapped and pushed
+        // in one chunk. Every comparison against it in this module is such an invariance check,
+        // not an independent oracle.
+        let reference = pipeline.reference(
+            pipeline
+                .inner_series()
+                .expect("the inner series holds values"),
+        );
+        assert_series_eq(
+            chunked.as_ref(),
+            &expand(reference.as_ref().expect("the reference holds values")),
+            &mapped_metric(0),
+        );
+        pipeline.finish();
+    }
+
+    /// A chunk that settles inner positions without a value still advances the outer window: what
+    /// crosses both layers is progress, not values.
+    #[test]
+    fn an_all_null_middle_chunk_still_advances_the_outer_window() {
+        let raw = composed_raw();
+        let mut pipeline = Pipeline::new();
+        pipeline.push(&raw[0]);
+
+        // The samples of this push fall into the 5 ms gaps the inner windows leave between the
+        // 0/10 grid points, so the inner layer decides the point at 10 ms without a value.
+        let before = pipeline.outer_extent();
+        pipeline.push(&raw[1]);
+        let decided = pipeline
+            .inner_chunks
+            .last()
+            .expect("the push decides a position");
+        assert!(
+            !decided.range().is_empty(),
+            "the push decided no position, so it can advance nothing"
+        );
+        assert!(
+            all_missing(&decided.series),
+            "the middle push was expected to decide a position without a value"
+        );
+        let after = pipeline.outer_extent();
+        assert!(
+            after > before,
+            "the outer layer did not advance over the position without a value ({before} -> {after})"
+        );
+
+        for raw in &raw[2..] {
+            pipeline.push(raw);
+        }
+        let chunked = fold_chunks(&pipeline.outer_chunks, pipeline.outer.output_schema());
+        let reference = pipeline.reference(
+            pipeline
+                .inner_series()
+                .expect("the inner series holds values"),
+        );
+        assert_series_eq(
+            chunked.as_ref(),
+            &expand(reference.as_ref().expect("the reference holds values")),
+            &mapped_metric(0),
+        );
+        pipeline.finish();
+    }
+
+    /// Each layer indexes its own grid: a chunk leaving a layer is addressed on that layer's grid,
+    /// the starts within a layer increase, and no outer position is an inner timestamp.
+    #[test]
+    fn each_layer_indexes_its_own_grid() {
+        let mut pipeline = Pipeline::new();
+        for raw in composed_raw() {
+            pipeline.push(&raw);
+        }
+        let inner_grid = pipeline.inner.output_schema().eval_grid.clone().unwrap();
+        assert_ne!(
+            inner_grid.spec(),
+            outer_grid().spec(),
+            "the fixture evaluates both layers on one grid"
+        );
+        for (layer, chunks, spec) in [
+            ("inner", &pipeline.inner_chunks, inner_grid.spec()),
+            ("mapped", &pipeline.mapped_chunks, inner_grid.spec()),
+            ("outer", &pipeline.outer_chunks, outer_grid().spec()),
+        ] {
+            assert!(
+                chunks.len() > 1,
+                "the {layer} layer hands its series out as one chunk"
+            );
+            for chunk in chunks {
+                assert_eq!(
+                    chunk.range().grid().spec(),
+                    spec,
+                    "a chunk of the {layer} layer is addressed on another grid"
+                );
+            }
+            let starts: Vec<_> = chunks.iter().map(|chunk| chunk.range().start()).collect();
+            assert!(
+                starts.windows(2).all(|pair| pair[0] < pair[1]),
+                "the chunk starts {starts:?} of the {layer} layer do not increase"
+            );
+        }
+        for chunk in &pipeline.outer_chunks {
+            for &timestamp in &chunk.range().timestamps() {
+                assert!(
+                    !inner_grid.timestamps().contains(&timestamp),
+                    "the outer layer used the inner timestamp {timestamp}"
+                );
+            }
+        }
+        pipeline.finish();
+    }
 }
