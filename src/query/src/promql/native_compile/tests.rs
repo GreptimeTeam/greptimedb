@@ -18,7 +18,9 @@ use std::time::{Duration, UNIX_EPOCH};
 use datafusion::error::DataFusionError;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::native::plan::{BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType};
+use promql::native::plan::{
+    BoundInstant, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+};
 use promql::range_eval::RangeFunction;
 use promql_parser::parser::{EvalStmt, Expr as PromExpr};
 
@@ -59,10 +61,21 @@ fn with_selector_range(range: Duration) -> EvalStmt {
     stmt
 }
 
-/// The window at the root of `tree`, which is the only shape `compile` produces.
+/// The window at the root of `tree`, for the range-function shape.
 fn root_window(tree: &NativeTree) -> (&NativeNode, &BoundWindow) {
     let NativeExpr::Window { input, op } = &tree.root().expr else {
         panic!("the root is not a window: {:?}", tree.root().expr);
+    };
+    (input, op)
+}
+
+/// The instant selection at the root of `tree`, for the bare-selector shape.
+fn root_instant(tree: &NativeTree) -> (&NativeNode, &BoundInstant) {
+    let NativeExpr::Instant { input, op } = &tree.root().expr else {
+        panic!(
+            "the root is not an instant selection: {:?}",
+            tree.root().expr
+        );
     };
     (input, op)
 }
@@ -148,6 +161,145 @@ fn the_supported_range_functions_map_to_their_kernels() {
     }
 }
 
+/// `x` becomes an instant selection over the raw input, on the statement's grid, with the
+/// statement's lookback and the input's fields.
+#[test]
+fn a_bare_selector_becomes_an_instant_over_raw_input() {
+    let input = raw_schema();
+    // A lookback the statement chose, so the binding cannot be a default the compiler invented.
+    let stmt = EvalStmt {
+        lookback_delta: Duration::from_secs(120),
+        ..eval_stmt("x")
+    };
+    let tree = compile(&stmt, Arc::clone(&input), SeriesOrdering::KeyThenTime).unwrap();
+
+    let (input_node, op) = root_instant(&tree);
+    assert_eq!(op.lookback_ms, 120_000);
+    assert_eq!(op.offset_ms, 0);
+
+    // The statement's grid: 0, 5s, ..., 100s.
+    let spec = op.output_grid.spec();
+    assert_eq!(
+        (spec.start_ms, spec.step_ms, spec.len),
+        (0, 5_000, 21),
+        "the instant selection does not land on the statement's grid"
+    );
+
+    // The output is the input's fields, evaluated on the statement's grid.
+    let output = tree
+        .root()
+        .output
+        .samples()
+        .expect("an instant selection produces samples");
+    assert!(
+        Arc::ptr_eq(&output.fields, &input.fields),
+        "the instant selection did not keep the input's fields"
+    );
+    let output_grid = output
+        .eval_grid
+        .as_ref()
+        .expect("an instant selection produces evaluated values");
+    assert!(
+        Arc::ptr_eq(output_grid, &op.output_grid),
+        "the output grid is not the bound grid"
+    );
+
+    let NativeExpr::Input(bound) = &input_node.expr else {
+        panic!(
+            "the instant selection's input is not an input: {:?}",
+            input_node.expr
+        );
+    };
+    assert!(
+        matches!(&bound.output, NativeType::Samples(schema) if schema.eval_grid.is_none()),
+        "the input is not raw samples: {:?}",
+        bound.output
+    );
+    assert_eq!(bound.ordering, SeriesOrdering::KeyThenTime);
+}
+
+/// A bare selector's offset reaches the instant binding with its sign.
+#[test]
+fn an_offset_on_a_bare_selector_keeps_its_sign() {
+    let cases = [("x offset 1m", 60_000), ("x offset -1m", -60_000)];
+
+    for (query, offset_ms) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+        let (_, op) = root_instant(&tree);
+        assert_eq!(op.offset_ms, offset_ms, "`{query}` lost the offset's sign");
+        assert_eq!(op.lookback_ms, 5_000, "`{query}` lost the lookback");
+    }
+}
+
+/// An `@`-anchored bare selector is refused because the instant node has no anchor field, not
+/// because anchoring is unsupported: the window shape binds an anchor.
+#[test]
+fn an_anchored_instant_selector_is_refused_for_the_missing_anchor_field() {
+    let error = compile(
+        &eval_stmt("x @ 100"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("`x @ 100` compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "`x @ 100` did not report NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("whose anchor the instant selection node has no field for"),
+        "`x @ 100` did not say why its anchor cannot be bound: {message}"
+    );
+}
+
+/// A window's `@` anchor is bound as an absolute millisecond timestamp: `start()` and `end()` are
+/// the statement's own bounds, and a number is the unix second it names.
+#[test]
+fn an_anchor_on_a_window_resolves_to_absolute_milliseconds() {
+    let cases = [
+        // `@ <seconds>`: 1234 is unix second 1234, which is 1_234_000 ms.
+        ("rate(x[5m] @ 1234)", 1_234_000),
+        // A sub-second anchor resolves to the millisecond it names.
+        ("rate(x[5m] @ 1.234)", 1_234),
+        // The statement here is UNIX_EPOCH..100s, which is what `start()` and `end()` mean.
+        ("rate(x[5m] @ start())", 0),
+        ("rate(x[5m] @ end())", 100_000),
+    ];
+
+    for (query, anchor_ms) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+        let (_, op) = root_window(&tree);
+        assert_eq!(
+            op.window.anchor_ms,
+            Some(anchor_ms),
+            "`{query}` bound the wrong anchor"
+        );
+        assert_eq!(op.window.offset_ms, 0, "`{query}` invented an offset");
+    }
+}
+
+/// An anchor and an offset are bound apart: the window ends at `anchor - offset`, which the
+/// runtime folds, so both numbers have to survive compilation.
+#[test]
+fn an_anchor_and_an_offset_are_bound_apart() {
+    let cases = [
+        ("rate(x[5m] @ 1.234 offset 1m)", 1_234, 60_000),
+        ("rate(x[5m] @ 1234 offset 1m)", 1_234_000, 60_000),
+        ("rate(x[5m] @ 1.234 offset -1m)", 1_234, -60_000),
+    ];
+
+    for (query, anchor_ms, offset_ms) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+        let (_, op) = root_window(&tree);
+        assert_eq!(
+            op.window.anchor_ms,
+            Some(anchor_ms),
+            "`{query}` lost the anchor"
+        );
+        assert_eq!(op.window.offset_ms, offset_ms, "`{query}` lost the offset");
+    }
+}
+
 /// The numbers a tree is made of, at the edges: a span the step does not divide, offsets in either
 /// direction, ranges that cannot be a window, and an ordering the scan did not default to.
 #[test]
@@ -209,6 +361,16 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
         (
             "a range wider than i64 milliseconds",
             eval_stmt("rate(x[4294967295y])"),
+            SeriesOrdering::KeyThenTime,
+            Expected::Rejected(Rejection::Plan),
+        ),
+        // An instant selection's lookback is narrowed like every other duration.
+        (
+            "a lookback wider than i64 milliseconds",
+            EvalStmt {
+                lookback_delta: Duration::from_millis(u64::MAX),
+                ..eval_stmt("x")
+            },
             SeriesOrdering::KeyThenTime,
             Expected::Rejected(Rejection::Plan),
         ),
@@ -293,8 +455,6 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
 #[test]
 fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
     let cases = [
-        // A bare selector reads every sample; there is no window to bind.
-        ("x", "the expression `x`"),
         ("x + 1", "the expression `x + 1`"),
         ("sum(x)", "the expression `sum(x)`"),
         ("x[5m:]", "the expression `x[5m:]`"),
@@ -314,9 +474,6 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
             "absent(x)",
             "a call to `absent`, which has no native range kernel",
         ),
-        // An anchored selector needs its anchor resolved to an absolute millisecond value, which
-        // this compiler does not do yet.
-        ("rate(x[5m] @ 100)", "`@`-anchored selector"),
     ];
 
     for (query, named) in cases {
