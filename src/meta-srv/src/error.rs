@@ -92,6 +92,18 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Draining datanode {} with follower regions is unsupported: {:?}",
+        datanode_id,
+        follower_regions
+    ))]
+    DrainNodeFollowerRegionUnsupported {
+        #[snafu(implicit)]
+        location: Location,
+        datanode_id: DatanodeId,
+        follower_regions: Vec<RegionId>,
+    },
+
+    #[snafu(display(
         "The region migration procedure is completed for region: {}, target_peer: {}",
         region_id,
         target_peer_id
@@ -1206,7 +1218,9 @@ impl ErrorExt for Error {
             Error::SerializePartitionExpr { source, .. }
             | Error::DeserializePartitionExpr { source, .. } => source.status_code(),
 
-            Error::Unsupported { .. } => StatusCode::Unsupported,
+            Error::Unsupported { .. } | Error::DrainNodeFollowerRegionUnsupported { .. } => {
+                StatusCode::Unsupported
+            }
 
             Error::SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
