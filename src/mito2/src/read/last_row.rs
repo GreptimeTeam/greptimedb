@@ -656,7 +656,11 @@ mod tests {
         let mut output_buffer = BatchBuffer::new();
         let batches = vec![
             new_flat_batch(&[b"a", b"b", b"b", b"c"], &[1, 1, 2, 3], &[10, 20, 21, 30]),
-            new_flat_batch(&[b"c", b"d", b"e", b"e"], &[3, 4, 5, 5], &[31, 40, 50, 51]),
+            new_flat_batch(
+                &[b"c", b"d", b"d", b"e", b"e"],
+                &[3, 4, 4, 5, 5],
+                &[31, 40, 41, 50, 51],
+            ),
             new_flat_batch(&[b"f", b"g"], &[6, 7], &[60, 70]),
         ];
         for batch in batches {
@@ -681,6 +685,7 @@ mod tests {
                 (b"c".to_vec(), 3),
                 (b"c".to_vec(), 3),
                 (b"d".to_vec(), 4),
+                (b"d".to_vec(), 4),
                 (b"e".to_vec(), 5),
                 (b"e".to_vec(), 5),
                 (b"f".to_vec(), 6),
@@ -688,7 +693,7 @@ mod tests {
             ],
             rows
         );
-        assert_eq!(vec![10, 21, 30, 31, 40, 50, 51, 60, 70], fields);
+        assert_eq!(vec![10, 21, 30, 31, 40, 41, 50, 51, 60, 70], fields);
     }
 
     #[test]
