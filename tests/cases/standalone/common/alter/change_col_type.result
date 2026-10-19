@@ -386,3 +386,70 @@ DROP TABLE ts_overflow;
 
 Affected Rows: 0
 
+-- Issue 9454: persisted partition bounds keep their original unit. Widening the
+-- time index unit must be rejected before any region is altered when a persisted
+-- bound overflows the new unit.
+CREATE TABLE ts_bound_overflow (host STRING, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (ts) (
+  ts < '2024-01-01 00:00:00',
+  ts >= '2024-01-01 00:00:00' AND ts < '3000-01-01 00:00:00',
+  ts >= '3000-01-01 00:00:00'
+);
+
+Affected Rows: 0
+
+INSERT INTO ts_bound_overflow VALUES ("a", "2024-06-01 12:00:00");
+
+Affected Rows: 1
+
+-- 3000-01-01 fits milliseconds but overflows nanoseconds, so the widening is
+-- rejected before any region is altered.
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+ALTER TABLE ts_bound_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+
+Error: 1004(InvalidArguments), Partition expression of region REDACTED is incompatible with the altered column 'ts': the persisted bound can no longer be compared with the new column type TimestampNanosecond
+
+-- The rejected ALTER leaves the schema and the stored data unchanged.
+DESCRIBE ts_bound_overflow;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM ts_bound_overflow ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-06-01T12:00:00 |
++------+---------------------+
+
+-- Widening to microseconds keeps every persisted bound representable.
+ALTER TABLE ts_bound_overflow MODIFY COLUMN ts TIMESTAMP_US;
+
+Affected Rows: 0
+
+DESCRIBE ts_bound_overflow;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| host   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMicrosecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM ts_bound_overflow ORDER BY ts;
+
++------+---------------------+
+| host | ts                  |
++------+---------------------+
+| a    | 2024-06-01T12:00:00 |
++------+---------------------+
+
+DROP TABLE ts_bound_overflow;
+
+Affected Rows: 0
+

@@ -89,8 +89,9 @@ impl UnorderedScan {
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_num = self.properties.num_partitions();
+        let ctx = QueryScanContext::default();
         let streams = (0..part_num)
-            .map(|i| self.scan_partition(&QueryScanContext::default(), &metrics_set, i))
+            .map(|i| self.scan_partition(&ctx, &metrics_set, i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
         let stream = stream! {
             for mut stream in streams {

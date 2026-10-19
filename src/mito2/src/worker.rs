@@ -52,7 +52,7 @@ use rand::{Rng, rng};
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
-    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+    RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -1417,6 +1417,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: oneshot::Sender<SetRegionRoleStateResponse>,
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
+            if matches!(
+                region_role_state,
+                SettableRegionRoleState::Follower | SettableRegionRoleState::DowngradingLeader
+            ) {
+                // Fence writes here: writes the worker handles later see
+                // Downgrading, and earlier ones have finished. This only
+                // changes a writable or staging leader.
+                region.set_role(RegionRole::DowngradingLeader);
+            }
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
