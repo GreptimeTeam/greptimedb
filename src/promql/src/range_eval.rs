@@ -704,9 +704,20 @@ impl RangeEvaluator {
             metric.remove_all(&METADATA_LABELS);
         }
         if end > start {
-            // Every decided position joins the span, including the ones without a value.
             self.output.cover_from(start)?;
-            self.output.cover_through(end)?;
+            // A closing chunk reports where the series ended; positions after its last value hold
+            // nothing, and a consumer reading `is_last` treats the rest of the grid as decided
+            // anyway. Covering them would materialise a null row for every one -- on a grid that may
+            // hold a single value -- only for the output stage to trim them off again. Mid-series the
+            // span *is* the progress report, so there it stays whole.
+            let through = if is_last {
+                self.output
+                    .valued_end()
+                    .map_or(start, |valued| valued.clamp(start, end))
+            } else {
+                end
+            };
+            self.output.cover_through(through)?;
         }
         let Some(series) = self.output.finish(metric)? else {
             debug_assert_eq!(end, start, "a decided position widens the span");

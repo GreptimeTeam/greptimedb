@@ -52,6 +52,12 @@ pub struct GridSeriesBuilder {
     next: usize,
     /// Index after the last valid row; rows from here to the next valid row are pending nulls.
     valid_end: usize,
+    /// Index one past the last row pushed with a value in any field.
+    ///
+    /// [`Self::valid_end`] also moves over rows that hold nothing, so it cannot answer where the
+    /// values end. A caller closing a series needs that: everything past it is a decided position
+    /// with no value, which `is_last` already says.
+    valued_end: Option<usize>,
     fields: Vec<FieldBuilder>,
 }
 
@@ -88,6 +94,7 @@ impl GridSeriesBuilder {
             start: None,
             next: 0,
             valid_end: 0,
+            valued_end: None,
             fields: Vec::new(),
         })
     }
@@ -99,6 +106,7 @@ impl GridSeriesBuilder {
         if !self.start_row(index, values.len(), values.iter().all(Option::is_none))? {
             return Ok(());
         }
+        self.valued_end = Some(index + 1);
         for (field, value) in self.fields.iter_mut().zip(values) {
             field.push_float(*value);
         }
@@ -114,6 +122,7 @@ impl GridSeriesBuilder {
         if !self.start_row(index, values.len(), values.iter().all(Option::is_none))? {
             return Ok(());
         }
+        self.valued_end = Some(index + 1);
         for (field, value) in self.fields.iter_mut().zip(values) {
             match value {
                 Some(GridSample::Histogram(h)) => {
@@ -173,6 +182,11 @@ impl GridSeriesBuilder {
         }
         self.valid_end = index + 1;
         Ok(true)
+    }
+
+    /// Index one past the last row that holds a value, or `None` when no row does.
+    pub fn valued_end(&self) -> Option<usize> {
+        self.valued_end
     }
 
     /// Declares that the output span begins at `index`, before any value is pushed for it.
@@ -237,6 +251,7 @@ impl GridSeriesBuilder {
         let start = self.start.take();
         let fields = std::mem::take(&mut self.fields);
         let valid_end = std::mem::take(&mut self.valid_end);
+        self.valued_end = None;
         self.next = 0;
         let Some(start) = start else {
             return Ok(None);

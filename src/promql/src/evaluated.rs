@@ -34,6 +34,11 @@ use datatypes::series::time::{GridRange, TimeAxis};
 /// followed by a closing chunk, even when that chunk holds no values, so a consumer can tell
 /// "nothing more here" from "no more input".
 ///
+/// The closing chunk stops at the last position that holds a value. Every position of the grid
+/// after it is decided as well, and `is_last` is what says so: a consumer that reads it evaluates
+/// the rest of the grid instead of waiting for input. Reporting those positions in the range would
+/// mean materialising a missing value for each of them, on a grid that may hold a single value.
+///
 /// The chunks of a series need not tile the grid: a position no chunk covers holds no sample, which
 /// is an ordinary state for a PromQL series rather than a missing report. A window over such a
 /// position reads no sample there, exactly as it does for a position whose chunk carries a missing

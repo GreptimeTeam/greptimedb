@@ -834,8 +834,8 @@ fn empty_input_and_series_without_results() {
     };
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
-    // A series whose samples all miss the grid still closes, and its closing chunk says the whole
-    // grid was decided: every point is a settled missing value, not a point still waiting.
+    // A series whose samples all miss the grid still closes, and `is_last` says every point is a
+    // settled missing value rather than a point still waiting. No row is materialised for them.
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
     let after_grid = chunk(&[(31, vec![Some(1.0)])], 1, 0, true);
     let closed = evaluator
@@ -843,9 +843,11 @@ fn empty_input_and_series_without_results() {
         .unwrap()
         .expect("a series closes");
     assert!(closed.is_last);
-    assert_eq!(closed.range().start(), 0);
-    assert_eq!(closed.range().len(), 4);
-    assert!(all_missing(&closed.series));
+    assert!(
+        closed.range().is_empty(),
+        "the closing chunk materialised four missing rows: {:?}",
+        (closed.range().start(), closed.range().len())
+    );
     // A series whose only sample is stale does the same: the row is dropped, the points behind it
     // are decided.
     let only_stale = chunk(&[(5, vec![Some(stale())])], 1, 1, true);
@@ -854,8 +856,10 @@ fn empty_input_and_series_without_results() {
         .unwrap()
         .expect("a series closes");
     assert!(closed.is_last);
-    assert_eq!((closed.range().start(), closed.range().len()), (0, 4));
-    assert!(all_missing(&closed.series));
+    assert!(
+        closed.range().is_empty(),
+        "the stale-only series padded its grid"
+    );
     evaluator.finish().unwrap();
 }
 
@@ -880,19 +884,28 @@ fn a_push_that_completes_nothing_hands_out_no_chunk() {
         "a push that completed no position must not hand out a chunk"
     );
 
-    // The closing push still hands one out, and it reports every position of the grid.
+    // The closing push reports the one position that does hold a value: point 0 reads the sample
+    // at 5 ms. The two positions after it hold nothing, and `is_last` is what tells the consumer
+    // they are decided -- covering them would materialise a null row each.
     let closed = evaluator
         .push(&chunk(&[(100, vec![Some(2.0)])], 1, 0, true))
         .unwrap()
         .expect("a series closes");
     assert!(closed.is_last);
-    assert_eq!((closed.range().start(), closed.range().len()), (0, 3));
+    assert_eq!(
+        (closed.range().start(), closed.range().len()),
+        (0, 1),
+        "the closing chunk does not stop at its last value"
+    );
     evaluator.finish().unwrap();
 }
 
 /// A series whose last sample is behind the end of the grid still closes, on a chunk holding no
-/// positions: the remaining points have no values, and only the closing chunk tells the consumer
-/// that the series is over rather than still waiting for input.
+/// positions: the closing chunk says the series is over rather than still waiting for input.
+///
+/// The positions after the last value are not materialised. A consumer reading `is_last` treats
+/// the rest of the grid as decided, so covering them would allocate a null row per position -- on
+/// a grid that may hold one value -- for the output stage to trim off again.
 #[test]
 fn a_series_that_ends_early_still_closes() {
     let window = RangeWindow {
@@ -910,12 +923,15 @@ fn a_series_that_ends_early_still_closes() {
     assert_eq!((handed.range().start(), handed.range().len()), (0, 2));
 
     // The last sample lies past every remaining window, so points 2 to 4 are decided to hold no
-    // value. The closing chunk reports them rather than trimming them away.
+    // value. The closing chunk says so with `is_last` and carries no row for them.
     let last = chunk(&[(45, vec![Some(3.0)])], 1, 0, true);
     let closed = evaluator.push(&last).unwrap().expect("a series closes");
     assert!(closed.is_last);
-    assert_eq!((closed.range().start(), closed.range().len()), (2, 3));
-    assert!(all_missing(&closed.series));
+    assert!(
+        closed.range().is_empty(),
+        "the closing chunk materialised positions 2 to 4: {:?}",
+        (closed.range().start(), closed.range().len())
+    );
 }
 
 /// A chunk that decides only missing positions still has to be handed out before the series ends.
@@ -962,13 +978,18 @@ fn a_chunk_of_decided_missing_positions_is_handed_out_before_the_series_ends() {
     assert_eq!((second.range().start(), second.range().len()), (1, 2));
     assert!(all_missing(&second.series));
 
-    // C closes the series and reports the rest.
+    // C closes the series. Points 3 and 4 hold no value, so the closing chunk is empty: `is_last`
+    // is what tells the consumer the series ended.
     let c = chunk(&[(4_000, vec![Some(4.0)])], 1, 0, true);
     let last = evaluator.push(&c).unwrap().expect("a series closes");
     assert!(last.is_last);
-    assert_eq!((last.range().start(), last.range().len()), (3, 2));
+    assert!(
+        last.range().is_empty(),
+        "the closing chunk materialised points 3 and 4: {:?}",
+        (last.range().start(), last.range().len())
+    );
 
-    // Folding the three chunks reproduces the whole grid, so the missing spans cost nothing.
+    // Folding the chunks that carry values reproduces the whole grid.
     let chunks = [first, second, last];
     let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
     assert_eq!(folded.metric, output_metric(RangeFunction::Rate, 0));
@@ -995,13 +1016,18 @@ fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
     assert!(!handed.is_last);
     assert_eq!(handed.series.metric.name(), None);
 
-    // The last sample is past every remaining window, so the closing chunk carries decided
-    // missing positions and must still be labelled the same.
+    // The last sample is past every remaining window, so every position left holds no value and
+    // the closing chunk is empty. It still has to carry the same labels: a consumer that keyed
+    // series by label set would read it as a second series otherwise. The comparison is not
+    // vacuous -- the raw series has a name, and `rate` drops it, so a chunk built without the
+    // rewrite would carry `Some("requests")` here.
     let last = chunk(&[(45, vec![Some(5.0)])], 1, 0, true);
     let closed = evaluator.push(&last).unwrap().expect("a series closes");
     assert!(closed.is_last);
-    assert!(!closed.range().is_empty());
-    assert!(all_missing(&closed.series));
+    assert!(
+        closed.range().is_empty(),
+        "the closing chunk padded its grid"
+    );
     assert_eq!(closed.series.metric, handed.series.metric);
     assert_eq!(closed.series.metric.name(), None);
 }
@@ -2537,9 +2563,20 @@ fn a_map_chain_yielding_no_value_keeps_progress_and_the_closing_chunk() {
         handed_out.len() > 1,
         "the closing chunk is the only one that came back"
     );
+    // Every chunk but the closing one reports exactly the span it was given: dropping the values
+    // must not shrink the progress a consumer reads. The closing chunk is the exception, and it is
+    // what `is_last` is for: it carries no value here, so it spans nothing and says "ended" instead
+    // of materialising a null row for each remaining position.
+    let closing = pushed.len() - 1;
     assert_eq!(
-        decided, pushed,
+        &decided[..closing],
+        &pushed[..closing],
         "the consumer did not report the positions the mapped chunks decided"
+    );
+    assert!(
+        handed_out[closing].is_last && handed_out[closing].range().is_empty(),
+        "the closing chunk reported positions it holds no value for: {:?}",
+        decided[closing]
     );
     assert!(
         handed_out.iter().all(|chunk| all_missing(&chunk.series)),
