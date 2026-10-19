@@ -319,11 +319,13 @@ impl Emitted {
             .iter()
             .map(|field| occupied_runs(field, base))
             .collect();
-        // A series that produced no value at all owns nothing here: it hands out no sample under
-        // this label set, so recording it would refuse the next series that produces none either,
-        // and the answer to both is simply empty. Only a label set already holding values has to
-        // be marked closed when its last chunk arrives.
-        if occupied.iter().all(Vec::is_empty) && !self.sets.contains_key(&labels) {
+        // A chunk holding no value records nothing. If the label set is unknown or already closed,
+        // the series this chunk belongs to contributed no sample at all -- either it is the first
+        // such series, or a later one that also answers empty -- so there is nothing to report,
+        // nothing to merge and nothing to refuse. A label set still open is the other case: the
+        // chunk closes the series that *did* produce the values, so it falls through to close it.
+        let empty = occupied.iter().all(Vec::is_empty);
+        if empty && self.sets.get(&labels).is_none_or(|history| history.closed) {
             return Ok(());
         }
         if let Some(history) = self.sets.get(&labels) {
@@ -355,12 +357,13 @@ impl Emitted {
             history.fields.resize_with(fields, Vec::new);
         }
         for (index, runs) in occupied.into_iter().enumerate() {
-            for run in runs {
-                absorb(&mut history.fields[index], run);
-            }
+            absorb(&mut history.fields[index], &runs);
         }
         if chunk.is_last {
             history.closed = true;
+            // No later chunk reads these runs: a closed label set refuses every series that would
+            // use them. Keeping them charges the pool for a series that has already been answered.
+            history.fields = Vec::new();
         }
         let after = history_bytes(history);
         history.bytes = after;
@@ -424,21 +427,41 @@ fn occupied_runs(field: &Samples, base: usize) -> Vec<Run> {
     runs
 }
 
-/// Adds `run` to `runs`, keeping them in position order and joining the ones that touch.
+/// Merges `incoming` into `stored`, keeping the result in position order and joining the runs that
+/// touch.
 ///
-/// `runs` never holds two that overlap, so only adjacency is joined; joining is what keeps one
-/// series arriving in many chunks from costing one run per chunk.
-fn absorb(runs: &mut Vec<Run>, run: Run) {
-    let at = runs.partition_point(|stored| stored.start < run.start);
-    runs.insert(at, run);
-    let mut merged: Vec<Run> = Vec::with_capacity(runs.len());
-    for run in runs.drain(..) {
+/// Both sides are sorted and disjoint, so one pass merges them. Adding the runs one at a time and
+/// rebuilding the whole array after each would cost the square of the runs a chunk yields: a chunk
+/// of one hundred thousand positions alternating between values and nulls yields fifty thousand
+/// runs, and re-merging after each is over a billion element moves for a single series.
+fn absorb(stored: &mut Vec<Run>, incoming: &[Run]) {
+    if incoming.is_empty() {
+        return;
+    }
+    let mut merged: Vec<Run> = Vec::with_capacity(stored.len() + incoming.len());
+    let (mut a, mut b) = (0, 0);
+    while a < stored.len() || b < incoming.len() {
+        let larger = match (stored.get(a), incoming.get(b)) {
+            (Some(left), Some(right)) if right.start < left.start => {
+                b += 1;
+                *right
+            }
+            (Some(left), _) => {
+                a += 1;
+                *left
+            }
+            (None, Some(right)) => {
+                b += 1;
+                *right
+            }
+            (None, None) => break,
+        };
         match merged.last_mut() {
-            Some(last) if run.start <= last.end => last.end = last.end.max(run.end),
-            _ => merged.push(run),
+            Some(last) if larger.start <= last.end => last.end = last.end.max(larger.end),
+            _ => merged.push(larger),
         }
     }
-    *runs = merged;
+    *stored = merged;
 }
 
 /// What a map node applies.

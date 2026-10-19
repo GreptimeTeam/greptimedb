@@ -1623,6 +1623,55 @@ fn the_emitted_charge_is_the_same_folded_in_as_walked() {
     }
 }
 
+/// A series that produced values under a label set, followed by one that produced none under the
+/// same label set, is not a collision: the second contributes no sample, so the answer is just the
+/// first one's values.
+///
+/// This is the other order of [`two_series_with_no_result_do_not_collide`], and the one that used to
+/// fail: by the time the empty series arrives the label set is already closed, and refusing it
+/// failed an execution whose answer was never in doubt.
+#[test]
+fn a_series_with_no_result_after_a_closed_one_is_passed_over() {
+    let map_grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&map_grid)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+
+    // `abs` drops the name, so both series arrive under the same label set. The first holds a
+    // value; the second holds none at all and has to be passed over rather than refused.
+    for (name, values) in [("a", vec![Some(-7.0)]), ("b", vec![None])] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric(name, "x"),
+                0,
+                values,
+                true,
+            ))
+            .unwrap();
+    }
+
+    let mut handed = Vec::new();
+    loop {
+        match execution.next_chunk() {
+            Ok(Some(chunk)) => handed.push(decided(&[chunk])),
+            Ok(None) => break,
+            Err(error) => panic!("an empty series after a closed one was refused: {error}"),
+        }
+    }
+    assert!(
+        handed
+            .iter()
+            .flatten()
+            .any(|(_, value)| *value == Some(7.0)),
+        "the first series' value is missing: {handed:?}"
+    );
+}
+
 /// Two series that each produce no value at all are not a collision: both answer empty, and the
 /// node hands nothing on rather than refusing the second one.
 ///
