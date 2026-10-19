@@ -124,8 +124,10 @@ struct FieldSamples {
     /// Native histogram samples, kept apart from the floats as Prometheus does.
     histograms: Vec<(i64, FloatHistogram)>,
     histogram_head: usize,
-    /// Sequence number of `values[0]`. Absolute and monotonic, so a reset keeps its position
-    /// when `head` samples are dropped instead of every index being renumbered.
+    /// Sequence number of `values[0]`. Absolute and monotonic across the series this evaluator
+    /// evaluates, so a reset keeps its position when `head` samples are dropped instead of every
+    /// index being renumbered. An empty field holds the number of samples already dropped, which
+    /// keeps positions increasing when the next series starts.
     base: u64,
     /// Resets between consecutive retained samples, ascending by position: exactly the ones a
     /// window over these samples can still contain. Maintained only for the counter-correcting
@@ -203,14 +205,6 @@ impl FieldSamples {
         let first = self.resets.partition_point(|reset| reset.position <= start);
         let count = self.resets[first..].partition_point(|reset| reset.position < end);
         &self.resets[first..first + count]
-    }
-
-    fn clear(&mut self) {
-        self.timestamps.clear();
-        self.values.clear();
-        self.head = 0;
-        self.base = 0;
-        self.resets.clear();
     }
 }
 
@@ -373,9 +367,6 @@ impl RangeEvaluator {
     fn finish_series(&mut self) -> Result<Option<Series>> {
         self.evaluate(None)?;
         let mut state = self.series.take().expect("set by the caller");
-        for field in &mut self.fields {
-            field.clear();
-        }
         if self.drops_metric_name {
             state.metric.remove_all(&METADATA_LABELS);
         }
