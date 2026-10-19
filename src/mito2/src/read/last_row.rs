@@ -16,8 +16,8 @@
 
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Array, BinaryArray};
-use datatypes::arrow::compute::concat_batches;
+use datatypes::arrow::array::{Array, BinaryArray, UInt32Array};
+use datatypes::arrow::compute::{concat_batches, take_record_batch};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
@@ -153,6 +153,11 @@ impl BatchBuffer {
             self.num_rows += batch.num_rows();
         }
         self.batches.extend_from_slice(batches);
+    }
+
+    fn push(&mut self, batch: RecordBatch) {
+        self.num_rows += batch.num_rows();
+        self.batches.push(batch);
     }
 
     /// Returns true if the buffer has no batches.
@@ -307,40 +312,55 @@ impl FlatLastTimestampSelector {
         }
 
         let ts_values = timestamp_array_to_i64_slice(batch.column(ts_col_idx));
-        for i in 0..offsets.len() - 1 {
+        let num_ranges = offsets.len() - 1;
+        // Rows of keys that start and end inside this batch. They are gathered with one
+        // `take` instead of buffering a slice per key: concatenating thousands of single-row
+        // slices merges their dictionaries once per slice.
+        let mut completed_rows = Vec::new();
+        for i in 0..num_ranges {
             let range_start = offsets[i];
             let range_end = offsets[i + 1];
             let range_key = primary_key_bytes_at(&batch, pk_col_idx, range_start);
             let range_last_ts = ts_values[range_end - 1];
             let range_last_ts_start = last_timestamp_start(ts_values, range_start, range_end);
-            let range_slice = batch.slice(range_last_ts_start, range_end - range_last_ts_start);
+            let is_last_range = i + 1 == num_ranges;
 
-            match self.current_key.as_mut() {
-                Some(state) if state.key.as_slice() == range_key => {
-                    if range_last_ts > state.last_timestamp {
-                        state.last_timestamp = range_last_ts;
-                        state.slices.clear();
-                        state.slices.push(range_slice);
-                    } else if range_last_ts == state.last_timestamp {
-                        state.slices.push(range_slice);
-                    }
+            // Only the first range can continue the key carried over from previous batches.
+            if let Some(state) = self.current_key.as_mut()
+                && state.key.as_slice() == range_key
+            {
+                let range_slice = batch.slice(range_last_ts_start, range_end - range_last_ts_start);
+                if range_last_ts > state.last_timestamp {
+                    state.last_timestamp = range_last_ts;
+                    state.slices.clear();
+                    state.slices.push(range_slice);
+                } else if range_last_ts == state.last_timestamp {
+                    state.slices.push(range_slice);
                 }
-                Some(_) => {
+                if !is_last_range {
                     self.flush_current_key(output_buffer);
-                    self.current_key = Some(LastKeyState::new(
-                        range_key.to_vec(),
-                        range_last_ts,
-                        range_slice,
-                    ));
                 }
-                None => {
-                    self.current_key = Some(LastKeyState::new(
-                        range_key.to_vec(),
-                        range_last_ts,
-                        range_slice,
-                    ));
-                }
+                continue;
             }
+
+            // Flushes the carried-over key before rows of this batch to keep the output sorted.
+            self.flush_current_key(output_buffer);
+            if is_last_range {
+                // The key may continue in the next batch.
+                self.current_key = Some(LastKeyState::new(
+                    range_key.to_vec(),
+                    range_last_ts,
+                    batch.slice(range_last_ts_start, range_end - range_last_ts_start),
+                ));
+            } else {
+                completed_rows.extend(range_last_ts_start as u32..range_end as u32);
+            }
+        }
+
+        if !completed_rows.is_empty() {
+            let indices = UInt32Array::from(completed_rows);
+            let selected = take_record_batch(&batch, &indices).context(ComputeArrowSnafu)?;
+            output_buffer.push(selected);
         }
 
         Ok(())
@@ -628,6 +648,47 @@ mod tests {
         ];
         let results = collect_flat_results(&mut selector, batches);
         assert_eq!(vec![(b"k1".to_vec(), 4), (b"k1".to_vec(), 4)], results);
+    }
+
+    #[test]
+    fn test_flat_concat_across_parent_dictionaries() {
+        let mut selector = FlatLastTimestampSelector::default();
+        let mut output_buffer = BatchBuffer::new();
+        let batches = vec![
+            new_flat_batch(&[b"a", b"b", b"b", b"c"], &[1, 1, 2, 3], &[10, 20, 21, 30]),
+            new_flat_batch(&[b"c", b"d", b"e", b"e"], &[3, 4, 5, 5], &[31, 40, 50, 51]),
+            new_flat_batch(&[b"f", b"g"], &[6, 7], &[60, 70]),
+        ];
+        for batch in batches {
+            selector.on_next(batch, &mut output_buffer).unwrap();
+        }
+        selector.finish(&mut output_buffer).unwrap();
+        let merged = output_buffer.concat().unwrap();
+
+        let mut rows = Vec::new();
+        extract_flat_rows(&merged, &mut rows);
+        let fields = merged
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .to_vec();
+        assert_eq!(
+            vec![
+                (b"a".to_vec(), 1),
+                (b"b".to_vec(), 2),
+                (b"c".to_vec(), 3),
+                (b"c".to_vec(), 3),
+                (b"d".to_vec(), 4),
+                (b"e".to_vec(), 5),
+                (b"e".to_vec(), 5),
+                (b"f".to_vec(), 6),
+                (b"g".to_vec(), 7),
+            ],
+            rows
+        );
+        assert_eq!(vec![10, 21, 30, 31, 40, 50, 51, 60, 70], fields);
     }
 
     #[test]
