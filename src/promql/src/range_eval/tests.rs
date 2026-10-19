@@ -221,7 +221,12 @@ fn collect_chunks(
 }
 
 /// Folds the chunks of one series back into one series, the way a consumer that keeps every value
-/// would, and checks the chunk protocol: absolute increasing ranges, and one closing chunk last.
+/// would, and checks the chunk protocol: absolute ranges, never going backwards, all of the same
+/// series, and one closing chunk last.
+///
+/// The range check is explicit rather than left to the builder, whose own ordering check only sees
+/// the rows holding a value: a closing chunk with no rows must still start at or after the end of
+/// the previous chunk, and an empty chunk at a wrong position is exactly what would pass otherwise.
 fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<Series> {
     let metric = chunks
         .first()
@@ -231,10 +236,18 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
         .clone();
     let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
     let mut closing = false;
+    let mut previous_end = 0;
     for chunk in chunks {
         assert!(!closing, "a chunk follows the closing chunk");
         closing = chunk.is_last;
+        assert_eq!(chunk.series.metric, metric, "a chunk changed the series");
         let range = chunk.range();
+        assert!(
+            range.start() >= previous_end,
+            "chunk range {} goes back before the previous end {previous_end}",
+            range.start()
+        );
+        previous_end = range.start() + range.len();
         let mut fields: Vec<_> = chunk
             .series
             .fields
@@ -862,6 +875,35 @@ fn a_series_that_ends_early_still_closes() {
     assert!(closed.is_last);
     assert!(closed.range().is_empty());
     assert_eq!(closed.range().start(), 2);
+}
+
+/// The closing chunk of a series is labelled like the chunks before it, including the metadata
+/// labels a function drops: `rate` removes `__name__`, and a consumer that keyed series by label
+/// set would see the same series split in two if the empty chunk kept it.
+#[test]
+fn an_empty_closing_chunk_is_labelled_like_the_chunks_before_it() {
+    let window = RangeWindow {
+        range_ms: 20,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator =
+        RangeEvaluator::try_new(&raw_schema(1), grid(0, 10, 6), window, RangeFunction::Rate)
+            .unwrap();
+    let first = chunk(&[(10, vec![Some(1.0)]), (20, vec![Some(3.0)])], 1, 0, false);
+    let handed = evaluator
+        .push(&first)
+        .unwrap()
+        .expect("the windows of the first point are complete");
+    assert!(!handed.is_last);
+    assert_eq!(handed.series.metric.name(), None);
+
+    let last = chunk(&[(45, vec![Some(5.0)])], 1, 0, true);
+    let closed = evaluator.push(&last).unwrap().expect("a series closes");
+    assert!(closed.is_last);
+    assert!(closed.range().is_empty());
+    assert_eq!(closed.series.metric, handed.series.metric);
+    assert_eq!(closed.series.metric.name(), None);
 }
 
 #[test]

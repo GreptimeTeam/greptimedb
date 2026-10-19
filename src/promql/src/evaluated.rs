@@ -20,13 +20,18 @@ use datatypes::series::time::{GridRange, TimeAxis};
 
 /// One slice of one evaluated series.
 ///
-/// The series' [`TimeAxis::Grid`] covers the positions this chunk has finished evaluating. Those
-/// positions are absolute on the grid: a consumer that concatenates the chunks of a series never
-/// reorders them, and never has to translate a chunk-local row number into a grid position.
+/// The series' [`TimeAxis::Grid`] covers the positions this chunk finished evaluating and found a
+/// value in, from the first such position to the last. Those positions are absolute on the grid: a
+/// consumer that concatenates the chunks of a series never reorders them, and never has to
+/// translate a chunk-local row number into a grid position.
 ///
-/// A series closes exactly once, on the chunk that carries [`EvaluatedChunk::is_last`]. A closed
-/// prefix is always followed by a closing chunk, even when that chunk holds no values, so a
-/// consumer can tell "nothing more at these positions" from "no more input".
+/// The range is an envelope, not a census: a position inside it whose window has no result is a
+/// missing value, and the positions after the range either hold no value in this chunk or have not
+/// been evaluated yet. Only [`EvaluatedChunk::is_last`] tells those two apart.
+///
+/// A series closes exactly once, on the chunk that carries `is_last`. A closed prefix is always
+/// followed by a closing chunk, even when that chunk holds no values, so a consumer can tell
+/// "nothing more here" from "no more input".
 #[derive(Debug)]
 pub struct EvaluatedChunk {
     /// The evaluated values, addressed on their absolute grid positions.
@@ -48,9 +53,9 @@ impl EvaluatedChunk {
 
     /// The absolute grid range this chunk covers.
     ///
-    /// Ranges of one series increase and never overlap. An empty range is meaningful: it reports
-    /// that the chunk closed a prefix of the grid without producing new values, which a consumer
-    /// needs in order to advance.
+    /// Ranges of one series never go backwards and never overlap. An empty range is meaningful: it
+    /// reports that the chunk closed a prefix of the grid without producing new values, and its
+    /// position is where that prefix ended, so a consumer can still tell how far the series got.
     pub fn range(&self) -> &GridRange {
         match &self.series.time {
             TimeAxis::Grid(range) => range,
