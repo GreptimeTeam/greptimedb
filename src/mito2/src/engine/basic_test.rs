@@ -1882,7 +1882,10 @@ async fn restart_without_region_close(
 
 /// Builds a bulk insert request for a region created by [CreateRequestBuilder]
 /// with its default columns `(tag_0, field_0, ts)`.
-fn build_bulk_insert_request(region_id: RegionId, num_rows: usize) -> RegionBulkInsertsRequest {
+pub(crate) fn build_bulk_insert_request(
+    region_id: RegionId,
+    num_rows: usize,
+) -> RegionBulkInsertsRequest {
     let schema = Arc::new(Schema::new(vec![
         Field::new("tag_0", DataType::Utf8, true),
         Field::new("field_0", DataType::Float64, true),
