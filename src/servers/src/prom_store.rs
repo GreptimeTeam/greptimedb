@@ -102,29 +102,55 @@ pub fn is_physical_table_selection_label(label: &str) -> bool {
     label == PHYSICAL_TABLE_LABEL || label == PHYSICAL_TABLE_LABEL_ALT
 }
 
-/// Get table name from remote query
-pub fn table_name(q: &Query) -> Result<String> {
-    let mut matchers = q
-        .matchers
-        .iter()
-        .filter(|matcher| matcher.name == METRIC_NAME_LABEL);
-    let matcher = matchers
-        .next()
-        .context(error::InvalidPromRemoteRequestSnafu {
-            msg: "missing '__name__' label in timeseries",
-        })?;
+/// Compiled metric-name conditions, applied before looking up candidate tables.
+pub struct MetricNameMatchers {
+    matchers: Vec<MetricNameMatcher>,
+}
 
-    if matcher.r#type != MatcherType::Eq as i32
-        || matcher.value.is_empty()
-        || matchers.next().is_some()
-    {
-        return Err(error::InvalidPromRemoteRequestSnafu {
-            msg: "expected exactly one non-empty equality matcher for '__name__'".to_string(),
+impl MetricNameMatchers {
+    /// Validates all query matchers and compiles the metric-name conditions.
+    pub fn new(matchers: &[LabelMatcher]) -> Result<Self> {
+        let mut compiled = Vec::new();
+        for matcher in matchers {
+            if matcher.name != METRIC_NAME_LABEL {
+                validate_matchers(std::slice::from_ref(matcher))?;
+                continue;
+            }
+            let condition = match decode_matcher_type(matcher.r#type)? {
+                MatcherType::Eq => MetricNameMatcher::Eq(matcher.value.clone()),
+                MatcherType::Neq => MetricNameMatcher::Neq(matcher.value.clone()),
+                MatcherType::Re => MetricNameMatcher::Re(compile_label_regex(matcher)?),
+                MatcherType::Nre => MetricNameMatcher::Nre(compile_label_regex(matcher)?),
+            };
+            compiled.push(condition);
         }
-        .build());
+        Ok(Self { matchers: compiled })
     }
 
-    Ok(matcher.value.clone())
+    /// An equality condition fixes the only possible candidate, including an empty name.
+    pub fn exact_name(&self) -> Option<&str> {
+        self.matchers.iter().find_map(|matcher| match matcher {
+            MetricNameMatcher::Eq(name) => Some(name.as_str()),
+            _ => None,
+        })
+    }
+
+    /// All metric-name conditions must match. An absent condition accepts every name.
+    pub fn matches(&self, name: &str) -> bool {
+        self.matchers.iter().all(|matcher| match matcher {
+            MetricNameMatcher::Eq(value) => name == value,
+            MetricNameMatcher::Neq(value) => name != value,
+            MetricNameMatcher::Re(regex) => regex.is_match(name),
+            MetricNameMatcher::Nre(regex) => !regex.is_match(name),
+        })
+    }
+}
+
+enum MetricNameMatcher {
+    Eq(String),
+    Neq(String),
+    Re(regex::Regex),
+    Nre(regex::Regex),
 }
 
 /// Extract database selector from a remote read query.
@@ -141,24 +167,9 @@ pub fn extract_schema_from_query(query: &Query) -> Option<String> {
 /// Validate matcher syntax independently of whether the metric exists.
 pub fn validate_matchers(matchers: &[LabelMatcher]) -> Result<()> {
     for matcher in matchers {
-        let matcher_type = MatcherType::try_from(matcher.r#type).map_err(|e| {
-            error::InvalidPromRemoteRequestSnafu {
-                msg: format!("invalid LabelMatcher type, decode error: {e}"),
-            }
-            .build()
-        })?;
+        let matcher_type = decode_matcher_type(matcher.r#type)?;
         if matches!(matcher_type, MatcherType::Re | MatcherType::Nre) {
-            // Like Prometheus, validate the raw regex first, then the anchored pattern.
-            // We use the same regex engine as query execution, whose syntax differs
-            // from Prometheus's: e.g. `(?x) a` is accepted here but rejected by Prometheus.
-            regex::Regex::new(&matcher.value)
-                .and_then(|_| regex::Regex::new(&anchored_label_regex(&matcher.value)))
-                .map_err(|e| {
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!("invalid regex for label '{}': {e}", matcher.name),
-                    }
-                    .build()
-                })?;
+            compile_label_regex(matcher)?;
         }
     }
     Ok(())
@@ -191,12 +202,7 @@ pub fn query_to_plan(
         }
 
         let value = &m.value;
-        let m_type = MatcherType::try_from(m.r#type).map_err(|e| {
-            error::InvalidPromRemoteRequestSnafu {
-                msg: format!("invalid LabelMatcher type, decode error: {e}",),
-            }
-            .build()
-        })?;
+        let m_type = decode_matcher_type(m.r#type)?;
 
         // Prometheus treats an absent label as "".
         let label = if dataframe.schema().has_column_with_unqualified_name(name) {
@@ -267,6 +273,28 @@ pub fn query_to_plan(
 
 /// Prometheus's NewFastRegexMatcher also wraps patterns in ^(?s:...)$:
 /// https://github.com/prometheus/prometheus/blob/main/model/labels/regexp.go
+fn decode_matcher_type(value: i32) -> Result<MatcherType> {
+    MatcherType::try_from(value).map_err(|e| {
+        error::InvalidPromRemoteRequestSnafu {
+            msg: format!("invalid LabelMatcher type, decode error: {e}"),
+        }
+        .build()
+    })
+}
+
+fn compile_label_regex(matcher: &LabelMatcher) -> Result<regex::Regex> {
+    // Validate the raw pattern too: wrapping must not make invalid syntax valid.
+    // Rust regex syntax differs from Prometheus, e.g. it accepts `(?x)`.
+    regex::Regex::new(&matcher.value)
+        .and_then(|_| regex::Regex::new(&anchored_label_regex(&matcher.value)))
+        .map_err(|e| {
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!("invalid regex for label '{}': {e}", matcher.name),
+            }
+            .build()
+        })
+}
+
 fn anchored_label_regex(value: &str) -> String {
     format!("^(?s:{value})$")
 }
@@ -1015,60 +1043,55 @@ mod tests {
     }
 
     #[test]
-    fn test_table_name() {
-        let q = Query {
-            start_timestamp_ms: 1000,
-            end_timestamp_ms: 2000,
-            matchers: vec![],
-            ..Default::default()
-        };
-        let err = table_name(&q).unwrap_err();
-        assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
-
-        let q = Query {
-            start_timestamp_ms: 1000,
-            end_timestamp_ms: 2000,
-            matchers: vec![LabelMatcher {
-                name: METRIC_NAME_LABEL.to_string(),
-                value: "test".to_string(),
-                r#type: EQ_TYPE,
-            }],
-            ..Default::default()
-        };
-        assert_eq!("test", table_name(&q).unwrap());
-
-        for matchers in [
-            vec![LabelMatcher {
-                name: METRIC_NAME_LABEL.to_string(),
-                value: "test.*".to_string(),
-                r#type: RE_TYPE,
-            }],
-            vec![LabelMatcher {
-                name: METRIC_NAME_LABEL.to_string(),
-                value: String::new(),
-                r#type: EQ_TYPE,
-            }],
-            vec![
-                LabelMatcher {
-                    name: METRIC_NAME_LABEL.to_string(),
-                    value: "test".to_string(),
-                    r#type: EQ_TYPE,
-                },
-                LabelMatcher {
-                    name: METRIC_NAME_LABEL.to_string(),
-                    value: "other".to_string(),
-                    r#type: EQ_TYPE,
-                },
-            ],
+    fn test_metric_name_matchers() {
+        for (op, pattern, name, expected) in [
+            (MatcherType::Eq, "cpu", "cpu", true),
+            (MatcherType::Neq, "cpu", "cpu", false),
+            (MatcherType::Re, "cpu", "my_cpu", false),
+            (MatcherType::Re, "cpu|memory", "memory", true),
+            (MatcherType::Nre, "cpu|memory", "my_cpu", true),
+            (MatcherType::Re, "a.b", "a\nb", true),
+            (MatcherType::Re, "(?-s:a.b)", "a\nb", false),
+            (MatcherType::Re, "(?i)CPU", "cpu", true),
+            (MatcherType::Re, "(?m)cpu", "cpu\nother", false),
+            (MatcherType::Re, "", "cpu", false),
+            (MatcherType::Nre, "", "cpu", true),
         ] {
-            let q = Query {
-                matchers,
-                ..Default::default()
-            };
-            assert!(matches!(
-                table_name(&q),
-                Err(error::Error::InvalidPromRemoteRequest { .. })
-            ));
+            let matchers = MetricNameMatchers::new(&[LabelMatcher {
+                name: METRIC_NAME_LABEL.to_string(),
+                value: pattern.to_string(),
+                r#type: op as i32,
+            }])
+            .unwrap();
+            assert_eq!(expected, matchers.matches(name), "{op:?}: {pattern}");
+            assert_eq!(
+                (op == MatcherType::Eq).then_some(pattern),
+                matchers.exact_name(),
+            );
+        }
+        assert!(MetricNameMatchers::new(&[]).unwrap().matches("cpu"));
+        // Validate even when an EQ condition would make the result empty.
+        for (op, value) in [
+            (99, "cpu"),
+            (MatcherType::Re as i32, "["),
+            (MatcherType::Nre as i32, "a)|(?:b"),
+            (MatcherType::Re as i32, "(?x) cpu # comment"),
+        ] {
+            assert!(
+                MetricNameMatchers::new(&[
+                    LabelMatcher {
+                        name: METRIC_NAME_LABEL.into(),
+                        value: String::new(),
+                        r#type: EQ_TYPE
+                    },
+                    LabelMatcher {
+                        name: METRIC_NAME_LABEL.into(),
+                        value: value.into(),
+                        r#type: op
+                    },
+                ])
+                .is_err()
+            );
         }
     }
 
