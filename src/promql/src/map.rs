@@ -136,11 +136,12 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 
 /// Applies the map kernels `ops` to one evaluated chunk, in order.
 ///
-/// The returned chunk always covers the input chunk's decided range and keeps its `is_last`; a
-/// chain that maps every value away delivers missing values, not a shorter range. A kernel
-/// dropping values is a property of the values, not of how far evaluation has progressed, so the
-/// positions the chunk decided still travel with it and its consumer still advances. Trimming the
-/// result to the rows holding a value, as the output does, is a separate stage.
+/// The result is one chunk per maximal run of consecutive positions the chain left holding a
+/// value. A position it mapped away is not a row of the result, and no piece spans one, so a chain
+/// that drops values costs nothing for the positions it dropped: a consumer reads them as holding
+/// no sample, which is what the chain left there. A chunk the chain emptied entirely therefore
+/// yields no piece, and only the close is unconditional -- a series whose whole result was mapped
+/// away still has to end, so it ends on an empty chunk.
 ///
 /// At least one kernel rewrites the labels as [`map_math`] does, so with one the metadata labels
 /// are dropped even from a chunk without any value to map. A chain without kernels maps nothing,
@@ -237,25 +238,30 @@ pub fn map_chunk(
         }
     }
     let pieces = builder.finish(metric.clone())?;
-    if pieces.is_empty() && !chunk.is_last {
-        return Err(DataFusionError::Execution(format!(
-            "mapped chunk lost the positions {}..{} it decided",
-            range.start(),
-            range.start() + range.len()
-        )));
+    if pieces.is_empty() {
+        // The chain mapped every value away, so no piece covers the positions it decided: they
+        // hold no sample, exactly as if the chain had never produced one. A chunk that does not
+        // close the series has nothing left to report; the closing one still has to end it, which
+        // it does with a chunk of no rows addressed after everything its input decided. It must
+        // not carry the input's samples: those are the values the chain just dropped.
+        if !chunk.is_last {
+            return Ok(Vec::new());
+        }
+        let time = GridRange::try_new(range.grid().clone(), range.start() + range.len(), 0)
+            .map_err(series_error)?;
+        let empty = Samples::from_float(Float64Array::from(Vec::<f64>::new()));
+        let fields =
+            SeriesFields::try_from_vec(vec![empty; schema.fields.len()]).map_err(series_error)?;
+        let series =
+            Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
+        return Ok(vec![EvaluatedChunk::try_new(series, true)?]);
     }
-    let mut chunks = Vec::with_capacity(pieces.len().max(1));
+    let mut chunks = Vec::with_capacity(pieces.len());
     let last = pieces.len();
     for (index, series) in pieces.into_iter().enumerate() {
-        // Only the piece that sees nothing behind it closes the series; a series whose whole
-        // result was mapped away still ends, on an empty chunk.
+        // Only the piece that sees nothing behind it closes the series.
         let is_last = chunk.is_last && index + 1 == last;
         chunks.push(EvaluatedChunk::try_new(series, is_last)?);
-    }
-    if chunks.is_empty() {
-        let mut series = chunk.series.clone();
-        series.metric = metric;
-        chunks.push(EvaluatedChunk::try_new(series, chunk.is_last)?);
     }
     Ok(chunks)
 }
