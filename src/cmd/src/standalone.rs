@@ -58,7 +58,7 @@ use datanode::config::{DatanodeOptions, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use flow::{
-    FlowDualEngineRef, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
+    FlownodeBuilder, FlownodeEngineRef, FlownodeInstance, FlownodeOptions, FrontendClient,
     GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
@@ -935,7 +935,7 @@ pub struct LeaderServicesContext {
     pub kv_backend: KvBackendRef,
     pub cache_registry: LayeredCacheRegistryRef,
     pub catalog_manager: CatalogManagerRef,
-    pub flow_engine: FlowDualEngineRef,
+    pub flow_engine: FlownodeEngineRef,
     pub frontend_client: Arc<FrontendClient>,
     pub node_id: Option<DatanodeId>,
     pub init_regions_parallelism: usize,
