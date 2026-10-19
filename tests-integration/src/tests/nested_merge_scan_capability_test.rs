@@ -747,3 +747,197 @@ fn multiset(mut rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
     rows.sort();
     rows
 }
+
+/// End-to-end check that a fused evaluation node consumes a real storage raw-series scan.
+///
+/// The child is the production `SeriesScanExec` over a real mito region whose labels are bound
+/// to the primary key, so this exercises the label decoding that storage actually requires. The
+/// expected values are derived from the inserted fixture, so the assertion does not repeat the
+/// implementation under test.
+#[tokio::test]
+async fn test_fused_series_exec_over_real_storage_scan() {
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use datafusion::arrow::array::Array;
+    use datafusion::physical_plan::ExecutionPlan;
+    use datatypes::series::samples::SeriesSchema;
+    use datatypes::series::time::{EvalGrid, GridSpec};
+    use futures_util::TryStreamExt;
+    use promql::extension_plan::fused_series::FusedSeriesExec;
+    use promql::range_eval::{RangeFunction, RangeWindow};
+    use store_api::region_engine::{BoundTag, PrepareRequest, RawLabelSource, RegionEngine};
+    use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
+    use table::table::scan::RegionScanExec;
+
+    const TABLE: &str = "fused_series_real_scan";
+    common_telemetry::init_default_ut_logging();
+    let cluster = build_cluster("test_fused_series_exec_over_real_storage_scan").await;
+    let frontend = cluster.fe_instance().clone();
+    execute_sql(&frontend, &format!(
+        "CREATE TABLE {TABLE} (host STRING, metric_value DOUBLE, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(host)) ENGINE=mito"
+    )).await;
+    // One series, one sample per 60s, rising 60 per sample, so `rate` over 5m is exactly 1/s.
+    let rows = (1..=9)
+        .map(|i| format!("('alpha', {}, {})", 60 * i, i * 60_000))
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_sql(&frontend, &format!("INSERT INTO {TABLE} VALUES {rows}")).await;
+
+    let leaders = region_leaders(&frontend, TABLE).await;
+    assert_eq!(1, leaders.len(), "fixture is required to have one region");
+    let (&region_id, &(node_id, _)) = leaders.iter().next().unwrap();
+    let region_id = RegionId::from_u64(region_id);
+    let engine = region_server(&cluster, node_id).mito_engine().unwrap();
+    let metadata = engine.find_region(region_id).unwrap().metadata();
+
+    // Build the production raw-series leaf straight from the real region engine. The engine's
+    // own `execute_raw_series` entry point also starts the scan stream, and a scanner serves a
+    // partition once, so the leaf has to be obtained before anything is polled.
+    let request = ScanRequest {
+        projection: Some(vec![
+            metadata
+                .column_metadatas
+                .iter()
+                .position(|c| c.column_schema.name == "host")
+                .unwrap(),
+            metadata
+                .column_metadatas
+                .iter()
+                .position(|c| c.column_schema.name == "metric_value")
+                .unwrap(),
+            metadata
+                .column_metadatas
+                .iter()
+                .position(|c| c.column_schema.name == "ts")
+                .unwrap(),
+        ]),
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let mut scanner = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    let mut labels = Vec::new();
+    for column in metadata.column_metadatas.iter() {
+        if column.semantic_type == SemanticType::Tag {
+            labels.push(BoundTag {
+                column_id: column.column_id,
+                name: Arc::from(column.column_schema.name.as_str()),
+            });
+        }
+    }
+    let label_source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from(TABLE),
+        physical_metadata: metadata.clone(),
+        logical_tags: labels.into(),
+    };
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let child = Arc::new(RegionScanExec::new(scanner, request, None).unwrap())
+        .try_to_series_scan(label_source.clone())
+        .unwrap()
+        .expect("mito region must support a native raw-series scan");
+    let series_schema: Arc<SeriesSchema> = Arc::clone(child.series_schema());
+    let ordering = child.raw_series_ordering();
+    assert!(matches!(label_source, RawLabelSource::PrimaryKey { .. }));
+
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(300_000, 60_000, 5).unwrap()).unwrap());
+    let output_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+        datafusion::arrow::datatypes::Field::new(
+            "metric_value",
+            datafusion::arrow::datatypes::DataType::Float64,
+            true,
+        ),
+        datafusion::arrow::datatypes::Field::new(
+            "host",
+            datafusion::arrow::datatypes::DataType::Utf8,
+            true,
+        ),
+        datafusion::arrow::datatypes::Field::new(
+            "ts",
+            datafusion::arrow::datatypes::DataType::Timestamp(
+                datafusion::arrow::datatypes::TimeUnit::Millisecond,
+                None,
+            ),
+            false,
+        ),
+    ]));
+    let window = RangeWindow {
+        range_ms: 300_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+
+    // A scanner serves partition 0 exactly once, so the fused node consumes the real storage
+    // stream directly and the expected values below come from the fixture, not from a second run
+    // of the same kernels.
+    let fused = FusedSeriesExec::try_new(
+        child,
+        series_schema,
+        label_source,
+        ordering,
+        grid,
+        window,
+        RangeFunction::Rate,
+        vec![],
+        output_schema,
+        vec!["host".to_string()],
+        "ts".to_string(),
+    )
+    .unwrap();
+    let mut stream = fused
+        .execute(
+            0,
+            Arc::new(datafusion::execution::context::TaskContext::default()),
+        )
+        .unwrap();
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        batches.push(batch);
+    }
+    assert_eq!(1, batches.len(), "one series expected from the fused node");
+
+    // The counter rises 60 per minute, so every five-minute window is exactly one per second.
+    let values = batches[0]
+        .column_by_name("metric_value")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Float64Array>()
+        .unwrap();
+    assert_eq!(5, values.len(), "five grid points at 300s..540s");
+    for row in 0..values.len() {
+        assert_eq!(1.0, values.value(row), "rate row {row}");
+    }
+    let hosts = batches[0]
+        .column_by_name("host")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+    for row in 0..hosts.len() {
+        assert_eq!(
+            "alpha",
+            hosts.value(row),
+            "primary-key label must decode to the real label value"
+        );
+    }
+    let timestamps = batches[0]
+        .column_by_name("ts")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
+        .unwrap();
+    let ts = (0..timestamps.len())
+        .map(|row| timestamps.value(row))
+        .collect::<Vec<_>>();
+    assert_eq!(vec![300_000, 360_000, 420_000, 480_000, 540_000], ts);
+}
