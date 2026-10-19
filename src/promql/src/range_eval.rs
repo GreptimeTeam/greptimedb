@@ -495,11 +495,12 @@ impl RangeEvaluator {
     ///
     /// Returns the values of the grid points this chunk finished evaluating, as one chunk whose
     /// range is absolute on the evaluation grid; `None` when it finished no point holding a value.
-    /// A grid point whose window has no result is simply absent from the range, as it is from a
-    /// whole series.
+    /// The range spans the first and last such point, so a point between them whose window has no
+    /// result is a missing value, as it is in a whole series.
     ///
     /// The last chunk of a series is always returned, empty when it finished none, because that
-    /// chunk is what closes the series for the consumer.
+    /// chunk is what closes the series for the consumer. The empty range is addressed where the
+    /// series got to, so a consumer can still tell how far it advanced.
     ///
     /// The evaluator must not be reused after an error.
     pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<EvaluatedChunk>> {
