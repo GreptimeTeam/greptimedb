@@ -19,9 +19,14 @@ use common_query::request::{
     DynFilterPayload, INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
     InitialDynFilterRegs, InitialDynFilterSnapshot, REMOTE_DYN_FILTER_PAYLOAD_MAX_BYTES,
 };
+use datafusion::physical_plan::filter_pushdown::PushedDown;
 use datafusion_common::Result;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr, Literal, lit};
+use datafusion_physical_expr::scalar_subquery::ScalarSubqueryExpr;
+use datafusion_physical_expr::utils::collect_columns;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
 
@@ -36,40 +41,58 @@ pub(crate) struct CapturedDynFilter {
     filter_id: FilterId,
     initial_registration: InitialDynFilterReg,
     pub(crate) alive_dyn_filter: Arc<DynamicFilterPhysicalExpr>,
+    /// A parent filter that references uncorrelated scalar subqueries. Its value is only
+    /// known once `ScalarSubqueryExec` has run the subqueries, so `alive_dyn_filter`
+    /// starts as `true` and is replaced by the resolved filter before regions are queried.
+    scalar_subquery_filter: Option<Arc<dyn PhysicalExpr>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteDynFilterPushdown {
     pub(crate) captured_dyn_filters: Vec<CapturedDynFilter>,
     /// Preflight result per parent filter.
-    pub(crate) pushed_down: Vec<bool>,
+    pub(crate) pushed_down: Vec<PushedDown>,
 }
 
 pub(crate) fn capture_remote_dyn_filters_for_pushdown(
     remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
+    first_producer_local_ordinal: usize,
     parent_filters: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
 ) -> RemoteDynFilterPushdown {
     let mut pushed_down = Vec::with_capacity(parent_filters.len());
     let mut captured_dyn_filters = Vec::new();
 
-    for (producer_local_ordinal, filter) in parent_filters.into_iter().enumerate() {
-        let Some(alive_dyn_filter) = downcast_dynamic_filter(filter) else {
-            pushed_down.push(false);
+    for (index, filter) in parent_filters.into_iter().enumerate() {
+        let producer_local_ordinal = first_producer_local_ordinal + index;
+        let captured = if let Some(alive_dyn_filter) = downcast_dynamic_filter(filter.clone()) {
+            build_captured_dyn_filter(
+                remote_dyn_filter_producer_id,
+                producer_local_ordinal,
+                alive_dyn_filter,
+            )
+            .map(|captured| (captured, PushedDown::Yes))
+        } else if is_scalar_subquery_filter(&filter) {
+            // The filter is only forwarded to regions for pruning; the parent keeps
+            // evaluating it, so report it as not pushed down.
+            build_scalar_subquery_dyn_filter(
+                remote_dyn_filter_producer_id,
+                producer_local_ordinal,
+                filter,
+            )
+            .map(|captured| (captured, PushedDown::No))
+        } else {
+            pushed_down.push(PushedDown::No);
             continue;
         };
 
-        match build_captured_dyn_filter(
-            remote_dyn_filter_producer_id,
-            producer_local_ordinal,
-            alive_dyn_filter,
-        ) {
-            Ok(captured_dyn_filter) => {
-                pushed_down.push(true);
+        match captured {
+            Ok((captured_dyn_filter, pushdown)) => {
+                pushed_down.push(pushdown);
                 captured_dyn_filters.push(captured_dyn_filter);
             }
             Err(error) => {
                 common_telemetry::warn!(error; "Remote dyn filter is not pushed down because initial registration cannot be built");
-                pushed_down.push(false);
+                pushed_down.push(PushedDown::No);
             }
         }
     }
@@ -78,7 +101,7 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
         common_telemetry::warn!(error; "Remote dyn filters are not pushed down because initial registrations are invalid");
         return RemoteDynFilterPushdown {
             captured_dyn_filters: Vec::new(),
-            pushed_down: vec![false; pushed_down.len()],
+            pushed_down: vec![PushedDown::No; pushed_down.len()],
         };
     }
 
@@ -86,6 +109,97 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
         captured_dyn_filters,
         pushed_down,
     }
+}
+
+/// Returns true if `filter` references at least one scalar subquery and is otherwise
+/// built only from columns and literals, so it becomes a plain predicate once the
+/// subqueries are resolved.
+fn is_scalar_subquery_filter(filter: &Arc<dyn PhysicalExpr>) -> bool {
+    let mut has_scalar_subquery = false;
+    let mut supported = true;
+    let _ = filter.apply(|expr| {
+        if expr.is::<ScalarSubqueryExpr>() {
+            has_scalar_subquery = true;
+        } else if expr.children().is_empty() && !expr.is::<Column>() && !expr.is::<Literal>() {
+            supported = false;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    has_scalar_subquery && supported
+}
+
+fn build_scalar_subquery_dyn_filter(
+    remote_dyn_filter_producer_id: RemoteDynFilterProducerId,
+    producer_local_ordinal: usize,
+    filter: Arc<dyn PhysicalExpr>,
+) -> Result<CapturedDynFilter> {
+    let mut columns = collect_columns(&filter).into_iter().collect::<Vec<_>>();
+    columns.sort_by_key(|column| column.index());
+    let children = columns
+        .into_iter()
+        .map(|column| Arc::new(column) as Arc<dyn PhysicalExpr>)
+        .collect();
+    let alive_dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(children, lit(true)));
+    let mut captured = build_captured_dyn_filter(
+        remote_dyn_filter_producer_id,
+        producer_local_ordinal,
+        alive_dyn_filter,
+    )?;
+    captured.scalar_subquery_filter = Some(filter);
+    Ok(captured)
+}
+
+/// Replaces the scalar subqueries in captured filters with their results.
+///
+/// `ScalarSubqueryExec` runs its subqueries before executing its input, so the results
+/// are available when `MergeScanExec` is executed. This runs on every execution because
+/// `ScalarSubqueryExec::reset_state` clears the results for re-execution. A filter whose
+/// subqueries are unresolved falls back to `true`, which only disables pruning.
+pub(crate) fn resolve_scalar_subquery_dyn_filters(captured_dyn_filters: &[CapturedDynFilter]) {
+    for captured in captured_dyn_filters {
+        let Some(filter) = &captured.scalar_subquery_filter else {
+            continue;
+        };
+        let resolved = replace_scalar_subqueries(filter).unwrap_or_else(|error| {
+            common_telemetry::debug!(
+                "Scalar subquery filter {} is not forwarded to regions: {}",
+                filter,
+                error
+            );
+            lit(true)
+        });
+        if captured
+            .alive_dyn_filter
+            .current()
+            .is_ok_and(|current| current.as_ref() == resolved.as_ref())
+        {
+            continue;
+        }
+        if let Err(error) = captured.alive_dyn_filter.update(resolved) {
+            common_telemetry::warn!(error; "Failed to update scalar subquery remote dyn filter");
+        }
+    }
+}
+
+fn replace_scalar_subqueries(filter: &Arc<dyn PhysicalExpr>) -> Result<Arc<dyn PhysicalExpr>> {
+    let empty_batch =
+        arrow::record_batch::RecordBatch::new_empty(Arc::new(arrow_schema::Schema::empty()));
+    filter
+        .clone()
+        .transform_up(|expr| {
+            if !expr.is::<ScalarSubqueryExpr>() {
+                return Ok(Transformed::no(expr));
+            }
+            // Fails if the subquery has not been executed yet.
+            match expr.evaluate(&empty_batch)? {
+                ColumnarValue::Scalar(value) => Ok(Transformed::yes(lit(value))),
+                ColumnarValue::Array(_) => Err(datafusion_common::DataFusionError::Internal(
+                    "scalar subquery evaluated to an array".to_string(),
+                )),
+            }
+        })
+        .map(|transformed| transformed.data)
 }
 
 fn downcast_dynamic_filter(
@@ -159,6 +273,7 @@ fn build_captured_dyn_filter(
         filter_id,
         initial_registration: attach_initial_snapshot(initial_registration, &alive_dyn_filter),
         alive_dyn_filter,
+        scalar_subquery_filter: None,
     })
 }
 
@@ -315,7 +430,9 @@ mod tests {
     use datafusion::execution::TaskContext;
     use datafusion_common::ScalarValue;
     use datafusion_expr::ColumnarValue;
-    use datafusion_physical_expr::expressions::{Column, lit};
+    use datafusion_expr::Operator;
+    use datafusion_expr::physical_planning_context::{ScalarSubqueryResults, SubqueryIndex};
+    use datafusion_physical_expr::expressions::BinaryExpr;
     use session::query_id::QueryId;
     use uuid::Uuid;
 
@@ -461,6 +578,93 @@ mod tests {
             .to_string()
     }
 
+    fn pushed_down(pushdown: &RemoteDynFilterPushdown) -> Vec<bool> {
+        pushdown
+            .pushed_down
+            .iter()
+            .map(|pushed_down| matches!(pushed_down, PushedDown::Yes))
+            .collect()
+    }
+
+    fn host_eq_scalar_subquery(results: &ScalarSubqueryResults) -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("host", 0)),
+            Operator::Eq,
+            Arc::new(ScalarSubqueryExpr::new(
+                arrow_schema::DataType::Utf8,
+                true,
+                SubqueryIndex::new(0),
+                results.clone(),
+            )),
+        ))
+    }
+
+    #[test]
+    fn scalar_subquery_filter_is_captured_but_left_to_parent() {
+        let results = ScalarSubqueryResults::new(1);
+        let parent_filters = vec![
+            host_eq_scalar_subquery(&results),
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("host", 0)),
+                Operator::Eq,
+                lit("a"),
+            )) as Arc<dyn PhysicalExpr>,
+        ];
+
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            0,
+            parent_filters,
+        );
+
+        assert_eq!(pushed_down(&pushdown), vec![false, false]);
+        assert_eq!(pushdown.captured_dyn_filters.len(), 1);
+        assert_eq!(
+            pushdown.captured_dyn_filters[0]
+                .filter_id
+                .producer_ordinal(),
+            0
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_dyn_filter_follows_subquery_results() {
+        let results = ScalarSubqueryResults::new(1);
+        let captured = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            0,
+            vec![host_eq_scalar_subquery(&results)],
+        )
+        .captured_dyn_filters;
+        let snapshot = |captured: &[CapturedDynFilter]| {
+            decode_snapshot(
+                refreshed_regs(captured).regs[0]
+                    .initial_snapshot
+                    .as_ref()
+                    .unwrap(),
+                "host",
+            )
+        };
+
+        // Not executed yet: regions must not be filtered.
+        resolve_scalar_subquery_dyn_filters(&captured);
+        assert_eq!(snapshot(&captured), "true");
+
+        results
+            .set(
+                SubqueryIndex::new(0),
+                ScalarValue::Utf8(Some("a".to_string())),
+            )
+            .unwrap();
+        resolve_scalar_subquery_dyn_filters(&captured);
+        assert_eq!(snapshot(&captured), "host@0 = a");
+
+        // `ScalarSubqueryExec::reset_state` clears the results before re-execution.
+        results.clear();
+        resolve_scalar_subquery_dyn_filters(&captured);
+        assert_eq!(snapshot(&captured), "true");
+    }
+
     #[test]
     fn capture_remote_dyn_filters_for_pushdown_preserves_parent_filter_ordinals() {
         let parent_filters = vec![
@@ -477,9 +681,12 @@ mod tests {
         ];
 
         let remote_dyn_filter_producer_id = test_remote_dyn_filter_producer_id(42);
-        let captured =
-            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters)
-                .captured_dyn_filters;
+        let captured = capture_remote_dyn_filters_for_pushdown(
+            remote_dyn_filter_producer_id,
+            0,
+            parent_filters,
+        )
+        .captured_dyn_filters;
 
         assert_eq!(captured.len(), 2);
         assert_eq!(
@@ -506,10 +713,13 @@ mod tests {
         ];
 
         let remote_dyn_filter_producer_id = test_remote_dyn_filter_producer_id(42);
-        let pushdown =
-            capture_remote_dyn_filters_for_pushdown(remote_dyn_filter_producer_id, parent_filters);
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            remote_dyn_filter_producer_id,
+            0,
+            parent_filters,
+        );
 
-        assert_eq!(pushdown.pushed_down, vec![false, true, false]);
+        assert_eq!(pushed_down(&pushdown), vec![false, true, false]);
         assert_eq!(pushdown.captured_dyn_filters.len(), 1);
         assert_eq!(
             pushdown.captured_dyn_filters[0]
@@ -541,10 +751,11 @@ mod tests {
 
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
+            0,
             parent_filters,
         );
 
-        assert_eq!(pushdown.pushed_down, vec![false]);
+        assert_eq!(pushed_down(&pushdown), vec![false]);
         assert!(pushdown.captured_dyn_filters.is_empty());
     }
 
@@ -558,10 +769,11 @@ mod tests {
 
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
+            0,
             parent_filters,
         );
 
-        assert_eq!(pushdown.pushed_down, vec![true]);
+        assert_eq!(pushed_down(&pushdown), vec![true]);
         assert!(
             pushdown.captured_dyn_filters[0]
                 .initial_registration
@@ -581,10 +793,11 @@ mod tests {
 
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
+            0,
             parent_filters,
         );
 
-        assert_eq!(pushdown.pushed_down, vec![true]);
+        assert_eq!(pushed_down(&pushdown), vec![true]);
         let snapshot = pushdown.captured_dyn_filters[0]
             .initial_registration
             .initial_snapshot
@@ -610,10 +823,11 @@ mod tests {
 
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
+            0,
             parent_filters,
         );
 
-        assert_eq!(pushdown.pushed_down, vec![false, false]);
+        assert_eq!(pushed_down(&pushdown), vec![false, false]);
         assert!(pushdown.captured_dyn_filters.is_empty());
     }
 
@@ -630,11 +844,12 @@ mod tests {
 
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
+            0,
             parent_filters,
         );
 
         assert!(pushdown.captured_dyn_filters.is_empty());
-        assert_eq!(pushdown.pushed_down, vec![false; TOO_MANY_INITIAL_REGS]);
+        assert_eq!(pushed_down(&pushdown), vec![false; TOO_MANY_INITIAL_REGS]);
     }
 
     #[test]
@@ -652,11 +867,12 @@ mod tests {
 
         let pushdown = capture_remote_dyn_filters_for_pushdown(
             test_remote_dyn_filter_producer_id(42),
+            0,
             parent_filters,
         );
 
         assert!(pushdown.captured_dyn_filters.is_empty());
-        assert_eq!(pushdown.pushed_down, vec![false; TOO_MANY_INITIAL_REGS]);
+        assert_eq!(pushed_down(&pushdown), vec![false; TOO_MANY_INITIAL_REGS]);
     }
 
     #[test]
