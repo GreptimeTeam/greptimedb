@@ -15,6 +15,9 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
+use common_meta::affinity::{
+    AffinityFallback, AffinityReference, AffinityRequirements, AffinityResolver,
+};
 use common_meta::ddl::create_table::executor::CreateTableExecutor;
 use common_meta::ddl::create_table::template::{
     CreateRequestBuilder, build_template_from_raw_table_info_for_physical_table,
@@ -155,18 +158,37 @@ impl ExecutePlan {
         let region_number_and_partition_exprs =
             AllocateRegion::prepare_region_allocation_data(&allocate_regions)?;
         let table_info_value = ctx.get_table_info_value().await?;
-        let new_allocated_region_routes = ctx
-            .region_routes_allocator
-            .allocate(
-                table_id,
-                &region_number_and_partition_exprs
+        let affinity = if let Some(resolver) = &ctx.affinity_resolver {
+            Some(resolve_allocation_affinity(ctx, resolver.as_ref()).await?)
+        } else {
+            None
+        };
+        let groups = if let Some(affinity) = &affinity {
+            group_allocations(table_id, &region_number_and_partition_exprs, affinity)
+        } else {
+            vec![AllocationGroup {
+                affinity: None,
+                regions: region_number_and_partition_exprs
                     .iter()
-                    .map(|(n, p)| (*n, p.as_str()))
-                    .collect::<Vec<_>>(),
-                &PeerAllocContext::default(),
-            )
-            .await
-            .context(error::AllocateRegionRoutesSnafu { table_id })?;
+                    .map(|(number, partition)| (*number, partition.as_str()))
+                    .collect(),
+            }]
+        };
+        let mut new_allocated_region_routes = Vec::with_capacity(allocate_regions.len());
+        for AllocationGroup { affinity, regions } in groups {
+            let routes = ctx
+                .region_routes_allocator
+                .allocate(
+                    table_id,
+                    &regions,
+                    &PeerAllocContext {
+                        affinity: affinity.cloned(),
+                    },
+                )
+                .await
+                .context(error::AllocateRegionRoutesSnafu { table_id })?;
+            new_allocated_region_routes.extend(routes);
+        }
         let skip_wal = table_info_value.table_info.meta.options.skip_wal;
         let allocate_noop = if skip_wal {
             let table_route_value = ctx.get_table_route_value().await?;
@@ -439,8 +461,146 @@ impl AllocateRegion {
     }
 }
 
+/// Selects the lowest-ID contributing source for a target spanning multiple sources.
+/// Legacy plans without a transition map fall back to the lowest-ID source in the group.
+fn collect_allocation_sources(
+    plans: &[RepartitionPlanEntry],
+    routes: &[RegionRoute],
+) -> Vec<(RegionId, Option<u64>)> {
+    let leaders: HashMap<_, _> = routes
+        .iter()
+        .filter_map(|route| {
+            route
+                .leader_peer
+                .as_ref()
+                .map(|peer| (route.region.id, peer.id))
+        })
+        .collect();
+    let mut sources = Vec::new();
+    for plan in plans {
+        let allocated: HashSet<_> = plan.allocated_region_ids.iter().copied().collect();
+        let mut target_sources = vec![None; plan.target_regions.len()];
+        if plan.transition_map.is_empty() {
+            let source = plan
+                .source_regions
+                .iter()
+                .map(|source| source.region_id())
+                .min();
+            target_sources.fill(source);
+        } else {
+            for (source, targets) in plan.source_regions.iter().zip(&plan.transition_map) {
+                for target_index in targets {
+                    if let Some(target_source) = target_sources.get_mut(*target_index) {
+                        let source_id = source.region_id();
+                        *target_source =
+                            Some(target_source.map_or(source_id, |current| current.min(source_id)));
+                    }
+                }
+            }
+        }
+        for (target, source) in plan.target_regions.iter().zip(target_sources) {
+            if allocated.contains(&target.region_id) {
+                sources.push((
+                    target.region_id,
+                    source.and_then(|source| leaders.get(&source)).copied(),
+                ));
+            }
+        }
+    }
+    sources
+}
+
+/// Owns requirements once per source; targets refer to them by index.
+#[derive(Debug)]
+struct AllocationAffinity {
+    requirements: Vec<Option<AffinityRequirements>>,
+    target_sources: HashMap<RegionId, usize>,
+}
+
+async fn resolve_allocation_affinity(
+    ctx: &Context,
+    resolver: &dyn AffinityResolver,
+) -> Result<AllocationAffinity> {
+    let table_id = ctx.persistent_ctx.table_id;
+    let routes = ctx.get_table_route_value().await?;
+    let sources =
+        collect_allocation_sources(&ctx.persistent_ctx.plans, routes.region_routes().unwrap());
+    let mut source_indices = HashMap::new();
+    let mut references = Vec::new();
+    for (_, source_id) in &sources {
+        if let Some(source_id) = source_id {
+            source_indices.entry(*source_id).or_insert_with(|| {
+                let index = references.len();
+                references.push(AffinityReference::Datanode(*source_id));
+                index
+            });
+        }
+    }
+    let resolved = resolver
+        .resolve(&references)
+        .await
+        .context(error::AllocateRegionRoutesSnafu { table_id })?;
+    snafu::ensure!(
+        resolved.len() == source_indices.len(),
+        error::UnexpectedSnafu {
+            violated: "affinity resolution must preserve the number and order of references",
+        }
+    );
+    snafu::ensure!(
+        ctx.affinity_fallback == AffinityFallback::Unconstrained
+            || sources.iter().all(|(_, source)| {
+                source.is_some_and(|id| resolved[source_indices[&id]].is_some())
+            }),
+        error::UnexpectedSnafu {
+            violated: "source affinity requirements are unavailable",
+        }
+    );
+    Ok(AllocationAffinity {
+        requirements: resolved,
+        target_sources: sources
+            .into_iter()
+            .filter_map(|(region_id, source_id)| {
+                source_id.map(|source_id| (region_id, source_indices[&source_id]))
+            })
+            .collect(),
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AllocationGroup<'a> {
+    affinity: Option<&'a AffinityRequirements>,
+    regions: Vec<(RegionNumber, &'a str)>,
+}
+
+fn group_allocations<'a>(
+    table_id: TableId,
+    regions: &'a [(RegionNumber, String)],
+    affinity: &'a AllocationAffinity,
+) -> Vec<AllocationGroup<'a>> {
+    let mut groups: Vec<AllocationGroup<'a>> = Vec::new();
+    for (number, partition) in regions {
+        let requirements = affinity
+            .target_sources
+            .get(&RegionId::new(table_id, *number))
+            .and_then(|index| affinity.requirements[*index].as_ref());
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.affinity == requirements)
+        {
+            group.regions.push((*number, partition.as_str()));
+        } else {
+            groups.push(AllocationGroup {
+                affinity: requirements,
+                regions: vec![(*number, partition.as_str())],
+            });
+        }
+    }
+    groups
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ptr;
     use std::sync::Arc;
 
     use api::v1::region::region_request::Body;
@@ -1034,5 +1194,399 @@ mod tests {
             AllocateRegion::Execute(_) => {}
             AllocateRegion::Build(_) => panic!("expected execute plan"),
         }
+    }
+    #[test]
+    fn test_collect_allocation_sources_use_target_overlap() {
+        let table_id = 1024;
+        let mut plan = RepartitionPlanEntry {
+            group_id: Uuid::nil(),
+            source_regions: vec![
+                create_region_descriptor(table_id, 2, "x", 100, 200),
+                create_region_descriptor(table_id, 1, "x", 0, 100),
+            ],
+            target_regions: vec![
+                create_target_region_descriptor(table_id, 3, "x", 0, 50),
+                create_target_region_descriptor(table_id, 4, "x", 50, 150),
+                create_target_region_descriptor(table_id, 5, "x", 150, 200),
+            ],
+            allocated_region_ids: (3..=5).map(|n| RegionId::new(table_id, n)).collect(),
+            pending_deallocate_region_ids: vec![],
+            transition_map: vec![vec![1, 2], vec![0, 1]],
+            original_target_routes: vec![],
+        };
+        let mut routes = create_current_region_routes(table_id, &[1, 2]);
+        routes[0].leader_peer = Some(Peer::empty(10));
+        routes[1].leader_peer = Some(Peer::empty(20));
+        assert_eq!(
+            collect_allocation_sources(&[plan.clone()], &routes),
+            vec![
+                (RegionId::new(table_id, 3), Some(10)),
+                (RegionId::new(table_id, 4), Some(10)),
+                (RegionId::new(table_id, 5), Some(20)),
+            ]
+        );
+        // Source enumeration does not change the tie-break for overlapping targets.
+        plan.source_regions.reverse();
+        plan.transition_map.reverse();
+        assert_eq!(
+            collect_allocation_sources(std::slice::from_ref(&plan), &routes)[1],
+            (RegionId::new(table_id, 4), Some(10))
+        );
+        plan.transition_map.clear();
+        assert_eq!(
+            collect_allocation_sources(std::slice::from_ref(&plan), &routes),
+            (3..=5)
+                .map(|number| (RegionId::new(table_id, number), Some(10)))
+                .collect::<Vec<_>>()
+        );
+        plan.source_regions.clear();
+        assert_eq!(
+            collect_allocation_sources(&[plan], &routes),
+            (3..=5)
+                .map(|number| (RegionId::new(table_id, number), None))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_group_allocations_preserves_region_partition_mapping() {
+        use common_meta::affinity::AffinityRequirements;
+        let table_id = 1024;
+        let requirements = |zone: &str| {
+            AffinityRequirements::new(HashMap::from([("ZONE".into(), zone.into())])).unwrap()
+        };
+        let region_requirements = AllocationAffinity {
+            requirements: vec![
+                Some(requirements("a")),
+                Some(requirements("b")),
+                Some(requirements("a")),
+            ],
+            target_sources: HashMap::from([
+                (RegionId::new(table_id, 1), 0),
+                (RegionId::new(table_id, 2), 1),
+                (RegionId::new(table_id, 3), 2),
+            ]),
+        };
+        let regions = vec![
+            (1, "p1".into()),
+            (2, "p2".into()),
+            (3, "p3".into()),
+            (4, "p4".into()),
+        ];
+        let groups = group_allocations(table_id, &regions, &region_requirements);
+        assert!(ptr::eq(
+            groups[0].affinity.unwrap(),
+            region_requirements.requirements[0].as_ref().unwrap(),
+        ));
+        assert!(!ptr::eq(
+            region_requirements.requirements[0].as_ref().unwrap(),
+            region_requirements.requirements[2].as_ref().unwrap(),
+        ));
+        assert_eq!(
+            groups,
+            vec![
+                AllocationGroup {
+                    affinity: region_requirements.requirements[0].as_ref(),
+                    regions: vec![(1, "p1"), (3, "p3")],
+                },
+                AllocationGroup {
+                    affinity: region_requirements.requirements[1].as_ref(),
+                    regions: vec![(2, "p2")],
+                },
+                AllocationGroup {
+                    affinity: None,
+                    regions: vec![(4, "p4")],
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_refreshes_affinity_on_retry() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_meta::affinity::AffinityResolver;
+        use common_meta::error::{self as meta_error, Result as MetaResult};
+        use common_meta::key::table_route::TableRouteKey;
+        use common_meta::peer::PeerAllocator;
+
+        #[derive(Default)]
+        struct ChangingResolver {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AffinityResolver for ChangingResolver {
+            async fn resolve(
+                &self,
+                references: &[AffinityReference],
+            ) -> MetaResult<Vec<Option<AffinityRequirements>>> {
+                assert_eq!(
+                    references,
+                    &[
+                        AffinityReference::Datanode(1),
+                        AffinityReference::Datanode(2)
+                    ]
+                );
+                let generation = self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(references
+                    .iter()
+                    .map(|_| {
+                        AffinityRequirements::new(HashMap::from([(
+                            "ZONE".into(),
+                            format!("zone-{generation}"),
+                        )]))
+                    })
+                    .collect())
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingAllocator(Mutex<Vec<Option<AffinityRequirements>>>);
+
+        #[async_trait::async_trait]
+        impl PeerAllocator for RecordingAllocator {
+            async fn alloc(&self, _num: usize, ctx: &PeerAllocContext) -> MetaResult<Vec<Peer>> {
+                self.0.lock().unwrap().push(ctx.affinity.clone());
+                meta_error::UnexpectedSnafu {
+                    err_msg: "stop before creating regions",
+                }
+                .fail()
+            }
+        }
+
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut routes = create_current_region_routes(table_id, &[1, 2]);
+        routes[1].leader_peer = Some(Peer::empty(2));
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            routes,
+            test_region_wal_options(&[1, 2]),
+        )
+        .await;
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut ctx = new_parent_context(
+            &env,
+            Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(sender))),
+            table_id,
+        );
+        let resolver = Arc::new(ChangingResolver::default());
+        let allocator = Arc::new(RecordingAllocator::default());
+        ctx.affinity_resolver = Some(resolver.clone());
+        ctx.region_routes_allocator = allocator.clone();
+        ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
+            group_id: Uuid::nil(),
+            source_regions: vec![
+                create_region_descriptor(table_id, 1, "x", 0, 100),
+                create_region_descriptor(table_id, 2, "x", 100, 200),
+            ],
+            target_regions: vec![
+                create_target_region_descriptor(table_id, 3, "x", 0, 50),
+                create_target_region_descriptor(table_id, 4, "x", 50, 100),
+                create_target_region_descriptor(table_id, 5, "x", 100, 200),
+            ],
+            allocated_region_ids: (3..=5).map(|n| RegionId::new(table_id, n)).collect(),
+            pending_deallocate_region_ids: vec![],
+            transition_map: vec![vec![0, 1], vec![2]],
+            original_target_routes: vec![],
+        }];
+        let procedure_ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
+        };
+        for _ in 0..2 {
+            assert!(ExecutePlan.next(&mut ctx, &procedure_ctx).await.is_err());
+        }
+        assert_eq!(resolver.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *allocator.0.lock().unwrap(),
+            (0..2)
+                .map(|generation| AffinityRequirements::new(HashMap::from([(
+                    "ZONE".into(),
+                    format!("zone-{generation}")
+                ),])))
+                .collect::<Vec<_>>()
+        );
+        // Without a resolver, allocation does not need source route metadata.
+        // Removing it makes any accidental lookup fail before the recording allocator.
+        ctx.affinity_resolver = None;
+        env.kv_backend
+            .delete(TableRouteKey::new(table_id).to_string().as_bytes(), false)
+            .await
+            .unwrap();
+        assert!(ExecutePlan.next(&mut ctx, &procedure_ctx).await.is_err());
+        assert_eq!(resolver.calls.load(Ordering::Relaxed), 2);
+        let allocations = allocator.0.lock().unwrap();
+        assert_eq!(allocations.len(), 3);
+        assert_eq!(allocations.last(), Some(&None));
+    }
+
+    #[tokio::test]
+    async fn test_resolved_affinity_preserves_source_associations() {
+        use common_meta::affinity::AffinityResolver;
+        use common_meta::error::Result as MetaResult;
+
+        struct Resolver(Vec<Option<AffinityRequirements>>);
+
+        #[async_trait::async_trait]
+        impl AffinityResolver for Resolver {
+            async fn resolve(
+                &self,
+                references: &[AffinityReference],
+            ) -> MetaResult<Vec<Option<AffinityRequirements>>> {
+                assert_eq!(
+                    references,
+                    &[
+                        AffinityReference::Datanode(2),
+                        AffinityReference::Datanode(1)
+                    ]
+                );
+                Ok(self.0.clone())
+            }
+        }
+
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut routes = create_current_region_routes(table_id, &[1, 2]);
+        routes[1].leader_peer = Some(Peer::empty(2));
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            routes,
+            test_region_wal_options(&[1, 2]),
+        )
+        .await;
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut ctx = new_parent_context(
+            &env,
+            Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(sender))),
+            table_id,
+        );
+        ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
+            group_id: Uuid::nil(),
+            source_regions: vec![
+                create_region_descriptor(table_id, 1, "x", 0, 100),
+                create_region_descriptor(table_id, 2, "x", 100, 200),
+            ],
+            target_regions: vec![
+                create_target_region_descriptor(table_id, 3, "x", 100, 200),
+                create_target_region_descriptor(table_id, 4, "x", 0, 50),
+                create_target_region_descriptor(table_id, 5, "x", 50, 100),
+            ],
+            allocated_region_ids: (3..=5).map(|n| RegionId::new(table_id, n)).collect(),
+            pending_deallocate_region_ids: vec![],
+            transition_map: vec![vec![1, 2], vec![0]],
+            original_target_routes: vec![],
+        }];
+        let a = AffinityRequirements::new(HashMap::from([("ZONE".into(), "a".into())])).unwrap();
+        let b = AffinityRequirements::new(HashMap::from([("ZONE".into(), "b".into())])).unwrap();
+        assert!(matches!(
+            resolve_allocation_affinity(&ctx, &Resolver(vec![None, Some(a.clone())])).await,
+            Err(error::Error::Unexpected { .. })
+        ));
+        ctx.affinity_fallback = AffinityFallback::Unconstrained;
+        for (resolved, expected) in [
+            (
+                vec![Some(b.clone()), Some(a.clone())],
+                HashMap::from([
+                    (RegionId::new(table_id, 3), b.clone()),
+                    (RegionId::new(table_id, 4), a.clone()),
+                    (RegionId::new(table_id, 5), a.clone()),
+                ]),
+            ),
+            (
+                vec![None, Some(a.clone())],
+                HashMap::from([
+                    (RegionId::new(table_id, 4), a.clone()),
+                    (RegionId::new(table_id, 5), a),
+                ]),
+            ),
+            (
+                vec![Some(b.clone()), None],
+                HashMap::from([(RegionId::new(table_id, 3), b)]),
+            ),
+        ] {
+            let affinity = resolve_allocation_affinity(&ctx, &Resolver(resolved))
+                .await
+                .unwrap();
+            assert_eq!(affinity.requirements.len(), 2);
+            assert_eq!(
+                affinity.target_sources[&RegionId::new(table_id, 4)],
+                affinity.target_sources[&RegionId::new(table_id, 5)]
+            );
+            let actual = affinity
+                .target_sources
+                .iter()
+                .filter_map(|(target, index)| {
+                    affinity.requirements[*index]
+                        .as_ref()
+                        .map(|requirements| (*target, requirements))
+                })
+                .collect::<HashMap<_, _>>();
+            if let Some(first) = actual.get(&RegionId::new(table_id, 4)) {
+                let second = actual[&RegionId::new(table_id, 5)];
+                assert!(ptr::eq(*first, second));
+            }
+            assert_eq!(
+                actual,
+                expected
+                    .iter()
+                    .map(|(target, requirements)| (*target, requirements))
+                    .collect()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_source_leader_requires_explicit_fallback() {
+        use common_meta::error::Result as MetaResult;
+
+        struct Resolver;
+
+        #[async_trait::async_trait]
+        impl AffinityResolver for Resolver {
+            async fn resolve(
+                &self,
+                references: &[AffinityReference],
+            ) -> MetaResult<Vec<Option<AffinityRequirements>>> {
+                assert!(references.is_empty());
+                Ok(vec![])
+            }
+        }
+
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let mut routes = create_current_region_routes(table_id, &[1]);
+        routes[0].leader_peer = None;
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            routes,
+            test_region_wal_options(&[1]),
+        )
+        .await;
+        let mut ctx = new_parent_context(&env, Arc::new(MockDatanodeManager::new(())), table_id);
+        ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
+            group_id: Uuid::nil(),
+            source_regions: vec![create_region_descriptor(table_id, 1, "x", 0, 100)],
+            target_regions: vec![create_target_region_descriptor(table_id, 2, "x", 0, 100)],
+            allocated_region_ids: vec![RegionId::new(table_id, 2)],
+            pending_deallocate_region_ids: vec![],
+            transition_map: vec![vec![0]],
+            original_target_routes: vec![],
+        }];
+        assert!(matches!(
+            resolve_allocation_affinity(&ctx, &Resolver).await,
+            Err(error::Error::Unexpected { .. })
+        ));
+        ctx.affinity_fallback = AffinityFallback::Unconstrained;
+        assert!(
+            resolve_allocation_affinity(&ctx, &Resolver)
+                .await
+                .unwrap()
+                .target_sources
+                .is_empty()
+        );
     }
 }

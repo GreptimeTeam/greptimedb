@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+mod flow_write;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -19,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
-use api::v1::column_def::{options_from_skipping, try_as_column_def};
+use api::v1::column_def::{options_from_compression, options_from_skipping, try_as_column_def};
 use api::v1::region::{
     InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
     RegionRequestHeader,
@@ -32,10 +35,11 @@ use api::v1::{
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
+use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
-    trace_operations_table_name, trace_services_table_name,
+    DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
+    TIMESTAMP_END_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY,
+    default_engine, is_ddl_reserved_table, trace_operations_table_name, trace_services_table_name,
 };
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
@@ -52,7 +56,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
-use datatypes::schema::SkippingIndexOptions;
+use datatypes::schema::{ColumnEncoding, CompressionOptions, SkippingIndexOptions};
 use futures_util::future;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
@@ -839,6 +843,47 @@ impl Inserter {
             has_instant_rows,
         )?;
 
+        // Tracked Flow children use a same-capability write protocol. Keep the
+        // ordinary dispatch path unchanged for every other request.
+        #[cfg(feature = "enterprise")]
+        if flow_write::is_child(ctx) {
+            let dispatcher = self.write_dispatcher.clone();
+            let request = request_factory.build_insert(normal_requests);
+            let writes = dispatcher.prepare(vec![request]).await?;
+            let tracked_tasks = writes.into_iter().map(|(peer, mut request)| {
+                let mut query_context = crate::utils::to_meta_query_context(ctx.clone());
+                query_context.extensions.insert(
+                    common_grpc::flow_write::CHILD_KEY.to_string(),
+                    "1".to_string(),
+                );
+                if let Some(header) = request.header.as_mut() {
+                    header.query_context = Some(query_context.into());
+                }
+                let node_manager = self.node_manager.clone();
+                async move { flow_write::dispatch(&node_manager, &peer, request).await }
+            });
+            let results = future::join_all(tracked_tasks).await;
+            let mut affected_rows = 0;
+            let mut first_error = None;
+            for result in results {
+                match result {
+                    Ok(response) => affected_rows += response.affected_rows,
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            crate::metrics::DIST_INGEST_ROW_COUNT
+                .with_label_values(&[ctx.get_db_string().as_str()])
+                .inc_by(affected_rows as u64);
+            return Ok(Output::new(
+                OutputData::AffectedRows(affected_rows),
+                OutputMeta::new_with_cost(write_cost as _),
+            ));
+        }
+
         let dispatcher = self.write_dispatcher.clone();
         let request = request_factory.build_insert(normal_requests);
         let writes = dispatcher.prepare(vec![request]).await?;
@@ -1318,6 +1363,38 @@ impl Inserter {
                                     "Column {} not found when creating index for trace table: {}.",
                                     index_column, create_table.table_name
                                 );
+                            }
+                        }
+
+                        // Span ids and end timestamps rarely repeat within an SST, so a
+                        // dictionary costs more than it saves. Small span id pages let
+                        // lookups by trace id decode only the pages holding matched rows.
+                        let id_compression = CompressionOptions {
+                            encoding: Some(ColumnEncoding::Plain),
+                            page_size: Some(ReadableSize::kb(64)),
+                            ..Default::default()
+                        };
+                        let compressed_columns = [
+                            (SPAN_ID_COLUMN, id_compression),
+                            (PARENT_SPAN_ID_COLUMN, id_compression),
+                            (
+                                TIMESTAMP_END_COLUMN,
+                                CompressionOptions {
+                                    encoding: Some(ColumnEncoding::DeltaBinaryPacked),
+                                    ..Default::default()
+                                },
+                            ),
+                        ];
+                        for (name, compression) in compressed_columns {
+                            if let Some(col) =
+                                create_table.column_defs.iter_mut().find(|c| c.name == name)
+                            {
+                                let compression = options_from_compression(&compression)
+                                    .context(ColumnOptionsSnafu)?;
+                                col.options
+                                    .get_or_insert_with(Default::default)
+                                    .options
+                                    .extend(compression.options);
                             }
                         }
 

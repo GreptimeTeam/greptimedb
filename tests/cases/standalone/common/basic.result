@@ -196,11 +196,11 @@ affected_rows: 0
 -- SQLNESS PROTOCOL MYSQL
 SHOW VARIABLES MAX_EXECUTION_TIME;
 
-+---------------+-------+
-| Variable_name | Value |
-+---------------+-------+
-|               |       |
-+---------------+-------+
++--------------------+
+| MAX_EXECUTION_TIME |
++--------------------+
+| 2000               |
++--------------------+
 
 -- SQLNESS PROTOCOL MYSQL
 SET MAX_EXECUTION_TIME = 0;

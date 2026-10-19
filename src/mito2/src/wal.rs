@@ -36,7 +36,10 @@ use store_api::logstore::provider::Provider;
 use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
-use crate::error::{BuildEntrySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu};
+use crate::error::{
+    BuildEntrySnafu, CheckWalHistorySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu,
+    WriteWalSnafu,
+};
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 
@@ -158,6 +161,41 @@ impl<S: LogStore> Wal<S> {
         }))
     }
 
+    /// Checks that the log store holds the WAL history of the region through
+    /// `entry_id`, the largest replay watermark the region persisted, before
+    /// the region is replayed from its persisted state.
+    pub(crate) async fn check_region_history(
+        &self,
+        region_id: RegionId,
+        provider: &Provider,
+        entry_id: EntryId,
+    ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .check_region_history(provider, entry_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(CheckWalHistorySnafu { region_id })
+    }
+
+    /// Records that the WAL history of the region starts in the log store,
+    /// as it does for a region created on it.
+    pub(crate) fn start_region_history(
+        &self,
+        region_id: RegionId,
+        provider: &Provider,
+    ) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .start_region_history(provider)
+            .map_err(BoxedError::new)
+            .context(CheckWalHistorySnafu { region_id })
+    }
+
     /// Returns a [WalEntryReader]
     pub(crate) fn wal_entry_reader(
         &self,
@@ -215,6 +253,18 @@ impl<S: LogStore> Wal<S> {
         }
         self.store
             .delete_namespace(provider)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
+    /// Releases every WAL entry of a dropped region, see [LogStore::release_region].
+    pub async fn release_region(&self, region_id: RegionId, provider: &Provider) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .release_region(provider, region_id)
             .await
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })

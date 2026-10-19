@@ -30,7 +30,7 @@ use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
@@ -64,12 +64,8 @@ impl RegionInvoker {
     }
 
     async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponseV1> {
-        let body = request.body.with_context(|| InvalidRegionRequestSnafu {
-            reason: "body not found",
-        })?;
-
         self.region_server
-            .handle(body)
+            .handle_region_request(request)
             .await
             .context(InvokeRegionServerSnafu)
     }

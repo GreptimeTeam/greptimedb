@@ -217,6 +217,7 @@ pub const TRACE_TIMESTAMP_COLUMN: &str = "timestamp";
 pub const SPAN_KIND_COLUMN: &str = "span_kind";
 pub const SPAN_STATUS_CODE_COLUMN: &str = "span_status_code";
 pub const DURATION_NANO_COLUMN: &str = "duration_nano";
+pub const TIMESTAMP_END_COLUMN: &str = "timestamp_end";
 pub const SPAN_KIND_CLIENT: &str = "SPAN_KIND_CLIENT";
 pub const SPAN_KIND_SERVER: &str = "SPAN_KIND_SERVER";
 pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";

@@ -2,8 +2,8 @@ CREATE TABLE spans (
     ts TIMESTAMP TIME INDEX,
     trace_id STRING SKIPPING INDEX,
     prompt STRING COMPRESSION WITH (type = 'zstd', level = 3, page_size = '8MiB'),
-    reply STRING COMPRESSION WITH (level = 9),
-    tokens BIGINT COMPRESSION WITH (page_size = '64KiB'),
+    reply STRING COMPRESSION WITH (level = 9, encoding = 'plain'),
+    tokens BIGINT COMPRESSION WITH (page_size = '64KiB', encoding = 'delta_binary_packed'),
 ) WITH (append_mode = 'true');
 
 Affected Rows: 0
@@ -17,8 +17,8 @@ SHOW CREATE TABLE spans;
 |       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                      |
 |       |   "trace_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'), |
 |       |   "prompt" STRING NULL COMPRESSION WITH(level = '3', page_size = '8MiB', type = 'zstd'),                           |
-|       |   "reply" STRING NULL COMPRESSION WITH(level = '9', type = 'zstd'),                                                |
-|       |   "tokens" BIGINT NULL COMPRESSION WITH(page_size = '64KiB', type = 'zstd'),                                       |
+|       |   "reply" STRING NULL COMPRESSION WITH(encoding = 'plain', level = '9', type = 'zstd'),                            |
+|       |   "tokens" BIGINT NULL COMPRESSION WITH(encoding = 'delta_binary_packed', page_size = '64KiB', type = 'zstd'),     |
 |       |   TIME INDEX ("ts")                                                                                                |
 |       | )                                                                                                                  |
 |       |                                                                                                                    |
@@ -53,6 +53,10 @@ SELECT ts, trace_id, prompt, reply, tokens FROM spans ORDER BY ts;
 | 1970-01-01T00:00:00.003 | t2       | another prompt                 |            |        |
 +-------------------------+----------+--------------------------------+------------+--------+
 
+ALTER TABLE spans MODIFY COLUMN tokens STRING;
+
+Error: 1004(InvalidArguments), Invalid compression option: encoding delta_binary_packed requires an integer or timestamp column, but column tokens is String
+
 DROP TABLE spans;
 
 Affected Rows: 0
@@ -72,6 +76,14 @@ Error: 1004(InvalidArguments), Invalid compression option: invalid page_size: la
 CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (codec = 'zstd'));
 
 Error: 1004(InvalidArguments), Invalid column option, column name: s, error: invalid COMPRESSION option: codec
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (encoding = 'dictionary'));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid encoding: dictionary, expected: 'plain' or 'delta_binary_packed'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (encoding = 'delta_binary_packed'));
+
+Error: 1004(InvalidArguments), Invalid compression option: encoding delta_binary_packed requires an integer or timestamp column, but column s is String
 
 CREATE TABLE bad (ts TIMESTAMP TIME INDEX, j JSON2 COMPRESSION WITH (level = 3));
 

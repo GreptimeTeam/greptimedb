@@ -42,20 +42,22 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::error::{
     CorruptedWalObjectSnafu, Error, IncompleteWalEntrySnafu, InvalidProviderSnafu,
     InvalidWalObjectSnafu, InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu,
-    MismatchedWalRegionSnafu, ObjectStoreWalFailingSnafu, ObjectStoreWalSnafu,
-    ObjectStoreWalStoppedSnafu, Result, StaleWalObjectSnafu, UnconfirmedWalEpochStartSnafu,
-    WalObjectSequenceExhaustedSnafu, WalObjectSequenceUnsettledSnafu, WalSegmentFetchSnafu,
+    MismatchedWalRegionSnafu, MissingWalHistorySnafu, ObjectStoreWalFailingSnafu,
+    ObjectStoreWalSnafu, ObjectStoreWalStoppedSnafu, Result, StaleWalObjectSnafu,
+    UnconfirmedWalEpochStartSnafu, WalObjectSequenceExhaustedSnafu,
+    WalObjectSequenceUnsettledSnafu, WalSegmentFetchSnafu, WalStartWithdrawnSnafu,
 };
 use crate::metrics::{
     METRIC_OBJECT_STORE_WAL_APPEND_ACK_SECONDS, METRIC_OBJECT_STORE_WAL_CREATE_CONFLICTS_TOTAL,
     METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL, METRIC_OBJECT_STORE_WAL_CREATED_OBJECTS_TOTAL,
     METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL, METRIC_OBJECT_STORE_WAL_FAILED_DELETES_TOTAL,
     METRIC_OBJECT_STORE_WAL_FAILING, METRIC_OBJECT_STORE_WAL_INDEXED_BYTES,
-    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS, METRIC_OBJECT_STORE_WAL_OBJECT_BYTES,
+    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS,
+    METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL, METRIC_OBJECT_STORE_WAL_OBJECT_BYTES,
     METRIC_OBJECT_STORE_WAL_OBJECT_ENTRIES, METRIC_OBJECT_STORE_WAL_POISONED_TOTAL,
     METRIC_OBJECT_STORE_WAL_READ_SECONDS, METRIC_OBJECT_STORE_WAL_RECOVERED_OBJECTS_TOTAL,
     METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS, METRIC_OBJECT_STORE_WAL_REJECTED_APPENDS_TOTAL,
-    METRIC_OBJECT_STORE_WAL_SEAL_TO_DURABLE_SECONDS,
+    METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL, METRIC_OBJECT_STORE_WAL_SEAL_TO_DURABLE_SECONDS,
     METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL, METRIC_OBJECT_STORE_WAL_STALLED_APPEND_SECONDS,
     METRIC_OBJECT_STORE_WAL_STALLED_APPENDS_TOTAL,
 };
@@ -63,8 +65,9 @@ use crate::object_store_wal::batch::{OBJECT_SEQ_LIMIT, OpenBatch, entry_id, sequ
 use crate::object_store_wal::catalog::ObjectCatalog;
 use crate::object_store_wal::format::{
     ChainLink, EncodedObject, FixedTrailer, FooterEntry, HEADER_LEN, Header, MIN_OBJECT_LEN,
-    Record, TRAILER_LEN, decode_footer, decode_header, decode_segment, decode_trailer,
-    encode_object, footer_range, object_len, verify_segment_ranges,
+    RELEASE_REGION_ID, Record, Release, TRAILER_LEN, decode_footer, decode_header, decode_releases,
+    decode_segment, decode_trailer, encode_object, encode_releases, footer_range, object_len,
+    verify_segment_ranges,
 };
 use crate::object_store_wal::io::{ListedObject, ObjectStoreIo, PutResult};
 
@@ -120,8 +123,16 @@ const READ_PREFETCH_DEPTH: usize = 8;
 const READ_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
 /// Bytes recovery reads from the end of an object in one request. The window
 /// holds the trailer and the footer of an object with up to 1364 regions of
-/// 48 bytes each, so a second request for the footer is rare.
+/// 48 bytes each, so a second request for the footer is rare, and usually the
+/// segment of release records, which is the last segment.
 const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
+/// Largest segment of release records that recovery keeps from the bytes it
+/// read for a footer. It keeps them before it knows which objects are on the
+/// chain, so the bound caps what objects off the chain hold until recovery
+/// ends; a larger segment is read again if its object is on the chain. A
+/// release seals its record at once, so a segment usually holds the records of
+/// one or a few regions, 16 bytes each.
+const MAX_KEPT_RELEASE_BYTES: u64 = 4 * 1024;
 
 /// A log store over the immutable WAL objects under one prefix.
 ///
@@ -138,11 +149,22 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// appends are rejected while the object store refuses the backlog with an
 /// error that requires intervention. A segment that a read cannot
 /// decode is handled as `on_corrupted_segment` says. Objects below the reclaim
-/// boundary of the last indexed object are deleted in the background.
+/// boundary of the last indexed object are deleted in the background. A
+/// release of a region seals an object with a release record of the region at
+/// once and returns, in both modes, once that object is durable and indexed.
 pub struct ObjectStoreLogStore {
     prefix: String,
+    /// The storage the prefix is read from, as configured, for messages.
+    storage: String,
     ack_mode: AckMode,
     on_corrupted_segment: CorruptedSegmentAction,
+    accept_missing_history: bool,
+    /// Whether the prefix held no object when the store opened.
+    found_empty: bool,
+    /// The sequence above the newest object holding entries that recovery
+    /// indexed, zero when it indexed none.
+    history_end: u64,
+    started_regions: StartedRegions,
     io: Arc<dyn WalObjectIo>,
     catalog: Arc<RwLock<ObjectCatalog>>,
     obsolete_entry_ids: ObsoleteEntryIds,
@@ -171,6 +193,12 @@ pub struct ObjectStoreLogStore {
 }
 
 type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
+
+/// Regions whose history starts in the store: those created on it and those
+/// it opened by accepting a missing history. The store registers a region and
+/// the actor decides a withdrawal under this lock, so neither misses the
+/// other.
+type StartedRegions = Arc<Mutex<HashSet<RegionId>>>;
 
 type WalHoles = Arc<Mutex<HashMap<RegionId, BTreeMap<u64, WalHole>>>>;
 
@@ -315,6 +343,7 @@ impl ObjectStoreLogStore {
             max_epoch,
             reclaim_boundary,
             unindexed,
+            released_entry_ids,
             recovered_objects,
         } = recover(io.as_ref()).await?;
         // Every epoch is one above the sequence of the start object its
@@ -328,14 +357,29 @@ impl ObjectStoreLogStore {
                 ),
             }
         );
+        let found_empty = next_object_seq == 0;
+        let history_end = durable_entry_ids
+            .values()
+            .map(|entry_id| sequence_floor(*entry_id))
+            .max()
+            .unwrap_or(0);
         // Only a recovery that succeeded is reported, so that the objects
         // counted and the time measured are those of the same recoveries.
         METRIC_OBJECT_STORE_WAL_RECOVERED_OBJECTS_TOTAL.inc_by(recovered_objects);
         METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS
             .observe(recovery_started_at.elapsed().as_secs_f64());
         publish_indexed(&catalog);
+        // A chain without any segment holds no history, so the start object
+        // reclaims every object below it. A start object that another
+        // instance withdraws after this recovery listed it is then below the
+        // boundary, and its delete leaves this chain complete.
+        let start_boundary = if durable_entry_ids.is_empty() {
+            next_object_seq
+        } else {
+            reclaim_boundary
+        };
         let (start, moved_past) =
-            start_epoch(io.as_ref(), next_object_seq, tip, reclaim_boundary).await?;
+            start_epoch(io.as_ref(), next_object_seq, tip, start_boundary).await?;
         let epoch = start.epoch;
         // The epoch identifies this instance in every object it writes.
         info!(
@@ -349,10 +393,13 @@ impl ObjectStoreLogStore {
             })?;
         METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.inc();
         METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.add(object_len(&[]) as i64);
-        // No watermark is recorded yet.
-        let writer_reclaim_boundary = catalog.reclaim_boundary(reclaim_boundary, &HashMap::new());
+        // The release records are the only watermarks recorded yet.
+        for (&region_id, &entry_id) in &released_entry_ids {
+            catalog.obsolete(region_id, entry_id);
+        }
+        let writer_reclaim_boundary = catalog.reclaim_boundary(reclaim_boundary);
         let catalog = Arc::new(RwLock::new(catalog));
-        let obsolete_entry_ids = ObsoleteEntryIds::default();
+        let obsolete_entry_ids = Arc::new(Mutex::new(released_entry_ids));
         let wal_holes = WalHoles::default();
         let deleting = Arc::new(DeletingObjects::default());
         let terminal_error = TerminalError::default();
@@ -372,8 +419,11 @@ impl ObjectStoreLogStore {
         #[cfg(any(test, feature = "testing"))]
         let (durability_waits_tx, durability_waits_rx) = watch::channel(0);
 
+        let started_regions = StartedRegions::default();
         let actor = Actor {
             io: io.clone(),
+            started_regions: started_regions.clone(),
+            withdrawal: Withdrawal::Kept,
             catalog: catalog.clone(),
             obsolete_entry_ids: obsolete_entry_ids.clone(),
             wal_holes: wal_holes.clone(),
@@ -403,6 +453,7 @@ impl ObjectStoreLogStore {
             reclaim_boundary: writer_reclaim_boundary,
             durable_reclaim_boundary: reclaim_boundary,
             unindexed: unindexed.into_iter().chain(moved_past).collect(),
+            failed_releases: BTreeMap::new(),
             creating: HashSet::new(),
             deleting: deleting.clone(),
             deletes: FuturesUnordered::new(),
@@ -424,10 +475,19 @@ impl ObjectStoreLogStore {
         #[cfg(test)]
         LIVE_ACTORS.fetch_add(1, Ordering::SeqCst);
         common_runtime::spawn_global(actor.run());
+        let storage = match config.storage_provider.as_str() {
+            "" => format!("the default storage ({})", io.storage()),
+            name => format!("storage provider {name:?} ({})", io.storage()),
+        };
         Ok(Arc::new(Self {
             prefix,
+            storage,
             ack_mode: config.ack_mode,
             on_corrupted_segment: config.on_corrupted_segment,
+            accept_missing_history: config.accept_missing_history,
+            found_empty,
+            history_end,
+            started_regions,
             io,
             catalog,
             obsolete_entry_ids,
@@ -521,6 +581,121 @@ impl ObjectStoreLogStore {
             None => Ok(()),
         }
     }
+
+    /// Releases the region: its watermark moves up to the release in memory
+    /// and a release record of it goes into an object sealed at once, and the
+    /// call returns once that object is durable and indexed, in both
+    /// acknowledgement modes, or with the error that failed it. A `full`
+    /// release reaches [`EntryId::MAX`]; any other the largest id the store
+    /// handed out for the region, which every entry of the region it holds is
+    /// at or below. When the object fails, the next sealed batch carries the
+    /// record again. Recovery seeds the watermark from the record, so a store
+    /// opened later collects the objects of a region that is never opened
+    /// again.
+    async fn release(&self, region_id: RegionId, full: bool) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(Command::Release {
+                region_id,
+                full,
+                response: response_tx,
+            })
+            .await
+            .ok()
+            .context(ObjectStoreWalStoppedSnafu)?;
+        response_rx.await.ok().context(ObjectStoreWalStoppedSnafu)?
+    }
+
+    /// Returns why the prefix cannot hold the WAL history of `region_id`
+    /// through the watermark `entry_id`, or `None` when it can.
+    ///
+    /// Two invariants of a prefix decide it. First, a prefix that any store
+    /// opened is never empty afterwards, unless that store withdrew its start
+    /// object, see [`withdraw_start`](Self::withdraw_start): every open writes
+    /// its start object before it admits an append, and collection deletes
+    /// only objects below the reclaim boundary of the last indexed object,
+    /// which carries a boundary at or below its own sequence (a larger one
+    /// fails its header check), so the newest indexed object always stays.
+    /// Second, a watermark a region persisted names an object at or below
+    /// the newest object holding entries that any later recovery of the
+    /// prefix indexes. The entry it names was durable and indexed when the
+    /// watermark was persisted, since an append of the `durable` mode returns
+    /// only then and Mito waits for durability before it publishes a
+    /// watermark in the `enqueued` mode. No durable boundary passes the
+    /// newest object holding entries: a batch carries at most the sequence
+    /// after the last indexed object, which is below the batch, and a start
+    /// object carries the boundary recovery found, or its own sequence on a
+    /// chain without segments. So that object stays, and
+    /// recovery indexes it on the chain of the tip. The segment of release
+    /// records counts as entries: it never holds the reclaim boundary, so an
+    /// object holding only releases can be the one that collection keeps
+    /// while it deletes every older object. Objects without segments, such as
+    /// the start objects of opens this check refused, do not move it.
+    ///
+    /// So the history is missing when this store found the prefix empty, or
+    /// when the watermark names an object above the newest one holding
+    /// entries that it found, unless the region's history starts in this
+    /// store or the catalog holds the region's entries through the
+    /// watermark: those of a region written since the store opened.
+    fn missing_history(&self, region_id: RegionId, entry_id: EntryId) -> Option<String> {
+        if self
+            .started_regions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&region_id)
+        {
+            return None;
+        }
+        if self
+            .catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .region_max_entry_id(region_id)
+            .is_some_and(|max_entry_id| max_entry_id >= entry_id)
+        {
+            return None;
+        }
+        if self.found_empty {
+            return Some("the prefix held no object when the WAL opened".to_string());
+        }
+        let sequence_floor = sequence_floor(entry_id);
+        (sequence_floor > self.history_end).then(|| {
+            let held = match self.history_end {
+                0 => "no entry".to_string(),
+                history_end => format!("entries only in objects below {history_end}"),
+            };
+            format!(
+                "its watermark, entry {entry_id}, names object {}, but the prefix held {held} when the WAL opened",
+                sequence_floor - 1
+            )
+        })
+    }
+
+    /// Deletes the start object of a store that found its prefix empty and
+    /// whose open of an existing region is refused, so that the next open
+    /// finds the prefix empty again and refuses the region as well, instead
+    /// of passing a region that never flushed. The actor gives the object up
+    /// only while the store has admitted nothing, has no batch, holds no
+    /// other object and no region's history started in it, and from then on
+    /// the store accepts nothing, since a later object would link to the
+    /// deleted one. The actor owns the delete like any collection, so `stop`
+    /// waits for it and a cancelled caller does not abandon it, and every
+    /// refusal returns only once it settled. A failed delete, or a crash
+    /// before the delete completes, leaves the start object behind, and the
+    /// next open passes a region that never flushed.
+    async fn withdraw_start(&self) {
+        let (response_tx, response_rx) = oneshot::channel();
+        if self
+            .command_tx
+            .send(Command::Withdraw {
+                response: response_tx,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = response_rx.await;
+        }
+    }
 }
 
 /// The transient object store error of a create that a testing hook fails.
@@ -537,14 +712,24 @@ fn injected_create_failure(io: &dyn WalObjectIo, object_seq: u64) -> Result<PutR
     })
 }
 
-/// Records the obsolete watermark of `region_id`, which never moves down.
-fn record_obsolete(obsolete_entry_ids: &ObsoleteEntryIds, region_id: RegionId, entry_id: EntryId) {
+/// Records the obsolete watermark of `region_id`, which never moves down, for
+/// reads and in the catalog for the reclaim boundary.
+fn record_obsolete(
+    obsolete_entry_ids: &ObsoleteEntryIds,
+    catalog: &RwLock<ObjectCatalog>,
+    region_id: RegionId,
+    entry_id: EntryId,
+) {
     obsolete_entry_ids
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(region_id)
         .and_modify(|current| *current = (*current).max(entry_id))
         .or_insert(entry_id);
+    catalog
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .obsolete(region_id, entry_id);
 }
 
 fn positive_bytes(bytes: u64, name: &str) -> Result<usize> {
@@ -607,6 +792,12 @@ impl ObjectStoreLogStore {
         self.creates_fail.store(true, Ordering::Release);
     }
 
+    /// Lets the creates that run from now on write again after
+    /// [`fail_creates`](Self::fail_creates).
+    pub fn allow_creates(&self) {
+        self.creates_fail.store(false, Ordering::Release);
+    }
+
     /// Makes the next create that writes its object report a transient object
     /// store error afterwards, so the object exists although its create
     /// failed.
@@ -660,8 +851,8 @@ impl ObjectStoreLogStore {
 
     /// Waits until no object delete is in flight. The deletes a collection
     /// starts are in flight by the time the `obsolete`, `obsolete_all`,
-    /// [`seal_open_batch`](Self::seal_open_batch) or `durable` append that
-    /// started it returns.
+    /// `release_region`, [`seal_open_batch`](Self::seal_open_batch) or
+    /// `durable` append that started it returns.
     pub async fn wait_for_garbage_collection(&self) {
         self.deleting.wait_until_empty().await;
     }
@@ -888,6 +1079,7 @@ impl LogStore for ObjectStoreLogStore {
         let regions = catalog
             .objects_in_order()
             .flat_map(|(_, footer)| footer.iter().map(|entry| entry.region_id))
+            .filter(|region_id| *region_id != RELEASE_REGION_ID)
             .collect::<BTreeSet<_>>();
         Ok(regions
             .into_iter()
@@ -905,7 +1097,12 @@ impl LogStore for ObjectStoreLogStore {
     /// object is raised above the object `entry_id` names unless it is there
     /// already, so a watermark assigned under another prefix, or one whose
     /// object this prefix no longer holds, is never passed by a new id. Zero
-    /// names no object and needs no floor.
+    /// names no object and needs no floor. Before Mito opens a region that
+    /// writes this WAL from its persisted state, it calls
+    /// [`check_region_history`](LogStore::check_region_history), which
+    /// refuses a watermark naming an object at or above the next sequence
+    /// the store found unless `accept_missing_history` is set, so the floor
+    /// moves for such a region only once that loss was accepted.
     ///
     /// The watermark and the floor are applied together by the actor: a call
     /// cancelled before its command is queued publishes neither, while a
@@ -913,7 +1110,9 @@ impl LogStore for ObjectStoreLogStore {
     /// ids under the next sequence the floor cannot move, and the call fails
     /// with [`Error::WalObjectSequenceUnsettled`] and records neither. The
     /// watermark is kept in memory; the caller re-establishes it after a
-    /// restart. In the `enqueued` mode an `entry_id` this store handed out
+    /// restart unless it released the region, see
+    /// [`release_region`](LogStore::release_region). In the `enqueued` mode
+    /// an `entry_id` this store handed out
     /// needs no floor: it is never handed out again while the store runs.
     async fn obsolete(
         &self,
@@ -943,29 +1142,30 @@ impl LogStore for ObjectStoreLogStore {
             // still queued behind the stop: nothing is assigned an id any
             // more, so the watermark alone is consistent.
             None => {
-                record_obsolete(&self.obsolete_entry_ids, region_id, watermark);
+                record_obsolete(
+                    &self.obsolete_entry_ids,
+                    &self.catalog,
+                    region_id,
+                    watermark,
+                );
                 Ok(())
             }
         }
     }
 
-    /// Hides every entry of the region in memory and lets collection delete
-    /// its objects. The caller re-establishes the watermark after a restart.
+    /// Hides every entry of the region and lets collection delete its
+    /// objects, by a release in full that is durable once this returns.
     async fn obsolete_all(&self, provider: &Provider, region_id: RegionId) -> Result<()> {
         self.check_region(provider, region_id)?;
-        record_obsolete(&self.obsolete_entry_ids, region_id, EntryId::MAX);
-        let (response_tx, response_rx) = oneshot::channel();
-        if self
-            .command_tx
-            .send(Command::Collect {
-                response: response_tx,
-            })
-            .await
-            .is_ok()
-        {
-            let _ = response_rx.await;
-        }
-        Ok(())
+        self.release(region_id, true).await
+    }
+
+    /// Releases the region through the largest id handed out for it, durably
+    /// once this returns. Should the region id be used again, its new entries
+    /// have greater ids and stay readable.
+    async fn release_region(&self, provider: &Provider, region_id: RegionId) -> Result<()> {
+        self.check_region(provider, region_id)?;
+        self.release(region_id, false).await
     }
 
     fn entry(
@@ -1009,6 +1209,51 @@ impl LogStore for ObjectStoreLogStore {
             .context(ObjectStoreWalStoppedSnafu)?;
         response_rx.await.ok().context(ObjectStoreWalStoppedSnafu)?
     }
+
+    /// Fails with [`Error::MissingWalHistory`] when the prefix cannot hold
+    /// the history of the provider's region through `entry_id`, unless
+    /// `accept_missing_history` is set: then the region's writes that were
+    /// not flushed are lost, which is logged and counted.
+    async fn check_region_history(&self, provider: &Provider, entry_id: EntryId) -> Result<()> {
+        let region_id = self.region_of(provider)?;
+        let Some(reason) = self.missing_history(region_id, entry_id) else {
+            return self.check_terminal();
+        };
+        if !self.accept_missing_history {
+            if self.found_empty {
+                self.withdraw_start().await;
+            }
+            return MissingWalHistorySnafu {
+                region_id,
+                prefix: self.prefix.clone(),
+                storage: self.storage.clone(),
+                reason,
+            }
+            .fail();
+        }
+        self.check_terminal()?;
+        warn!(
+            "Opening region {region_id} without its WAL history, as accept_missing_history allows: prefix {} on {} does not hold it, {reason}; the region's writes above entry {entry_id} that were not flushed are lost",
+            self.prefix, self.storage
+        );
+        METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.inc();
+        self.start_region_history(provider)
+    }
+
+    /// Records the provider's region as one whose history starts in this
+    /// store, which is kept in memory: a later store on the prefix judges
+    /// the region by its watermark and the objects it finds.
+    fn start_region_history(&self, provider: &Provider) -> Result<()> {
+        let region_id = self.region_of(provider)?;
+        let mut started_regions = self
+            .started_regions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A withdrawal records its terminal error under the same lock.
+        self.check_terminal()?;
+        started_regions.insert(region_id);
+        Ok(())
+    }
 }
 
 type AppendResponse = oneshot::Sender<Result<AppendBatchResponse>>;
@@ -1031,8 +1276,18 @@ enum Command {
         watermark: EntryId,
         response: oneshot::Sender<Result<()>>,
     },
-    /// Answered once the collection the recorded watermarks allow started.
-    Collect { response: oneshot::Sender<()> },
+    /// Answered once the object holding the release record of the region is
+    /// durable and indexed, or with the reason it is not. A `full` release
+    /// reaches [`EntryId::MAX`], any other the largest id handed out for the
+    /// region.
+    Release {
+        region_id: RegionId,
+        full: bool,
+        response: oneshot::Sender<Result<()>>,
+    },
+    /// Answered once the store keeps its start object, or once the delete
+    /// of the start object it gave up settled.
+    Withdraw { response: oneshot::Sender<()> },
     Stop {
         response: oneshot::Sender<Result<()>>,
     },
@@ -1074,11 +1329,15 @@ struct SealedBatch {
     reclaim_boundary: u64,
     bytes: Bytes,
     footer: Vec<FooterEntry>,
+    releases: Vec<Release>,
     first_admitted_at: Instant,
     sealed_at: Instant,
     /// Number of creates that were attempted for the batch.
     attempts: u32,
     waiters: Vec<PendingAppend>,
+    /// Callers of a release whose record the batch carries, answered once the
+    /// object is durable and indexed.
+    release_waiters: Vec<oneshot::Sender<Result<()>>>,
     #[cfg(any(test, feature = "testing"))]
     seal_waiters: Vec<oneshot::Sender<Result<()>>>,
     state: CreateState,
@@ -1093,6 +1352,9 @@ impl SealedBatch {
         for waiter in self.waiters {
             let _ = waiter.response.send(Err(error()));
         }
+        for waiter in self.release_waiters {
+            let _ = waiter.send(Err(error()));
+        }
         #[cfg(any(test, feature = "testing"))]
         for waiter in self.seal_waiters {
             let _ = waiter.send(Err(error()));
@@ -1101,6 +1363,19 @@ impl SealedBatch {
 }
 
 type CreateOutcome = (u64, Result<PutResult>);
+
+/// Whether the store gave up its start object, see
+/// [`Actor::handle_withdraw`].
+enum Withdrawal {
+    Kept,
+    /// The delete of the start object `object_seq` is in flight; `waiters`
+    /// are answered once it settled.
+    Deleting {
+        object_seq: u64,
+        waiters: Vec<oneshot::Sender<()>>,
+    },
+    Settled,
+}
 
 /// The state of an `enqueued` store whose backlog the object store refuses
 /// with an error that requires intervention, see [`requires_intervention`],
@@ -1113,7 +1388,8 @@ type CreateOutcome = (u64, Result<PutResult>);
 /// flight, after a delay that doubles from [`CREATE_RETRY_DELAY`] up to
 /// [`MAX_FAILING_RETRY_DELAY`]. Appends are rejected at once with a retryable
 /// error that carries the last error: they take no entry id and never wait
-/// behind the backlog. The first create that succeeds ends the state.
+/// behind the backlog. Releases fail with it too, and their records wait for
+/// a create. The first create that succeeds ends the state.
 struct Failing {
     /// The last error a create met, which rejected appends carry.
     error: Arc<Error>,
@@ -1159,9 +1435,9 @@ impl Failing {
 /// | --- | --- | --- | --- |
 /// | created, or identical retry | advances | acknowledged in order | healthy |
 /// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch |
-/// | transient error, `enqueued` mode | unchanged | already acknowledged | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
-/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged; later appends are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
-/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged | the backlog is dropped and `stop` reports the error |
+/// | transient error, `enqueued` mode | unchanged | already acknowledged, except a release, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
+/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged, except a release, which fails while its record stays in the backlog; later appends and releases are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
+/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a release, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
 /// | an object of an earlier epoch holds the sequence, `durable` mode | never reused | as for a transient error | healthy: that object can never be on the chain |
 /// | an object of the same or a later epoch holds the sequence, any conflicting object in the `enqueued` mode, encoding or catalog error | unchanged | every batch that is not indexed fails | poisoned |
 /// | created at the last representable sequence | cannot advance | acknowledged | poisoned: no later batch can be allocated a sequence |
@@ -1169,8 +1445,9 @@ impl Failing {
 /// A create still in flight when its batch failed runs to completion and its
 /// outcome is ignored: whatever it stored is off the chain. After `stop` began
 /// nothing is admitted and no create starts, except that the `enqueued` mode
-/// uploads its backlog; creates in flight run to completion and acknowledge
-/// if they succeed.
+/// uploads its backlog and the `durable` mode creates one object with the
+/// release records of failed batches; creates in flight run to completion and
+/// acknowledge if they succeed.
 ///
 /// Appends arrive on their own channel. The actor holds one back while the
 /// sealed batches leave no room for the two an admission can seal, or at a
@@ -1180,16 +1457,19 @@ impl Failing {
 ///
 /// The actor also collects garbage. Every batch carries the reclaim boundary
 /// current when it was sealed, see [`ObjectCatalog::reclaim_boundary`], which
-/// is recomputed after every `obsolete` and every indexed object and never
-/// moves down. The boundary of the last indexed object is durable: every
-/// present object below it, indexed or not, is deleted in the background, up
-/// to [`MAX_IN_FLIGHT_DELETES`] at a time, after an `obsolete` or an indexing
-/// that moved it. An indexed object is unindexed once its delete succeeded; a
-/// failed delete is attempted again at the next collection. Nothing is
+/// is recomputed after every `obsolete`, every release and every indexed
+/// object and never moves down. The boundary of the last indexed object is
+/// durable: every present object below it, indexed or not, is deleted in the
+/// background, up to [`MAX_IN_FLIGHT_DELETES`] at a time, after an
+/// `obsolete`, a release or an indexing that moved it. An indexed object is
+/// unindexed once its delete succeeded; a failed delete is attempted again at
+/// the next collection. Nothing is
 /// collected once stop began or the store is poisoned, and deletes in flight
 /// complete before `stop` returns.
 struct Actor {
     io: Arc<dyn WalObjectIo>,
+    started_regions: StartedRegions,
+    withdrawal: Withdrawal,
     catalog: Arc<RwLock<ObjectCatalog>>,
     obsolete_entry_ids: ObsoleteEntryIds,
     wal_holes: WalHoles,
@@ -1240,6 +1520,11 @@ struct Actor {
     /// Sequences of objects that may be present but are not indexed: the
     /// objects recovery listed off the chain and the batches that failed.
     unindexed: BTreeSet<u64>,
+    /// Release records of batches that failed, which the next sealed batch
+    /// carries again, so a release whose call failed still becomes durable
+    /// while the store runs. A timer tick seals them when no entry is
+    /// admitted.
+    failed_releases: BTreeMap<RegionId, EntryId>,
     /// Sequences whose create is in flight.
     creating: HashSet<u64>,
     deleting: Arc<DeletingObjects>,
@@ -1297,10 +1582,11 @@ impl Actor {
                     Some(Command::Obsolete { region_id, entry_id, watermark, response }) => {
                         self.handle_obsolete(region_id, entry_id, watermark, response);
                     }
-                    Some(Command::Collect { response }) => {
-                        self.update_reclaim_boundary();
-                        self.collect();
-                        let _ = response.send(());
+                    Some(Command::Release { region_id, full, response }) => {
+                        self.handle_release(region_id, full, response);
+                    }
+                    Some(Command::Withdraw { response }) => {
+                        self.handle_withdraw(response);
                     }
                     Some(Command::Stop { response }) => {
                         self.handle_stop(response);
@@ -1474,7 +1760,22 @@ impl Actor {
     /// Seals the open batch as the object `next_object_seq` and starts its
     /// create when a slot is free. Returns whether a batch was sealed.
     fn flush_open_batch(&mut self) -> bool {
-        if self.open_batch.is_empty() {
+        self.seal(Vec::new())
+    }
+
+    /// Seals the open batch together with `releases` and the release records
+    /// of failed batches as the object `next_object_seq`, even when the open
+    /// batch holds no entry, and starts its create when a slot is free.
+    /// Returns whether a batch was sealed.
+    ///
+    /// A failing store keeps the records of failed batches coalesced instead
+    /// of sealing them alone behind its backlog on every tick, until `stop`
+    /// seals them for its last attempt of the backlog.
+    fn seal(&mut self, releases: Vec<Release>) -> bool {
+        if self.open_batch.is_empty()
+            && releases.is_empty()
+            && (self.failed_releases.is_empty() || (self.failing.is_some() && self.stop.is_empty()))
+        {
             return false;
         }
         if let Some(error) = terminal(&self.terminal_error) {
@@ -1506,7 +1807,12 @@ impl Actor {
             ),
             reclaim_boundary: self.reclaim_boundary,
         };
-        let encoded = match encode_batch(header, entries) {
+        let mut records = std::mem::take(&mut self.failed_releases);
+        for release in releases {
+            let entry_id = records.entry(release.region_id).or_insert(release.entry_id);
+            *entry_id = (*entry_id).max(release.entry_id);
+        }
+        let encoded = match encode_batch(header, entries, &records) {
             Ok(encoded) => encoded,
             Err(error) => {
                 self.poison(error);
@@ -1534,10 +1840,18 @@ impl Actor {
             reclaim_boundary: self.reclaim_boundary,
             bytes: encoded.bytes,
             footer: encoded.footer,
+            releases: records
+                .into_iter()
+                .map(|(region_id, entry_id)| Release {
+                    region_id,
+                    entry_id,
+                })
+                .collect(),
             first_admitted_at,
             sealed_at: Instant::now(),
             attempts: 0,
             waiters: std::mem::take(&mut self.pending),
+            release_waiters: Vec::new(),
             #[cfg(any(test, feature = "testing"))]
             seal_waiters: Vec::new(),
             state: CreateState::Pending,
@@ -1549,11 +1863,13 @@ impl Actor {
     /// Starts the creates of pending batches in sequence order while fewer
     /// than [`MAX_IN_FLIGHT_CREATES`] are in flight, counting the creates of
     /// batches that already failed. Nothing starts once stop began, except
-    /// the backlog of the `enqueued` mode. A failing store only schedules the
+    /// the backlog of the `enqueued` mode and, once the stop command was
+    /// handled, the release records [`handle_stop`](Self::handle_stop)
+    /// seals in the `durable` mode. A failing store only schedules the
     /// next attempt once nothing is in flight, see [`Failing`]; after stop
     /// began it uploads its backlog at once.
     fn start_creates(&mut self) {
-        if self.is_stopped() && self.ack_mode == AckMode::Durable {
+        if self.is_stopped() && self.ack_mode == AckMode::Durable && self.stop.is_empty() {
             return;
         }
         if !self.is_stopped()
@@ -1760,6 +2076,13 @@ impl Actor {
         if let Some((_, response)) = stalled {
             let _ = response.send(Err(failing.reject()));
         }
+        // So would a release. Its record stays in the backlog and becomes
+        // durable with it.
+        for batch in &mut self.sealed {
+            for waiter in batch.release_waiters.drain(..) {
+                let _ = waiter.send(Err(failing.reject()));
+            }
+        }
     }
 
     /// Ends the failing state, if the store is in it, because of `reason`.
@@ -1808,6 +2131,7 @@ impl Actor {
         };
         METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.inc();
         METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.add(batch.bytes.len() as i64);
+        METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL.inc_by(batch.releases.len() as u64);
         self.last_indexed = ChainLink {
             object_seq: batch.object_seq,
             epoch: self.epoch,
@@ -1823,6 +2147,9 @@ impl Actor {
             let _ = waiter.response.send(Ok(AppendBatchResponse {
                 last_entry_ids: waiter.last_entry_ids,
             }));
+        }
+        for waiter in batch.release_waiters {
+            let _ = waiter.send(Ok(()));
         }
         #[cfg(any(test, feature = "testing"))]
         for waiter in batch.seal_waiters {
@@ -1884,8 +2211,9 @@ impl Actor {
                 shared(&error)
             }
         };
-        for batch in self.sealed.drain(..) {
+        for mut batch in std::mem::take(&mut self.sealed) {
             self.unindexed.insert(batch.object_seq);
+            self.keep_releases(&mut batch);
             batch.fail(failure);
         }
         self.reset_open_batch();
@@ -1893,11 +2221,30 @@ impl Actor {
         // so `settle` admits it, or refuses it once stop began.
         self.fail_waiters(failure);
         // An acknowledged backlog was dropped: `stop` reports it, whether
-        // its caller has arrived yet or not.
-        if self.ack_mode == AckMode::Enqueued {
+        // its caller has arrived yet or not. So it does release records once
+        // stop began, which no later create carries.
+        if self.ack_mode == AckMode::Enqueued
+            || (!self.stop.is_empty() && !self.failed_releases.is_empty())
+        {
             self.stop_error.get_or_insert(error);
         }
         self.leave_failing("its backlog was dropped");
+    }
+
+    /// Keeps the release records of a batch that failed for the next sealed
+    /// batch.
+    fn keep_releases(&mut self, batch: &mut SealedBatch) {
+        for release in batch.releases.drain(..) {
+            self.keep_release(release);
+        }
+    }
+
+    fn keep_release(&mut self, release: Release) {
+        let entry_id = self
+            .failed_releases
+            .entry(release.region_id)
+            .or_insert(release.entry_id);
+        *entry_id = (*entry_id).max(release.entry_id);
     }
 
     /// Records `error` as terminal and fails every waiter that is not
@@ -1910,6 +2257,8 @@ impl Actor {
     fn poison(&mut self, error: Error) -> Arc<Error> {
         let error = set_terminal(&self.terminal_error, error);
         let stopped = self.is_stopped();
+        let releases_lost = !self.failed_releases.is_empty()
+            || self.sealed.iter().any(|batch| !batch.releases.is_empty());
         let failure = || {
             if stopped {
                 ObjectStoreWalStoppedSnafu.build()
@@ -1922,7 +2271,9 @@ impl Actor {
         }
         self.reset_open_batch();
         self.fail_unacknowledged(failure);
-        if self.ack_mode == AckMode::Enqueued {
+        // As in `roll_back`, release records lost once stop began are
+        // reported by `stop` in both modes.
+        if self.ack_mode == AckMode::Enqueued || (!self.stop.is_empty() && releases_lost) {
             self.stop_error.get_or_insert(error.clone());
         }
         self.leave_failing("the store is poisoned");
@@ -1994,6 +2345,79 @@ impl Actor {
         self.durability_waits.send_modify(|count| *count += 1);
     }
 
+    /// Gives up the start object while it is the only object this store
+    /// knows of: the catalog indexes nothing else, nothing was ever handed an
+    /// id, no batch, append or release waits, no other object was listed or
+    /// created, no region's history started in the store, and the store is
+    /// neither failing nor terminal. A release seals its own batch without
+    /// handing an id, so the catalog decides once its object is indexed, and
+    /// the object it may then leave alone holds a segment. The store then
+    /// records a terminal error, so nothing is admitted that would link to
+    /// the object, and deletes it like a collected object; `response` is
+    /// answered once that delete settled, or at once when the store keeps
+    /// the object. A later request waits for the same delete.
+    fn handle_withdraw(&mut self, response: oneshot::Sender<()>) {
+        match &mut self.withdrawal {
+            Withdrawal::Kept => {}
+            Withdrawal::Deleting { waiters, .. } => {
+                waiters.push(response);
+                return;
+            }
+            Withdrawal::Settled => {
+                let _ = response.send(());
+                return;
+            }
+        }
+        let started_regions = self
+            .started_regions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !started_regions.is_empty()
+            || terminal(&self.terminal_error).is_some()
+            || self.failing.is_some()
+            || !self.issued_entry_ids.is_empty()
+            || !self.open_batch.is_empty()
+            || !self.sealed.is_empty()
+            || !self.creates.is_empty()
+            || self.stalled.is_some()
+            || !self.unindexed.is_empty()
+            || !self.failed_releases.is_empty()
+        {
+            let _ = response.send(());
+            return;
+        }
+        // The start object is the one object indexed, and the only one
+        // without segments: a release object can be indexed alone once it
+        // collected the start object.
+        let start_object = {
+            let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+            let mut objects = catalog.objects_in_order();
+            match (objects.next(), objects.next()) {
+                (Some((object_seq, [])), None) => Some(object_seq),
+                _ => None,
+            }
+        };
+        let Some(object_seq) = start_object else {
+            let _ = response.send(());
+            return;
+        };
+        let path = self.io.object_path(object_seq);
+        self.terminal_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(|| Arc::new(WalStartWithdrawnSnafu { path }.build()));
+        drop(started_regions);
+        self.deleting.start(object_seq);
+        let io = self.io.clone();
+        self.deletes.push(Box::pin(async move {
+            (object_seq, io.delete(object_seq).await)
+        }));
+        self.withdrawal = Withdrawal::Deleting {
+            object_seq,
+            waiters: vec![response],
+        };
+    }
+
     /// Makes sure no id of the region at or below `entry_id` is assigned
     /// from now on, then records the obsolete watermark of the region;
     /// neither is done when the sequence cannot be raised.
@@ -2005,7 +2429,12 @@ impl Actor {
         response: oneshot::Sender<Result<()>>,
     ) {
         let result = self.raise_sequence_floor(region_id, entry_id).map(|_| {
-            record_obsolete(&self.obsolete_entry_ids, region_id, watermark);
+            record_obsolete(
+                &self.obsolete_entry_ids,
+                &self.catalog,
+                region_id,
+                watermark,
+            );
         });
         if result.is_ok() {
             self.update_reclaim_boundary();
@@ -2014,20 +2443,71 @@ impl Actor {
         let _ = response.send(result);
     }
 
+    /// Moves the watermark of the region up to the release and seals the
+    /// open batch with a release record of the region; `response` is
+    /// answered once that object is durable and indexed. The batch carries
+    /// the reclaim boundary the watermark allows, so the object makes both
+    /// durable at once.
+    ///
+    /// The watermark is not clamped to the durable entry id in the `enqueued`
+    /// mode: a released region is never replayed, and the record is durable
+    /// only once every object sealed before it is. A release arrives as a
+    /// command, so [`MAX_SEALED_BATCHES`] does not hold it back; every caller
+    /// waits for its own object, so releases add at most one batch per caller.
+    fn handle_release(
+        &mut self,
+        region_id: RegionId,
+        full: bool,
+        response: oneshot::Sender<Result<()>>,
+    ) {
+        if self.is_stopped() {
+            let _ = response.send(Err(ObjectStoreWalStoppedSnafu.build()));
+            return;
+        }
+        if let Some(error) = terminal(&self.terminal_error) {
+            let _ = response.send(Err(shared(&error)));
+            return;
+        }
+        let entry_id = if full {
+            EntryId::MAX
+        } else {
+            self.issued_entry_ids.get(&region_id).copied().unwrap_or(0)
+        };
+        record_obsolete(&self.obsolete_entry_ids, &self.catalog, region_id, entry_id);
+        self.update_reclaim_boundary();
+        self.collect();
+        let release = Release {
+            region_id,
+            entry_id,
+        };
+        // A failing store admits nothing behind its backlog: the release
+        // fails at once, and its record is kept like that of a batch that
+        // failed, sealed once a create succeeds.
+        if let Some(failing) = &mut self.failing {
+            let _ = response.send(Err(failing.reject()));
+            self.keep_release(release);
+            return;
+        }
+        if self.seal(vec![release])
+            && let Some(batch) = self.sealed.back_mut()
+        {
+            batch.release_waiters.push(response);
+            return;
+        }
+        // Sealing failed and poisoned the store.
+        if let Some(error) = terminal(&self.terminal_error) {
+            let _ = response.send(Err(shared(&error)));
+        }
+    }
+
     /// Raises the reclaim boundary to what the catalog and the obsolete
     /// watermarks allow.
     fn update_reclaim_boundary(&mut self) {
-        let boundary = {
-            let obsolete_entry_ids = self
-                .obsolete_entry_ids
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            self.catalog
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .reclaim_boundary(self.reclaim_boundary, &obsolete_entry_ids)
-        };
-        self.reclaim_boundary = boundary;
+        self.reclaim_boundary = self
+            .catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reclaim_boundary(self.reclaim_boundary);
     }
 
     /// Starts a collection, which also attempts the deletes that failed since
@@ -2075,6 +2555,36 @@ impl Actor {
     /// succeeded, then settles its attempt, so a read that the attempt
     /// releases sees the outcome in the catalog.
     fn on_delete_completed(&mut self, object_seq: u64, result: Result<()>) {
+        if let Withdrawal::Deleting {
+            object_seq: withdrawn,
+            waiters,
+        } = &mut self.withdrawal
+            && *withdrawn == object_seq
+        {
+            let path = self.io.object_path(object_seq);
+            match result {
+                Ok(()) => {
+                    let mut catalog = self.catalog.write().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(footer) = catalog.remove_object(object_seq) {
+                        METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.dec();
+                        METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.sub(object_len(&footer) as i64);
+                    }
+                    info!(
+                        "Deleted the start object {path} of the object store WAL, whose prefix held no object, after refusing a region without its history"
+                    );
+                }
+                Err(error) => warn!(
+                    error;
+                    "Failed to delete the start object {path} of the object store WAL after refusing a region without its history; the next open passes regions that never flushed"
+                ),
+            }
+            for waiter in waiters.drain(..) {
+                let _ = waiter.send(());
+            }
+            self.withdrawal = Withdrawal::Settled;
+            self.deleting.finish(object_seq);
+            return;
+        }
         match result {
             Ok(()) => {
                 self.unindexed.remove(&object_seq);
@@ -2162,7 +2672,8 @@ impl Actor {
 
     /// Begins stopping. Nothing is admitted from now on and the append held
     /// back is refused; the `durable` mode drops the open batch and the
-    /// batches whose create has not started, the `enqueued` mode seals its
+    /// batches whose create has not started, and seals the release records of
+    /// failed and dropped batches once more; the `enqueued` mode seals its
     /// backlog and uploads it, a failing store included. Stop is answered by
     /// [`finish_stop`](Self::finish_stop) once nothing is in flight.
     fn handle_stop(&mut self, response: oneshot::Sender<Result<()>>) {
@@ -2183,10 +2694,12 @@ impl Actor {
                     .iter()
                     .position(|batch| matches!(batch.state, CreateState::Pending))
                 {
-                    for batch in self.sealed.drain(index..) {
+                    for mut batch in self.sealed.split_off(index) {
+                        self.keep_releases(&mut batch);
                         batch.fail(|| ObjectStoreWalStoppedSnafu.build());
                     }
                 }
+                self.seal(Vec::new());
             }
             AckMode::Enqueued => {
                 self.flush_open_batch();
@@ -2486,7 +2999,19 @@ fn record_skipped_segment(
         .or_insert(hole);
 }
 
-fn encode_batch(header: Header, entries: Vec<Entry>) -> Result<EncodedObject> {
+/// Encodes the entries of a batch, and its release records as the single
+/// entry of [`RELEASE_REGION_ID`], whose id is at position 1 of the object;
+/// segments are ordered by region id, so it is the last segment.
+fn encode_batch(
+    header: Header,
+    entries: Vec<Entry>,
+    releases: &BTreeMap<RegionId, EntryId>,
+) -> Result<EncodedObject> {
+    let release_record = (!releases.is_empty()).then(|| Record {
+        region_id: RELEASE_REGION_ID,
+        entry_id: entry_id(header.object_seq, 1),
+        payload: encode_releases(releases),
+    });
     let records = entries
         .into_iter()
         .map(|entry| Record {
@@ -2494,6 +3019,7 @@ fn encode_batch(header: Header, entries: Vec<Entry>) -> Result<EncodedObject> {
             entry_id: entry.entry_id(),
             payload: Bytes::from(entry.into_bytes()),
         })
+        .chain(release_record)
         .collect::<Vec<_>>();
     encode_object(header, &records)
 }
@@ -2513,6 +3039,9 @@ struct Recovered {
     reclaim_boundary: u64,
     /// Present objects that are not indexed, in sequence order.
     unindexed: Vec<u64>,
+    /// The entry id each region is released through, from the release
+    /// records of the indexed objects, see [`read_releases`].
+    released_entry_ids: HashMap<RegionId, EntryId>,
     /// Number of objects whose header and footer were read.
     recovered_objects: u64,
 }
@@ -2526,23 +3055,96 @@ struct FetchedObjects {
     vanished: Vec<(u64, Error)>,
 }
 
-/// An object as recovery fetched it: its key, header and footer.
+/// An object as recovery fetched it: its key, header and footer, and its
+/// segment of release records when the reads of the footer returned it.
 struct FetchedObject {
     object: ListedObject,
     header: Header,
     footer: Vec<FooterEntry>,
+    releases: Option<Bytes>,
 }
 
 /// Rebuilds the catalog from object headers and footers,
 /// so recovery costs a few small reads per object however large the objects
-/// are. Segments are not read; a segment checksum is verified by the read that
-/// decodes it. Footers are fetched for up to [`RECOVERY_CONCURRENCY`] objects
+/// are. Segments are not read, except those of release records, see
+/// [`read_releases`]; a segment checksum is verified by the read that decodes
+/// it. Footers are fetched for up to [`RECOVERY_CONCURRENCY`] objects
 /// at a time and indexed in sequence order, so the catalog checks the entry
 /// ranges of every object against its predecessors like a sequential replay.
 /// Only the objects on the chain [`select_chain`] picks are indexed.
 async fn recover(io: &dyn WalObjectIo) -> Result<Recovered> {
     let objects = io.list().await?;
-    finish_recovery(fetch_footers(io, objects, RECOVERY_CONCURRENCY).await?)
+    let mut fetched = fetch_footers(io, objects, RECOVERY_CONCURRENCY).await?;
+    let releases = fetched
+        .objects
+        .iter_mut()
+        .filter_map(|fetched| Some((fetched.object.object_seq, fetched.releases.take()?)))
+        .collect();
+    let mut recovered = finish_recovery(fetched)?;
+    recovered.released_entry_ids = read_releases(io, &recovered.catalog, releases).await?;
+    Ok(recovered)
+}
+
+/// Reads the release records of the indexed objects, which seed the
+/// watermarks of their regions, from the segment of [`RELEASE_REGION_ID`] of
+/// every indexed object that holds one: the bytes in `fetched` by object
+/// sequence, which the reads of the footers returned, or else one range read.
+/// The segments of objects that are not indexed are never decoded. A segment
+/// that cannot be fetched or does not decode fails recovery, whatever
+/// `on_corrupted_segment` says: skipping it would lose the watermarks it
+/// seeds.
+///
+/// A release record needs no bookkeeping of its own. It is sealed once every
+/// entry it covers was admitted, so it lies in the object holding the last
+/// segment it covers or in a later one. Collection deletes, in any order,
+/// only objects below the durable reclaim boundary, and recovery indexes only
+/// objects at or above the boundary of the tip, which a start object carries
+/// forward. So recovery indexes a release record whenever it indexes a
+/// segment the record covers, and once the record is below the boundary so is
+/// every segment it covers, which recovery never indexes again, whether
+/// collection deleted it yet or not. A release in full also covers entries a
+/// region would be assigned afterwards, so it is made only for a region that
+/// writes nothing more.
+async fn read_releases(
+    io: &dyn WalObjectIo,
+    catalog: &ObjectCatalog,
+    mut fetched: HashMap<u64, Bytes>,
+) -> Result<HashMap<RegionId, EntryId>> {
+    let segments = catalog
+        .objects_in_order()
+        .filter_map(|(object_seq, footer)| {
+            footer
+                .iter()
+                .find(|entry| entry.region_id == RELEASE_REGION_ID)
+                .map(|entry| (object_seq, entry.clone(), fetched.remove(&object_seq)))
+        })
+        .collect::<Vec<_>>();
+    let releases = futures::stream::iter(segments)
+        .map(|(object_seq, entry, fetched)| async move {
+            let bytes = match fetched {
+                Some(bytes) => bytes,
+                None => {
+                    io.get_range(object_seq, entry.segment_offset, entry.segment_len)
+                        .await?
+                }
+            };
+            decode_segment(&bytes, &entry)
+                .and_then(|records| decode_releases(&records[0].payload))
+                .with_context(|_| InvalidWalObjectSnafu {
+                    path: io.object_path(object_seq),
+                })
+        })
+        .buffered(RECOVERY_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let mut released_entry_ids = HashMap::new();
+    for release in releases.into_iter().flatten() {
+        let entry_id = released_entry_ids
+            .entry(release.region_id)
+            .or_insert(release.entry_id);
+        *entry_id = (*entry_id).max(release.entry_id);
+    }
+    Ok(released_entry_ids)
 }
 
 /// Indexes the chain of the fetched objects. Objects off the chain, orphans
@@ -2627,6 +3229,7 @@ fn finish_recovery(fetched: FetchedObjects) -> Result<Recovered> {
         max_epoch,
         reclaim_boundary,
         unindexed,
+        released_entry_ids: HashMap::new(),
         recovered_objects,
     })
 }
@@ -2782,10 +3385,11 @@ async fn fetch_footers(
     let outcomes = futures::stream::iter(objects)
         .map(|object| async move {
             match fetch_footer(io, &object).await {
-                Ok((header, footer)) => Ok(Ok(FetchedObject {
+                Ok((header, footer, releases)) => Ok(Ok(FetchedObject {
                     object,
                     header,
                     footer,
+                    releases,
                 })),
                 Err(error) if is_not_found(&error) => Ok(Err((object.object_seq, error))),
                 Err(error) => Err(error),
@@ -2813,7 +3417,9 @@ fn is_not_found(error: &Error) -> bool {
 /// Reads the header, trailer and footer of `object` and verifies them: the
 /// header must carry the sequence of the key, the trailer must be well formed,
 /// the footer must match the checksum the trailer holds and its segments must
-/// tile the object body.
+/// tile the object body. Also returns a copy of the segment of release records
+/// when the bytes read hold it and it is at most [`MAX_KEPT_RELEASE_BYTES`],
+/// which is not decoded here.
 ///
 /// A short object is read whole. Otherwise the header and a window at the end
 /// of the object are read concurrently, and the footer is read separately only
@@ -2821,7 +3427,7 @@ fn is_not_found(error: &Error) -> bool {
 async fn fetch_footer(
     io: &dyn WalObjectIo,
     object: &ListedObject,
-) -> Result<(Header, Vec<FooterEntry>)> {
+) -> Result<(Header, Vec<FooterEntry>, Option<Bytes>)> {
     let ListedObject {
         object_seq, size, ..
     } = *object;
@@ -2879,7 +3485,18 @@ async fn fetch_footer(
     };
     let footer = decode_footer(&footer, trailer).map_err(invalid)?;
     verify_segment_ranges(&footer, footer_range.start).map_err(invalid)?;
-    Ok((header, footer))
+    // A copy, so the window is not kept until the releases are decoded.
+    let releases = footer
+        .iter()
+        .find(|entry| entry.region_id == RELEASE_REGION_ID)
+        .filter(|entry| {
+            entry.segment_offset >= tail_start as u64 && entry.segment_len <= MAX_KEPT_RELEASE_BYTES
+        })
+        .map(|entry| {
+            let start = entry.segment_offset as usize - tail_start;
+            Bytes::copy_from_slice(&tail[start..start + entry.segment_len as usize])
+        });
+    Ok((header, footer, releases))
 }
 
 /// Verifies the header and trailer of the object `object_seq` of `object_len`
@@ -2933,6 +3550,9 @@ pub(crate) trait WalObjectIo: Send + Sync {
     async fn list(&self) -> Result<Vec<ListedObject>>;
 
     fn object_path(&self, object_seq: u64) -> String;
+
+    /// Describes the object store the objects live in, for messages.
+    fn storage(&self) -> String;
 }
 
 #[async_trait::async_trait]
@@ -2959,6 +3579,10 @@ impl WalObjectIo for ObjectStoreIo {
 
     fn object_path(&self, object_seq: u64) -> String {
         ObjectStoreIo::object_path(self, object_seq)
+    }
+
+    fn storage(&self) -> String {
+        ObjectStoreIo::storage(self)
     }
 }
 
@@ -3398,6 +4022,7 @@ mod tests {
                 object,
                 header: decoded.header,
                 footer: decoded.footer,
+                releases: None,
             });
         }
         finish_recovery(FetchedObjects {
@@ -3417,6 +4042,7 @@ mod tests {
         assert_eq!(expected.max_epoch, actual.max_epoch);
         assert_eq!(expected.reclaim_boundary, actual.reclaim_boundary);
         assert_eq!(expected.unindexed, actual.unindexed);
+        assert_eq!(expected.released_entry_ids, actual.released_entry_ids);
     }
 
     fn catalog_contents(catalog: &ObjectCatalog) -> Vec<(u64, Vec<FooterEntry>)> {
@@ -3600,8 +4226,8 @@ mod tests {
                 let last = bytes.len() - 1;
                 bytes[last] ^= 1;
             }),
-            ("unsupported format version 2", |bytes| {
-                bytes[8..10].copy_from_slice(&2u16.to_be_bytes());
+            ("unsupported format version 3", |bytes| {
+                bytes[8..10].copy_from_slice(&3u16.to_be_bytes());
             }),
             ("footer checksum mismatch", |bytes| {
                 let (trailer, _) = footer_of(bytes);
@@ -3861,6 +4487,500 @@ mod tests {
         store.stop().await.unwrap();
     }
 
+    /// Returns the message of the missing history error the check of
+    /// `region_id` at `entry_id` fails with, or `None` when it passes.
+    async fn missing_history(
+        store: &ObjectStoreLogStore,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Option<String> {
+        match store
+            .check_region_history(&provider(region_id), entry_id)
+            .await
+        {
+            Ok(()) => None,
+            Err(error @ Error::MissingWalHistory { .. }) => {
+                assert_eq!(
+                    common_error::status_code::StatusCode::InvalidArguments,
+                    error.status_code()
+                );
+                Some(error.to_string())
+            }
+            Err(error) => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    /// Copies every object under the prefix of `from` to the same key in `to`.
+    async fn copy_objects(from: &ObjectStore, to: &ObjectStore) {
+        let io = ObjectStoreIo::new(from.clone(), PREFIX).unwrap();
+        for object in io.list().await.unwrap() {
+            let bytes = from.read(&object.path).await.unwrap().to_vec();
+            to.write(&object.path, bytes).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_history_is_missing_from_a_prefix_found_empty() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            storage_provider: "wal-store".to_string(),
+            ..eager()
+        };
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &config).await;
+
+        // A region written since the store opened holds its history through
+        // its entries, not past them.
+        let written = append(&store, region(2), "a").await.unwrap().last_entry_ids[&region(2)];
+        assert_eq!(None, missing_history(&store, region(2), 0).await);
+        assert_eq!(None, missing_history(&store, region(2), written).await);
+        assert!(
+            missing_history(&store, region(2), written + 1)
+                .await
+                .is_some()
+        );
+
+        // No other region has a history under a prefix that held no object,
+        // not even one that never flushed. The store admitted an append, so
+        // it keeps its objects.
+        for entry_id in [0, id(0, 1), id(7, 1)] {
+            let message = missing_history(&store, region(1), entry_id).await.unwrap();
+            for expected in [
+                &region(1).to_string(),
+                PREFIX,
+                // A memory store names itself by its address as its bucket.
+                "storage provider \"wal-store\" (memory, bucket ",
+                "root \"/\")",
+                "the prefix held no object when the WAL opened",
+                "copy every object under the prefix",
+                "`[wal].accept_missing_history = true`",
+            ] {
+                assert!(message.contains(expected), "{message}");
+            }
+        }
+        assert_eq!(vec![1], object_seqs(store.io.as_ref()).await);
+
+        // A region created on the store has its history here without any
+        // entry.
+        store.start_region_history(&provider(region(3))).unwrap();
+        assert_eq!(None, missing_history(&store, region(3), 0).await);
+
+        // The provider must select the store's prefix.
+        let foreign = Provider::object_store_provider(region(1), "wal/datanodes/9/epochs/2".into());
+        assert!(matches!(
+            store.check_region_history(&foreign, 0).await.unwrap_err(),
+            Error::MismatchedWalPrefix { .. }
+        ));
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_withdraws_its_start_object_when_it_refuses_a_region() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+
+        // Every open of the prefix refuses the region, since each refusal
+        // deletes the start object the open wrote and the next open finds
+        // the prefix empty again.
+        for _ in 0..2 {
+            let store = open(object_store.clone(), &eager()).await;
+            assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+            let indexed_objects = METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get();
+            let indexed_bytes = METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get();
+            assert!(missing_history(&store, region(1), 0).await.is_some());
+            assert!(object_seqs(store.io.as_ref()).await.is_empty());
+            // The catalog and the indexed gauges no longer hold the object.
+            assert!(!store.catalog.read().unwrap().contains_object(0));
+            assert_eq!(
+                (indexed_objects - 1, indexed_bytes - object_len(&[]) as i64),
+                (
+                    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get(),
+                    METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get()
+                )
+            );
+
+            // The store accepts nothing more, and refuses again without a
+            // second delete.
+            assert!(missing_history(&store, region(2), 0).await.is_some());
+            let entry = Entry::Naive(NaiveEntry {
+                provider: provider(region(2)),
+                region_id: region(2),
+                entry_id: 0,
+                data: b"a".to_vec(),
+            });
+            for error in [
+                store.append_batch(vec![entry]).await.unwrap_err(),
+                store
+                    .start_region_history(&provider(region(3)))
+                    .unwrap_err(),
+            ] {
+                assert!(
+                    matches!(unwrap_shared(&error), Error::WalStartWithdrawn { .. }),
+                    "{error:?}"
+                );
+            }
+            store.stop().await.unwrap();
+        }
+
+        // A store whose region history started keeps its start object.
+        let store = open(object_store.clone(), &eager()).await;
+        store.start_region_history(&provider(region(3))).unwrap();
+        assert!(missing_history(&store, region(1), 0).await.is_some());
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        assert_eq!(None, missing_history(&store, region(3), 0).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_withdrawal_outlives_its_caller_and_holds_up_stop() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (io, mut parked) = ParkedIo::parking_creates(object_store.clone());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+
+        // The refusal that withdraws the start object is cancelled once the
+        // actor started its delete.
+        let first = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        first.abort();
+
+        // A later withdrawal request and stop reach the actor, and a
+        // durability wait queued behind them is answered, so the actor
+        // handled both; neither is answered while the delete is in flight.
+        let (withdrawn_tx, mut withdrawn) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::Withdraw {
+                response: withdrawn_tx,
+            })
+            .await
+            .unwrap();
+        store.begin_stop();
+        let (stopped_tx, mut stopped) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::Stop {
+                response: stopped_tx,
+            })
+            .await
+            .unwrap();
+        let (answered_tx, answered) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::WaitDurable {
+                region_id: region(1),
+                entry_id: 1,
+                response: answered_tx,
+            })
+            .await
+            .unwrap();
+        timeout(WAIT, answered).await.unwrap().unwrap().unwrap_err();
+        assert!(withdrawn.try_recv().is_err());
+        assert!(stopped.try_recv().is_err());
+
+        release.send(true).unwrap();
+        timeout(WAIT, withdrawn).await.unwrap().unwrap();
+        timeout(WAIT, stopped).await.unwrap().unwrap().unwrap();
+        assert!(object_seqs(io.as_ref()).await.is_empty());
+        assert!(missing_history(&store, region(2), 0).await.is_some());
+
+        // The next open finds the prefix empty and refuses the region again.
+        let store = open(object_store, &eager()).await;
+        assert!(missing_history(&store, region(1), 0).await.is_some());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_withdrawal_keeps_the_chain_of_a_successor() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (io, mut parked) = ParkedIo::parking_creates(object_store.clone());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+
+        // While the withdrawal of start object 0 waits on its delete, a
+        // successor opens the prefix, links its start object 1 to object 0
+        // and stops before any append.
+        let refused = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        let successor = open(object_store.clone(), &eager()).await;
+        assert_eq!(vec![0, 1], object_seqs(successor.io.as_ref()).await);
+        successor.stop().await.unwrap();
+        release.send(true).unwrap();
+        timeout(WAIT, refused).await.unwrap().unwrap().unwrap_err();
+        store.stop().await.unwrap();
+
+        // Object 1 reclaims the deleted object 0, so its chain is complete.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(vec![1, 2], object_seqs(store.io.as_ref()).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_keeps_indexing_a_start_object_whose_withdrawal_failed() {
+        let _serialized = SERIALIZED.lock().await;
+        let (io, mut parked) = ParkedIo::parking_creates(memory_store());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+        let indexed_objects = METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get();
+        let indexed_bytes = METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get();
+
+        let refused = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        release.send(false).unwrap();
+        assert!(matches!(
+            timeout(WAIT, refused).await.unwrap().unwrap().unwrap_err(),
+            Error::MissingWalHistory { .. }
+        ));
+
+        // The object is still there, so the catalog and the indexed gauges
+        // keep it.
+        assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+        assert!(store.catalog.read().unwrap().contains_object(0));
+        assert_eq!(
+            (indexed_objects, indexed_bytes),
+            (
+                METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get(),
+                METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get()
+            )
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_is_missing_above_the_newest_object_holding_entries() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // The start object 0, then objects 1 and 2 of region 1.
+        let store = open(object_store.clone(), &eager()).await;
+        append(&store, region(1), "a").await.unwrap();
+        append(&store, region(1), "b").await.unwrap();
+        store.stop().await.unwrap();
+
+        // Every restart writes one more start object, but the newest object
+        // holding entries stays object 2, so a refused open does not let
+        // the next one pass a watermark of object 3.
+        for start_object in [3, 4] {
+            let store = open(object_store.clone(), &eager()).await;
+            assert!(
+                store.storage.starts_with("the default storage (memory, ")
+                    && store.storage.ends_with("root \"/\")"),
+                "{}",
+                store.storage
+            );
+            for region_id in [region(1), region(2)] {
+                for entry_id in [0, id(1, 1), id(2, 1), id(2, POSITION_LIMIT - 1)] {
+                    assert_eq!(None, missing_history(&store, region_id, entry_id).await);
+                }
+                for entry_id in [id(3, 1), id(9, 1)] {
+                    let message = missing_history(&store, region_id, entry_id).await.unwrap();
+                    let reason = format!(
+                        "its watermark, entry {entry_id}, names object {}, but the prefix held entries only in objects below 3 when the WAL opened",
+                        entry_id >> 20
+                    );
+                    assert!(message.contains(&reason), "{message}");
+                }
+            }
+            assert_eq!(
+                Some(&start_object),
+                object_seqs(store.io.as_ref()).await.last()
+            );
+            store.stop().await.unwrap();
+        }
+
+        // An entry written since then lies above the objects found, and the
+        // catalog holds it.
+        let store = open(object_store, &eager()).await;
+        let written = append(&store, region(2), "c").await.unwrap().last_entry_ids[&region(2)];
+        assert_eq!(id(6, 1), written);
+        assert_eq!(None, missing_history(&store, region(2), written).await);
+        assert!(missing_history(&store, region(1), written).await.is_some());
+        store.stop().await.unwrap();
+
+        // A prefix that holds only start objects holds no entry.
+        let object_store = memory_store();
+        open(object_store.clone(), &eager())
+            .await
+            .stop()
+            .await
+            .unwrap();
+        let store = open(object_store, &eager()).await;
+        assert_eq!(None, missing_history(&store, region(1), 0).await);
+        let message = missing_history(&store, region(1), id(0, 1)).await.unwrap();
+        assert!(
+            message.contains("names object 0, but the prefix held no entry when the WAL opened"),
+            "{message}"
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_survives_collection_down_to_the_newest_object() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        // Region 1 flushes object 1; object 2 of region 2 carries the boundary
+        // past it, so only object 2 is left once region 2 flushes it too.
+        let flushed_1 = append(&store, region(1), "a").await.unwrap().last_entry_ids[&region(1)];
+        store
+            .obsolete(&provider(region(1)), region(1), flushed_1)
+            .await
+            .unwrap();
+        let flushed_2 = append(&store, region(2), "b").await.unwrap().last_entry_ids[&region(2)];
+        store
+            .obsolete(&provider(region(2)), region(2), flushed_2)
+            .await
+            .unwrap();
+        assert_eq!(vec![2], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+
+        // The object region 1 flushed is gone, but the newest object stays
+        // and keeps the next sequence above it.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(0, latest(&store, region(1)));
+        assert_eq!(None, missing_history(&store, region(1), flushed_1).await);
+        assert_eq!(None, missing_history(&store, region(2), flushed_2).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_survives_collection_down_to_a_release_object() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        // Region 1 flushes object 1; the release of region 2 seals object 2,
+        // which holds only its release record and carries the boundary past
+        // object 1.
+        let flushed = append(&store, region(1), "a").await.unwrap().last_entry_ids[&region(1)];
+        store
+            .obsolete(&provider(region(1)), region(1), flushed)
+            .await
+            .unwrap();
+        store
+            .release_region(&provider(region(2)), region(2))
+            .await
+            .unwrap();
+        assert_eq!(vec![2], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+
+        // The object holding the release record bounds the history.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(None, missing_history(&store, region(1), flushed).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_keeps_its_objects_after_a_release_when_it_refuses_a_region() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        // The release seals object 1, which collects the start object.
+        store
+            .release_region(&provider(region(2)), region(2))
+            .await
+            .unwrap();
+        assert_eq!(vec![1], collected_object_seqs(&store).await);
+
+        // The refusal leaves the object holding the release record, and the
+        // store keeps accepting appends.
+        assert!(missing_history(&store, region(1), 0).await.is_some());
+        assert_eq!(vec![1], object_seqs(store.io.as_ref()).await);
+        append(&store, region(3), "a").await.unwrap();
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_moves_with_a_copy_of_the_objects() {
+        let _serialized = SERIALIZED.lock().await;
+        let old_location = memory_store();
+        let store = open(old_location.clone(), &eager()).await;
+        let flushed = append(&store, region(1), "a").await.unwrap().last_entry_ids[&region(1)];
+        store
+            .obsolete(&provider(region(1)), region(1), flushed)
+            .await
+            .unwrap();
+        let unflushed = append(&store, region(1), "b").await.unwrap().last_entry_ids[&region(1)];
+        assert_eq!(vec![2], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+
+        // Another location without the objects does not hold the history.
+        let store = open(memory_store(), &eager()).await;
+        assert!(missing_history(&store, region(1), flushed).await.is_some());
+        store.stop().await.unwrap();
+
+        // A copy of every object does, and replays the unflushed entry.
+        let new_location = memory_store();
+        copy_objects(&old_location, &new_location).await;
+        let store = open(new_location, &eager()).await;
+        assert_eq!(None, missing_history(&store, region(1), flushed).await);
+        assert_eq!(
+            expected_entries(region(1), &[(unflushed, "b")]),
+            read_entries(&store, region(1), flushed + 1).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_accepts_a_missing_history_when_configured() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            accept_missing_history: true,
+            ..eager()
+        };
+        let store = open(memory_store(), &config).await;
+        let accepted = METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get();
+        store
+            .check_region_history(&provider(region(1)), id(5, 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted + 1,
+            METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get()
+        );
+
+        // The accepted region's history starts in this store, so a second
+        // open of it is not counted again, and neither is a history the
+        // prefix holds.
+        store
+            .check_region_history(&provider(region(1)), id(5, 1))
+            .await
+            .unwrap();
+        let written = append(&store, region(2), "a").await.unwrap().last_entry_ids[&region(2)];
+        store
+            .check_region_history(&provider(region(2)), written)
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted + 1,
+            METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get()
+        );
+
+        // Once Mito records the accepted watermark, the region's next id is
+        // above it.
+        store
+            .obsolete(&provider(region(1)), region(1), id(5, 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            HashMap::from([(region(1), id(6, 1))]),
+            append(&store, region(1), "b").await.unwrap().last_entry_ids
+        );
+        store.stop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_store_rejects_exhausted_sequence() {
         let _serialized = SERIALIZED.lock().await;
@@ -3951,8 +5071,13 @@ mod tests {
         let (append_tx, _) = mpsc::channel(APPEND_BUFFER);
         let store = ObjectStoreLogStore {
             prefix: PREFIX.to_string(),
+            storage: String::new(),
             ack_mode: AckMode::Durable,
             on_corrupted_segment: CorruptedSegmentAction::Skip,
+            accept_missing_history: false,
+            found_empty: false,
+            history_end: 0,
+            started_regions: StartedRegions::default(),
             io: Arc::new(ObjectStoreIo::new(memory_store(), PREFIX).unwrap()),
             catalog: Arc::default(),
             obsolete_entry_ids: ObsoleteEntryIds::default(),
@@ -4320,19 +5445,10 @@ mod tests {
         assert_eq!(20, latest(&store, region(1)));
         store.obsolete(&p, region(1), 10).await.unwrap();
         assert_eq!(remaining, read_entries(&store, region(1), 0).await);
-        store.obsolete_all(&p, region(1)).await.unwrap();
-        store.obsolete(&p, region(1), 0).await.unwrap();
-        assert_eq!(
-            Vec::<Entry>::new(),
-            read_entries(&store, region(1), 0).await
-        );
-        assert_eq!(20, latest(&store, region(1)));
-        assert_eq!(
-            expected_entries(region(2), &[(10, "e10")]),
-            read_entries(&store, region(2), 0).await
-        );
         store.stop().await.unwrap();
-        let reopened = open(object_store, &eager()).await;
+
+        // A watermark is kept in memory only.
+        let reopened = open(object_store.clone(), &eager()).await;
         assert_eq!(all, read_entries(&reopened, region(1), 0).await);
         reopened.obsolete(&p, region(1), 20).await.unwrap();
         assert_eq!(
@@ -4340,6 +5456,31 @@ mod tests {
             read_entries(&reopened, region(1), 0).await
         );
         assert_eq!(20, latest(&reopened, region(1)));
+
+        // A release in full survives the restart, and a later watermark does
+        // not move it down.
+        reopened.obsolete_all(&p, region(1)).await.unwrap();
+        reopened.obsolete(&p, region(1), 0).await.unwrap();
+        assert_eq!(
+            Vec::<Entry>::new(),
+            read_entries(&reopened, region(1), 0).await
+        );
+        assert_eq!(20, latest(&reopened, region(1)));
+        reopened.stop().await.unwrap();
+        let reopened = open(object_store, &eager()).await;
+        assert_eq!(
+            Vec::<Entry>::new(),
+            read_entries(&reopened, region(1), 0).await
+        );
+        reopened.obsolete(&p, region(1), 0).await.unwrap();
+        assert_eq!(
+            Vec::<Entry>::new(),
+            read_entries(&reopened, region(1), 0).await
+        );
+        assert_eq!(
+            expected_entries(region(2), &[(10, "e10")]),
+            read_entries(&reopened, region(2), 0).await
+        );
         reopened.stop().await.unwrap();
     }
 
@@ -6409,9 +7550,12 @@ mod tests {
             } else {
                 (0, 1, None)
             };
-            let same = encode_object(chain_header(start_seq, epoch, tip), &[])
-                .unwrap()
-                .bytes;
+            // A prefix without segments is reclaimed up to the start object.
+            let header = Header {
+                reclaim_boundary: start_seq,
+                ..chain_header(start_seq, epoch, tip)
+            };
+            let same = encode_object(header, &[]).unwrap().bytes;
             let io = Arc::new(RacingIo {
                 inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
                 late: Mutex::new(Some((start_seq, same))),
@@ -7477,22 +8621,25 @@ mod tests {
         assert_eq!(2, reclaim_boundary_of(io.as_ref(), 3).await);
         assert_eq!(vec![2, 3], collected_object_seqs(&store).await);
 
-        // Region one dropped and region two flushed through object 2: object
-        // 4 carries the sequence after the last indexed object.
+        // Region two flushed through object 2 and region one released: the
+        // object of the release record, 4, carries the sequence after the
+        // last indexed object, and so does the next one.
         store.obsolete(&provider(two), two, id(2, 1)).await.unwrap();
         store.obsolete_all(&provider(one), one).await.unwrap();
-        append(&store, two, "b2").await.unwrap();
         assert_eq!(4, reclaim_boundary_of(io.as_ref(), 4).await);
         assert_eq!(vec![4], collected_object_seqs(&store).await);
+        append(&store, two, "b2").await.unwrap();
+        assert_eq!(5, reclaim_boundary_of(io.as_ref(), 5).await);
+        assert_eq!(vec![5], collected_object_seqs(&store).await);
 
         // A region that appears later does not move the boundary back.
         append(&store, three, "c1").await.unwrap();
-        assert_eq!(4, reclaim_boundary_of(io.as_ref(), 5).await);
-        assert_eq!(vec![4, 5], collected_object_seqs(&store).await);
+        assert_eq!(5, reclaim_boundary_of(io.as_ref(), 6).await);
+        assert_eq!(vec![5, 6], collected_object_seqs(&store).await);
         // Other stores of the process count their deletes as well.
-        assert!(METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL.get() >= deleted + 4);
+        assert!(METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL.get() >= deleted + 5);
         assert_eq!(
-            expected_entries(two, &[(id(4, 1), "b2")]),
+            expected_entries(two, &[(id(5, 1), "b2")]),
             read_entries(&store, two, 0).await
         );
         store.stop().await.unwrap();
@@ -7608,15 +8755,17 @@ mod tests {
                 put_foreign(&object_store, 7, 100).await;
                 append(&store, region_id, "a7").await.unwrap_err();
             } else {
-                // The first poll queues the stop command; the actor answers
-                // the command of `obsolete_all` queued after it only once it
+                // The first poll queues the stop command; the actor refuses
+                // the release of `obsolete_all` queued after it only once it
                 // handled the stop.
                 let mut stopping = Box::pin(store.stop());
                 assert!((&mut stopping).now_or_never().is_none());
-                store
-                    .obsolete_all(&provider(region_id), region_id)
-                    .await
-                    .unwrap();
+                assert_stopped(
+                    &store
+                        .obsolete_all(&provider(region_id), region_id)
+                        .await
+                        .unwrap_err(),
+                );
                 assert!((&mut stopping).now_or_never().is_none());
                 stop = Some(stopping);
             }
@@ -7967,6 +9116,458 @@ mod tests {
         store.stop().await.unwrap();
     }
 
+    fn spawn_release(
+        store: &Arc<ObjectStoreLogStore>,
+        region_id: RegionId,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        let store = store.clone();
+        tokio::spawn(async move { store.release_region(&provider(region_id), region_id).await })
+    }
+
+    fn release(region_id: RegionId, entry_id: EntryId) -> Release {
+        Release {
+            region_id,
+            entry_id,
+        }
+    }
+
+    /// The release records of the object `object_seq`.
+    async fn releases_of(io: &dyn WalObjectIo, object_seq: u64) -> Vec<Release> {
+        let decoded = decode_object(&io.get(object_seq).await.unwrap()).unwrap();
+        let record = decoded
+            .records
+            .iter()
+            .find(|record| record.region_id == RELEASE_REGION_ID)
+            .unwrap();
+        assert_eq!(entry_id(object_seq, 1), record.entry_id);
+        decode_releases(&record.payload).unwrap()
+    }
+
+    fn watermark(store: &ObjectStoreLogStore, region_id: RegionId) -> Option<EntryId> {
+        store
+            .obsolete_entry_ids
+            .lock()
+            .unwrap()
+            .get(&region_id)
+            .copied()
+    }
+
+    #[tokio::test]
+    async fn test_store_release_writes_a_record_of_the_largest_issued_id() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &eager()).await;
+        let (one, two) = (region(1), region(2));
+        store
+            .append_batch(vec![entry(&store, one, "a1"), entry(&store, two, "b1")])
+            .await
+            .unwrap();
+
+        // The release seals object 2 without any entry; its record releases
+        // region one through the largest id handed out for it, and it carries
+        // the boundary region two holds at object 1.
+        store.release_region(&provider(one), one).await.unwrap();
+        assert_eq!(
+            vec![release(one, id(1, 1))],
+            releases_of(store.io.as_ref(), 2).await
+        );
+        assert_eq!(1, reclaim_boundary_of(store.io.as_ref(), 2).await);
+        assert_eq!(vec![1, 2], collected_object_seqs(&store).await);
+        assert!(read_entries(&store, one, 0).await.is_empty());
+        // The record is the segment of a reserved region, which names no
+        // namespace.
+        assert_eq!(
+            vec![provider(one), provider(two)],
+            store.list_namespaces().await.unwrap()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_seeds_watermarks_from_release_records() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (one, two) = (region(1), region(2));
+        let store = open(object_store.clone(), &eager()).await;
+        // Object 1 holds entries of both regions and object 2 of region one.
+        // The release of region one is the last object written, and region
+        // two holds the boundary at object 1.
+        store
+            .append_batch(vec![entry(&store, one, "a1"), entry(&store, two, "b1")])
+            .await
+            .unwrap();
+        append(&store, one, "a2").await.unwrap();
+        store.release_region(&provider(one), one).await.unwrap();
+        assert_eq!(1, reclaim_boundary_of(store.io.as_ref(), 3).await);
+        store.stop().await.unwrap();
+
+        // Recovery seeds the watermark of region one, which nothing opens
+        // again, and a later watermark never moves it down.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(vec![1, 2, 3, 4], collected_object_seqs(&store).await);
+        assert_eq!(Some(id(2, 1)), watermark(&store, one));
+        assert!(read_entries(&store, one, 0).await.is_empty());
+        store.obsolete(&provider(one), one, id(1, 1)).await.unwrap();
+        assert_eq!(Some(id(2, 1)), watermark(&store, one));
+
+        // Once region two is flushed through object 1, no object holds a
+        // live segment: object 5 carries the boundary past all of them.
+        store.obsolete(&provider(two), two, id(1, 1)).await.unwrap();
+        append(&store, two, "b2").await.unwrap();
+        assert_eq!(5, reclaim_boundary_of(store.io.as_ref(), 5).await);
+        assert_eq!(vec![5], collected_object_seqs(&store).await);
+        assert_eq!(
+            expected_entries(two, &[(id(5, 1), "b2")]),
+            read_entries(&store, two, 0).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_takes_release_records_from_the_footer_reads() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (one, two, three) = (region(1), region(2), region(3));
+        let store = open(object_store.clone(), &eager()).await;
+        // Object 1 holds entries of regions one and two, object 2 the release
+        // of region one and object 3 the drop of region three; region two
+        // holds the boundary at object 1.
+        store
+            .append_batch(vec![entry(&store, one, "a1"), entry(&store, two, "b1")])
+            .await
+            .unwrap();
+        store.release_region(&provider(one), one).await.unwrap();
+        store.obsolete_all(&provider(three), three).await.unwrap();
+        store.stop().await.unwrap();
+
+        // Every object is shorter than the tail window, so recovery reads
+        // each one whole, once, and decodes the release records from those
+        // bytes without a range read.
+        let (io, reads) = RecordingIo::over(object_store);
+        let store = open_over(io, &eager()).await;
+        assert_eq!(Some(id(1, 1)), watermark(&store, one));
+        assert_eq!(None, watermark(&store, two));
+        assert_eq!(Some(EntryId::MAX), watermark(&store, three));
+        assert!(reads.lock().unwrap().is_empty());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_reads_a_release_segment_outside_the_tail_window() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // So many release records that their segment starts before the
+        // window at the end of the object.
+        let releases = (1..=5_000)
+            .map(|number| (region(number), id(0, 1)))
+            .collect::<BTreeMap<_, _>>();
+        let record = Record {
+            region_id: RELEASE_REGION_ID,
+            entry_id: id(0, 1),
+            payload: encode_releases(&releases),
+        };
+        put_records(&object_store, 0, &[record]).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = &footer[0];
+        assert!(segment.segment_offset < object.size - RECOVERY_TAIL_WINDOW as u64);
+
+        let store = open_over(io, &eager()).await;
+        for number in [1, 5_000] {
+            assert_eq!(Some(id(0, 1)), watermark(&store, region(number)));
+        }
+        let mut reads = reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(
+            vec![
+                (0, 0, HEADER_LEN as u64),
+                (0, segment.segment_offset, segment.segment_len),
+                (
+                    0,
+                    object.size - RECOVERY_TAIL_WINDOW as u64,
+                    RECOVERY_TAIL_WINDOW as u64
+                ),
+            ],
+            reads
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_takes_a_release_segment_from_the_tail_window() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // A segment longer than the window comes first, so the object is read
+        // as its header and its tail, and the segment of release records, the
+        // last one, lies inside the tail but not at its start.
+        let records = [
+            Record {
+                region_id: region(1),
+                entry_id: id(0, 1),
+                payload: Bytes::from(vec![0; RECOVERY_TAIL_WINDOW * 2]),
+            },
+            Record {
+                region_id: RELEASE_REGION_ID,
+                entry_id: id(0, 1),
+                payload: encode_releases(&BTreeMap::from([(region(2), 7)])),
+            },
+        ];
+        put_records(&object_store, 0, &records).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let tail_start = object.size - RECOVERY_TAIL_WINDOW as u64;
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = footer
+            .iter()
+            .find(|entry| entry.region_id == RELEASE_REGION_ID)
+            .unwrap();
+        assert!(segment.segment_offset > tail_start);
+
+        let store = open_over(io, &eager()).await;
+        assert_eq!(Some(7), watermark(&store, region(2)));
+        let mut reads = reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(
+            vec![
+                (0, 0, HEADER_LEN as u64),
+                (0, tail_start, RECOVERY_TAIL_WINDOW as u64)
+            ],
+            reads
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_reads_a_release_segment_above_the_kept_size_again() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // The object is read whole, but its segment of release records is
+        // larger than recovery keeps.
+        let releases = (1..=300)
+            .map(|number| (region(number), id(0, 1)))
+            .collect::<BTreeMap<_, _>>();
+        let record = Record {
+            region_id: RELEASE_REGION_ID,
+            entry_id: id(0, 1),
+            payload: encode_releases(&releases),
+        };
+        put_records(&object_store, 0, &[record]).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = &footer[0];
+        assert!(object.size <= RECOVERY_TAIL_WINDOW as u64);
+        assert!(segment.segment_len > MAX_KEPT_RELEASE_BYTES);
+
+        let store = open_over(io, &eager()).await;
+        for number in [1, 300] {
+            assert_eq!(Some(id(0, 1)), watermark(&store, region(number)));
+        }
+        assert_eq!(
+            vec![(0, segment.segment_offset, segment.segment_len)],
+            *reads.lock().unwrap()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_decodes_release_records_only_on_the_chain() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        let release_record = |object_seq, number| Record {
+            region_id: RELEASE_REGION_ID,
+            entry_id: id(object_seq, 1),
+            payload: encode_releases(&BTreeMap::from([(region(number), 1)])),
+        };
+        let damage_release_segment = |bytes: &mut Vec<u8>| {
+            let (_, footer) = footer_of(bytes);
+            let segment = footer
+                .iter()
+                .find(|entry| entry.region_id == RELEASE_REGION_ID)
+                .unwrap();
+            let last = segment.segment_offset + segment.segment_len - 1;
+            bytes[last as usize] ^= 1;
+        };
+        // Object 0 holds an entry of region one and the release of region
+        // two. Object 1 releases region three but is off the chain: it links
+        // to an object 0 of another epoch.
+        let entry_record = Record {
+            region_id: region(1),
+            entry_id: id(0, 1),
+            payload: Bytes::from_static(b"a1"),
+        };
+        put_records(&object_store, 0, &[entry_record, release_record(0, 2)]).await;
+        let orphan = Header {
+            object_seq: 1,
+            epoch: 1,
+            prev: Some(ChainLink {
+                object_seq: 0,
+                epoch: 2,
+            }),
+            reclaim_boundary: 0,
+        };
+        put_object_with_header(&io, orphan, &[release_record(1, 3)]).await;
+
+        // A damaged release segment off the chain is never decoded.
+        corrupt_object(&object_store, &io.object_path(1), damage_release_segment).await;
+        let store = open(object_store.clone(), &eager()).await;
+        assert_eq!(Some(1), watermark(&store, region(2)));
+        assert_eq!(None, watermark(&store, region(3)));
+        store.stop().await.unwrap();
+
+        // A damaged release segment on the chain fails recovery.
+        let path = io.object_path(0);
+        corrupt_object(&object_store, &path, damage_release_segment).await;
+        assert_recovery_rejects(&object_store, &path, "checksum mismatch").await;
+    }
+
+    #[tokio::test]
+    async fn test_store_carries_the_record_of_a_failed_release() {
+        let _serialized = SERIALIZED.lock().await;
+        let region_id = region(1);
+
+        // The release fails with its create, and a tick seals the record
+        // again although nothing is appended.
+        let (io, _) = RecordingIo::over(memory_store());
+        let store = open_over(io.clone(), &config(MIN_FLUSH_INTERVAL, u64::MAX)).await;
+        io.fail_next_put_persistently();
+        store
+            .release_region(&provider(region_id), region_id)
+            .await
+            .unwrap_err();
+        wait_until(|| store.catalog.read().unwrap().contains_object(2)).await;
+        assert_eq!(
+            vec![release(region_id, 0)],
+            releases_of(io.as_ref(), 2).await
+        );
+        store.stop().await.unwrap();
+
+        // A `durable` stop creates the record once more, and reports it lost
+        // when that create fails or conflicts too.
+        for last_create in ["succeeds", "fails", "conflicts"] {
+            let object_store = memory_store();
+            let store = open(object_store.clone(), &eager()).await;
+            append(&store, region_id, "a1").await.unwrap();
+            store.fail_creates();
+            store
+                .release_region(&provider(region_id), region_id)
+                .await
+                .unwrap_err();
+            match last_create {
+                "succeeds" => store.allow_creates(),
+                "conflicts" => {
+                    store.allow_creates();
+                    put_foreign(&object_store, 3, 2).await;
+                }
+                _ => {}
+            }
+            let stopped = store.stop().await;
+            let store = open(object_store, &eager()).await;
+            if last_create == "succeeds" {
+                stopped.unwrap();
+                assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
+            } else {
+                let error = stopped.unwrap_err();
+                let conflict = matches!(unwrap_shared(&error), Error::WalObjectConflict { .. });
+                assert_eq!(last_create == "conflicts", conflict, "{error:?}");
+                assert_eq!(None, watermark(&store, region_id));
+            }
+            store.stop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_releases_a_region_without_segments() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        let io = store.io.clone();
+        let (one, two, three) = (region(1), region(2), region(3));
+        append(&store, two, "b1").await.unwrap();
+
+        // A region the store holds no entry of is released through zero and
+        // a release in full reaches the largest id, each in an object of its
+        // own; neither moves the boundary region two holds.
+        store.release_region(&provider(one), one).await.unwrap();
+        store.obsolete_all(&provider(three), three).await.unwrap();
+        assert_eq!(vec![release(one, 0)], releases_of(io.as_ref(), 2).await);
+        assert_eq!(
+            vec![release(three, EntryId::MAX)],
+            releases_of(io.as_ref(), 3).await
+        );
+        assert_eq!(1, reclaim_boundary_of(io.as_ref(), 3).await);
+        assert_eq!(vec![1, 2, 3], collected_object_seqs(&store).await);
+
+        // Region one written again stays readable across a restart.
+        append(&store, one, "a1").await.unwrap();
+        store.stop().await.unwrap();
+        let store = open(object_store, &eager()).await;
+        assert_eq!(Some(0), watermark(&store, one));
+        assert_eq!(Some(EntryId::MAX), watermark(&store, three));
+        assert_eq!(
+            expected_entries(one, &[(id(4, 1), "a1")]),
+            read_entries(&store, one, 0).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_release_record_lives_as_long_as_the_segments_it_covers() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (one, two) = (region(1), region(2));
+        let store = open(object_store.clone(), &eager()).await;
+        // Object 1 holds entries of both regions, object 2 the release of
+        // region one and object 3 an entry of region two, which holds the
+        // boundary at object 1.
+        store
+            .append_batch(vec![entry(&store, one, "a1"), entry(&store, two, "b1")])
+            .await
+            .unwrap();
+        store.release_region(&provider(one), one).await.unwrap();
+        append(&store, two, "b2").await.unwrap();
+        assert_eq!(vec![1, 2, 3], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+
+        // The record outlives a restart together with the segment it covers.
+        let (io, mut parked) = ParkedIo::parking_creates(object_store.clone());
+        let store = open_over(io.clone(), &eager()).await;
+        assert_eq!(Some(id(1, 1)), watermark(&store, one));
+        assert!(read_entries(&store, one, 0).await.is_empty());
+
+        // Region two flushed through object 1 lets object 5 carry boundary
+        // 3, below which the record and the segment go in any order: the
+        // record is deleted, the delete of the segment fails.
+        io.deletes_parked.store(true, Ordering::SeqCst);
+        store.obsolete(&provider(two), two, id(1, 1)).await.unwrap();
+        append(&store, two, "b3").await.unwrap();
+        assert_eq!(3, reclaim_boundary_of(io.as_ref(), 5).await);
+        let mut deletes = parked_operations(&mut parked, 2).await;
+        deletes.remove(&2).unwrap().send(true).unwrap();
+        deletes.remove(&1).unwrap().send(false).unwrap();
+        timeout(WAIT, store.wait_for_garbage_collection())
+            .await
+            .unwrap();
+        assert_eq!(vec![1, 3, 4, 5], object_seqs(io.as_ref()).await);
+        store.stop().await.unwrap();
+
+        // Recovery indexes nothing below boundary 3, which the start object
+        // carries forward, so the segment the record covered is never live
+        // again, and the first collection deletes it.
+        let plain = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        let recovered = recover(&plain).await.unwrap();
+        assert_eq!(3, recovered.reclaim_boundary);
+        assert_eq!(vec![1], recovered.unindexed);
+        assert!(recovered.released_entry_ids.is_empty());
+        let store = open(object_store, &eager()).await;
+        assert_eq!(3, reclaim_boundary_of(&plain, 6).await);
+        assert_eq!(None, watermark(&store, one));
+        store.obsolete(&provider(two), two, id(3, 1)).await.unwrap();
+        assert_eq!(vec![3, 4, 5, 6], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+    }
+
     /// Object access whose next create stores the object but reports a
     /// transient failure, as a create whose response is lost.
     struct LostResponseIo {
@@ -8010,6 +9611,10 @@ mod tests {
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
         }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
+        }
     }
 
     /// Object access whose first create lets another object land at a given
@@ -8047,6 +9652,10 @@ mod tests {
 
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
+        }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
         }
     }
 
@@ -8175,6 +9784,10 @@ mod tests {
 
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
+        }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
         }
     }
 
@@ -8323,6 +9936,270 @@ mod tests {
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
         }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
+        }
+    }
+
+    /// Measurements of costs that grow with the catalog or the prefix,
+    /// taken through the store. They are ignored by default and print what
+    /// they measure; run them with `--run-ignored only` and `--no-capture`,
+    /// preferably with `--cargo-profile release`.
+    #[allow(clippy::print_stdout)]
+    mod measurements {
+        use super::*;
+
+        /// Times every watermark update while one object holds a segment of
+        /// each region and the regions are flushed in region id order, so
+        /// each update leaves the next region as the first live segment of
+        /// that object. An update is timed as the caller of `obsolete` sees
+        /// it, which includes the round trip of its command to the actor.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_watermark_updates_over_one_shared_object() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 5_000, 10_000, 20_000] {
+                let store = open_with_one_shared_object(regions).await;
+                let mut pauses = Vec::with_capacity(regions as usize);
+                for number in 1..=regions {
+                    let region_id = region(number);
+                    let started_at = Instant::now();
+                    store
+                        .obsolete(&provider(region_id), region_id, id(1, 1))
+                        .await
+                        .unwrap();
+                    pauses.push(started_at.elapsed());
+                }
+                // The next object carries the boundary past every flushed
+                // object.
+                append(&store, region(regions + 1), "b").await.unwrap();
+                assert_eq!(vec![2], collected_object_seqs(&store).await);
+                print_pauses("watermark updates", regions, pauses);
+                store.stop().await.unwrap();
+            }
+        }
+
+        /// Times the steps the actor takes for each of the same watermark
+        /// updates that depend on the catalog, recording the watermark and
+        /// recomputing the reclaim boundary, without the round trip: the
+        /// store is stopped first and the steps run on its catalog.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_actor_watermark_steps_over_one_shared_object() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 5_000, 10_000, 20_000] {
+                let store = open_with_one_shared_object(regions).await;
+                store.stop().await.unwrap();
+                let mut boundary = 0;
+                let mut pauses = Vec::with_capacity(regions as usize);
+                for number in 1..=regions {
+                    let started_at = Instant::now();
+                    record_obsolete(
+                        &store.obsolete_entry_ids,
+                        &store.catalog,
+                        region(number),
+                        id(1, 1),
+                    );
+                    boundary = store.catalog.read().unwrap().reclaim_boundary(boundary);
+                    pauses.push(started_at.elapsed());
+                }
+                assert_eq!(2, boundary);
+                print_pauses("actor watermark steps", regions, pauses);
+            }
+        }
+
+        /// Opens a store whose object 1 holds one segment of each of
+        /// `regions` regions.
+        async fn open_with_one_shared_object(regions: u32) -> Arc<ObjectStoreLogStore> {
+            let store = open(memory_store(), &eager()).await;
+            let entries = (1..=regions)
+                .map(|number| entry(&store, region(number), "a"))
+                .collect();
+            store.append_batch(entries).await.unwrap();
+            store
+        }
+
+        fn print_pauses(label: &str, regions: u32, mut pauses: Vec<Duration>) {
+            let total = pauses.iter().sum::<Duration>();
+            pauses.sort_unstable();
+            let micros = |pause: Duration| pause.as_secs_f64() * 1e6;
+            println!(
+                "{label}: regions={regions} total_ms={:.3} mean_us={:.3} p50_us={:.3} p99_us={:.3} max_us={:.3}",
+                total.as_secs_f64() * 1e3,
+                micros(total) / pauses.len() as f64,
+                micros(pauses[pauses.len() / 2]),
+                micros(pauses[pauses.len() * 99 / 100]),
+                micros(pauses[pauses.len() - 1]),
+            );
+        }
+
+        /// Times 100 reads of the last ten objects of a region that holds a
+        /// segment in every retained object, and 100 lookups of those objects
+        /// in the catalog alone.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_tail_reads_over_retained_objects() {
+            let _serialized = SERIALIZED.lock().await;
+            let region_id = region(1);
+            for objects in [10_000, 100_000, 1_000_000] {
+                let object_store = memory_store();
+                let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+                futures::stream::iter(0..objects)
+                    .for_each_concurrent(RECOVERY_CONCURRENCY, |object_seq| {
+                        let io = &io;
+                        async move {
+                            let header = Header {
+                                object_seq,
+                                epoch: 1,
+                                prev: object_seq.checked_sub(1).map(|prev| ChainLink {
+                                    object_seq: prev,
+                                    epoch: 1,
+                                }),
+                                reclaim_boundary: 0,
+                            };
+                            let record = Record {
+                                region_id,
+                                entry_id: id(object_seq, 1),
+                                payload: Bytes::from_static(b"a"),
+                            };
+                            put_object_with_header(io, header, &[record]).await;
+                        }
+                    })
+                    .await;
+                let store = open(object_store, &eager()).await;
+                let start = id(objects - 10, 1);
+
+                let started_at = Instant::now();
+                for _ in 0..100 {
+                    assert_eq!(10, read_entries(&store, region_id, start).await.len());
+                }
+                let reads = started_at.elapsed();
+                let started_at = Instant::now();
+                for _ in 0..100 {
+                    let catalog = store.catalog.read().unwrap();
+                    let found = catalog
+                        .objects_for_entry_range(region_id, start, EntryId::MAX)
+                        .unwrap();
+                    assert_eq!(10, found.len());
+                }
+                let lookups = started_at.elapsed();
+                println!(
+                    "tail reads: objects={objects} read_100_ms={:.3} lookup_100_ms={:.3}",
+                    reads.as_secs_f64() * 1e3,
+                    lookups.as_secs_f64() * 1e3,
+                );
+                store.stop().await.unwrap();
+            }
+        }
+
+        /// Object access that counts the reads of whole objects and of byte
+        /// ranges.
+        struct CountingIo {
+            inner: ObjectStoreIo,
+            gets: AtomicUsize,
+            range_gets: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl WalObjectIo for CountingIo {
+            async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+                self.inner.put_if_absent(object_seq, content).await
+            }
+
+            async fn get(&self, object_seq: u64) -> Result<Bytes> {
+                self.gets.fetch_add(1, Ordering::Relaxed);
+                self.inner.get(object_seq).await
+            }
+
+            async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+                self.range_gets.fetch_add(1, Ordering::Relaxed);
+                self.inner.get_range(object_seq, offset, len).await
+            }
+
+            async fn delete(&self, object_seq: u64) -> Result<()> {
+                self.inner.delete(object_seq).await
+            }
+
+            async fn list(&self) -> Result<Vec<ListedObject>> {
+                self.inner.list().await
+            }
+
+            fn object_path(&self, object_seq: u64) -> String {
+                self.inner.object_path(object_seq)
+            }
+
+            fn storage(&self) -> String {
+                self.inner.storage()
+            }
+        }
+
+        /// The object store a measurement of recovery runs on: a fresh root
+        /// in the bucket the `GT_S3_*` variables name when they are set, an
+        /// in-memory store otherwise.
+        fn measured_object_store() -> (ObjectStore, &'static str) {
+            let Ok(bucket) = std::env::var("GT_S3_BUCKET") else {
+                return (memory_store(), "memory");
+            };
+            let variable = |name: &str| std::env::var(name).unwrap();
+            let mut builder = object_store::services::S3::default()
+                .root(&format!("measurements/{}", uuid::Uuid::new_v4()))
+                .bucket(&bucket)
+                .region(&variable("GT_S3_REGION"))
+                .access_key_id(&variable("GT_S3_ACCESS_KEY_ID"))
+                .secret_access_key(&variable("GT_S3_ACCESS_KEY"));
+            if let Ok(endpoint) = std::env::var("GT_S3_ENDPOINT_URL") {
+                builder = builder.endpoint(&endpoint);
+            }
+            (ObjectStore::new(builder).unwrap(), "s3")
+        }
+
+        /// Counts the reads of a recovery over a prefix where every dropped
+        /// region left its release record in an object of its own, while one
+        /// region still holds the boundary at the object of the first
+        /// entries, and times the recovery.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_recovery_of_dropped_regions() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 4_000] {
+                let (object_store, storage) = measured_object_store();
+                let store = open(object_store.clone(), &eager()).await;
+                let entries = (1..=regions + 1)
+                    .map(|number| entry(&store, region(number), "a"))
+                    .collect();
+                store.append_batch(entries).await.unwrap();
+                for number in 1..=regions {
+                    let region_id = region(number);
+                    store
+                        .obsolete_all(&provider(region_id), region_id)
+                        .await
+                        .unwrap();
+                }
+                store.stop().await.unwrap();
+
+                let io = Arc::new(CountingIo {
+                    inner: ObjectStoreIo::new(object_store, PREFIX).unwrap(),
+                    gets: AtomicUsize::new(0),
+                    range_gets: AtomicUsize::new(0),
+                });
+                let objects = io.list().await.unwrap().len();
+                let started_at = Instant::now();
+                let store = open_over(io.clone(), &eager()).await;
+                let elapsed = started_at.elapsed();
+                for number in 1..=regions {
+                    assert_eq!(Some(EntryId::MAX), watermark(&store, region(number)));
+                }
+                assert_eq!(None, watermark(&store, region(regions + 1)));
+                println!(
+                    "recovery of dropped regions: storage={storage} regions={regions} objects={objects} gets={} range_gets={} recovery_ms={:.3}",
+                    io.gets.load(Ordering::Relaxed),
+                    io.range_gets.load(Ordering::Relaxed),
+                    elapsed.as_secs_f64() * 1e3,
+                );
+                store.stop().await.unwrap();
+            }
+        }
     }
 
     /// Drives every outcome of a conditional create and every failure of the
@@ -8430,6 +10307,7 @@ mod tests {
             reads: METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count(),
             deleted_objects: METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL.get(),
             failed_deletes: METRIC_OBJECT_STORE_WAL_FAILED_DELETES_TOTAL.get(),
+            release_records: METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL.get(),
             /// No read of the matrix meets a corrupted segment.
             skipped_segments: METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL.get(),
             stalled_appends: METRIC_OBJECT_STORE_WAL_STALLED_APPENDS_TOTAL.get(),
@@ -8486,6 +10364,15 @@ mod tests {
         /// The length of the object of one two-byte entry, which most cases seal.
         fn one_entry_object() -> u64 {
             object_bytes_of(&[(region(1), "a1")])
+        }
+
+        /// The length of an object that holds one release record alone.
+        fn release_object() -> u64 {
+            let releases = BTreeMap::from([(region(1), 0)]);
+            encode_batch(chain_header(1, 1, None), Vec::new(), &releases)
+                .unwrap()
+                .bytes
+                .len() as u64
         }
 
         /// The sum and the count of a timing histogram before a forced wait.
@@ -8679,6 +10566,36 @@ mod tests {
                     fault: "a create at the last representable object sequence",
                     row: Some(Row::LastSequence),
                     run: || Box::pin(create_takes_the_last_object_sequence()),
+                },
+                Case {
+                    fault: "a release whose create succeeds",
+                    row: Some(Row::Created),
+                    run: || Box::pin(release_create_succeeds()),
+                },
+                Case {
+                    fault: "a release whose create fails transiently, `durable` mode",
+                    row: Some(Row::TransientDurable),
+                    run: || Box::pin(release_create_fails_transiently_durable()),
+                },
+                Case {
+                    fault: "a release whose create fails transiently, `enqueued` mode",
+                    row: Some(Row::TransientEnqueued),
+                    run: || Box::pin(release_create_fails_transiently_enqueued()),
+                },
+                Case {
+                    fault: "a release whose create the object store refuses with an error that requires intervention, `enqueued` mode",
+                    row: Some(Row::InterventionEnqueued),
+                    run: || Box::pin(release_create_refused_enqueued()),
+                },
+                Case {
+                    fault: "a release while the object store refuses the backlog, `enqueued` mode",
+                    row: None,
+                    run: || Box::pin(release_while_the_backlog_is_refused()),
+                },
+                Case {
+                    fault: "a release whose create finds an object of the same or a later epoch",
+                    row: Some(Row::Conflict),
+                    run: || Box::pin(release_create_finds_another_writer()),
                 },
                 Case {
                     fault: "a start object that meets an object of an earlier epoch",
@@ -8875,6 +10792,310 @@ mod tests {
                 Counters::since(before)
             );
             store.stop().await.unwrap();
+        }
+
+        /// A release seals an object of its own and returns once it is
+        /// indexed, in both modes.
+        async fn release_create_succeeds() {
+            for config in [eager(), enqueued(eager())] {
+                let (store, io, mut parked) = open_parking_creates(memory_store(), &config).await;
+                let before = Counters::sample();
+                let region_id = region(1);
+                let released = spawn_release(&store, region_id);
+                let (object_seq, create) = next_parked_operation(&mut parked).await;
+                assert_eq!(1, object_seq);
+                assert!(!released.is_finished());
+                assert_indexed(io.as_ref(), &[0]).await;
+                create.send(true).unwrap();
+                timeout(WAIT, released).await.unwrap().unwrap().unwrap();
+                // Object 1 carries the boundary past the start object.
+                assert_eq!(vec![1], collected_object_seqs(&store).await);
+                assert_eq!(
+                    vec![release(region_id, 0)],
+                    releases_of(io.as_ref(), 1).await
+                );
+                assert!(read_entries(&store, region_id, 1).await.is_empty());
+                assert_indexed(io.as_ref(), &[1]).await;
+                assert_eq!(
+                    Counters {
+                        created_objects: 1,
+                        seal_to_durable: 1,
+                        sealed_objects: 1,
+                        object_bytes: release_object(),
+                        reads: 1,
+                        deleted_objects: 1,
+                        release_records: 1,
+                        ..Counters::default()
+                    },
+                    Counters::since(before)
+                );
+                store.stop().await.unwrap();
+            }
+        }
+
+        /// The release fails with the create, its sequence is not reused, and
+        /// the release of the region again lands in the next object.
+        async fn release_create_fails_transiently_durable() {
+            let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let released = spawn_release(&store, region_id);
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            create.send(false).unwrap();
+            let error = timeout(WAIT, released).await.unwrap().unwrap().unwrap_err();
+            assert!(
+                matches!(unwrap_shared(&error), Error::WalObjectStore { .. }),
+                "unexpected error: {error:?}"
+            );
+            assert!(terminal(&store.terminal_error).is_none());
+            assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+
+            let released = spawn_release(&store, region_id);
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(2, object_seq);
+            create.send(true).unwrap();
+            timeout(WAIT, released).await.unwrap().unwrap().unwrap();
+            assert_eq!(vec![2], collected_object_seqs(&store).await);
+            assert_indexed(io.as_ref(), &[2]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    seal_to_durable: 1,
+                    create_failures: 1,
+                    sealed_objects: 2,
+                    object_bytes: 2 * release_object(),
+                    deleted_objects: 1,
+                    release_records: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// The store repeats the create, and the release waits for the repeat.
+        async fn release_create_fails_transiently_enqueued() {
+            let (store, io, mut parked) =
+                open_parking_creates(memory_store(), &enqueued(eager())).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let released = spawn_release(&store, region_id);
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            create.send(false).unwrap();
+            let (object_seq, repeat) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            assert!(!released.is_finished());
+            assert_eq!(0, failing_stores());
+            assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+
+            repeat.send(true).unwrap();
+            timeout(WAIT, released).await.unwrap().unwrap().unwrap();
+            assert_eq!(vec![1], collected_object_seqs(&store).await);
+            assert_indexed(io.as_ref(), &[1]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    seal_to_durable: 1,
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    deleted_objects: 1,
+                    release_records: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// The object store denies access to the object of a release: the
+        /// store becomes failing and the release fails at once with the
+        /// retryable error; its record stays in the backlog and becomes
+        /// durable with the next create that succeeds.
+        async fn release_create_refused_enqueued() {
+            let (store, io, mut parked) =
+                open_parking_creates(memory_store(), &enqueued(eager())).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let released = spawn_release(&store, region_id);
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            io.creates_refused.store(true, Ordering::SeqCst);
+            create.send(false).unwrap();
+            let error = timeout(WAIT, released).await.unwrap().unwrap().unwrap_err();
+            assert_rejected(&error, ErrorKind::PermissionDenied);
+            assert_eq!(1, failing_stores());
+            assert!(terminal(&store.terminal_error).is_none());
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    rejected_appends: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            create.send(true).unwrap();
+            wait_until(|| failing_stores() == 0).await;
+            assert_eq!(vec![1], collected_object_seqs(&store).await);
+            assert_eq!(
+                vec![release(region_id, 0)],
+                releases_of(io.as_ref(), 1).await
+            );
+            assert_indexed(io.as_ref(), &[1]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    seal_to_durable: 1,
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    deleted_objects: 1,
+                    release_records: 1,
+                    rejected_appends: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// Releases that arrive while the store is failing fail at once with
+        /// the retryable error, and their record is kept coalesced: the
+        /// ticks that pass seal nothing behind the backlog. A stop seals the
+        /// record with the backlog, and recovery reads it back.
+        async fn release_while_the_backlog_is_refused() {
+            let object_store = memory_store();
+            let (store, io, mut parked) = open_parking_creates(
+                object_store.clone(),
+                &enqueued(config(MIN_FLUSH_INTERVAL, 1)),
+            )
+            .await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            append(&store, region_id, "a1").await.unwrap();
+            io.creates_refused.store(true, Ordering::SeqCst);
+            next_parked_operation(&mut parked)
+                .await
+                .1
+                .send(false)
+                .unwrap();
+            wait_until(|| failing_stores() == 1).await;
+            for _ in 0..3 {
+                let error = store
+                    .release_region(&provider(region_id), region_id)
+                    .await
+                    .unwrap_err();
+                assert_rejected(&error, ErrorKind::PermissionDenied);
+            }
+            // The next attempt of the backlog comes after several ticks.
+            let (object_seq, probe) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            assert!(parked.try_recv().is_err());
+            probe.send(false).unwrap();
+            wait_until(|| Counters::since(before).create_failures == 2).await;
+            assert_eq!(1, Counters::since(before).sealed_objects);
+
+            let stop = {
+                let store = store.clone();
+                tokio::spawn(async move { store.stop().await })
+            };
+            for create in parked_operations(&mut parked, 2).await.into_values() {
+                create.send(true).unwrap();
+            }
+            timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
+            assert_eq!(0, failing_stores());
+            assert_eq!(
+                vec![release(region_id, id(1, 1))],
+                releases_of(io.as_ref(), 2).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 2,
+                    seal_to_durable: 2,
+                    create_failures: 2,
+                    sealed_objects: 2,
+                    object_bytes: one_entry_object() + release_object(),
+                    object_entries: 1,
+                    release_records: 1,
+                    rejected_appends: 3,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            let store = open(object_store, &eager()).await;
+            assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
+            store.stop().await.unwrap();
+        }
+
+        /// Another writer holds the sequence: the release fails with the
+        /// conflict, which poisons the store, in both modes.
+        async fn release_create_finds_another_writer() {
+            for config in [eager(), enqueued(eager())] {
+                let object_store = memory_store();
+                let (store, io, mut parked) =
+                    open_parking_creates(object_store.clone(), &config).await;
+                put_foreign(&object_store, 1, 2).await;
+                let before = Counters::sample();
+                let region_id = region(1);
+                let released = spawn_release(&store, region_id);
+                let (_, create) = next_parked_operation(&mut parked).await;
+                create.send(true).unwrap();
+                let error = timeout(WAIT, released).await.unwrap().unwrap().unwrap_err();
+                let path = io.object_path(1);
+                assert!(
+                    matches!(unwrap_shared(&error), Error::WalObjectConflict { path: actual, .. } if *actual == path),
+                    "unexpected error: {error:?}"
+                );
+                assert_read_is_terminal(&store, region_id).await;
+                assert_indexed(io.as_ref(), &[0]).await;
+                assert_eq!(
+                    Counters {
+                        create_conflicts: 1,
+                        poisoned: 1,
+                        sealed_objects: 1,
+                        object_bytes: release_object(),
+                        ..Counters::default()
+                    },
+                    Counters::since(before)
+                );
+                let stopped = store.stop().await;
+                if config.ack_mode == AckMode::Durable {
+                    stopped.unwrap();
+                } else {
+                    assert!(matches!(
+                        unwrap_shared(&stopped.unwrap_err()),
+                        Error::WalObjectConflict { .. }
+                    ));
+                }
+            }
         }
 
         /// Appends over `io` after `arm` made the create meet the very object
@@ -10254,15 +12475,17 @@ mod tests {
         }
 
         /// Round-trips a command through the actor once `stop` began, when
-        /// the seal command is refused: the collection that `obsolete_all` of
-        /// a region without entries requests is answered by the actor, and
+        /// the seal command is refused: the actor refuses the release that
+        /// `obsolete_all` of a region without entries requests as well, which
         /// hides nothing of the regions a case reads.
         async fn round_trip_stopping_actor(store: &ObjectStoreLogStore) {
             let region_id = region(9);
-            store
-                .obsolete_all(&provider(region_id), region_id)
-                .await
-                .unwrap();
+            assert_stopped(
+                &store
+                    .obsolete_all(&provider(region_id), region_id)
+                    .await
+                    .unwrap_err(),
+            );
         }
 
         /// Four creates are in flight and a fifth batch waits for a slot when

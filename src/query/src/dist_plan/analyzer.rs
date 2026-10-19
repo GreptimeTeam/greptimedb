@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use common_function::function::FunctionContext;
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
@@ -54,6 +55,7 @@ use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::optimizer::expr_depth;
+use crate::optimizer::infer_aggregate_input_bounds::InferAggregateInputBoundsRule;
 use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
@@ -121,8 +123,19 @@ impl AnalyzerRule for DistPlannerAnalyzer {
     ) -> datafusion_common::Result<LogicalPlan> {
         expr_depth::validate_plan(&plan)?;
         let mut config = config.clone();
-        // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
-        config.optimizer.filter_null_join_keys = true;
+        // Preserve the historical pre-MergeScan default unless explicitly set.
+        let explicit = config
+            .extensions
+            .get::<FunctionContext>()
+            .is_some_and(|context| {
+                context
+                    .query_ctx
+                    .extension("datafusion.optimizer.filter_null_join_keys")
+                    .is_some()
+            });
+        if !explicit {
+            config.optimizer.filter_null_join_keys = true;
+        }
         let config = Arc::new(config);
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
@@ -225,6 +238,7 @@ fn pre_merge_scan_optimizer() -> Optimizer {
         Arc::new(EliminateFilter::new()),
         Arc::new(PropagateEmptyRelation::new()),
         Arc::new(FilterNullJoinKeys::default()),
+        Arc::new(InferAggregateInputBoundsRule),
         Arc::new(PushDownFilter::new()),
         Arc::new(SimplifyExpressions::new()),
     ])

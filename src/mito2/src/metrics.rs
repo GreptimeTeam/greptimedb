@@ -136,11 +136,14 @@ lazy_static! {
         exponential_buckets(1.0, 10.0, 6).unwrap(),
     )
     .unwrap();
-    /// Timer of whole compaction task.
-    pub static ref COMPACTION_ELAPSED_TOTAL: Histogram =
-        register_histogram!(
+    /// Elapsed time of each successfully published compaction unit, labeled by `type`.
+    /// - local: one dependency unit, from task start through worker apply acknowledgement
+    /// - remote: one remote job, from request start through publication
+    pub static ref COMPACTION_ELAPSED_TOTAL: HistogramVec =
+        register_histogram_vec!(
         "greptime_mito_compaction_total_elapsed",
-        "mito compaction total elapsed",
+        "mito compaction elapsed per published unit",
+        &[TYPE_LABEL],
         // 1 ~ 100000
         exponential_buckets(1.0, 10.0, 6).unwrap(),
     ).unwrap();
@@ -151,7 +154,7 @@ lazy_static! {
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_failure_total", "mito compaction failure total").unwrap();
 
-    /// Gauge for inflight compaction tasks.
+    /// Gauge for inflight compaction tasks: local units and remote jobs.
     pub static ref INFLIGHT_COMPACTION_COUNT: IntGauge =
         register_int_gauge!(
             "greptime_mito_inflight_compaction_count",

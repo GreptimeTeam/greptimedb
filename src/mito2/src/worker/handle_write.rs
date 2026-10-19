@@ -564,7 +564,7 @@ impl<S> RegionWorkerLoop<S> {
 
             // Collect requests by region.
             if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
-                return;
+                continue;
             }
         }
     }

@@ -440,6 +440,8 @@ impl FrontendBuilder {
             trace_aux_limiter,
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "enterprise")]
+            flow_write_registry: Default::default(),
         })
     }
 }

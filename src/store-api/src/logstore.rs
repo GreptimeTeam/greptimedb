@@ -106,6 +106,48 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Releases every entry of a region the caller dropped, after `obsolete`
+    /// marked them obsolete, so that the log store keeps none of them even
+    /// across a restart, which never opens the region again to mark its
+    /// entries obsolete.
+    ///
+    /// The default does nothing and keeps each log store's existing handling
+    /// of a dropped region. A log store that keeps obsolete marks only in
+    /// memory overrides this method and returns once the release is durable.
+    async fn release_region(
+        &self,
+        _provider: &Provider,
+        _region_id: RegionId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Checks, before an existing region is replayed from its persisted
+    /// state, that the log store holds the region's WAL history through
+    /// `entry_id`, the largest replay watermark the region persisted, so that
+    /// an open against a WAL that lost that history fails instead of
+    /// silently replaying nothing.
+    ///
+    /// The default accepts, which keeps the behaviour of every log store that
+    /// does not override it.
+    async fn check_region_history(
+        &self,
+        _provider: &Provider,
+        _entry_id: EntryId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Records that the WAL history of the provider's region starts in this
+    /// log store, as it does for a region created on it, so that
+    /// [`check_region_history`](Self::check_region_history) accepts a later
+    /// open of the region by the same log store.
+    ///
+    /// The default does nothing.
+    fn start_region_history(&self, _provider: &Provider) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// The response of an `append` operation.
