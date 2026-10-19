@@ -17,7 +17,7 @@
 //! A function's output decides which region a row is written to, and the
 //! function is persisted in partition metadata. Its result for a given input
 //! must therefore never change across versions. A different algorithm needs a
-//! new variant.
+//! new type.
 //!
 //! Partition rule simplification and coverage checks treat a function result
 //! as an independent dimension. This is sound only for deterministic functions
@@ -42,99 +42,70 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Result};
 
-const ICEBERG_HASH: &str = "iceberg_hash";
-
+/// `iceberg_hash(column)`: the 32-bit Murmur3 hash defined by the Iceberg table
+/// spec (appendix B) over a string or integer column, as an `INT`.
+///
+/// Integers of every width hash as Iceberg longs. `UINT64` values hash their bits
+/// as a long, so values up to `i64::MAX` match Iceberg. `NULL` hashes to `NULL`.
+/// The field is the hashed column.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum PartitionFunction {
-    /// `iceberg_hash(column)`: the 32-bit Murmur3 hash defined by the Iceberg
-    /// table spec (appendix B) over a string or integer column, as an `INT`.
-    ///
-    /// Integers of every width hash as Iceberg longs. `UINT64` values hash
-    /// their bits as a long, so values up to `i64::MAX` match Iceberg. `NULL`
-    /// hashes to `NULL`.
-    IcebergHash(String),
-}
+pub struct IcebergHash(String);
 
-impl PartitionFunction {
-    /// Creates a function call from its SQL name and the column argument.
-    pub fn try_new(name: &str, column: String) -> Option<Self> {
-        name.eq_ignore_ascii_case(ICEBERG_HASH)
-            .then_some(Self::IcebergHash(column))
-    }
+impl IcebergHash {
+    pub const NAME: &str = "iceberg_hash";
 
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::IcebergHash(_) => ICEBERG_HASH,
-        }
+    pub fn new(column: impl Into<String>) -> Self {
+        Self(column.into())
     }
 
     pub fn column(&self) -> &str {
-        match self {
-            Self::IcebergHash(column) => column,
-        }
+        &self.0
     }
 
-    pub fn accepts(&self, data_type: &ConcreteDataType) -> bool {
-        match self {
-            Self::IcebergHash(_) => {
-                data_type.is_string() || data_type.is_unsigned() || is_signed_integer(data_type)
+    pub fn accepts(data_type: &ConcreteDataType) -> bool {
+        data_type.is_string() || data_type.is_unsigned() || is_signed_integer(data_type)
+    }
+
+    /// The type of the result, which is also the type of the literals it is compared with.
+    pub fn output_type() -> ConcreteDataType {
+        ConcreteDataType::int32_datatype()
+    }
+
+    pub fn evaluate_value(value: &Value) -> Result<Value> {
+        let hash = match value {
+            Value::Null => return Ok(Value::Null),
+            Value::String(v) => murmur3_32(v.as_utf8().as_bytes()),
+            Value::Int8(v) => hash_long(*v as i64),
+            Value::Int16(v) => hash_long(*v as i64),
+            Value::Int32(v) => hash_long(*v as i64),
+            Value::Int64(v) => hash_long(*v),
+            Value::UInt8(v) => hash_long(*v as i64),
+            Value::UInt16(v) => hash_long(*v as i64),
+            Value::UInt32(v) => hash_long(*v as i64),
+            Value::UInt64(v) => hash_long(*v as i64),
+            other => {
+                return error::UnexpectedSnafu {
+                    err_msg: format!("Unsupported value for {}: {other:?}", Self::NAME),
+                }
+                .fail();
             }
-        }
+        };
+        Ok(Value::Int32(hash))
     }
 
-    /// The type of the function result, which is also the type of the literals
-    /// it is compared with.
-    pub fn output_type(&self) -> ConcreteDataType {
-        match self {
-            Self::IcebergHash(_) => ConcreteDataType::int32_datatype(),
-        }
-    }
-
-    pub fn evaluate_value(&self, value: &Value) -> Result<Value> {
-        match self {
-            Self::IcebergHash(_) => {
-                let hash = match value {
-                    Value::Null => return Ok(Value::Null),
-                    Value::String(v) => murmur3_32(v.as_utf8().as_bytes()),
-                    Value::Int8(v) => hash_long(*v as i64),
-                    Value::Int16(v) => hash_long(*v as i64),
-                    Value::Int32(v) => hash_long(*v as i64),
-                    Value::Int64(v) => hash_long(*v),
-                    Value::UInt8(v) => hash_long(*v as i64),
-                    Value::UInt16(v) => hash_long(*v as i64),
-                    Value::UInt32(v) => hash_long(*v as i64),
-                    Value::UInt64(v) => hash_long(*v as i64),
-                    other => {
-                        return error::UnexpectedSnafu {
-                            err_msg: format!("Unsupported value for {self}: {other:?}"),
-                        }
-                        .fail();
-                    }
-                };
-                Ok(Value::Int32(hash))
-            }
-        }
-    }
-
-    pub fn evaluate_array(&self, array: &dyn Array) -> datafusion_common::Result<ArrayRef> {
-        match self {
-            Self::IcebergHash(_) => iceberg_hash_array(array),
-        }
+    pub fn evaluate_array(array: &dyn Array) -> datafusion_common::Result<ArrayRef> {
+        iceberg_hash_array(array)
     }
 
     pub fn to_logical_expr(&self) -> Expr {
         let column = datafusion_expr::col(format!(r#""{}""#, self.column()));
-        match self {
-            Self::IcebergHash(_) => {
-                ScalarUDF::new_from_impl(IcebergHashUdf::default()).call(vec![column])
-            }
-        }
+        ScalarUDF::new_from_impl(IcebergHashUdf::default()).call(vec![column])
     }
 }
 
-impl Display for PartitionFunction {
+impl Display for IcebergHash {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}({})", self.name(), self.column())
+        write!(f, "{}({})", Self::NAME, self.column())
     }
 }
 
@@ -194,7 +165,8 @@ fn iceberg_hash_array(array: &dyn Array) -> datafusion_common::Result<ArrayRef> 
         }
         other => {
             return Err(DataFusionError::Execution(format!(
-                "{ICEBERG_HASH} does not support type {other}"
+                "{} does not support type {other}",
+                IcebergHash::NAME
             )));
         }
     };
@@ -240,7 +212,7 @@ fn murmur3_32(data: &[u8]) -> i32 {
     h as i32
 }
 
-/// DataFusion form of [`PartitionFunction::IcebergHash`], so storage engines
+/// DataFusion form of [`IcebergHash`], so storage engines
 /// can evaluate a region's partition expression as a filter.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct IcebergHashUdf {
@@ -257,7 +229,7 @@ impl Default for IcebergHashUdf {
 
 impl ScalarUDFImpl for IcebergHashUdf {
     fn name(&self) -> &str {
-        ICEBERG_HASH
+        IcebergHash::NAME
     }
 
     fn signature(&self) -> &Signature {
@@ -274,7 +246,8 @@ impl ScalarUDFImpl for IcebergHashUdf {
     ) -> datafusion_common::Result<ColumnarValue> {
         let [arg] = args.args.as_slice() else {
             return Err(DataFusionError::Internal(format!(
-                "{ICEBERG_HASH} expects one argument, got {}",
+                "{} expects one argument, got {}",
+                IcebergHash::NAME,
                 args.args.len()
             )));
         };
@@ -315,20 +288,18 @@ mod tests {
 
     #[test]
     fn test_unsigned_policy() {
-        let function = PartitionFunction::IcebergHash("c".to_string());
         assert_eq!(
-            function.evaluate_value(&Value::UInt64(34)).unwrap(),
+            IcebergHash::evaluate_value(&Value::UInt64(34)).unwrap(),
             Value::Int32(2017239379)
         );
         assert_eq!(
-            function.evaluate_value(&Value::UInt64(u64::MAX)).unwrap(),
+            IcebergHash::evaluate_value(&Value::UInt64(u64::MAX)).unwrap(),
             Value::Int32(hash_long(-1))
         );
     }
 
     #[test]
     fn test_array_matches_value() {
-        let function = PartitionFunction::IcebergHash("c".to_string());
         let strings = [Some("iceberg"), None, Some(""), Some("中🙂")];
         let mut dictionary = StringDictionaryBuilder::<UInt16Type>::new();
         for v in strings {
@@ -359,10 +330,10 @@ mod tests {
                 ),
             ]);
         for (array, values) in cases {
-            let hashes = function.evaluate_array(array.as_ref()).unwrap();
+            let hashes = IcebergHash::evaluate_array(array.as_ref()).unwrap();
             let hashes = hashes.as_primitive::<Int32Type>();
             for (row, value) in values.iter().enumerate() {
-                let expected = function.evaluate_value(value).unwrap();
+                let expected = IcebergHash::evaluate_value(value).unwrap();
                 let actual = if hashes.is_null(row) {
                     Value::Null
                 } else {

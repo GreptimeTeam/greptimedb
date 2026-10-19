@@ -19,7 +19,7 @@ use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
 use datatypes::value::Value;
 use partition::expr::{Operand, col};
-use partition::function::PartitionFunction;
+use partition::function::IcebergHash;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     EnterStagingRequest, RegionFlushRequest, RegionRequest, StagingPartitionDirective,
@@ -216,14 +216,11 @@ async fn test_partition_filter_iceberg_hash_with_format(flat_format: bool) {
     .await;
     flush().await;
 
-    let function = PartitionFunction::IcebergHash("tag_0".to_string());
     let in_partition = |i: &usize| {
-        function
-            .evaluate_value(&Value::String(i.to_string().as_str().into()))
-            .unwrap()
+        IcebergHash::evaluate_value(&Value::String(i.to_string().as_str().into())).unwrap()
             < Value::Int32(0)
     };
-    let hash_expr = Operand::Function(function.clone()).lt(Value::Int32(0));
+    let hash_expr = Operand::IcebergHash(IcebergHash::new("tag_0")).lt(Value::Int32(0));
     engine
         .handle_request(
             region_id,

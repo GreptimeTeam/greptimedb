@@ -72,7 +72,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
-use partition::function::PartitionFunction;
+use partition::function::IcebergHash;
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
@@ -2875,12 +2875,12 @@ fn ensure_partition_operand_columns_in_target(
             ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
             ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
         }
-        Operand::Function(function) => ensure!(
-            target_partition_columns.contains(&function.column().to_string()),
+        Operand::IcebergHash(hash) => ensure!(
+            target_partition_columns.contains(&hash.column().to_string()),
             InvalidPartitionRuleSnafu {
                 reason: format!(
                     "partition expression references column '{}' that is not in target partition columns",
-                    function.column()
+                    hash.column()
                 )
             }
         ),
@@ -2939,17 +2939,17 @@ fn convert_one_expr(
         (Expr::Function(function), literal)
             if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
         {
-            let function = convert_partition_function(function, column_name_and_type)?;
-            let value = convert_literal(literal, function.output_type(), timezone)?;
-            (Operand::Function(function), op, Operand::Value(value))
+            let hash = convert_iceberg_hash(function, column_name_and_type)?;
+            let value = convert_literal(literal, IcebergHash::output_type(), timezone)?;
+            (Operand::IcebergHash(hash), op, Operand::Value(value))
         }
         // val, func
         (literal, Expr::Function(function))
             if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
         {
-            let function = convert_partition_function(function, column_name_and_type)?;
-            let value = convert_literal(literal, function.output_type(), timezone)?;
-            (Operand::Value(value), op, Operand::Function(function))
+            let hash = convert_iceberg_hash(function, column_name_and_type)?;
+            let value = convert_literal(literal, IcebergHash::output_type(), timezone)?;
+            (Operand::Value(value), op, Operand::IcebergHash(hash))
         }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
             // sub-expr must against another sub-expr
@@ -2968,11 +2968,11 @@ fn convert_one_expr(
     Ok(PartitionExpr::new(lhs, op, rhs))
 }
 
-/// Converts a partition function call, which takes exactly one partition column.
-fn convert_partition_function(
+/// Converts an `iceberg_hash` call, which takes exactly one partition column.
+fn convert_iceberg_hash(
     function: &Function,
     column_name_and_type: &HashMap<&String, ConcreteDataType>,
-) -> Result<PartitionFunction> {
+) -> Result<IcebergHash> {
     let invalid = || {
         InvalidPartitionRuleSnafu {
             reason: format!("unsupported partition function call {function}"),
@@ -2997,21 +2997,26 @@ fn convert_partition_function(
     {
         return Err(invalid());
     }
-    let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-    let partition_function = PartitionFunction::try_new(&function.name.to_string(), column_name)
-        .with_context(|| InvalidPartitionRuleSnafu {
-            reason: format!("unsupported partition function {}", function.name),
-        })?;
     ensure!(
-        partition_function.accepts(&data_type),
+        function
+            .name
+            .to_string()
+            .eq_ignore_ascii_case(IcebergHash::NAME),
+        InvalidPartitionRuleSnafu {
+            reason: format!("unsupported partition function {}", function.name),
+        }
+    );
+    let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+    ensure!(
+        IcebergHash::accepts(&data_type),
         InvalidPartitionRuleSnafu {
             reason: format!(
                 "partition function {} does not support column type {data_type}",
-                partition_function.name()
+                IcebergHash::NAME
             ),
         }
     );
-    Ok(partition_function)
+    Ok(IcebergHash::new(column_name))
 }
 
 fn convert_literal(expr: &Expr, data_type: ConcreteDataType, timezone: &Timezone) -> Result<Value> {
@@ -3768,7 +3773,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
-    fn test_convert_partition_function() {
+    fn test_convert_iceberg_hash() {
         let names = ["host", "count", "device", "measure", "host-name"].map(String::from);
         let column_name_and_type = HashMap::from([
             (&names[0], ConcreteDataType::string_datatype()),

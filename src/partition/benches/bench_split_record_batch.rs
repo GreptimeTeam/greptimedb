@@ -23,7 +23,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use partition::PartitionRule;
 use partition::expr::{Operand, PartitionExpr, col};
-use partition::function::PartitionFunction;
+use partition::function::IcebergHash;
 use partition::multi_dim::MultiDimPartitionRule;
 use rand::Rng;
 use store_api::storage::RegionNumber;
@@ -244,7 +244,7 @@ fn hash_rule(column: &str, num_partitions: i64) -> MultiDimPartitionRule {
     let width = (1i64 << 32) / num_partitions;
     range_rule(
         column,
-        Operand::Function(PartitionFunction::IcebergHash(column.to_string())),
+        Operand::IcebergHash(IcebergHash::new(column)),
         (1..num_partitions).map(|k| (i32::MIN as i64 + k * width) as i32),
     )
 }

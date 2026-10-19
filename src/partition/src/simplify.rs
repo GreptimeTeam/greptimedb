@@ -509,10 +509,10 @@ mod tests {
     }
 
     #[test]
-    fn simplify_adjacent_function_ranges() {
-        use crate::function::PartitionFunction;
+    fn simplify_adjacent_hash_ranges() {
+        use crate::function::IcebergHash;
 
-        let hash = Operand::Function(PartitionFunction::IcebergHash("host".to_string()));
+        let hash = Operand::IcebergHash(IcebergHash::new("host"));
         let left = hash.clone().lt(Value::Int32(0));
         let right = hash
             .clone()

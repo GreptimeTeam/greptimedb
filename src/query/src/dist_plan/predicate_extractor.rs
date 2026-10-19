@@ -215,7 +215,7 @@ impl ExpressionChecker {
         result: &mut Vec<PartitionExpr>,
     ) {
         match operand {
-            Operand::Column(_) | Operand::Value(_) | Operand::Function(_) => {
+            Operand::Column(_) | Operand::Value(_) | Operand::IcebergHash(_) => {
                 // This shouldn't happen in well-formed expressions
             }
             Operand::Expr(expr) => {
@@ -240,7 +240,7 @@ impl ExpressionChecker {
     ) -> bool {
         match operand {
             Operand::Column(col) => partition_columns.contains(col),
-            Operand::Function(function) => partition_columns.contains(function.column()),
+            Operand::IcebergHash(hash) => partition_columns.contains(hash.column()),
             Operand::Value(_) => true, // Values are always safe
             Operand::Expr(expr) => {
                 Self::expr_only_involves_partition_columns(expr, partition_columns)

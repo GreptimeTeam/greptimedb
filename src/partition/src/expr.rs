@@ -35,7 +35,7 @@ use sqlparser::ast::{
 };
 
 use crate::error;
-use crate::function::PartitionFunction;
+use crate::function::IcebergHash;
 use crate::partition::PartitionBound;
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
@@ -54,7 +54,7 @@ pub enum Operand {
     Column(String),
     Value(Value),
     Expr(PartitionExpr),
-    Function(PartitionFunction),
+    IcebergHash(IcebergHash),
 }
 
 pub fn col(column_name: impl Into<String>) -> Operand {
@@ -111,13 +111,13 @@ impl Operand {
                 Ok(datafusion_expr::lit(scalar_value))
             }
             Self::Expr(e) => e.try_as_logical_expr(),
-            Self::Function(f) => Ok(f.to_logical_expr()),
+            Self::IcebergHash(f) => Ok(f.to_logical_expr()),
         }
     }
 
     /// Whether this operand is a partition dimension that values are compared against.
     fn is_dimension(&self) -> bool {
-        matches!(self, Self::Column(_) | Self::Function(_))
+        matches!(self, Self::Column(_) | Self::IcebergHash(_))
     }
 
     fn to_parser_expr(&self) -> ParserExpr {
@@ -127,8 +127,8 @@ impl Operand {
             Self::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
             Self::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
             Self::Expr(e) => e.to_parser_expr(),
-            Self::Function(f) => ParserExpr::Function(Function {
-                name: ObjectName::from(vec![Ident::new(f.name())]),
+            Self::IcebergHash(f) => ParserExpr::Function(Function {
+                name: ObjectName::from(vec![Ident::new(IcebergHash::NAME)]),
                 uses_odbc_syntax: false,
                 parameters: FunctionArguments::None,
                 args: FunctionArguments::List(FunctionArgumentList {
@@ -177,7 +177,7 @@ impl Display for Operand {
             Self::Column(v) => write!(f, "{v}"),
             Self::Value(v) => write!(f, "{v}"),
             Self::Expr(v) => write!(f, "{v}"),
-            Self::Function(v) => write!(f, "{v}"),
+            Self::IcebergHash(v) => write!(f, "{v}"),
         }
     }
 }
@@ -474,7 +474,7 @@ impl PartitionExpr {
             Operand::Expr(e) => {
                 e.collect_column_names(columns);
             }
-            Operand::Function(f) => {
+            Operand::IcebergHash(f) => {
                 columns.insert(f.column().to_string());
             }
             Operand::Value(_) => {}
@@ -851,17 +851,18 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_function_partition_expr() {
-        let hash = Operand::Function(PartitionFunction::IcebergHash("host".to_string()));
+    fn test_serde_iceberg_hash_partition_expr() {
+        let hash = Operand::IcebergHash(IcebergHash::new("host"));
         let expr = hash.clone().lt(Value::Int32(0));
         let json = expr.as_json_str().unwrap();
         assert_eq!(
             json,
-            r#"{"Expr":{"lhs":{"Function":{"IcebergHash":"host"}},"op":"Lt","rhs":{"Value":{"Int32":0}}}}"#
+            r#"{"Expr":{"lhs":{"IcebergHash":"host"},"op":"Lt","rhs":{"Value":{"Int32":0}}}}"#
         );
         assert_eq!(PartitionExpr::from_json_str(&json).unwrap().unwrap(), expr);
 
-        let swapped = r#"{"Expr":{"lhs":{"Value":{"Int32":0}},"op":"Gt","rhs":{"Function":{"IcebergHash":"host"}}}}"#;
+        let swapped =
+            r#"{"Expr":{"lhs":{"Value":{"Int32":0}},"op":"Gt","rhs":{"IcebergHash":"host"}}}"#;
         assert_eq!(
             PartitionExpr::from_json_str(swapped).unwrap().unwrap(),
             expr

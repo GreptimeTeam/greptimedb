@@ -376,19 +376,19 @@ mod tests {
     use crate::multi_dim::MultiDimPartitionRule;
 
     #[test]
-    fn test_function_and_same_named_column_are_distinct() {
+    fn test_hash_and_same_named_column_are_distinct() {
         use crate::expr::Operand;
-        use crate::function::PartitionFunction;
+        use crate::function::IcebergHash;
 
-        let function = PartitionFunction::IcebergHash("host".to_string());
-        // A column can be named like the function call, but it is another dimension, so these
+        let hash = IcebergHash::new("host");
+        // A column can be named like the hash call, but it is another dimension, so these
         // two rules don't cover each other's complement.
         let result = MultiDimPartitionRule::try_new(
-            vec!["host".to_string(), function.to_string()],
+            vec!["host".to_string(), hash.to_string()],
             vec![1, 2],
             vec![
-                Operand::Function(function.clone()).lt(Value::Int32(0)),
-                col(function.to_string()).gt_eq(Value::Int32(0)),
+                Operand::IcebergHash(hash.clone()).lt(Value::Int32(0)),
+                col(hash.to_string()).gt_eq(Value::Int32(0)),
             ],
             true,
         );

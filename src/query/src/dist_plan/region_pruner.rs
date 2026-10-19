@@ -208,8 +208,8 @@ impl ConstraintPruner {
             }
             // Query predicates never constrain a function dimension, so its values all
             // come from partition rules, already typed as the function output.
-            (Operand::Function(_), Operand::Value(_))
-            | (Operand::Value(_), Operand::Function(_)) => true,
+            (Operand::IcebergHash(_), Operand::Value(_))
+            | (Operand::Value(_), Operand::IcebergHash(_)) => true,
             _ => false,
         }
     }
@@ -276,9 +276,9 @@ mod tests {
 
     #[test]
     fn test_constraint_pruning_with_hash_dimension() {
-        use partition::function::PartitionFunction;
+        use partition::function::IcebergHash;
 
-        let hash = Operand::Function(PartitionFunction::IcebergHash("host".to_string()));
+        let hash = Operand::IcebergHash(IcebergHash::new("host"));
         let partitions = [
             col("ts")
                 .lt(Value::Int64(100))

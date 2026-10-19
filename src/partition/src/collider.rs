@@ -38,24 +38,24 @@ use datatypes::value::{OrderedF64, OrderedFloat, Value};
 use crate::error;
 use crate::error::Result;
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
-use crate::function::PartitionFunction;
+use crate::function::IcebergHash;
 
 const ZERO: OrderedF64 = OrderedFloat(0.0f64);
 pub(crate) const NORMALIZE_STEP: OrderedF64 = OrderedFloat(1.0f64);
 pub(crate) const CHECK_STEP: OrderedF64 = OrderedFloat(0.5f64);
 
-/// A dimension of the partition space: a column, or a function of a column.
+/// A dimension of the partition space: a column, or the hash of a column.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PartitionDim {
     Column(String),
-    Function(PartitionFunction),
+    IcebergHash(IcebergHash),
 }
 
 impl PartitionDim {
     fn from_operand(operand: &Operand) -> Option<Self> {
         match operand {
             Operand::Column(column) => Some(Self::Column(column.clone())),
-            Operand::Function(function) => Some(Self::Function(function.clone())),
+            Operand::IcebergHash(hash) => Some(Self::IcebergHash(hash.clone())),
             Operand::Value(_) | Operand::Expr(_) => None,
         }
     }
@@ -63,7 +63,7 @@ impl PartitionDim {
     pub fn to_operand(&self) -> Operand {
         match self {
             Self::Column(column) => Operand::Column(column.clone()),
-            Self::Function(function) => Operand::Function(function.clone()),
+            Self::IcebergHash(hash) => Operand::IcebergHash(hash.clone()),
         }
     }
 }
@@ -72,7 +72,7 @@ impl Display for PartitionDim {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Column(column) => write!(f, "{column}"),
-            Self::Function(function) => write!(f, "{function}"),
+            Self::IcebergHash(hash) => write!(f, "{hash}"),
         }
     }
 }

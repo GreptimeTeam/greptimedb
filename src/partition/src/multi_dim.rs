@@ -39,7 +39,7 @@ use crate::PartitionRule;
 use crate::checker::PartitionChecker;
 use crate::error::{self, Result, UndefinedColumnSnafu};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
-use crate::function::PartitionFunction;
+use crate::function::IcebergHash;
 use crate::partition::RegionMask;
 
 /// The default region number when no partition exprs are matched.
@@ -52,10 +52,10 @@ type PhysicalExprCache = Option<Arc<PhysicalPartitionExprs>>;
 struct PhysicalPartitionExprs {
     input_schema: Arc<Schema>,
     exprs: Vec<Arc<dyn PhysicalExpr>>,
-    /// Partition functions with the input index of their argument. Each is evaluated
+    /// Input indices of the columns under `iceberg_hash`. Each hash is evaluated
     /// once per batch and appended to the input as `eval_schema` describes, and
-    /// `exprs` read the results instead of evaluating the function per predicate.
-    functions: Vec<(PartitionFunction, usize)>,
+    /// `exprs` read the results instead of hashing per predicate.
+    hash_inputs: Vec<usize>,
     eval_schema: Arc<Schema>,
 }
 
@@ -154,12 +154,12 @@ impl MultiDimPartitionRule {
                 let r = &values[*index];
                 Self::perform_op(l, &expr.op, r)
             }
-            (Operand::Function(function), Operand::Value(r)) => {
-                let l = self.evaluate_function(function, values)?;
+            (Operand::IcebergHash(hash), Operand::Value(r)) => {
+                let l = self.evaluate_hash(hash, values)?;
                 Self::perform_op(&l, &expr.op, r)
             }
-            (Operand::Value(l), Operand::Function(function)) => {
-                let r = self.evaluate_function(function, values)?;
+            (Operand::Value(l), Operand::IcebergHash(hash)) => {
+                let r = self.evaluate_hash(hash, values)?;
                 Self::perform_op(l, &expr.op, &r)
             }
             (Operand::Expr(lhs), Operand::Expr(rhs)) => {
@@ -175,13 +175,13 @@ impl MultiDimPartitionRule {
         }
     }
 
-    fn evaluate_function(&self, function: &PartitionFunction, values: &[Value]) -> Result<Value> {
-        let column = function.column();
+    fn evaluate_hash(&self, hash: &IcebergHash, values: &[Value]) -> Result<Value> {
+        let column = hash.column();
         let index = self
             .name_to_index
             .get(column)
             .context(UndefinedColumnSnafu { column })?;
-        function.evaluate_value(&values[*index])
+        IcebergHash::evaluate_value(&values[*index])
     }
 
     fn perform_op(lhs: &Value, op: &RestrictedOp, rhs: &Value) -> Result<bool> {
@@ -288,14 +288,13 @@ impl MultiDimPartitionRule {
         };
 
         let eval_batch;
-        let record_batch = if physical_exprs.functions.is_empty() {
+        let record_batch = if physical_exprs.hash_inputs.is_empty() {
             record_batch
         } else {
             let mut columns = record_batch.columns().to_vec();
-            for (function, index) in &physical_exprs.functions {
+            for index in &physical_exprs.hash_inputs {
                 columns.push(
-                    function
-                        .evaluate_array(record_batch.column(*index).as_ref())
+                    IcebergHash::evaluate_array(record_batch.column(*index).as_ref())
                         .context(error::EvaluateRecordBatchSnafu)?,
                 );
             }
@@ -370,11 +369,11 @@ impl MultiDimPartitionRule {
     }
 
     fn plan_physical_exprs(&self, input_schema: Arc<Schema>) -> Result<PhysicalPartitionExprs> {
-        let mut functions = BTreeSet::new();
+        let mut hashes = BTreeSet::new();
         for expr in &self.exprs {
-            collect_functions(expr, &mut functions);
+            collect_hashes(expr, &mut hashes);
         }
-        if functions.is_empty() {
+        if hashes.is_empty() {
             let exprs = self
                 .exprs
                 .iter()
@@ -384,35 +383,35 @@ impl MultiDimPartitionRule {
                 eval_schema: input_schema.clone(),
                 input_schema,
                 exprs,
-                functions: vec![],
+                hash_inputs: vec![],
             });
         }
 
         let mut fields = input_schema.fields().to_vec();
-        let mut function_columns = HashMap::with_capacity(functions.len());
-        let mut evaluated = Vec::with_capacity(functions.len());
-        for function in functions {
+        let mut hash_columns = HashMap::with_capacity(hashes.len());
+        let mut hash_inputs = Vec::with_capacity(hashes.len());
+        for hash in hashes {
             let index =
                 input_schema
-                    .index_of(function.column())
+                    .index_of(hash.column())
                     .ok()
                     .context(UndefinedColumnSnafu {
-                        column: function.column(),
+                        column: hash.column(),
                     })?;
-            let mut name = format!("__partition_function_{}", evaluated.len());
+            let mut name = format!("__partition_hash_{}", hash_inputs.len());
             while input_schema.field_with_name(&name).is_ok() {
                 name.push('_');
             }
             fields.push(Arc::new(Field::new(
                 &name,
-                function.output_type().as_arrow_type(),
+                IcebergHash::output_type().as_arrow_type(),
                 true,
             )));
-            function_columns.insert(
-                function.to_logical_expr(),
+            hash_columns.insert(
+                hash.to_logical_expr(),
                 Expr::Column(datafusion_common::Column::from_name(name)),
             );
-            evaluated.push((function, index));
+            hash_inputs.push(index);
         }
         let eval_schema = Arc::new(Schema::new(fields));
 
@@ -427,7 +426,7 @@ impl MultiDimPartitionRule {
                 let expr = expr
                     .try_as_logical_expr()?
                     .transform(|expr| {
-                        Ok(match function_columns.get(&expr) {
+                        Ok(match hash_columns.get(&expr) {
                             Some(column) => Transformed::yes(column.clone()),
                             None => Transformed::no(expr),
                         })
@@ -438,7 +437,7 @@ impl MultiDimPartitionRule {
                     !expr
                         .exists(|expr| Ok(matches!(expr, Expr::ScalarFunction(_))))
                         .unwrap(),
-                    "partition functions should read precomputed columns: {expr}"
+                    "iceberg_hash should read the precomputed columns: {expr}"
                 );
                 create_physical_expr(
                     &expr,
@@ -453,19 +452,19 @@ impl MultiDimPartitionRule {
         Ok(PhysicalPartitionExprs {
             input_schema,
             exprs,
-            functions: evaluated,
+            hash_inputs,
             eval_schema,
         })
     }
 }
 
-fn collect_functions(expr: &PartitionExpr, functions: &mut BTreeSet<PartitionFunction>) {
+fn collect_hashes(expr: &PartitionExpr, hashes: &mut BTreeSet<IcebergHash>) {
     for operand in [expr.lhs(), expr.rhs()] {
         match operand {
-            Operand::Function(function) => {
-                functions.insert(function.clone());
+            Operand::IcebergHash(hash) => {
+                hashes.insert(hash.clone());
             }
-            Operand::Expr(expr) => collect_functions(expr, functions),
+            Operand::Expr(expr) => collect_hashes(expr, hashes),
             Operand::Column(_) | Operand::Value(_) => {}
         }
     }
@@ -1130,8 +1129,8 @@ mod test_split_record_batch {
         use datatypes::arrow::array::{Array, StringDictionaryBuilder, UInt64Array};
         use datatypes::arrow::datatypes::{DataType, Field, UInt32Type};
 
-        let host_hash = Operand::Function(PartitionFunction::IcebergHash("host".to_string()));
-        let tenant_hash = Operand::Function(PartitionFunction::IcebergHash("tenant".to_string()));
+        let host_hash = Operand::IcebergHash(IcebergHash::new("host"));
+        let tenant_hash = Operand::IcebergHash(IcebergHash::new("tenant"));
         let exprs = [
             host_hash
                 .clone()
