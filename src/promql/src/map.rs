@@ -142,9 +142,9 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 /// positions the chunk decided still travel with it and its consumer still advances. Trimming the
 /// result to the rows holding a value, as the output does, is a separate stage.
 ///
-/// At least one kernel rewrites the labels as [`map_math`] does -- dropping the metadata labels
-/// and every label whose value is empty -- even from a chunk without any value to map. A chain
-/// without kernels maps nothing, so it is the identity on the whole chunk and returns its labels
+/// A kernel rewrites the labels as [`map_math`] does -- dropping the metadata labels and every
+/// label whose value is empty -- even from a chunk without any value to map. A chain without
+/// kernels maps nothing, so it is the identity on the whole chunk and returns its labels
 /// unchanged: a consumer of the series reads the chunks of one series as one series only while
 /// they agree on them. Raw time axes are rejected.
 pub fn map_chunk(
@@ -181,53 +181,17 @@ pub fn map_chunk(
         };
         mapped = map_math(schema, &series, *op)?;
     }
-    if let Some(mapped) = &mapped
-        && let TimeAxis::Grid(mapped_range) = &mapped.time
-        && mapped_range == range
-    {
-        // The chain did not move the ends of the series, so it is already the chunk.
-        return EvaluatedChunk::try_new(mapped.clone(), chunk.is_last);
+    if let Some(mapped) = mapped {
+        // `map_math` keeps the input's time axis, so the mapped series covers exactly the positions
+        // this chunk covers: it is already the chunk, labels rewritten.
+        return EvaluatedChunk::try_new(mapped, chunk.is_last);
     }
 
-    // The chain trimmed rows off one or both ends, or dropped every value. Place its rows back at
-    // the offset they kept and hold the span open to the input chunk's ends.
+    // The chain dropped every value, which is a property of the values and not of how far
+    // evaluation has progressed: the positions this chunk decided still travel with it, so the
+    // span is held open to its ends and every position in it is missing.
     let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
     builder.cover_from(range.start())?;
-    if let Some(mapped) = &mapped {
-        let TimeAxis::Grid(mapped_range) = &mapped.time else {
-            return Err(DataFusionError::Execution(
-                "Map math requires an evaluated grid time axis".into(),
-            ));
-        };
-        let offset = mapped_range
-            .start()
-            .checked_sub(range.start())
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "mapped series begins at {} before its input chunk at {}",
-                    mapped_range.start(),
-                    range.start()
-                ))
-            })?;
-        // One cursor per field, for the reason `map_math` advances iterators rather than calling
-        // `sample(row)`.
-        let mut cursors = mapped
-            .fields
-            .iter()
-            .map(|samples| samples.iter())
-            .collect::<Vec<_>>();
-        let mut values = vec![None; mapped.fields.len()];
-        for row in 0..mapped_range.len() {
-            for (value, cursor) in values.iter_mut().zip(cursors.iter_mut()) {
-                *value = match cursor.next() {
-                    // A mapped field holds no histogram, so anything else stays missing.
-                    Some(SampleRef::Float(value)) => Some(value),
-                    _ => None,
-                };
-            }
-            builder.push(range.start() + offset + row, &values)?;
-        }
-    }
     builder.cover_through(range.start() + range.len())?;
     // `cover_from` opens the span for every non-empty range, and the empty one returned above, so
     // the builder always hands back the series it spans. Refuse to report a shorter range than the

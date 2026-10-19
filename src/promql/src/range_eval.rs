@@ -579,7 +579,11 @@ impl RangeEvaluator {
     /// The first chunk opens the series with its labels, each later one starts exactly where the
     /// previous one ended, and the one marked `is_last` closes it. The first chunk may begin at any
     /// position of the input grid: a producer that trims its output starts at its first row
-    /// holding a value, and the positions before it carry no sample rather than a missing one.
+    /// holding a value, and the positions before it carry no sample rather than a missing one. A
+    /// consumer therefore cannot tell a dropped leading chunk from a trimmed prefix -- both leave
+    /// the same positions without a sample and are reported as decided. A gap after the first
+    /// chunk is rejected instead, because there it would claim positions between two chunks of one
+    /// series are settled while a sample may still arrive in them.
     ///
     /// A chunk reports the positions it decided, whether they hold a value or not, so a position
     /// an inner evaluation settled without a result crosses this layer too; as on the raw path,
@@ -622,6 +626,14 @@ impl RangeEvaluator {
         // row, and the positions before it carry no sample rather than a missing one. Reporting
         // them as decided is still correct, because no input ever arrives there, so a window over
         // them can never gain a sample.
+        //
+        // The concession is deliberately leading-only, and it costs the consumer no information:
+        // `emit`, the only producer here, begins a series at position 0 and tiles every chunk after
+        // it, so a leading gap can only mean an outside producer trimmed the series head -- a
+        // dropped leading chunk and a trimmed prefix are the same thing to this layer, since both
+        // leave the positions before the start without a sample. A gap in the middle is not the
+        // same: the positions in it lie between two chunks of one series, so they would read as
+        // decided-without-a-sample while a sample may still arrive there, and it is rejected.
         if let Some(state) = &self.series
             && range.start() != state.input_end
         {
@@ -649,18 +661,27 @@ impl RangeEvaluator {
                 emitted_end: 0,
             });
         }
+        // The first position this chunk does not carry. Chunks tile the input grid and samples sit
+        // on its timestamps, so the next sample can only arrive there.
+        let input_end = range.start() + range.len();
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
         // Advanced only now: `ingest` may fail on a sample it cannot shift or convert.
-        self.series
-            .as_mut()
-            .expect("opened at the entry of this push")
-            .input_end = range.start() + range.len();
+        if let Some(state) = self.series.as_mut() {
+            // Open, because the first chunk above opens the series and `ingest` never closes it.
+            state.input_end = input_end;
+        }
         if !chunk.is_last {
-            // `ready` is in the shifted sample domain, so it is the last grid timestamp this
-            // chunk carries plus the offset its samples were shifted by: every point up to there
-            // can no longer gain a sample.
-            let last = range.grid().timestamps()[range.start() + range.len() - 1];
-            self.evaluate(Some(i128::from(last) + i128::from(self.window.offset_ms)))?;
+            // A point is decided once no sample that can still arrive falls in its window, and the
+            // next sample can only sit at `grid[input_end]`. `ready` is inclusive and in the
+            // shifted sample domain, so it is that boundary shifted by the offset, minus one: a
+            // point at the boundary itself still reads a sample arriving there. At the end of the
+            // input grid no sample can follow at all, which is what `None` means.
+            let ready = range
+                .grid()
+                .timestamps()
+                .get(input_end)
+                .map(|&next| i128::from(next) + i128::from(self.window.offset_ms) - 1);
+            self.evaluate(ready)?;
             return self.emit(false);
         }
         self.close_series()
@@ -735,7 +756,7 @@ impl RangeEvaluator {
     pub fn finish(self) -> Result<()> {
         if self.series.is_some() {
             return Err(DataFusionError::Execution(
-                "raw series input ended before the last chunk of a series".into(),
+                "series input ended before the last chunk of a series".into(),
             ));
         }
         Ok(())
@@ -807,7 +828,7 @@ impl RangeEvaluator {
         fields: &SeriesFields,
         drop_stale: bool,
     ) -> bool {
-        // Lengths are checked by `check_chunk` for raw input and by `push_series` for evaluated
+        // Lengths are checked by `check_chunk` for raw input and by `push_evaluated` for evaluated
         // input, so only the shape of the columns is decided here.
         if self.window.offset_ms != 0 {
             return false;
