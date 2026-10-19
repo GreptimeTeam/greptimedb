@@ -143,10 +143,12 @@ pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Op
 /// whole result was mapped away still has to end, so it ends on an empty chunk.
 ///
 /// A kernel rewrites the labels as [`map_math`] does -- dropping the metadata labels and every
-/// label whose value is empty -- even from a chunk without any value to map. A chain without
-/// kernels maps nothing, so it is the identity on the whole chunk and returns its labels
-/// unchanged: a consumer of the series reads the chunks of one series as one series only while
-/// they agree on them. Raw time axes are rejected.
+/// label whose value is empty -- even from a chunk without any value to map: a consumer of the
+/// series reads the chunks of one series as one series only while they agree on them, and a
+/// chunk that skipped the rewrite would label the closing chunk differently from the one before
+/// it. A chain without kernels rewrites no label and is therefore the identity on the whole
+/// chunk, which is the only meaning that keeps one series' chunks agreeing with each other.
+/// Raw time axes are rejected.
 pub fn map_chunk(
     schema: &SeriesSchema,
     chunk: &EvaluatedChunk,

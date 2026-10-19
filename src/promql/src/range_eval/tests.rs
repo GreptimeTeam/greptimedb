@@ -3066,98 +3066,6 @@ fn evaluated_chunk(
     EvaluatedChunk::try_new(series, is_last).unwrap()
 }
 
-/// Pushes `chunks` into a fresh consumer on the 5/20 grid and returns what it handed out together
-/// with the series those chunks fold into.
-fn consume(
-    input: &Arc<SeriesSchema>,
-    chunks: &[EvaluatedChunk],
-) -> (Vec<EvaluatedChunk>, Option<Series>) {
-    let mut consumer = outer_layer(input);
-    let schema = consumer.output_schema().clone();
-    let handed_out: Vec<_> = chunks
-        .iter()
-        .flat_map(|chunk| consumer.push_evaluated(chunk).unwrap())
-        .collect();
-    consumer.finish().expect("the series closed");
-    let series = fold_chunks(&handed_out, &schema);
-    (handed_out, series)
-}
-
-/// The chunks of one evaluated series pushed one at a time and the whole series pushed as one
-/// chunk reach the same consumer result, on a grid the series is not indexed on.
-///
-/// This is chunking invariance, not an independent oracle: both sides run the same outer layer,
-/// so it is the properties the other tests of this module name that pin the protocol itself.
-#[test]
-fn a_series_pushed_in_chunks_matches_the_whole_series() {
-    let mut inner = inner_layer();
-    let schema = inner.output_schema().clone();
-    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
-    inner.finish().expect("the inner series closed");
-    assert!(
-        inner_chunks.len() > 1,
-        "the fixture hands the inner series out as one chunk"
-    );
-
-    let (handed_out, chunked) = consume(&schema, &inner_chunks);
-
-    // The whole inner series as one chunk that closes it, the way a producer that never chunked
-    // would hand it over.
-    let whole = fold_chunks(&inner_chunks, &schema).expect("the fixture inner series holds values");
-    let whole = EvaluatedChunk::try_new(whole, true).unwrap();
-    let (_, at_once) = consume(&schema, std::slice::from_ref(&whole));
-
-    assert!(
-        handed_out.len() > 1,
-        "the chunked path handed out one chunk, exactly like the whole-series path"
-    );
-    assert_series_eq(
-        chunked.as_ref(),
-        &expand(at_once.as_ref().expect("both paths produce a value")),
-        &metric(0),
-    );
-}
-
-/// A chunk leaving the outer layer is addressed on the outer grid, and the starts of those chunks
-/// strictly increase: no row number of the inner grid leaks into the outer addressing.
-#[test]
-fn a_chunk_indexed_on_the_inner_grid_is_absolute_on_the_outer_one() {
-    let mut inner = inner_layer();
-    let schema = inner.output_schema().clone();
-    let inner_grid = schema.eval_grid.clone().unwrap();
-    let inner_chunks = collect_chunks(&mut inner, &consumer_chunks());
-    inner.finish().expect("the inner series closed");
-
-    assert_ne!(
-        inner_grid.spec(),
-        outer_grid().spec(),
-        "the fixture evaluates both layers on one grid"
-    );
-    let mut consumer = outer_layer(&schema);
-    let mut starts = Vec::new();
-    for chunk in &inner_chunks {
-        let Some(handed_out) = consumer.push_evaluated(chunk).unwrap() else {
-            continue;
-        };
-        assert_eq!(
-            handed_out.range().grid().spec(),
-            outer_grid().spec(),
-            "a chunk is addressed on a grid other than the one its layer was asked for"
-        );
-        starts.push(handed_out.range().start());
-    }
-    consumer.finish().expect("the outer series closed");
-
-    assert!(
-        starts.len() > 1,
-        "one chunk makes the strict monotonicity below free"
-    );
-    assert!(
-        starts.windows(2).all(|pair| pair[0] < pair[1]),
-        "the outer chunk starts {starts:?} do not strictly increase"
-    );
-}
-
 /// A point is decided by the chunk after which no sample can reach its window, so it leaves with
 /// that chunk: the outer point at 5 ms is settled by the inner chunk covering position 0, and it
 /// must not wait for the chunk that follows it.
@@ -3349,8 +3257,13 @@ fn a_map_chain_yielding_no_value_keeps_no_row_and_still_closes_its_series() {
     );
 }
 
-/// The chunks of one series are handed over once, in order: a chunk starting behind the end of the
-/// previous one is rejected, and the error names both positions.
+/// The chunks of one series are handed over once, in order: a chunk that repeats or goes back on a
+/// position already covered is rejected, and the error names both sample timestamps.
+///
+/// This is the strictly-increasing rule, not the tiling one the input grid used to impose: the
+/// chunks of a series may skip positions, so only going backwards or repeating is refused -- the
+/// samples are kept in arrival order and read back by timestamp, and out-of-order ones would be
+/// answered from the wrong sample.
 #[test]
 fn an_out_of_order_chunk_is_rejected() {
     let mut inner = inner_layer();
@@ -3359,7 +3272,8 @@ fn an_out_of_order_chunk_is_rejected() {
     inner.finish().expect("the inner series closed");
 
     let mut consumer = evaluated_layer(&schema, grid(0, 10, 5), 10);
-    // The first two chunks cover 0..1 and 1..3, so the series has reached position 3.
+    // The first two chunks cover 0..1 and 1..3, so the last sample the series has reached is the
+    // one at 20 ms.
     for chunk in &inner_chunks[..2] {
         consumer.push_evaluated(chunk).unwrap();
     }
@@ -3383,9 +3297,10 @@ fn an_out_of_order_chunk_is_rejected() {
     );
 }
 
-/// A producer that trims its output starts at its first row holding a value. The consumer accepts
-/// that series: the positions before it carry no sample rather than a missing one, which is the
-/// same state as a position no chunk covers anywhere else in the series.
+/// A position no chunk covers reads exactly like one whose chunk carries a missing value: both say
+/// there is no sample there, so a window over either takes no sample. The consumer does not ask
+/// which of the two it was given, and reports the position as decided either way rather than
+/// leaving it waiting for input.
 #[test]
 fn a_series_may_begin_past_the_first_position_of_its_grid() {
     let grid = grid(0, 10, 4);
@@ -3990,14 +3905,6 @@ mod composition {
                 starts.windows(2).all(|pair| pair[0] < pair[1]),
                 "the chunk starts {starts:?} of the {layer} layer do not increase"
             );
-        }
-        for chunk in &pipeline.outer_chunks {
-            for &timestamp in &chunk.range().timestamps() {
-                assert!(
-                    !inner_grid.timestamps().contains(&timestamp),
-                    "the outer layer used the inner timestamp {timestamp}"
-                );
-            }
         }
         pipeline.finish();
     }

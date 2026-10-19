@@ -570,9 +570,12 @@ impl RangeEvaluator {
     /// value at each grid point is a sample at that time. Stale markers are kept as values,
     /// since the input is computed.
     ///
-    /// The chunks of one series arrive in grid order and may skip positions: a position no chunk
-    /// covers holds no sample, exactly like a missing value. They may not go backwards or repeat,
-    /// because the samples are kept in arrival order and read back by timestamp.
+    /// The first chunk opens the series with its labels and the one marked `is_last` closes it.
+    /// The chunks arrive in grid order and may skip positions: a position no chunk covers holds no
+    /// sample, which is the same state as a position whose chunk carries a missing value, so the
+    /// positions a chunk jumps over are reported as decided without a sample. They may not go
+    /// backwards or repeat, because the samples are kept in arrival order and read back by
+    /// timestamp.
     ///
     /// A skipped position is what a producer settled without a result, so the positions before a
     /// chunk are all decided and the next sample can only arrive at or after its end. That is what
@@ -668,8 +671,8 @@ impl RangeEvaluator {
                 state.last_ts = last_ts;
             }
         }
-        // The first position this chunk does not carry. A later chunk of the same series starts
-        // after it, so no sample can arrive before it: that is what bounds the settle below.
+        // The first position this chunk does not carry. A later chunk of the same series starts at
+        // or after it, so no sample can arrive before it: that is what bounds the settle below.
         let input_end = range.start() + range.len();
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
         if chunk.is_last {
