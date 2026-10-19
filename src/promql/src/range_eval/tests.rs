@@ -3589,6 +3589,88 @@ mod composition {
         downstream.finish().expect("the series closed");
     }
 
+    /// A chain with a kernel rewrites the labels of every chunk it maps, and it has to rewrite them
+    /// the same way on the zero-length closing chunk as on the chunk before it.
+    ///
+    /// A kernel drops the metadata labels and, like Prometheus' `simpleFloatFunc`, every label whose
+    /// value is empty -- an ordinary label such as `empty=""` goes too. The closing chunk carries no
+    /// position to map, so a chain that rewrote only its metadata labels would leave `empty=""` on
+    /// it while the chunk before it lost the label, and a consumer of the series would reject the
+    /// two chunks as different series.
+    #[test]
+    fn a_map_chain_relabels_the_closing_chunk_like_the_chunk_before_it() {
+        let grid = grid(0, 10, 3);
+        let schema = Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("f0"),
+            }]
+            .into(),
+            eval_grid: Some(grid.clone()),
+        });
+        // A label with an empty value, which Prometheus treats as absent, next to a label that
+        // survives the chain. Without the empty one both assertions below would hold for free.
+        let labelled = MetricName::try_new(
+            Some(Arc::from("http_requests")),
+            vec![
+                Label {
+                    name: Arc::from("host"),
+                    value: Arc::from("h0"),
+                },
+                Label {
+                    name: Arc::from("empty"),
+                    value: Arc::from(""),
+                },
+            ],
+        )
+        .unwrap();
+        let with_metric = |start: usize, values: Vec<Option<f64>>, is_last: bool| {
+            let range = GridRange::try_new(grid.clone(), start, values.len()).unwrap();
+            let fields =
+                SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(values))])
+                    .unwrap();
+            let series =
+                Series::try_new(&schema, labelled.clone(), TimeAxis::Grid(range), fields).unwrap();
+            EvaluatedChunk::try_new(series, is_last).unwrap()
+        };
+
+        // The valued chunk fills the whole grid, so the closing one decides nothing new and reaches
+        // a consumer with no positions at all.
+        let valued = with_metric(0, vec![Some(-1.0), Some(-2.0), Some(-3.0)], false);
+        let closing = with_metric(3, vec![], true);
+
+        let ops = [MathOp::Abs];
+        let mapped_valued = map_chunk(&schema, &valued, &ops).unwrap();
+        let mapped_closing = map_chunk(&schema, &closing, &ops).unwrap();
+
+        let names: Vec<_> = mapped_valued
+            .series
+            .metric
+            .tags()
+            .iter()
+            .map(|label| label.name.to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["host".to_string()],
+            "the kernel did not drop the name, the metadata labels and the empty-valued label"
+        );
+        assert_eq!(
+            mapped_closing.series.metric, mapped_valued.series.metric,
+            "the closing chunk carries labels the chunk before it does not"
+        );
+
+        // Both chunks are one series to the consumer.
+        let mut downstream = outer_layer(&schema);
+        downstream
+            .push_evaluated(&mapped_valued)
+            .expect("the valued chunk opens the series");
+        downstream
+            .push_evaluated(&mapped_closing)
+            .expect("the closing chunk carries the labels of the chunk before it")
+            .expect("a series closes");
+        downstream.finish().expect("the series closed");
+    }
+
     /// A prefix reaches the outer layer before the inner series ends: the composed pipeline streams
     /// instead of buffering a whole series behind the map chain.
     #[test]
