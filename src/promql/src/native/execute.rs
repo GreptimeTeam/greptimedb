@@ -42,6 +42,7 @@
 //! series. A chunk that continues a label set where it ended, or that fills positions the set has
 //! not occupied, is handed on.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -54,11 +55,11 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridRange, TimeAxis};
 
+use crate::grid_series::{LabelSet, label_set};
+use crate::map::{MathOp, map_math};
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{self, NodeMetrics, NodePath};
 use crate::native::plan::{BoundWindow, NativeExpr, NativeTree};
-use crate::grid_series::{LabelSet, label_set};
-use crate::map::{MathOp, map_math};
 use crate::range_eval::RangeEvaluator;
 
 #[cfg(test)]
@@ -260,6 +261,13 @@ impl Run {
 #[derive(Default)]
 struct Emitted {
     sets: HashMap<LabelSet, History>,
+    /// The bytes the entries in `sets` hold, kept as a running total.
+    ///
+    /// A node records every label set it has ever handed out and must charge for all of them, so
+    /// the figure is read after every output. Recomputing it there walks every entry recorded so
+    /// far, which is quadratic over a series that keeps producing label sets; folding one entry's
+    /// change in as it happens keeps the read constant.
+    entries: usize,
 }
 
 /// What one node has handed out under one output label set.
@@ -269,6 +277,27 @@ struct History {
     fields: Vec<Vec<Run>>,
     /// Whether the series on this label set closed. A second series cannot close it again.
     closed: bool,
+    /// The bytes this entry's labels and runs hold, kept current by [`Emitted::occupy`].
+    bytes: usize,
+}
+
+/// The bytes a label set holds: each label's name and value with the pair that refers to them.
+fn label_bytes(labels: &LabelSet) -> usize {
+    labels
+        .iter()
+        .map(|(name, value)| std::mem::size_of::<(Arc<str>, Arc<str>)>() + name.len() + value.len())
+        .sum()
+}
+
+/// The bytes a history holds: the entry itself, the per-field vectors and the runs in them.
+fn history_bytes(history: &History) -> usize {
+    std::mem::size_of::<History>()
+        + history.fields.capacity() * std::mem::size_of::<Vec<Run>>()
+        + history
+            .fields
+            .iter()
+            .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
+            .sum::<usize>()
 }
 
 impl Emitted {
@@ -304,7 +333,17 @@ impl Emitted {
             }
         }
         let fields = chunk.series.fields.len();
-        let history = self.sets.entry(labels).or_default();
+        // The change is folded in here rather than recomputed when the figure is read: a node
+        // keeps every label set it has ever handed out, so a fresh walk after each output costs a
+        // pass over the whole table for a table that only ever grows.
+        let history = match self.sets.entry(labels) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                self.entries += label_bytes(entry.key());
+                entry.insert(History::default())
+            }
+        };
+        let before = history.bytes;
         if history.fields.len() < fields {
             history.fields.resize_with(fields, Vec::new);
         }
@@ -316,6 +355,9 @@ impl Emitted {
         if chunk.is_last {
             history.closed = true;
         }
+        let after = history_bytes(history);
+        history.bytes = after;
+        self.entries = self.entries - before + after;
         Ok(())
     }
 
@@ -325,30 +367,24 @@ impl Emitted {
     /// and the table's capacity at a label-set slot plus a history per entry. It leaves out the
     /// map's buckets and the `Arc` headers of the strings it shares, so it is a lower bound rather
     /// than a measurement.
+    ///
+    /// The per-entry part is a running total, so reading this after every output does not walk the
+    /// table: only the entry that changed and the table's own capacity are read here.
     fn bytes(&self) -> usize {
-        let sets = self
-            .sets
+        self.entries
+            + self.sets.capacity()
+                * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>())
+    }
+
+    /// The same figure by walking every entry, used by a test to keep the running total honest.
+    #[cfg(test)]
+    fn bytes_recomputed(&self) -> usize {
+        self.sets
             .iter()
-            .map(|(labels, history)| {
-                labels
-                    .iter()
-                    .map(|(name, value)| {
-                        std::mem::size_of::<(std::sync::Arc<str>, std::sync::Arc<str>)>()
-                            + name.len()
-                            + value.len()
-                    })
-                    .sum::<usize>()
-                    + std::mem::size_of::<History>()
-                    + history.fields.capacity() * std::mem::size_of::<Vec<Run>>()
-                    + history
-                        .fields
-                        .iter()
-                        .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
-                        .sum::<usize>()
-            })
-            .sum::<usize>();
-        sets + self.sets.capacity()
-            * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>())
+            .map(|(labels, history)| label_bytes(labels) + history_bytes(history))
+            .sum::<usize>()
+            + self.sets.capacity()
+                * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>())
     }
 }
 
@@ -926,6 +962,24 @@ impl NativeExecutionState {
                 .map_or(0, WindowRuntime::retained_bytes),
             runtime.emitted_bytes(),
         )
+    }
+
+    /// The bytes the label sets at `path` charge for, and the same figure walked in full.
+    ///
+    /// Test-only: the running total is only correct if folding one entry's change in agrees with
+    /// recounting the table, so a test compares the two after the table has changed shape.
+    #[cfg(test)]
+    fn emitted_charge_pair(&self, path: &NodePath) -> (usize, usize) {
+        let index = *self
+            .by_path
+            .get(path)
+            .expect("the path names a node of this tree");
+        self.runtimes[index]
+            .emitted
+            .as_ref()
+            .map_or((0, 0), |emitted| {
+                (emitted.bytes(), emitted.bytes_recomputed())
+            })
     }
 
     /// How many nodes still hold the state a window buffers into.

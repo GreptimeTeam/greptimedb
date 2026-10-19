@@ -1576,3 +1576,49 @@ fn a_window_over_an_interleaved_input_is_rejected() {
         ]
     );
 }
+
+/// The charge for the label sets a node has handed out does not depend on how it is read.
+///
+/// The table only grows, so the figure is folded in as each entry changes rather than walked after
+/// every output. Folding it wrong would show up as a running total that drifts from the same figure
+/// recounted in full, so both are compared after every chunk: distinct label sets add entries, and
+/// later chunks of one set grow its run vectors and the table's own capacity.
+#[test]
+fn the_emitted_charge_is_the_same_folded_in_as_walked() {
+    let grid = grid(0, 60_000, 4);
+    let tree =
+        NativeTree::try_new(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs])).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+
+    let chunks = [
+        ("a", "x", 0, vec![Some(-1.0), None, Some(-2.0), None], false),
+        ("a", "x", 0, vec![None, Some(-3.0), None, None], true),
+        ("b", "y", 0, vec![None, None, None, Some(-4.0)], true),
+        (
+            "c",
+            "z",
+            0,
+            vec![Some(-5.0), Some(-6.0), Some(-7.0), Some(-8.0)],
+            true,
+        ),
+    ];
+    for (name, job, start, values, is_last) in chunks {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric(name, job),
+                start,
+                values,
+                is_last,
+            ))
+            .unwrap();
+        while execution.next_chunk().unwrap().is_some() {}
+        let (folded, walked) = execution.state().emitted_charge_pair(&NodePath::root());
+        assert!(folded > 0, "the node handed out nothing to charge for");
+        assert_eq!(
+            folded, walked,
+            "the folded charge of {folded} bytes is not the {walked} bytes the table holds"
+        );
+    }
+}
