@@ -755,15 +755,15 @@ impl RegionServer {
                     async move { (region_ids, response.await) }.trace(span)
                 })
                 .collect::<FuturesUnordered<_>>();
+            let histogram =
+                crate::metrics::HANDLE_REGION_REQUEST_ELAPSED.with_label_values(&[request_type]);
             let mut result_tx = Some(result_tx);
             let mut affected_rows = 0;
             let mut extensions = HashMap::new();
             while let Some((region_ids, result)) = pending.next().await {
                 let elapsed = started.elapsed().as_secs_f64();
                 for _ in &region_ids {
-                    crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-                        .with_label_values(&[request_type])
-                        .observe(elapsed);
+                    histogram.observe(elapsed);
                 }
                 let result = result.context(HandleRegionRequestSnafu {
                     region_id: region_ids[0],
