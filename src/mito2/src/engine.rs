@@ -108,7 +108,8 @@ use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
-use futures::future::{join_all, try_join_all};
+use futures::FutureExt;
+use futures::future::{self, join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
 use region_hook::RegionHookRef;
@@ -122,14 +123,14 @@ use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
-    BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse, RegionEngine,
-    RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
-    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
-    SyncRegionFromRequest, SyncRegionFromResponse,
+    BatchPutResponse, BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
-    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
@@ -1405,6 +1406,46 @@ impl RegionEngine for MitoEngine {
             .await
             .map(map_batch_responses)
             .map_err(BoxedError::new)
+    }
+
+    /// Sends the puts to regions of the same worker in one message, so that the worker writes
+    /// them in one batch and one WAL append. The messages are sent on their own task, so every
+    /// response can be awaited at once.
+    fn handle_batch_put_requests(
+        self: Arc<Self>,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<BatchPutResponse> {
+        let mut writes = Vec::with_capacity(requests.len());
+        let mut responses = Vec::with_capacity(requests.len());
+        for (region_id, request) in requests {
+            let request = RegionRequest::Put(request);
+            let timer = HANDLE_REQUEST_ELAPSED
+                .with_label_values(&[request.request_type()])
+                .start_timer();
+            let region_metadata = self.inner.get_metadata(region_id).ok();
+            let response =
+                match WorkerRequest::try_from_region_request(region_id, request, region_metadata) {
+                    Ok((WorkerRequest::Write(write), receiver)) => {
+                        writes.push(write);
+                        async move {
+                            let _timer = timer;
+                            receiver
+                                .await
+                                .context(RecvSnafu)
+                                .flatten()
+                                .map(RegionResponse::new)
+                                .map_err(BoxedError::new)
+                        }
+                        .boxed()
+                    }
+                    Ok(_) => unreachable!("a put converts to a write"),
+                    Err(e) => future::ready(Err(BoxedError::new(e))).boxed(),
+                };
+            responses.push((vec![region_id], response));
+        }
+        let inner = self.inner.clone();
+        common_runtime::spawn_ingest(async move { inner.workers.submit_writes(writes).await });
+        responses
     }
 
     #[tracing::instrument(skip_all)]
