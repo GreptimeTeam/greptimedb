@@ -1622,3 +1622,51 @@ fn the_emitted_charge_is_the_same_folded_in_as_walked() {
         );
     }
 }
+
+/// Two series that each produce no value at all are not a collision: both answer empty, and the
+/// node hands nothing on rather than refusing the second one.
+///
+/// `rate` over a five-minute window with one sample in it has no result, in the single-point and
+/// the batch kernel alike. Both series then arrive as a closing chunk of missing values under the
+/// same label set -- `rate` drops the name -- but neither holds a sample, so there is nothing to
+/// report twice and nothing to merge.
+#[test]
+fn two_series_with_no_result_do_not_collide() {
+    let out = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        input(),
+        RangeFunction::Rate,
+        300_000,
+        None,
+        Arc::clone(&out),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+
+    // One sample each: rate over a 5m window with a single sample has no result.
+    for name in ["a", "b"] {
+        execution
+            .push_raw(raw_chunk_of(
+                &schema,
+                name.as_bytes(),
+                MetricName::try_new(Some(name.into()), vec![]).unwrap(),
+                &[0],
+                &[1.0],
+                true,
+            ))
+            .unwrap();
+    }
+    let mut handed = Vec::new();
+    loop {
+        match execution.next_chunk() {
+            Ok(Some(chunk)) => handed.push(decided(&[chunk])),
+            Ok(None) => break,
+            Err(error) => panic!("two empty series were refused: {error}"),
+        }
+    }
+    assert!(
+        handed.iter().flatten().all(|(_, value)| value.is_none()),
+        "a series with no result handed a value on: {handed:?}"
+    );
+}

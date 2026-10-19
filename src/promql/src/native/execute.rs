@@ -319,6 +319,13 @@ impl Emitted {
             .iter()
             .map(|field| occupied_runs(field, base))
             .collect();
+        // A series that produced no value at all owns nothing here: it hands out no sample under
+        // this label set, so recording it would refuse the next series that produces none either,
+        // and the answer to both is simply empty. Only a label set already holding values has to
+        // be marked closed when its last chunk arrives.
+        if occupied.iter().all(Vec::is_empty) && !self.sets.contains_key(&labels) {
+            return Ok(());
+        }
         if let Some(history) = self.sets.get(&labels) {
             if history.closed {
                 return Err(closed_label_set(path, &labels));
