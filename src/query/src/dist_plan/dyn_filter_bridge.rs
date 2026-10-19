@@ -24,7 +24,9 @@ use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_expr::expressions::{Column, DynamicFilterPhysicalExpr, Literal, lit};
+use datafusion_physical_expr::expressions::{
+    Column, DynamicFilterPhysicalExpr, InListExpr, Literal, lit,
+};
 use datafusion_physical_expr::scalar_subquery::ScalarSubqueryExpr;
 use datafusion_physical_expr::utils::collect_columns;
 use session::context::{QueryContext, QueryContextRef};
@@ -123,13 +125,19 @@ pub(crate) fn capture_remote_dyn_filters_for_pushdown(
 /// Returns true if `filter` references at least one scalar subquery and is otherwise
 /// built only from columns and literals, so it becomes a plain predicate once the
 /// subqueries are resolved.
+///
+/// Filters containing `IN` lists are rejected: an oversized payload replaces `IN` with
+/// `true`, which only widens a conjunction but can narrow an arbitrary predicate such as
+/// `(host IN (...)) = false`.
 fn is_scalar_subquery_filter(filter: &Arc<dyn PhysicalExpr>) -> bool {
     let mut has_scalar_subquery = false;
     let mut supported = true;
     let _ = filter.apply(|expr| {
         if expr.is::<ScalarSubqueryExpr>() {
             has_scalar_subquery = true;
-        } else if expr.children().is_empty() && !expr.is::<Column>() && !expr.is::<Literal>() {
+        } else if expr.is::<InListExpr>()
+            || (expr.children().is_empty() && !expr.is::<Column>() && !expr.is::<Literal>())
+        {
             supported = false;
             return Ok(TreeNodeRecursion::Stop);
         }
@@ -635,6 +643,44 @@ mod tests {
                 .producer_ordinal(),
             0
         );
+    }
+
+    #[test]
+    fn scalar_subquery_filter_with_in_list_is_left_to_parent() {
+        let results = ScalarSubqueryResults::new(1);
+        let schema = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "host",
+            arrow_schema::DataType::Utf8,
+            true,
+        )]);
+        let host_in_list = datafusion_physical_expr::expressions::in_list(
+            Arc::new(Column::new("host", 0)),
+            vec![lit("a"), lit("b")],
+            &false,
+            &schema,
+        )
+        .unwrap();
+        // `(host IN ('a', 'b')) = (SELECT flag ...)`
+        let filter = Arc::new(BinaryExpr::new(
+            host_in_list,
+            Operator::Eq,
+            Arc::new(ScalarSubqueryExpr::new(
+                arrow_schema::DataType::Boolean,
+                true,
+                SubqueryIndex::new(0),
+                results,
+            )),
+        )) as Arc<dyn PhysicalExpr>;
+
+        let pushdown = capture_remote_dyn_filters_for_pushdown(
+            test_remote_dyn_filter_producer_id(42),
+            0,
+            &[],
+            vec![filter],
+        );
+
+        assert_eq!(pushed_down(&pushdown), vec![false]);
+        assert!(pushdown.captured_dyn_filters.is_empty());
     }
 
     #[test]
