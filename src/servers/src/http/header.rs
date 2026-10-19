@@ -106,6 +106,9 @@ pub static CONTENT_ENCODING_SNAPPY: HeaderValue = HeaderValue::from_static("snap
 pub static CONTENT_TYPE_NDJSON_STR: &str = "application/x-ndjson";
 pub static CONTENT_TYPE_NDJSON_SUBTYPE_STR: &str = "x-ndjson";
 
+pub static CONTENT_TYPE_JSON_STREAM_STR: &str = "application/x-json-stream";
+pub static CONTENT_TYPE_JSON_STREAM_SUBTYPE_STR: &str = "x-json-stream";
+
 pub struct GreptimeDbName(Option<String>);
 
 impl Header for GreptimeDbName {

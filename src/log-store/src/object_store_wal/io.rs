@@ -181,6 +181,18 @@ impl ObjectStoreIo {
         )
     }
 
+    /// Describes the object store the objects live in by its scheme, its
+    /// bucket when it has one and its root, none of which is a credential.
+    pub(crate) fn storage(&self) -> String {
+        let info = self.store.info();
+        let name = info.name();
+        if name.is_empty() {
+            format!("{}, root {:?}", info.scheme(), info.root())
+        } else {
+            format!("{}, bucket {name:?}, root {:?}", info.scheme(), info.root())
+        }
+    }
+
     fn parse_object_seq(&self, path: &str) -> Option<u64> {
         let value = path
             .strip_prefix(&self.object_prefix)?

@@ -130,7 +130,6 @@ impl UpgradeRegionsHandler {
                 let UpgradeRegion {
                     last_entry_id,
                     metadata_last_entry_id,
-                    location_id,
                     replay_entry_id,
                     metadata_replay_entry_id,
                     replay_timeout,
@@ -161,7 +160,6 @@ impl UpgradeRegionsHandler {
                         set_writable: true,
                         entry_id: last_entry_id,
                         metadata_entry_id: metadata_last_entry_id,
-                        location_id,
                         checkpoint,
                     },
                 ));
@@ -314,6 +312,49 @@ mod tests {
         assert_eq!(replies[0].region_id, region_id);
         assert_eq!(replies[1].region_id, region_id2);
         for reply in replies {
+            assert!(reply.ready);
+            assert!(reply.exists);
+            assert!(reply.error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_legacy_wal_index_hint() {
+        for location_id in [None, Some(42)] {
+            let mock_region_server = mock_region_server();
+            let region_id = RegionId::new(1024, 1);
+            let (mock_engine, _) =
+                MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |engine| {
+                    engine.mock_role = Some(Some(RegionRole::Follower));
+                    engine.handle_request_mock_fn = Some(Box::new(|_, request| {
+                        let store_api::region_request::RegionRequest::Catchup(request) = request
+                        else {
+                            panic!("expected catchup request");
+                        };
+                        assert!(request.set_writable);
+                        assert_eq!(request.entry_id, Some(10));
+                        assert_eq!(request.metadata_entry_id, Some(5));
+                        Ok(0)
+                    }));
+                });
+            mock_region_server.register_test_region(region_id, mock_engine);
+            let ctx =
+                HandlerContext::new_for_test(mock_region_server, Arc::new(MemoryKvBackend::new()));
+            let reply = UpgradeRegionsHandler::new_test()
+                .handle(
+                    &ctx,
+                    vec![UpgradeRegion {
+                        region_id,
+                        last_entry_id: Some(10),
+                        metadata_last_entry_id: Some(5),
+                        location_id,
+                        replay_timeout: Duration::from_secs(1),
+                        ..Default::default()
+                    }],
+                )
+                .await
+                .unwrap();
+            let reply = &reply.expect_upgrade_regions_reply()[0];
             assert!(reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_none());

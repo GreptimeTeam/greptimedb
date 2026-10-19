@@ -415,11 +415,15 @@ jobs:
           REQUESTED_VALIDATION_POLICY: ${{ inputs.release_validation }}
         run: |
           set -euo pipefail
-          base_commit="${GITHUB_SHA}"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            base_commit="${GITHUB_SHA}^"
-          fi
-          previous_release_tag="$(git tag --merged "${base_commit}" --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          # Stable tags on older release branches are not ancestors of this
+          # commit. Pick the newest vX.Y.Z older than the version being released.
+          release_version="${{ needs.allocate-runners.outputs.version }}"
+          previous_release_tag="$(
+            git ls-remote --tags origin 'refs/tags/v*' \
+              | awk '{print $2}' \
+              | sed -e 's#^refs/tags/##' \
+              | python3 .github/scripts/previous-release-tag.py --version "${release_version}"
+          )"
           if [[ -z "${previous_release_tag}" ]]; then
             previous_release_tag="main"
           fi

@@ -294,6 +294,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to set COMPRESSION option"))]
+    SetCompressionOption {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Invalid partition number: {}, should be in range [2, 65536]",
         partition_num
@@ -405,6 +412,7 @@ impl ErrorExt for Error {
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
             SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
+            SetCompressionOption { source, .. } => source.status_code(),
         }
     }
 

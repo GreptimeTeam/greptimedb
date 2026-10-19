@@ -1,0 +1,63 @@
+SELECT * FROM legacy_payload ORDER BY ts;
+
++-------------------------+----------------+
+| ts                      | payload        |
++-------------------------+----------------+
+| 1970-01-01T00:00:00.001 | before upgrade |
++-------------------------+----------------+
+
+CREATE TABLE compressed_payload (
+    ts TIMESTAMP TIME INDEX,
+    payload STRING COMPRESSION WITH (level = 3, page_size = '64KiB')
+);
+
+Affected Rows: 0
+
+INSERT INTO compressed_payload SELECT * FROM legacy_payload;
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('compressed_payload');
+
++-----------------------------------------+
+| ADMIN FLUSH_TABLE('compressed_payload') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE compressed_payload;
+
++--------------------+--------------------------------------------------------------------------------------------+
+| Table              | Create Table                                                                               |
++--------------------+--------------------------------------------------------------------------------------------+
+| compressed_payload | CREATE TABLE IF NOT EXISTS "compressed_payload" (                                          |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                                                              |
+|                    |   "payload" STRING NULL COMPRESSION WITH(level = '3', page_size = '64KiB', type = 'zstd'), |
+|                    |   TIME INDEX ("ts")                                                                        |
+|                    | )                                                                                          |
+|                    |                                                                                            |
+|                    | ENGINE=mito                                                                                |
+|                    |                                                                                            |
++--------------------+--------------------------------------------------------------------------------------------+
+
+INSERT INTO compressed_payload VALUES (2, 'after restart');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('compressed_payload');
+
++-----------------------------------------+
+| ADMIN FLUSH_TABLE('compressed_payload') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+SELECT * FROM compressed_payload ORDER BY ts;
+
++-------------------------+----------------+
+| ts                      | payload        |
++-------------------------+----------------+
+| 1970-01-01T00:00:00.001 | before upgrade |
+| 1970-01-01T00:00:00.002 | after restart  |
++-------------------------+----------------+

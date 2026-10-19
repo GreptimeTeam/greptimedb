@@ -111,7 +111,8 @@ struct MockNode<T> {
 
 #[async_trait::async_trait]
 impl<T: MockDatanodeHandler> Datanode for MockNode<T> {
-    async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
+    async fn handle_request(&self, request: Arc<RegionRequest>) -> Result<RegionResponse> {
+        let request = Arc::try_unwrap(request).expect("mock request must be exclusively owned");
         self.handler.handle(&self.peer, request).await
     }
 
@@ -197,6 +198,9 @@ pub fn new_ddl_context_with_kv_backend(
                 .build(),
         )));
     DdlContext {
+        affinity_resolver: None,
+        affinity_fallback: Default::default(),
+        peer_alloc_context_provider: None,
         node_manager,
         cache_invalidator: Arc::new(DummyCacheInvalidator),
         memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),

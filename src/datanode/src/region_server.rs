@@ -13,6 +13,10 @@
 // limitations under the License.
 
 mod catalog;
+#[cfg(feature = "enterprise")]
+mod flow_write;
+#[cfg(feature = "enterprise")]
+use flow_write::TrackedPayload;
 mod registrations;
 mod remote_dyn_filter;
 
@@ -29,7 +33,8 @@ use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest, region_request,
+    ListMetadataRequest, RegionRequest as RegionRequestV1, RegionResponse as RegionResponseV1,
+    SyncRequest, region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -37,6 +42,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+#[cfg(feature = "enterprise")]
+use common_grpc::flow_write::{COMMAND_KEY, FlowWriteRegistry, Reply};
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
 use common_query::request::QueryRequest;
@@ -115,6 +122,8 @@ pub struct RegionServer {
     inner: Arc<RegionServerInner>,
     flight_compression: FlightCompression,
     suspend: Arc<AtomicBool>,
+    #[cfg(feature = "enterprise")]
+    flow_write_registry: Arc<FlowWriteRegistry<TrackedPayload, Reply>>,
 }
 
 pub struct RegionStat {
@@ -163,6 +172,8 @@ impl RegionServer {
             )),
             flight_compression,
             suspend: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "enterprise")]
+            flow_write_registry: Arc::new(FlowWriteRegistry::default()),
         }
     }
 
@@ -297,6 +308,17 @@ impl RegionServer {
         };
 
         let region_id = RegionId::from_u64(request.region_id);
+        let engine_ctx = self
+            .inner
+            .query_engine
+            .engine_context(query_ctx)
+            .map_err(|error| {
+                crate::error::InvalidQueryContextSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+        let query_ctx = engine_ctx.query_ctx();
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.clone(),
             region_id,
@@ -307,12 +329,7 @@ impl RegionServer {
             common_telemetry::info!("Handle remote read for region: {}", region_id);
         }
 
-        let decoder = self
-            .inner
-            .query_engine
-            .engine_context(query_ctx.clone())
-            .new_plan_decoder()
-            .context(NewPlanDecoderSnafu)?;
+        let decoder = engine_ctx.new_plan_decoder().context(NewPlanDecoderSnafu)?;
 
         let plan = decoder
             .decode(Bytes::from(request.plan), catalog_list, false)
@@ -925,6 +942,25 @@ impl Stream for RegionWatermarkStream {
 
 #[async_trait]
 impl RegionServerHandler for RegionServer {
+    async fn handle_region_request(
+        &self,
+        request: RegionRequestV1,
+    ) -> ServerResult<RegionResponseV1> {
+        #[cfg(feature = "enterprise")]
+        if request
+            .header
+            .as_ref()
+            .and_then(|header| header.query_context.as_ref())
+            .is_some_and(|context| context.extensions.contains_key(COMMAND_KEY))
+        {
+            return self.handle_flow_write_request(request).await;
+        }
+        let body = request.body.context(servers_error::InvalidQuerySnafu {
+            reason: "Expecting non-empty region request body.",
+        })?;
+        self.handle(body).await
+    }
+
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
         let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
             .with_label_values(&[request.as_ref()]);
@@ -1950,6 +1986,7 @@ impl RegionServerInner {
             .collect::<Vec<_>>();
         let num_regions = regions.len();
 
+        let mut first_error = None;
         for (region_id, engine) in regions {
             let closed = engine
                 .handle_request(
@@ -1959,7 +1996,15 @@ impl RegionServerInner {
                 .await;
             match closed {
                 Ok(_) => debug!("Region {region_id} is closed"),
-                Err(e) => warn!("Failed to close region {region_id}, err: {e}"),
+                Err(e) => {
+                    // A close that failed may not have flushed writes that
+                    // skipped the WAL, which nothing replays.
+                    error!(e; "Failed to close region {region_id}; writes that skipped the WAL may be lost");
+                    record_shutdown_error(
+                        &mut first_error,
+                        Err(e).context(HandleRegionRequestSnafu { region_id }),
+                    );
+                }
             }
         }
         self.region_map.clear();
@@ -1967,7 +2012,6 @@ impl RegionServerInner {
 
         drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
-        let mut first_error = None;
         for (engine_name, engine) in engines {
             let result = engine
                 .stop()
@@ -2501,6 +2545,47 @@ mod tests {
 
         let status = mock_region_server.inner.region_map.get(&region_id);
         assert!(status.is_some());
+    }
+
+    /// A region that fails to close is reported in the result of the stop,
+    /// which still closes the other regions.
+    #[tokio::test]
+    async fn test_stop_reports_a_region_that_failed_to_close() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let failing = RegionId::new(1, 1);
+        let closing = RegionId::new(1, 2);
+        let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(MITO_ENGINE_NAME, {
+            let closed = closed.clone();
+            Box::new(move |region_id, request| {
+                if matches!(request, RegionRequest::Close(_)) {
+                    closed.lock().unwrap().push(region_id);
+                    if region_id == failing {
+                        return error::UnexpectedSnafu {
+                            violated: "close failed".to_string(),
+                        }
+                        .fail();
+                    }
+                }
+                Ok(0)
+            })
+        });
+        mock_region_server.register_engine(engine.clone());
+        for region_id in [failing, closing] {
+            mock_region_server
+                .inner
+                .region_map
+                .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
+        }
+
+        let err = mock_region_server.stop().await.unwrap_err();
+
+        assert_matches!(err, error::Error::HandleRegionRequest { region_id, .. } if region_id == failing);
+        let mut closed = closed.lock().unwrap().clone();
+        closed.sort();
+        assert_eq!(vec![failing, closing], closed);
     }
 
     #[tokio::test]

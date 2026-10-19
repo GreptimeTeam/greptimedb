@@ -63,7 +63,7 @@ use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
-use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
+use crate::region::version::{Version, VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
     ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
     RegionStats,
@@ -360,6 +360,9 @@ impl RegionOpener {
                     region_dir, self.region_id
                 );
             }
+            // The region exists but the WAL does not hold its history:
+            // creating it again would replace its manifest.
+            Err(e @ error::Error::CheckWalHistory { .. }) => return Err(e),
             Err(e) => {
                 warn!(e;
                     "Failed to open region {} before creating it, region_dir: {}",
@@ -384,6 +387,12 @@ impl RegionOpener {
             FormatType::PrimaryKey
         };
         ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        options.validate_column_compression(&metadata)?;
+        // The region's WAL history starts in this log store, so reopening
+        // the region on it passes the history check without any entry. It is
+        // recorded before the manifest exists: a log store that gave up its
+        // history meanwhile fails the create before it leaves a manifest.
+        wal.start_region_history(region_id, &provider)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
             RegionManifestOptions::new(config, &region_dir, &object_store);
@@ -501,6 +510,8 @@ impl RegionOpener {
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
+    /// A region it replays must find its WAL history in the log store, see
+    /// [`check_wal_history`].
     async fn maybe_open<S: LogStore>(
         &mut self,
         config: &MitoConfig,
@@ -539,13 +550,14 @@ impl RegionOpener {
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
         ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
+        region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
         let wal_entry_reader = self
             .wal_entry_reader
             .take()
-            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id, None));
+            .unwrap_or_else(|| wal.wal_entry_reader(&provider, region_id));
         let on_region_opened = wal.on_region_opened();
         let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
 
@@ -603,6 +615,7 @@ impl RegionOpener {
             .unwrap_or_default()
             .max(flushed_entry_id);
         let topic_latest_entry_id = if !self.skip_wal_replay {
+            check_wal_history(wal, &provider, &version_control.current().version).await?;
             info!(
                 "Start replaying memtable at replay_from_entry_id: {} for region {}, manifest version: {}, flushed entry id: {}, elapsed: {:?}",
                 replay_from_entry_id,
@@ -905,6 +918,25 @@ pub(crate) fn check_recovered_region(
     }
 
     Ok(())
+}
+
+/// Checks that the log store holds the WAL history of a region that writes
+/// to the WAL through the largest replay watermark `version` persisted,
+/// before the region is replayed. A region that skips the WAL keeps no
+/// history there.
+pub(crate) async fn check_wal_history<S: LogStore>(
+    wal: &Wal<S>,
+    provider: &Provider,
+    version: &Version,
+) -> Result<()> {
+    if version.options.skip_wal {
+        return Ok(());
+    }
+    let watermark = version
+        .flushed_entry_id
+        .max(version.truncated_entry_id.unwrap_or_default());
+    wal.check_region_history(version.metadata.region_id, provider, watermark)
+        .await
 }
 
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.

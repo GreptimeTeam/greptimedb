@@ -836,7 +836,7 @@ impl ScanbenchCommand {
             }
             ScanbenchLogStore::Kafka(kafka_config) => {
                 let log_store = Arc::new(
-                    KafkaLogStore::try_new(kafka_config, None)
+                    KafkaLogStore::try_new(kafka_config)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::BuildCliSnafu)?,

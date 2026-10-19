@@ -470,13 +470,13 @@ pub(crate) mod test_hooks {
         release: watch::Sender<bool>,
     }
 
-    static ACTIVE_BARRIER: Mutex<Option<ActiveBarrier>> = Mutex::new(None);
+    static ACTIVE_BARRIERS: Mutex<Vec<ActiveBarrier>> = Mutex::new(Vec::new());
     static NEXT_BARRIER_ID: AtomicU64 = AtomicU64::new(1);
 
-    fn lock_active_barrier() -> std::sync::MutexGuard<'static, Option<ActiveBarrier>> {
+    fn lock_active_barriers() -> std::sync::MutexGuard<'static, Vec<ActiveBarrier>> {
         // Never let a poisoned mutex (e.g. a panic in another test while
         // holding the lock) hang or break unrelated tests.
-        ACTIVE_BARRIER
+        ACTIVE_BARRIERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -513,8 +513,8 @@ pub(crate) mod test_hooks {
         }
     }
 
-    /// Arms the bulk-install barrier and returns the owning guard; any
-    /// previously armed barrier is replaced.
+    /// Arms a bulk-install barrier for the target and returns the owning
+    /// guard; barriers of concurrently running tests stay independent.
     pub(crate) fn arm_bulk_install_barrier(
         target_region_id: RegionId,
         target_version_control: VersionControlRef,
@@ -522,8 +522,7 @@ pub(crate) mod test_hooks {
         let (reached_tx, reached_rx) = watch::channel(false);
         let (release_tx, _release_rx) = watch::channel(false);
         let id = NEXT_BARRIER_ID.fetch_add(1, Ordering::Relaxed);
-        let mut active = lock_active_barrier();
-        *active = Some(ActiveBarrier {
+        lock_active_barriers().push(ActiveBarrier {
             id,
             target_region_id,
             target_version_control,
@@ -539,10 +538,7 @@ pub(crate) mod test_hooks {
     }
 
     fn disarm_barrier(id: u64) {
-        let mut active = lock_active_barrier();
-        if active.as_ref().is_some_and(|barrier| barrier.id == id) {
-            *active = None;
-        }
+        lock_active_barriers().retain(|barrier| barrier.id != id);
     }
 
     /// Pauses a bulk write before installing its parts until the barrier is
@@ -552,19 +548,14 @@ pub(crate) mod test_hooks {
         version_control: &VersionControlRef,
     ) {
         let (reached_tx, release_rx) = {
-            let active = lock_active_barrier();
-            match active.as_ref() {
-                Some(barrier)
-                    if barrier.target_region_id == region_id
-                        && std::sync::Arc::ptr_eq(
-                            &barrier.target_version_control,
-                            version_control,
-                        ) =>
-                {
-                    (barrier.reached.clone(), barrier.release.subscribe())
-                }
-                _ => return,
-            }
+            let active = lock_active_barriers();
+            let Some(barrier) = active.iter().find(|barrier| {
+                barrier.target_region_id == region_id
+                    && std::sync::Arc::ptr_eq(&barrier.target_version_control, version_control)
+            }) else {
+                return;
+            };
+            (barrier.reached.clone(), barrier.release.subscribe())
         };
         let _ = reached_tx.send(true);
         let mut release_rx = release_rx;

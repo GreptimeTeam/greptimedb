@@ -399,6 +399,18 @@ memory_pool_size = "50%"
 #+ experimental_spill_compression = "uncompressed"
 # --- End spill-to-disk ---
 
+## Retry retryable distributed write failures.
+## Backoff grows exponentially, with jitter to spread concurrent retries.
+[write_retry]
+## Maximum retries after the initial write attempt. Set to 0 to disable retries.
+max_retries = 3
+## Initial backoff before jitter is applied. Must be positive.
+initial_backoff = "1500ms"
+## Maximum backoff before jitter is applied. Must be at least initial_backoff.
+max_backoff = "10s"
+## Backoff multiplier. Must be finite and at least 1.
+backoff_multiplier = 2.0
+
 ## Datanode options.
 [datanode]
 ## Datanode client options.
@@ -501,6 +513,10 @@ enable_heap_profiling = true
 ## Time to live of the frontend-local pipeline cache. A pipeline created or deleted on
 ## another frontend takes effect on this one after at most this duration.
 cache_ttl = "10s"
+## Allow VRL to access the server environment, filesystem, hostname, local timezone,
+## network, and logs. Default is false. Enable only for trusted pipeline authors.
+## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
+allow_vrl_host_access = false
 
 ## Configuration options for the event recorder.
 [event_recorder]

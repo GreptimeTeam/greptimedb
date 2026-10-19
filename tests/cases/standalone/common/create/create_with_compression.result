@@ -1,0 +1,230 @@
+CREATE TABLE spans (
+    ts TIMESTAMP TIME INDEX,
+    trace_id STRING SKIPPING INDEX,
+    prompt STRING COMPRESSION WITH (type = 'zstd', level = 3, page_size = '8MiB'),
+    reply STRING COMPRESSION WITH (level = 9, encoding = 'plain'),
+    tokens BIGINT COMPRESSION WITH (page_size = '64KiB', encoding = 'delta_binary_packed'),
+) WITH (append_mode = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE spans;
+
++-------+--------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                       |
++-------+--------------------------------------------------------------------------------------------------------------------+
+| spans | CREATE TABLE IF NOT EXISTS "spans" (                                                                               |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                      |
+|       |   "trace_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'), |
+|       |   "prompt" STRING NULL COMPRESSION WITH(level = '3', page_size = '8MiB', type = 'zstd'),                           |
+|       |   "reply" STRING NULL COMPRESSION WITH(encoding = 'plain', level = '9', type = 'zstd'),                            |
+|       |   "tokens" BIGINT NULL COMPRESSION WITH(encoding = 'delta_binary_packed', page_size = '64KiB', type = 'zstd'),     |
+|       |   TIME INDEX ("ts")                                                                                                |
+|       | )                                                                                                                  |
+|       |                                                                                                                    |
+|       | ENGINE=mito                                                                                                        |
+|       | WITH(                                                                                                              |
+|       |   append_mode = 'true'                                                                                             |
+|       | )                                                                                                                  |
++-------+--------------------------------------------------------------------------------------------------------------------+
+
+INSERT INTO spans VALUES
+    (1, 't1', 'fix the flaky test', 'running it', 120),
+    (2, 't1', 'fix the flaky test\nrunning it', 'patched', 340),
+    (3, 't2', 'another prompt', NULL, NULL);
+
+Affected Rows: 3
+
+ADMIN flush_table('spans');
+
++----------------------------+
+| ADMIN flush_table('spans') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+SELECT ts, trace_id, prompt, reply, tokens FROM spans ORDER BY ts;
+
++-------------------------+----------+--------------------------------+------------+--------+
+| ts                      | trace_id | prompt                         | reply      | tokens |
++-------------------------+----------+--------------------------------+------------+--------+
+| 1970-01-01T00:00:00.001 | t1       | fix the flaky test             | running it | 120    |
+| 1970-01-01T00:00:00.002 | t1       | fix the flaky test\nrunning it | patched    | 340    |
+| 1970-01-01T00:00:00.003 | t2       | another prompt                 |            |        |
++-------------------------+----------+--------------------------------+------------+--------+
+
+ALTER TABLE spans MODIFY COLUMN tokens STRING;
+
+Error: 1004(InvalidArguments), Invalid compression option: encoding delta_binary_packed requires an integer or timestamp column, but column tokens is String
+
+DROP TABLE spans;
+
+Affected Rows: 0
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level = 0));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid level: 0, expected: an integer in 1..=22
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (type = 'lz4'));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid type: lz4, expected: 'zstd'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (page_size = 'large'));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid page_size: large, expected: a positive size such as '8MiB'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (codec = 'zstd'));
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: invalid COMPRESSION option: codec
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (encoding = 'dictionary'));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid encoding: dictionary, expected: 'plain' or 'delta_binary_packed'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (encoding = 'delta_binary_packed'));
+
+Error: 1004(InvalidArguments), Invalid compression option: encoding delta_binary_packed requires an integer or timestamp column, but column s is String
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, j JSON2 COMPRESSION WITH (level = 3));
+
+Error: 1004(InvalidArguments), Invalid compression option: compression options are not supported on column j of type Json2"<Null>"
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level = [3]));
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: COMPRESSION option level requires a scalar value
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (page_size = NULL));
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: COMPRESSION option page_size requires a scalar value
+
+CREATE TABLE bad (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
+) WITH ('sst_format' = 'primary_key', 'memtable.type' = 'time_series');
+
+Error: 1004(InvalidArguments), Invalid region options, COMPRESSION on tag column host requires flat SST format and dense primary key encoding
+
+CREATE TABLE bad (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
+) WITH ('primary_key_encoding' = 'sparse');
+
+Error: 1004(InvalidArguments), Invalid region options, COMPRESSION on tag column host requires flat SST format and dense primary key encoding
+
+CREATE TABLE compressed_tags (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3, page_size = '64KiB'),
+    val DOUBLE
+) WITH ('sst_format' = 'flat', 'primary_key_encoding' = 'dense');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE compressed_tags;
+
++-----------------+-----------------------------------------------------------------------------------------+
+| Table           | Create Table                                                                            |
++-----------------+-----------------------------------------------------------------------------------------+
+| compressed_tags | CREATE TABLE IF NOT EXISTS "compressed_tags" (                                          |
+|                 |   "ts" TIMESTAMP(3) NOT NULL,                                                           |
+|                 |   "host" STRING NULL COMPRESSION WITH(level = '3', page_size = '64KiB', type = 'zstd'), |
+|                 |   "val" DOUBLE NULL,                                                                    |
+|                 |   TIME INDEX ("ts"),                                                                    |
+|                 |   PRIMARY KEY ("host")                                                                  |
+|                 | )                                                                                       |
+|                 |                                                                                         |
+|                 | ENGINE=mito                                                                             |
+|                 | WITH(                                                                                   |
+|                 |   primary_key_encoding = 'dense',                                                       |
+|                 |   sst_format = 'flat'                                                                   |
+|                 | )                                                                                       |
++-----------------+-----------------------------------------------------------------------------------------+
+
+INSERT INTO compressed_tags VALUES (1, 'host-a', 1), (2, 'host-b', 2);
+
+Affected Rows: 2
+
+ADMIN flush_table('compressed_tags');
+
++--------------------------------------+
+| ADMIN flush_table('compressed_tags') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT * FROM compressed_tags ORDER BY ts;
+
++-------------------------+--------+-----+
+| ts                      | host   | val |
++-------------------------+--------+-----+
+| 1970-01-01T00:00:00.001 | host-a | 1.0 |
+| 1970-01-01T00:00:00.002 | host-b | 2.0 |
++-------------------------+--------+-----+
+
+DROP TABLE compressed_tags;
+
+Affected Rows: 0
+
+CREATE TABLE compression_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 3)
+) ENGINE = metric WITH (physical_metric_table = '');
+
+Affected Rows: 0
+
+CREATE TABLE compression_conflict (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 9)
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Error: 1004(InvalidArguments), Unexpected request: COMPRESSION is not supported on logical tables; configure it on the physical table
+
+CREATE TABLE compression_same (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 3)
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Error: 1004(InvalidArguments), Unexpected request: COMPRESSION is not supported on logical tables; configure it on the physical table
+
+CREATE TABLE compression_new_tag (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3),
+    val DOUBLE
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Error: 1004(InvalidArguments), Unexpected request: COMPRESSION is not supported on logical tables; configure it on the physical table
+
+CREATE TABLE compression_logical (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Affected Rows: 0
+
+INSERT INTO compression_logical VALUES (1, 42);
+
+Affected Rows: 1
+
+ADMIN flush_table('compression_phy');
+
++--------------------------------------+
+| ADMIN flush_table('compression_phy') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT * FROM compression_logical;
+
++-------------------------+------+
+| ts                      | val  |
++-------------------------+------+
+| 1970-01-01T00:00:00.001 | 42.0 |
++-------------------------+------+
+
+DROP TABLE compression_logical;
+
+Affected Rows: 0
+
+DROP TABLE compression_phy;
+
+Affected Rows: 0
+

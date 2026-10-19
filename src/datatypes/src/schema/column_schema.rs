@@ -20,6 +20,7 @@ use arrow::datatypes::Field;
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
 use sqlparser_derive::{Visit, VisitMut};
@@ -48,6 +49,8 @@ pub const FULLTEXT_KEY: &str = "greptime:fulltext";
 pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
 /// Key used to store skip options in arrow field's metadata.
 pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
+/// Key used to store SST compression options in arrow field's metadata.
+pub const COMPRESSION_KEY: &str = "greptime:compression";
 
 /// Keys used in fulltext options
 pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
@@ -61,6 +64,12 @@ pub const COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE: &str = "false_positive_ra
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE: &str = "false_positive_rate";
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
+
+/// Keys used in compression options
+pub const COLUMN_COMPRESSION_OPT_KEY_TYPE: &str = "type";
+pub const COLUMN_COMPRESSION_OPT_KEY_LEVEL: &str = "level";
+pub const COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE: &str = "page_size";
+pub const COLUMN_COMPRESSION_OPT_KEY_ENCODING: &str = "encoding";
 
 pub const DEFAULT_GRANULARITY: u32 = 10240;
 
@@ -424,6 +433,59 @@ impl ColumnSchema {
 
     pub fn unset_skipping_options(&mut self) -> Result<()> {
         self.metadata.remove(SKIPPING_INDEX_KEY);
+        Ok(())
+    }
+
+    /// Retrieves the SST compression options for the column.
+    pub fn compression_options(&self) -> Result<Option<CompressionOptions>> {
+        match self.metadata.get(COMPRESSION_KEY) {
+            None => Ok(None),
+            Some(json) => {
+                let options = serde_json::from_str(json).map_err(|e| {
+                    error::InvalidCompressionOptionSnafu {
+                        msg: format!("invalid compression metadata for column {}: {e}", self.name),
+                    }
+                    .build()
+                })?;
+                self.validate_compression_options(&options)?;
+                Ok(Some(options))
+            }
+        }
+    }
+
+    /// Sets the SST compression options. Nested types are rejected: their values are
+    /// stored in child columns that the options would not reach.
+    pub fn with_compression_options(mut self, options: CompressionOptions) -> Result<Self> {
+        self.validate_compression_options(&options)?;
+        self.metadata.insert(
+            COMPRESSION_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
+
+    fn validate_compression_options(&self, options: &CompressionOptions) -> Result<()> {
+        options.validate()?;
+        ensure!(
+            !self.data_type.as_arrow_type().is_nested(),
+            error::InvalidCompressionOptionSnafu {
+                msg: format!(
+                    "compression options are not supported on column {} of type {}",
+                    self.name, self.data_type
+                ),
+            }
+        );
+        if options.encoding == Some(ColumnEncoding::DeltaBinaryPacked) {
+            ensure!(
+                self.data_type.is_timestamp() || self.data_type.as_arrow_type().is_integer(),
+                error::InvalidCompressionOptionSnafu {
+                    msg: format!(
+                        "encoding delta_binary_packed requires an integer or timestamp column, but column {} is {}",
+                        self.name, self.data_type
+                    ),
+                }
+            );
+        }
         Ok(())
     }
 
@@ -952,6 +1014,182 @@ impl fmt::Display for SkippingIndexType {
     }
 }
 
+/// Compression algorithms for SST columns.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionType {
+    #[default]
+    Zstd,
+}
+
+impl fmt::Display for CompressionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompressionType::Zstd => write!(f, "zstd"),
+        }
+    }
+}
+
+/// Parquet value encodings for SST columns. Both replace the default dictionary encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnEncoding {
+    Plain,
+    /// Only valid for integer and timestamp columns.
+    DeltaBinaryPacked,
+}
+
+impl fmt::Display for ColumnEncoding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ColumnEncoding::Plain => write!(f, "plain"),
+            ColumnEncoding::DeltaBinaryPacked => write!(f, "delta_binary_packed"),
+        }
+    }
+}
+
+/// Parquet compression settings for a column in SSTs. Unset fields keep the SST defaults.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompressionOptions {
+    #[serde(rename = "type", default)]
+    pub compression_type: CompressionType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<ReadableSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<ColumnEncoding>,
+}
+
+impl CompressionOptions {
+    fn validate(&self) -> Result<()> {
+        if let Some(level) = self.level {
+            ensure!(
+                ZSTD_LEVELS.contains(&level),
+                error::InvalidCompressionOptionSnafu {
+                    msg: format!("invalid level: {level}, expected: an integer in 1..=22"),
+                }
+            );
+        }
+        if let Some(page_size) = self.page_size {
+            ensure!(
+                page_size.as_bytes() > 0,
+                error::InvalidCompressionOptionSnafu {
+                    msg: "page_size must be positive",
+                }
+            );
+        }
+        Ok(())
+    }
+
+    /// Returns the options as `COMPRESSION WITH (...)` key-value pairs.
+    pub fn to_options_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::from([(
+            COLUMN_COMPRESSION_OPT_KEY_TYPE.to_string(),
+            self.compression_type.to_string(),
+        )]);
+        if let Some(level) = self.level {
+            map.insert(
+                COLUMN_COMPRESSION_OPT_KEY_LEVEL.to_string(),
+                level.to_string(),
+            );
+        }
+        if let Some(page_size) = self.page_size {
+            // `Display` rounds to one decimal; the serde form is exact and parses back.
+            let page_size = match serde_json::to_value(page_size) {
+                Ok(serde_json::Value::String(size)) => size,
+                _ => page_size.as_bytes().to_string(),
+            };
+            map.insert(COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE.to_string(), page_size);
+        }
+        if let Some(encoding) = self.encoding {
+            map.insert(
+                COLUMN_COMPRESSION_OPT_KEY_ENCODING.to_string(),
+                encoding.to_string(),
+            );
+        }
+        map
+    }
+}
+
+/// Valid zstd levels, as accepted by the parquet writer.
+const ZSTD_LEVELS: std::ops::RangeInclusive<i32> = 1..=22;
+
+impl TryFrom<HashMap<String, String>> for CompressionOptions {
+    type Error = Error;
+
+    fn try_from(options: HashMap<String, String>) -> Result<Self> {
+        let compression_type = match options.get(COLUMN_COMPRESSION_OPT_KEY_TYPE) {
+            Some(value) if value.eq_ignore_ascii_case("zstd") => CompressionType::Zstd,
+            Some(value) => {
+                return error::InvalidCompressionOptionSnafu {
+                    msg: format!("invalid type: {value}, expected: 'zstd'"),
+                }
+                .fail();
+            }
+            None => CompressionType::default(),
+        };
+
+        let level = options
+            .get(COLUMN_COMPRESSION_OPT_KEY_LEVEL)
+            .map(|value| {
+                value
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|level| ZSTD_LEVELS.contains(level))
+                    .ok_or_else(|| {
+                        error::InvalidCompressionOptionSnafu {
+                            msg: format!(
+                                "invalid level: {value}, expected: an integer in {}..={}",
+                                ZSTD_LEVELS.start(),
+                                ZSTD_LEVELS.end()
+                            ),
+                        }
+                        .build()
+                    })
+            })
+            .transpose()?;
+
+        let page_size = options
+            .get(COLUMN_COMPRESSION_OPT_KEY_PAGE_SIZE)
+            .map(|value| {
+                ReadableSize::from_str(value)
+                    .ok()
+                    .filter(|size| size.as_bytes() > 0)
+                    .ok_or_else(|| {
+                        error::InvalidCompressionOptionSnafu {
+                            msg: format!(
+                                "invalid page_size: {value}, expected: a positive size such as '8MiB'"
+                            ),
+                        }
+                        .build()
+                    })
+            })
+            .transpose()?;
+
+        let encoding = options
+            .get(COLUMN_COMPRESSION_OPT_KEY_ENCODING)
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "plain" => Ok(ColumnEncoding::Plain),
+                "delta_binary_packed" => Ok(ColumnEncoding::DeltaBinaryPacked),
+                _ => error::InvalidCompressionOptionSnafu {
+                    msg: format!(
+                        "invalid encoding: {value}, expected: 'plain' or 'delta_binary_packed'"
+                    ),
+                }
+                .fail(),
+            })
+            .transpose()?;
+
+        Ok(CompressionOptions {
+            compression_type,
+            level,
+            page_size,
+            encoding,
+        })
+    }
+}
+
 impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
     type Error = Error;
 
@@ -1321,6 +1559,138 @@ mod tests {
         assert!(!column_schema.is_time_index);
         assert!(column_schema.default_constraint.is_none());
         assert!(column_schema.metadata.is_empty());
+    }
+
+    #[test]
+    fn test_compression_options_from_map() {
+        let parse = |pairs: &[(&str, &str)]| {
+            CompressionOptions::try_from(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<HashMap<_, _>>(),
+            )
+        };
+
+        let options = parse(&[("type", "ZSTD"), ("level", "3"), ("page_size", "8MiB")]).unwrap();
+        assert_eq!(
+            CompressionOptions {
+                compression_type: CompressionType::Zstd,
+                level: Some(3),
+                page_size: Some(ReadableSize::mb(8)),
+                encoding: None,
+            },
+            options
+        );
+        // Stored in column metadata; this format must stay readable.
+        assert_eq!(
+            r#"{"type":"zstd","level":3,"page_size":"8MiB"}"#,
+            serde_json::to_string(&options).unwrap()
+        );
+        assert_eq!(
+            options,
+            parse(
+                &options
+                    .to_options_map()
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+        );
+
+        let odd_size = parse(&[("page_size", "1.25MiB")]).unwrap();
+        assert_eq!(
+            odd_size,
+            parse(&[("page_size", odd_size.to_options_map()["page_size"].as_str())]).unwrap()
+        );
+
+        let page_only = parse(&[("page_size", "1MiB")]).unwrap();
+        assert_eq!(None, page_only.level);
+        assert_eq!(
+            r#"{"type":"zstd","page_size":"1MiB"}"#,
+            serde_json::to_string(&page_only).unwrap()
+        );
+
+        let delta = parse(&[("encoding", "DELTA_BINARY_PACKED")]).unwrap();
+        assert_eq!(Some(ColumnEncoding::DeltaBinaryPacked), delta.encoding);
+        assert_eq!(
+            r#"{"type":"zstd","encoding":"delta_binary_packed"}"#,
+            serde_json::to_string(&delta).unwrap()
+        );
+        assert_eq!(
+            delta,
+            parse(&[("encoding", delta.to_options_map()["encoding"].as_str())]).unwrap()
+        );
+
+        for invalid in [
+            &[("type", "lz4")][..],
+            &[("level", "0")],
+            &[("level", "23")],
+            &[("level", "high")],
+            &[("page_size", "0")],
+            &[("page_size", "large")],
+            &[("encoding", "dictionary")],
+        ] {
+            assert!(parse(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn test_compression_options_reject_nested_types() {
+        let options = CompressionOptions {
+            level: Some(3),
+            ..Default::default()
+        };
+        let string_column = ColumnSchema::new("s", ConcreteDataType::string_datatype(), true)
+            .with_compression_options(options)
+            .unwrap();
+        assert_eq!(Some(options), string_column.compression_options().unwrap());
+
+        let struct_type =
+            ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![StructField::new(
+                "a".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )])));
+        let list_type =
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype()));
+        for data_type in [struct_type, list_type] {
+            assert!(
+                ColumnSchema::new("n", data_type, true)
+                    .with_compression_options(options)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_delta_encoding_requires_integer_or_timestamp() {
+        let options = CompressionOptions {
+            encoding: Some(ColumnEncoding::DeltaBinaryPacked),
+            ..Default::default()
+        };
+        for data_type in [
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+        ] {
+            assert!(
+                ColumnSchema::new("c", data_type, true)
+                    .with_compression_options(options)
+                    .is_ok()
+            );
+        }
+        for data_type in [
+            ConcreteDataType::string_datatype(),
+            ConcreteDataType::float64_datatype(),
+        ] {
+            assert!(
+                ColumnSchema::new("c", data_type, true)
+                    .with_compression_options(options)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

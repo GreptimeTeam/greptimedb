@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+mod flow_write;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -19,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
-use api::v1::column_def::{options_from_skipping, try_as_column_def};
+use api::v1::column_def::{options_from_compression, options_from_skipping, try_as_column_def};
 use api::v1::region::{
     InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
     RegionRequestHeader,
@@ -32,10 +35,11 @@ use api::v1::{
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
+use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, TRACE_ID_COLUMN,
-    TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY, default_engine, is_ddl_reserved_table,
-    trace_operations_table_name, trace_services_table_name,
+    DEFAULT_PRIVATE_SCHEMA_NAME, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
+    TIMESTAMP_END_COLUMN, TRACE_ID_COLUMN, TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY,
+    default_engine, is_ddl_reserved_table, trace_operations_table_name, trace_services_table_name,
 };
 use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
 use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
@@ -52,7 +56,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
-use datatypes::schema::SkippingIndexOptions;
+use datatypes::schema::{ColumnEncoding, CompressionOptions, SkippingIndexOptions};
 use futures_util::future;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
@@ -67,8 +71,8 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
-    TWCS_TIME_WINDOW,
+    APPEND_MODE_KEY, COMPACTION_OPTION_KEYS, COMPACTION_TWCS_PREFIX, COMPACTION_TYPE,
+    COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
@@ -80,6 +84,7 @@ use table::requests::{
     validate_semantic_option,
 };
 use table::table_reference::TableReference;
+use tokio_util::sync::CancellationToken;
 
 use crate::batcher::PendingRowsBatcher;
 use crate::error::{
@@ -838,15 +843,60 @@ impl Inserter {
             has_instant_rows,
         )?;
 
+        // Tracked Flow children use a same-capability write protocol. Keep the
+        // ordinary dispatch path unchanged for every other request.
+        #[cfg(feature = "enterprise")]
+        if flow_write::is_child(ctx) {
+            let dispatcher = self.write_dispatcher.clone();
+            let request = request_factory.build_insert(normal_requests);
+            let writes = dispatcher.prepare(vec![request]).await?;
+            let tracked_tasks = writes.into_iter().map(|(peer, mut request)| {
+                let mut query_context = crate::utils::to_meta_query_context(ctx.clone());
+                query_context.extensions.insert(
+                    common_grpc::flow_write::CHILD_KEY.to_string(),
+                    "1".to_string(),
+                );
+                if let Some(header) = request.header.as_mut() {
+                    header.query_context = Some(query_context.into());
+                }
+                let node_manager = self.node_manager.clone();
+                async move { flow_write::dispatch(&node_manager, &peer, request).await }
+            });
+            let results = future::join_all(tracked_tasks).await;
+            let mut affected_rows = 0;
+            let mut first_error = None;
+            for result in results {
+                match result {
+                    Ok(response) => affected_rows += response.affected_rows,
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            crate::metrics::DIST_INGEST_ROW_COUNT
+                .with_label_values(&[ctx.get_db_string().as_str()])
+                .inc_by(affected_rows as u64);
+            return Ok(Output::new(
+                OutputData::AffectedRows(affected_rows),
+                OutputMeta::new_with_cost(write_cost as _),
+            ));
+        }
+
         let dispatcher = self.write_dispatcher.clone();
         let request = request_factory.build_insert(normal_requests);
         let writes = dispatcher.prepare(vec![request]).await?;
-        let affected_rows =
-            common_runtime::spawn_global(async move { dispatcher.execute(writes, None).await })
-                .await
-                .context(JoinTaskSnafu)?
-                .context(RequestInsertsSnafu)?
-                .affected_rows;
+        // Dropping the caller stops retries without abandoning in-flight writes.
+        let cancellation = CancellationToken::new();
+        let _guard = cancellation.clone().drop_guard();
+        let affected_rows = common_runtime::spawn_global(async move {
+            dispatcher.execute(writes, None, Some(&cancellation)).await
+        })
+        .await
+        .context(JoinTaskSnafu)?
+        .context(RequestInsertsSnafu)?
+        .affected_rows;
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);
@@ -1313,6 +1363,38 @@ impl Inserter {
                                     "Column {} not found when creating index for trace table: {}.",
                                     index_column, create_table.table_name
                                 );
+                            }
+                        }
+
+                        // Span ids and end timestamps rarely repeat within an SST, so a
+                        // dictionary costs more than it saves. Small span id pages let
+                        // lookups by trace id decode only the pages holding matched rows.
+                        let id_compression = CompressionOptions {
+                            encoding: Some(ColumnEncoding::Plain),
+                            page_size: Some(ReadableSize::kb(64)),
+                            ..Default::default()
+                        };
+                        let compressed_columns = [
+                            (SPAN_ID_COLUMN, id_compression),
+                            (PARENT_SPAN_ID_COLUMN, id_compression),
+                            (
+                                TIMESTAMP_END_COLUMN,
+                                CompressionOptions {
+                                    encoding: Some(ColumnEncoding::DeltaBinaryPacked),
+                                    ..Default::default()
+                                },
+                            ),
+                        ];
+                        for (name, compression) in compressed_columns {
+                            if let Some(col) =
+                                create_table.column_defs.iter_mut().find(|c| c.name == name)
+                            {
+                                let compression = options_from_compression(&compression)
+                                    .context(ColumnOptionsSnafu)?;
+                                col.options
+                                    .get_or_insert_with(Default::default)
+                                    .options
+                                    .extend(compression.options);
                             }
                         }
 
@@ -1856,6 +1938,21 @@ pub fn fill_table_options_for_create(
         }
     }
 
+    if !matches!(create_type, AutoCreateTableType::Logical(_)) {
+        let mut has_twcs_option = false;
+        for key in COMPACTION_OPTION_KEYS {
+            if let Some(value) = ctx.extension(key) {
+                has_twcs_option |= key.starts_with(COMPACTION_TWCS_PREFIX);
+                table_options.insert(key.to_string(), value.to_string());
+            }
+        }
+        if has_twcs_option {
+            table_options
+                .entry(COMPACTION_TYPE.to_string())
+                .or_insert_with(|| COMPACTION_TYPE_TWCS.to_string());
+        }
+    }
+
     // Semantic keys use their own vocabulary instead of the fixed option list.
     for (key, value) in ctx.extensions() {
         if is_semantic_option_key(&key) && validate_semantic_option(&key, &value) {
@@ -1876,14 +1973,6 @@ pub fn fill_table_options_for_create(
             }
             if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
                 table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
-            }
-            if let Some(time_window) = ctx.extension(TWCS_TIME_WINDOW) {
-                table_options.insert(TWCS_TIME_WINDOW.to_string(), time_window.to_string());
-                // We need to set the compaction type explicitly.
-                table_options.insert(
-                    COMPACTION_TYPE.to_string(),
-                    COMPACTION_TYPE_TWCS.to_string(),
-                );
             }
         }
         // Set append_mode to true for log table.
@@ -3052,6 +3141,49 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_create_options_copy_compaction_hints() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension("compaction.twcs.time_window", "1h");
+        ctx.set_extension("compaction.twcs.max_output_file_size", "256MB");
+        ctx.set_extension("compaction.twcs.remote_compaction", "true");
+        ctx.set_extension("compaction.unknown", "ignored");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(
+            &mut table_options,
+            &AutoCreateTableType::Trace {
+                alter_existing: true,
+            },
+            &ctx,
+        );
+
+        assert_eq!(
+            Some("twcs"),
+            table_options.get(COMPACTION_TYPE).map(String::as_str)
+        );
+        assert_eq!(
+            Some("1h"),
+            table_options
+                .get("compaction.twcs.time_window")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("256MB"),
+            table_options
+                .get("compaction.twcs.max_output_file_size")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("true"),
+            table_options
+                .get("compaction.twcs.remote_compaction")
+                .map(String::as_str)
+        );
+        assert!(!table_options.contains_key("compaction.unknown"));
+    }
+
+    #[test]
     fn test_skip_wal_does_not_change_table_options() {
         check_skip_wal_does_not_change_table_options(false);
         check_skip_wal_does_not_change_table_options(true);
@@ -3549,9 +3681,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl common_meta::node_manager::Datanode for RecordingNode {
-        async fn handle(
+        async fn handle_request(
             &self,
-            _request: api::v1::region::RegionRequest,
+            _request: Arc<api::v1::region::RegionRequest>,
         ) -> common_meta::error::Result<api::region::RegionResponse> {
             let rows = match _request.body.as_ref() {
                 Some(api::v1::region::region_request::Body::Inserts(requests)) => requests

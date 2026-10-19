@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ::auth::UserProviderRef;
+use ::auth::{AuthMethod, UserProviderRef};
 use api::v1::Basic;
+use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::{self, StatusCode};
 use axum::middleware::Next;
@@ -28,6 +29,7 @@ use common_telemetry::warn;
 use common_time::Timezone;
 use common_time::timezone::parse_timezone;
 use headers::Header;
+use serde::Serialize;
 use session::context::QueryContextBuilder;
 use snafu::{OptionExt, ResultExt, ensure};
 
@@ -53,6 +55,26 @@ impl AuthState {
     pub fn new(user_provider: Option<UserProviderRef>) -> Self {
         Self { user_provider }
     }
+}
+
+/// Public authentication configuration used by browser clients.
+#[derive(Debug, Serialize)]
+pub(crate) struct AuthConfig {
+    auth_required: bool,
+    methods: Vec<AuthMethod>,
+}
+
+/// Returns the configured login methods without requiring authentication.
+pub(crate) async fn auth_config(State(auth_state): State<AuthState>) -> Json<AuthConfig> {
+    let (auth_required, methods) = match auth_state.user_provider {
+        Some(user_provider) => (true, user_provider.auth_methods()),
+        None => (false, Vec::new()),
+    };
+
+    Json(AuthConfig {
+        auth_required,
+        methods,
+    })
 }
 
 pub async fn inner_auth<B>(

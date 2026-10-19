@@ -39,6 +39,7 @@ use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_time::timestamp::TimeUnit;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
+use operator::write_dispatcher::WriteDispatcherRef;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -52,7 +53,7 @@ use crate::batcher::logical_table::pending_worker::{
     PendingWorker, WorkerCommand, remove_worker_if_same_channel, start_worker,
 };
 pub use crate::batcher::logical_table::region_write::{
-    PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
+    PhysicalFlushCatalogProvider, PhysicalFlushPartitionProvider, PhysicalFlushWriteDispatcher,
     PhysicalTableMetadata,
 };
 pub use crate::batcher::logical_table::tables::{
@@ -97,7 +98,7 @@ pub struct LogicalTablePendingRowsBatcher {
     flush_interval: Duration,
     flush_policy: TimingFlushPolicy,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    write_dispatcher: WriteDispatcherRef,
     catalog_manager: CatalogManagerRef,
     flow_notification_tx: FlowNotifier,
     flush_limiter: FlushLimiter,
@@ -110,10 +111,12 @@ pub struct LogicalTablePendingRowsBatcher {
 }
 
 impl LogicalTablePendingRowsBatcher {
+    /// Creates the batcher when metric-engine batching is enabled.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
+        write_dispatcher: WriteDispatcherRef,
         catalog_manager: CatalogManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
         prom_store_with_metric_engine: bool,
@@ -153,7 +156,7 @@ impl LogicalTablePendingRowsBatcher {
             flush_interval,
             flush_policy,
             partition_manager,
-            node_manager,
+            write_dispatcher,
             catalog_manager,
             flow_notification_tx,
             prom_store_with_metric_engine,
@@ -404,7 +407,7 @@ impl LogicalTablePendingRowsBatcher {
             rx,
             self.shutdown.clone(),
             self.partition_manager.clone(),
-            self.node_manager.clone(),
+            self.write_dispatcher.clone(),
             self.catalog_manager.clone(),
             self.flow_notification_tx.clone(),
             worker_idle_timeout,

@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
-use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::prom_store::remote::{Label, LabelMatcher, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use arrow::array::{
     Array, ArrayRef, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
@@ -138,6 +138,32 @@ pub fn extract_schema_from_query(query: &Query) -> Option<String> {
         .map(|matcher| matcher.value.clone())
 }
 
+/// Validate matcher syntax independently of whether the metric exists.
+pub fn validate_matchers(matchers: &[LabelMatcher]) -> Result<()> {
+    for matcher in matchers {
+        let matcher_type = MatcherType::try_from(matcher.r#type).map_err(|e| {
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!("invalid LabelMatcher type, decode error: {e}"),
+            }
+            .build()
+        })?;
+        if matches!(matcher_type, MatcherType::Re | MatcherType::Nre) {
+            // Like Prometheus, validate the raw regex first, then the anchored pattern.
+            // We use the same regex engine as query execution, whose syntax differs
+            // from Prometheus's: e.g. `(?x) a` is accepted here but rejected by Prometheus.
+            regex::Regex::new(&matcher.value)
+                .and_then(|_| regex::Regex::new(&anchored_label_regex(&matcher.value)))
+                .map_err(|e| {
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!("invalid regex for label '{}': {e}", matcher.name),
+                    }
+                    .build()
+                })?;
+        }
+    }
+    Ok(())
+}
+
 /// Create a DataFrame from a remote Query
 #[tracing::instrument(skip_all)]
 pub fn query_to_plan(
@@ -172,22 +198,61 @@ pub fn query_to_plan(
             .build()
         })?;
 
-        match m_type {
+        // Prometheus treats an absent label as "".
+        let label = if dataframe.schema().has_column_with_unqualified_name(name) {
+            ident(name)
+        } else {
+            lit("")
+        };
+
+        // Like PromQL, include NULL when the matcher accepts the empty string.
+        // Keep EQ/NEQ on the original column for index recognition.
+        let condition = match m_type {
             MatcherType::Eq => {
-                conditions.push(ident(name).eq(lit(value)));
+                if value.is_empty() {
+                    label.clone().eq(lit(value)).or(label.is_null())
+                } else {
+                    label.eq(lit(value))
+                }
             }
             MatcherType::Neq => {
-                conditions.push(ident(name).not_eq(lit(value)));
+                if value.is_empty() {
+                    label.not_eq(lit(value))
+                } else {
+                    label.clone().not_eq(lit(value)).or(label.is_null())
+                }
             }
-            // Case sensitive regexp match
-            MatcherType::Re => {
-                conditions.push(regexp_match(ident(name), lit(value), None).is_not_null());
+            MatcherType::Re | MatcherType::Nre => {
+                let pattern = anchored_label_regex(value);
+                let matches_empty = regex::Regex::new(&pattern)
+                    .map_err(|e| {
+                        error::InvalidPromRemoteRequestSnafu {
+                            msg: format!("invalid regex for label '{name}': {e}"),
+                        }
+                        .build()
+                    })?
+                    .is_match("");
+                let matched = regexp_match(label.clone(), lit(pattern), None);
+                if m_type == MatcherType::Re {
+                    let condition = matched.is_not_null();
+                    if matches_empty {
+                        condition.or(label.is_null())
+                    } else {
+                        condition
+                    }
+                } else {
+                    let condition = matched.is_null();
+                    // A NULL input also produces NULL. Keep it only when the
+                    // negative matcher accepts the empty string.
+                    if matches_empty {
+                        condition.and(label.is_not_null())
+                    } else {
+                        condition
+                    }
+                }
             }
-            // Case sensitive regexp not match
-            MatcherType::Nre => {
-                conditions.push(regexp_match(ident(name), lit(value), None).is_null());
-            }
-        }
+        };
+        conditions.push(condition);
     }
 
     // Safety: conditions MUST not be empty, reduce always return Some(expr).
@@ -198,6 +263,12 @@ pub fn query_to_plan(
         .context(error::DataFrameSnafu)?;
 
     Ok(dataframe.into_parts().1)
+}
+
+/// Prometheus's NewFastRegexMatcher also wraps patterns in ^(?s:...)$:
+/// https://github.com/prometheus/prometheus/blob/main/model/labels/regexp.go
+fn anchored_label_regex(value: &str) -> String {
+    format!("^(?s:{value})$")
 }
 
 #[inline]
@@ -918,6 +989,32 @@ mod tests {
     const RE_TYPE: i32 = MatcherType::Re as i32;
 
     #[test]
+    fn test_validate_matchers_regex_syntax() {
+        for op in [MatcherType::Re, MatcherType::Nre] {
+            for (value, valid) in [
+                ("api|web", true),
+                ("(?s)api.web", true),
+                ("(?x) api", true),
+                ("(?x) api # comment", false),
+                ("[", false),
+                // Wrapping must not make an invalid original pattern valid.
+                ("a)|(?:b", false),
+            ] {
+                let matcher = LabelMatcher {
+                    name: "job".into(),
+                    value: value.into(),
+                    r#type: op as i32,
+                };
+                assert_eq!(
+                    valid,
+                    validate_matchers(&[matcher]).is_ok(),
+                    "{op:?}: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_table_name() {
         let q = Query {
             start_timestamp_ms: 1000,
@@ -1071,7 +1168,7 @@ mod tests {
                 },
                 LabelMatcher {
                     name: "job".to_string(),
-                    value: "*prom*".to_string(),
+                    value: ".*prom.*".to_string(),
                     r#type: RE_TYPE,
                 },
                 LabelMatcher {
@@ -1099,10 +1196,208 @@ mod tests {
 
         let ts_col = greptime_timestamp();
         let expected = format!(
-            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\") AND ?table?.service.name = Utf8(\"api\") AND ?table?.Region = Utf8(\"us\")\n  TableScan: ?table?",
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"^(?s:.*prom.*)$\")) IS NOT NULL AND (?table?.instance != Utf8(\"localhost\") OR ?table?.instance IS NULL) AND ?table?.service.name = Utf8(\"api\") AND ?table?.Region = Utf8(\"us\")\n  TableScan: ?table?",
             ts_col, ts_col
         );
         assert_eq!(expected, display_string);
+    }
+
+    #[tokio::test]
+    async fn test_remote_read_label_matcher_semantics() {
+        let ctx = SessionContext::new();
+        let batch = DfRecordBatch::try_from_iter(vec![
+            (
+                greptime_timestamp(),
+                Arc::new(TimestampMillisecondArray::from(vec![1000; 6])) as ArrayRef,
+            ),
+            (
+                "job",
+                Arc::new(StringArray::from(vec![
+                    Some("api"),
+                    Some("my-api-server"),
+                    Some(""),
+                    None,
+                    Some("web"),
+                    Some("api\nweb"),
+                ])) as ArrayRef,
+            ),
+            (
+                "id",
+                Arc::new(UInt32Array::from(vec![0, 1, 2, 3, 4, 5])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        ctx.register_batch("metrics", batch).unwrap();
+        for (name, op, value, expected) in [
+            ("job", MatcherType::Eq, "api", vec![0]),
+            ("job", MatcherType::Neq, "api", vec![1, 2, 3, 4, 5]),
+            ("job", MatcherType::Eq, "", vec![2, 3]),
+            ("job", MatcherType::Neq, "", vec![0, 1, 4, 5]),
+            ("job", MatcherType::Re, "api", vec![0]),
+            ("job", MatcherType::Nre, "api", vec![1, 2, 3, 4, 5]),
+            ("job", MatcherType::Re, "api|web", vec![0, 4]),
+            ("job", MatcherType::Nre, "api|web", vec![1, 2, 3, 5]),
+            ("job", MatcherType::Re, "", vec![2, 3]),
+            ("job", MatcherType::Nre, "", vec![0, 1, 4, 5]),
+            ("job", MatcherType::Re, ".*", vec![0, 1, 2, 3, 4, 5]),
+            ("job", MatcherType::Nre, ".*", vec![]),
+            ("job", MatcherType::Re, ".+", vec![0, 1, 4, 5]),
+            ("job", MatcherType::Nre, ".+", vec![2, 3]),
+            ("job", MatcherType::Re, "(?m)api", vec![0]),
+            ("job", MatcherType::Re, "api.web", vec![5]),
+            ("job", MatcherType::Nre, "api.web", vec![0, 1, 2, 3, 4]),
+            ("job", MatcherType::Re, "(?-s:api.web)", vec![]),
+            ("job", MatcherType::Re, "(api)?", vec![0, 2, 3]),
+            ("missing", MatcherType::Eq, "", vec![0, 1, 2, 3, 4, 5]),
+            ("missing", MatcherType::Eq, "us", vec![]),
+            ("missing", MatcherType::Neq, "us", vec![0, 1, 2, 3, 4, 5]),
+            ("missing", MatcherType::Neq, "", vec![]),
+            ("missing", MatcherType::Re, ".*", vec![0, 1, 2, 3, 4, 5]),
+            ("missing", MatcherType::Re, ".+", vec![]),
+            ("missing", MatcherType::Nre, ".*", vec![]),
+            ("missing", MatcherType::Nre, ".+", vec![0, 1, 2, 3, 4, 5]),
+            ("missing", MatcherType::Re, "", vec![0, 1, 2, 3, 4, 5]),
+            ("missing", MatcherType::Nre, "", vec![]),
+        ] {
+            let query = Query {
+                start_timestamp_ms: 1000,
+                end_timestamp_ms: 1000,
+                matchers: vec![LabelMatcher {
+                    name: name.into(),
+                    value: value.into(),
+                    r#type: op as i32,
+                }],
+                ..Default::default()
+            };
+            let plan = query_to_plan(
+                ctx.table("metrics").await.unwrap(),
+                &query,
+                greptime_timestamp(),
+            )
+            .unwrap_or_else(|err| panic!("{name} {op:?} {value:?}: {err}"));
+            let batches = ctx
+                .execute_logical_plan(plan)
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let actual: Vec<u32> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(2)
+                        .as_primitive::<UInt32Type>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(expected, actual, "{name} {op:?} {value:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_read_matcher_combinations_and_label_types() {
+        let labels = StringArray::from(vec![Some("api"), Some("api"), None, Some("api")]);
+        for label_type in [
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Utf8View,
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+        ] {
+            let ctx = SessionContext::new();
+            let batch = DfRecordBatch::try_from_iter(vec![
+                (
+                    greptime_timestamp(),
+                    Arc::new(TimestampMillisecondArray::from(vec![999, 1000, 2000, 2001]))
+                        as ArrayRef,
+                ),
+                ("Job.Name", casts::cast(&labels, &label_type).unwrap()),
+            ])
+            .unwrap();
+            ctx.register_batch("metrics", batch).unwrap();
+            let mut cases = vec![
+                (vec![("Job.Name", MatcherType::Re, ".*")], vec![1000, 2000]),
+                (vec![("Job.Name", MatcherType::Nre, ".+")], vec![2000]),
+            ];
+            // Exercise combinations once; other representations only need regex/NULL coverage.
+            if label_type == DataType::Utf8 {
+                cases.extend([
+                    (
+                        vec![
+                            ("Job.Name", MatcherType::Re, "api|web"),
+                            ("Job.Name", MatcherType::Neq, "web"),
+                        ],
+                        vec![1000],
+                    ),
+                    (
+                        vec![
+                            ("Job.Name", MatcherType::Eq, ""),
+                            ("Job.Name", MatcherType::Neq, "api"),
+                        ],
+                        vec![2000],
+                    ),
+                    (
+                        vec![
+                            ("Job.Name", MatcherType::Eq, "api"),
+                            ("Job.Name", MatcherType::Eq, "web"),
+                        ],
+                        vec![],
+                    ),
+                    (
+                        vec![
+                            ("job.name", MatcherType::Eq, ""),
+                            ("Job.Name", MatcherType::Re, ".*"),
+                        ],
+                        vec![1000, 2000],
+                    ),
+                ]);
+            }
+            for (matchers, expected) in cases {
+                let mut query = Query {
+                    start_timestamp_ms: 1000,
+                    end_timestamp_ms: 2000,
+                    matchers: matchers
+                        .iter()
+                        .map(|(name, op, value)| LabelMatcher {
+                            name: (*name).into(),
+                            value: (*value).into(),
+                            r#type: *op as i32,
+                        })
+                        .collect(),
+                    ..Default::default()
+                };
+                query.matchers.push(LabelMatcher {
+                    name: METRIC_NAME_LABEL.into(),
+                    value: "metrics".into(),
+                    r#type: EQ_TYPE,
+                });
+                let plan = query_to_plan(
+                    ctx.table("metrics").await.unwrap(),
+                    &query,
+                    greptime_timestamp(),
+                )
+                .unwrap();
+                let batches = ctx
+                    .execute_logical_plan(plan)
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap();
+                let actual: Vec<i64> = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(0)
+                            .as_primitive::<TimestampMillisecondType>()
+                            .values()
+                            .to_vec()
+                    })
+                    .collect();
+                assert_eq!(expected, actual, "{label_type:?}: {matchers:?}");
+            }
+        }
     }
 
     fn column_schemas_with(

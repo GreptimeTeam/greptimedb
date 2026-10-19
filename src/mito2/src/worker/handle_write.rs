@@ -564,7 +564,7 @@ impl<S> RegionWorkerLoop<S> {
 
             // Collect requests by region.
             if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
-                return;
+                continue;
             }
         }
     }
@@ -758,7 +758,7 @@ mod tests {
     };
     use store_api::logstore::entry::{Entry, NaiveEntry};
     use store_api::logstore::provider::Provider;
-    use store_api::logstore::{AppendBatchResponse, EntryId, SendableEntryStream, WalIndex};
+    use store_api::logstore::{AppendBatchResponse, EntryId, SendableEntryStream};
     use store_api::region_request::AffectedRows;
     use tokio::sync::oneshot;
 
@@ -828,7 +828,6 @@ mod tests {
             &self,
             _provider: &Provider,
             _entry_id: EntryId,
-            _index: Option<WalIndex>,
         ) -> LogStoreResult<SendableEntryStream<'static, Entry, Self::Error>> {
             Ok(Box::pin(stream::empty()))
         }
