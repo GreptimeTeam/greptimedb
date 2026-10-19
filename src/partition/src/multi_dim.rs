@@ -1028,6 +1028,11 @@ mod test_split_record_batch {
                             continue;
                         }
                     };
+                    // `split_record_batch` merges masks with non-Kleene `or`, so a NULL
+                    // result drops the row instead of acting as false.
+                    if by_batch.null_count() > 0 {
+                        mismatches.push(format!("{expr}: batch result has NULLs"));
+                    }
                     for (row, input) in inputs.iter().enumerate() {
                         let value = input.map_or(Value::Null, Value::Int64);
                         let by_row = rule.evaluate_expr(&expr, &[value]).unwrap();
@@ -1042,6 +1047,38 @@ mod test_split_record_batch {
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn test_split_null_rows_match_row_routing() {
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string()],
+            vec![0, 1],
+            vec![
+                col("host").not_eq(Value::from("a")),
+                col("host").eq(Value::from("a")),
+            ],
+            true,
+        )
+        .unwrap();
+        for hosts in [vec![Some("a"), None, Some("z")], vec![Some("a"), None]] {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
+                vec![Arc::new(StringArray::from(hosts.clone()))],
+            )
+            .unwrap();
+            let by_row = rule.split_record_batch_naive(&batch).unwrap();
+            let by_batch = rule.split_record_batch(&batch).unwrap();
+            for (region, expected) in by_row {
+                let actual = by_batch
+                    .get(&region)
+                    .map(|mask| mask.array().clone())
+                    .unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]));
+                assert_eq!(actual, expected, "{hosts:?}, region {region}");
+            }
+        }
     }
 
     #[test]

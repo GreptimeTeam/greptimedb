@@ -135,8 +135,11 @@ pub fn sql_value_to_value(
     let data_type = &column_schema.data_type;
     let mut value = match sql_val {
         // Parse the sign with the digits, otherwise the minimum of a signed type
-        // overflows before it is negated.
-        SqlValue::Number(n, _) if unary_op == Some(UnaryOperator::Minus) => {
+        // overflows before it is negated. Unsigned types keep the negation below,
+        // which accepts `-0`.
+        SqlValue::Number(n, _)
+            if unary_op == Some(UnaryOperator::Minus) && data_type.is_signed() =>
+        {
             unary_op = None;
             sql_number_to_value(data_type, &format!("-{n}"))?
         }
@@ -980,6 +983,14 @@ mod test {
             .unwrap();
             assert_eq!(value, expected);
         }
+        let value = call_sql_value_to_value!(
+            "test",
+            ConcreteDataType::uint64_datatype(),
+            &SqlValue::Number("0".into(), false),
+            unary_op = UnaryOperator::Minus
+        )
+        .unwrap();
+        assert_eq!(value, Value::UInt64(0));
     }
 
     #[test]

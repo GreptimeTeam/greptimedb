@@ -305,7 +305,7 @@ impl PartitionExpr {
             }
             let bound = Operand::Value(value.clone()).try_as_logical_expr()?;
             return match op {
-                RestrictedOp::Eq => Ok(column.eq(bound)),
+                RestrictedOp::Eq => Ok(column.clone().eq(bound).and(column.is_not_null())),
                 RestrictedOp::NotEq => Ok(column.clone().not_eq(bound).or(column.is_null())),
                 RestrictedOp::Lt => Ok(column.clone().lt(bound).or(column.is_null())),
                 RestrictedOp::LtEq => Ok(column.clone().lt_eq(bound).or(column.is_null())),
