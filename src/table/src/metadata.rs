@@ -1074,17 +1074,6 @@ impl TableMeta {
                 }
             );
 
-            // Partition rules keep bounds typed as the column, and functions such as
-            // `iceberg_hash` route by the typed value, so a new type would reroute or
-            // break routing.
-            ensure!(
-                !self.partition_key_indices.contains(&index),
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!("Not allowed to change partition column '{}'", column.name)
-                }
-            );
-
             let is_time_index = timestamp_index == Some(index);
             if is_time_index {
                 // The time index column is NOT NULL by construction and only
@@ -1104,6 +1093,16 @@ impl TableMeta {
                     }
                 );
             } else {
+                // Partition rules keep bounds typed as the column, and functions such as
+                // `iceberg_hash` route by the typed value, so a new type would reroute or
+                // break routing. Time index widening above keeps timestamps comparable.
+                ensure!(
+                    !self.partition_key_indices.contains(&index),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!("Not allowed to change partition column '{}'", column.name)
+                    }
+                );
                 ensure!(
                     column
                         .data_type
@@ -1944,6 +1943,26 @@ mod tests {
             let result = meta.builder_with_alter_kind("my_table", &alter_kind);
             assert_eq!(result.is_ok(), allowed);
         }
+
+        // Widening the unit of a time index that is also a partition column is allowed.
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .partition_key_indices(vec![1])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+            }],
+        };
+        assert!(
+            meta.builder_with_alter_kind("my_table", &alter_kind)
+                .is_ok()
+        );
     }
 
     #[test]
