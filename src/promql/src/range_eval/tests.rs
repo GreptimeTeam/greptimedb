@@ -198,6 +198,13 @@ fn random_chunks(rng: &mut StdRng, rows: &[Row], fields: usize, host: u64) -> Ve
     chunks
 }
 
+/// Whether every sample of every field is missing.
+fn all_missing(series: &Series) -> bool {
+    series.fields.iter().all(|field| {
+        (0..field.len()).all(|index| matches!(field.sample(index), SampleRef::Missing))
+    })
+}
+
 /// The float values of a single-field series, in order.
 fn floats(series: &Series) -> Vec<f64> {
     let field = &series.fields.as_slice()[0];
@@ -832,7 +839,8 @@ fn empty_input_and_series_without_results() {
     };
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
-    // A series whose samples all miss the grid still closes, on a chunk holding no positions.
+    // A series whose samples all miss the grid still closes, and its closing chunk says the whole
+    // grid was decided: every point is a settled missing value, not a point still waiting.
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
     let after_grid = chunk(&[(31, vec![Some(1.0)])], 1, 0, true);
     let closed = evaluator
@@ -840,14 +848,19 @@ fn empty_input_and_series_without_results() {
         .unwrap()
         .expect("a series closes");
     assert!(closed.is_last);
-    assert!(closed.range().is_empty());
+    assert_eq!(closed.range().start(), 0);
+    assert_eq!(closed.range().len(), 4);
+    assert!(all_missing(&closed.series));
+    // A series whose only sample is stale does the same: the row is dropped, the points behind it
+    // are decided.
     let only_stale = chunk(&[(5, vec![Some(stale())])], 1, 1, true);
     let closed = evaluator
         .push(&only_stale)
         .unwrap()
         .expect("a series closes");
     assert!(closed.is_last);
-    assert!(closed.range().is_empty());
+    assert_eq!((closed.range().start(), closed.range().len()), (0, 4));
+    assert!(all_missing(&closed.series));
     evaluator.finish().unwrap();
 }
 
@@ -870,18 +883,76 @@ fn a_series_that_ends_early_still_closes() {
     assert!(!handed.is_last);
     assert_eq!((handed.range().start(), handed.range().len()), (0, 2));
 
+    // The last sample lies past every remaining window, so points 2 to 4 are decided to hold no
+    // value. The closing chunk reports them rather than trimming them away.
     let last = chunk(&[(45, vec![Some(3.0)])], 1, 0, true);
     let closed = evaluator.push(&last).unwrap().expect("a series closes");
     assert!(closed.is_last);
-    assert!(closed.range().is_empty());
-    assert_eq!(closed.range().start(), 2);
+    assert_eq!((closed.range().start(), closed.range().len()), (2, 3));
+    assert!(all_missing(&closed.series));
+}
+
+/// A chunk that decides only missing positions still has to be handed out before the series ends.
+///
+/// Without it a consumer cannot tell that those positions are settled: it would keep their
+/// windows open and wait for input that has already been shown to contribute nothing. The values
+/// are all missing, so only the span itself carries the progress.
+#[test]
+fn a_chunk_of_decided_missing_positions_is_handed_out_before_the_series_ends() {
+    // `rate` over a one-second window on grid 0,1,2,3,4s.
+    let window = RangeWindow {
+        range_ms: 1_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(0, 1_000, 5),
+        window,
+        RangeFunction::Rate,
+    )
+    .unwrap();
+
+    // A: samples at -0.5s and 0s decide the point at 0s.
+    let a = chunk(
+        &[(-500, vec![Some(1.0)]), (0, vec![Some(2.0)])],
+        1,
+        0,
+        false,
+    );
+    let first = evaluator.push(&a).unwrap().expect("point 0 is decided");
+    assert!(!first.is_last);
+    assert_eq!((first.range().start(), first.range().len()), (0, 1));
+
+    // B: the sample at 2s decides that 1s has no window content and 2s has a single sample, so
+    // neither yields a rate. Neither point can change once a sample at 4s arrives: that sample
+    // lies past both windows.
+    let b = chunk(&[(2_000, vec![Some(3.0)])], 1, 0, false);
+    let second = evaluator
+        .push(&b)
+        .unwrap()
+        .expect("points 1 and 2 are decided, missing or not");
+    assert!(!second.is_last, "the series has not ended");
+    assert_eq!((second.range().start(), second.range().len()), (1, 2));
+    assert!(all_missing(&second.series));
+
+    // C closes the series and reports the rest.
+    let c = chunk(&[(4_000, vec![Some(4.0)])], 1, 0, true);
+    let last = evaluator.push(&c).unwrap().expect("a series closes");
+    assert!(last.is_last);
+    assert_eq!((last.range().start(), last.range().len()), (3, 2));
+
+    // Folding the three chunks reproduces the whole grid, so the missing spans cost nothing.
+    let chunks = [first, second, last];
+    let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
+    assert_eq!(folded.metric, output_metric(RangeFunction::Rate, 0));
 }
 
 /// The closing chunk of a series is labelled like the chunks before it, including the metadata
 /// labels a function drops: `rate` removes `__name__`, and a consumer that keyed series by label
-/// set would see the same series split in two if the empty chunk kept it.
+/// set would see the same series split in two if the closing chunk kept it.
 #[test]
-fn an_empty_closing_chunk_is_labelled_like_the_chunks_before_it() {
+fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
     let window = RangeWindow {
         range_ms: 20,
         offset_ms: 0,
@@ -898,10 +969,13 @@ fn an_empty_closing_chunk_is_labelled_like_the_chunks_before_it() {
     assert!(!handed.is_last);
     assert_eq!(handed.series.metric.name(), None);
 
+    // The last sample is past every remaining window, so the closing chunk carries decided
+    // missing positions and must still be labelled the same.
     let last = chunk(&[(45, vec![Some(5.0)])], 1, 0, true);
     let closed = evaluator.push(&last).unwrap().expect("a series closes");
     assert!(closed.is_last);
-    assert!(closed.range().is_empty());
+    assert!(!closed.range().is_empty());
+    assert!(all_missing(&closed.series));
     assert_eq!(closed.series.metric, handed.series.metric);
     assert_eq!(closed.series.metric.name(), None);
 }
@@ -1570,13 +1644,14 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
             )
             .unwrap()
         };
-        // Like Prometheus, only a window holding a sample checks the factors.
+        // Like Prometheus, only a window holding a sample checks the factors. The sample lies past
+        // every window, so the result is missing everywhere rather than an error.
         let outside = chunk(&[(100, vec![Some(1.0)])], 1, 0, true);
         let closed = evaluator()
             .push(&outside)
             .unwrap()
             .expect("a series closes");
-        assert!(closed.range().is_empty());
+        assert!(all_missing(&closed.series));
         evaluator().finish().unwrap();
         let inside = chunk(&[(5, vec![Some(1.0)])], 1, 0, true);
         assert!(matches!(
@@ -1677,16 +1752,17 @@ fn waiting_for_a_point_drops_samples_behind_its_window() {
         let rows: Vec<Row> = (0..100)
             .map(|row| (1 + chunk_index * 100 + row, vec![Some(1.0)]))
             .collect();
-        assert!(
-            evaluator
-                .push(&chunk(&rows, 1, 0, false))
-                .unwrap()
-                .is_none()
-        );
+        // The second point stays undecided until its window can be read, so a chunk here may
+        // report progress on the first point but never on the second.
+        if let Some(handed) = evaluator.push(&chunk(&rows, 1, 0, false)).unwrap() {
+            assert!(!handed.is_last);
+            assert!(handed.range().start() + handed.range().len() <= 1);
+        }
         assert!(evaluator.fields[0].timestamps.len() <= 100);
     }
     let last = chunk(&[(100_000, vec![Some(1.0)])], 1, 0, true);
-    assert!(evaluator.push(&last).unwrap().is_some());
+    let closed = evaluator.push(&last).unwrap().expect("a series closes");
+    assert!(closed.is_last);
 }
 
 /// Prometheus 3.15 reports `ts_of_last_over_time` as the max of the last float timestamp and

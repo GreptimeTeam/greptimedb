@@ -266,6 +266,10 @@ struct SeriesState {
     last_ts: i64,
     /// Next grid index to evaluate.
     cursor: usize,
+    /// Grid index after the last position the evaluator has decided, whether it holds a value or
+    /// not. This is what a consumer needs in order to advance, so it is reported as the chunk
+    /// span even where no value was produced.
+    completed: usize,
     /// Grid index after the last position handed out to the consumer.
     emitted_end: usize,
 }
@@ -535,14 +539,13 @@ impl RangeEvaluator {
 
     /// Consumes the next chunk of the current series, or starts a new series.
     ///
-    /// Returns the values of the grid points this chunk finished evaluating, as one chunk whose
-    /// range is absolute on the evaluation grid; `None` when it finished no point holding a value.
-    /// The range spans the first and last such point, so a point between them whose window has no
-    /// result is a missing value, as it is in a whole series.
+    /// Returns the grid points this chunk decided, as one chunk whose range is absolute on the
+    /// evaluation grid; `None` when it decided no new point. A decided point whose window has no
+    /// result is a missing value inside the range, as it is in a whole series; the range is what
+    /// tells a consumer that the point is settled rather than still waiting for input.
     ///
-    /// The last chunk of a series is always returned, empty when it finished none, because that
-    /// chunk is what closes the series for the consumer. The empty range is addressed where the
-    /// series got to, so a consumer can still tell how far it advanced.
+    /// The last chunk of a series is always returned, empty when it decided nothing new, because
+    /// that chunk is what closes the series for the consumer.
     ///
     /// The evaluator must not be reused after an error.
     pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<EvaluatedChunk>> {
@@ -593,6 +596,7 @@ impl RangeEvaluator {
             metric: series.metric.clone(),
             last_ts: 0,
             cursor: 0,
+            completed: 0,
             emitted_end: 0,
         });
         self.ingest(&range.timestamps(), &series.fields, false)?;
@@ -607,35 +611,38 @@ impl RangeEvaluator {
         Ok(chunk)
     }
 
-    /// Hands out the positions evaluated since the last chunk, if any.
+    /// Hands out the positions decided since the last chunk, if any.
     ///
-    /// `is_last` closes the series, and then a chunk is always handed out: a consumer needs the
-    /// closing chunk to advance, and a series whose remaining points hold no values would
-    /// otherwise close silently.
+    /// The span covers everything decided, so a position decided to hold no value travels with
+    /// the chunk that decided it: a consumer needs that progress to advance, and to tell a
+    /// finished position from one still waiting for input. `is_last` closes the series, and then a
+    /// chunk is always handed out, empty when there is nothing left to report.
     fn emit(&mut self, is_last: bool) -> Result<Option<EvaluatedChunk>> {
         let Some(state) = self.series.as_ref() else {
             return Ok(None);
         };
-        let ended = state.emitted_end;
+        let (start, end) = (state.emitted_end, state.completed);
         let mut metric = state.metric.clone();
         if self.drops_metric_name {
             metric.remove_all(&METADATA_LABELS);
         }
+        if end > start {
+            // Every decided position joins the span, including the ones without a value.
+            self.output.cover_from(start)?;
+            self.output.cover_through(end)?;
+        }
         let Some(series) = self.output.finish(metric)? else {
+            debug_assert_eq!(end, start, "a decided position widens the span");
             return if is_last {
-                self.empty_chunk(ended)
+                self.empty_chunk(start)
             } else {
                 Ok(None)
             };
         };
-        let TimeAxis::Grid(range) = &series.time else {
-            unreachable!("the builder always emits a grid series")
-        };
-        let emitted_end = range.start() + range.len();
         self.series
             .as_mut()
             .expect("checked at the entry of emit")
-            .emitted_end = emitted_end;
+            .emitted_end = end;
         EvaluatedChunk::try_new(series, is_last).map(Some)
     }
 
@@ -691,6 +698,7 @@ impl RangeEvaluator {
                     metric,
                     last_ts: time[time.len() - 1],
                     cursor: 0,
+                    completed: 0,
                     emitted_end: 0,
                 });
             }
@@ -830,11 +838,20 @@ impl RangeEvaluator {
     /// Evaluates grid points up to `ready` on the evaluation timeline, or all remaining points
     /// when `ready` is `None`.
     fn evaluate(&mut self, ready: Option<i128>) -> Result<()> {
+        // Positions handed out so far stay behind the builder's span, so a chunk never repeats or
+        // reorders them.
+        let emitted = self
+            .series
+            .as_ref()
+            .expect("checked by check_chunk")
+            .emitted_end;
+        self.output.cover_from(emitted)?;
         let points_read = self.points_read();
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
         let grid = self.grid.timestamps();
         let range = i128::from(self.window.range_ms);
+        let mut empty_tail = false;
         while state.cursor < points_read {
             let eval_ts = grid[state.cursor];
             let lower = i128::from(eval_ts) - range;
@@ -859,8 +876,10 @@ impl RangeEvaluator {
             if ready.is_some_and(|ready| i128::from(eval_ts) > ready) {
                 break;
             }
-            // No retained sample: either the series is done or the next one is not here yet.
+            // No retained sample: every point from here on is decided too. A sample that still
+            // has to arrive lies beyond the window of every one of them, so none can gain a value.
             let Some(earliest) = earliest else {
+                empty_tail = true;
                 break;
             };
             if earliest > eval_ts {
@@ -960,6 +979,44 @@ impl RangeEvaluator {
                 &mut self.batch_calls,
             )?;
         }
+        // How far the series is decided. A point is decided once it has been evaluated, once its
+        // window can no longer gain a sample, or -- at the end of the series or of what the input
+        // has reached -- once no retained sample reaches it. The last case matters: the loop stops
+        // at the first such point instead of walking the rest of the grid, so the points behind it
+        // still have to be reported as decided, or a consumer waits for input that decided them.
+        let completed = if empty_tail {
+            match self.replay {
+                Replay::PerPoint => {
+                    let mut decided = state.cursor;
+                    if let Some(ready) = ready {
+                        while decided < points_read && i128::from(grid[decided]) <= ready {
+                            decided += 1;
+                        }
+                    } else {
+                        decided = points_read;
+                    }
+                    // Later rounds start evaluating from here, and none of these points can gain
+                    // a value, so the cursor may skip them.
+                    state.cursor = decided;
+                    decided
+                }
+                // An anchored selector broadcasts its one window over the whole grid, so deciding
+                // that window decides every point. Its window ends at the grid's start rather than
+                // at each point, so it is decided once the input has ended or has passed that end.
+                Replay::Once | Replay::EveryPoint => match ready {
+                    None => grid.len(),
+                    Some(ready) if ready >= i128::from(spec.start_ms) => grid.len(),
+                    Some(_) => state.completed,
+                },
+            }
+        } else if matches!(self.replay, Replay::PerPoint) {
+            state.cursor
+        } else if state.cursor > 0 {
+            grid.len()
+        } else {
+            0
+        };
+        state.completed = state.completed.max(completed);
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.
