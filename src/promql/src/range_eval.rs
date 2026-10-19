@@ -264,6 +264,13 @@ struct SeriesState {
     primary_key: Option<Buffer>,
     metric: MetricName,
     last_ts: i64,
+    /// Grid index one past the last position any chunk of this series covered.
+    ///
+    /// A later chunk must not start behind it: the samples of one series are stored in the order
+    /// they arrive and read back by binary search, so a chunk reaching backwards would store
+    /// timestamps out of order and the search would stop at the wrong one -- a wrong value, with no
+    /// error. A chunk starting *past* it is fine: the positions it jumps over hold no sample.
+    reached_end: usize,
     /// Next grid index to evaluate.
     cursor: usize,
     /// Whether the input, or the evaluated series, has ended. Until the queue of runs runs dry,
@@ -571,11 +578,11 @@ impl RangeEvaluator {
     /// since the input is computed.
     ///
     /// The first chunk opens the series with its labels and the one marked `is_last` closes it.
-    /// The chunks arrive in grid order and may skip positions: a position no chunk covers holds no
-    /// sample, which is the same state as a position whose chunk carries a missing value, so the
-    /// positions a chunk jumps over are reported as decided without a sample. They may not go
-    /// backwards or repeat, because the samples are kept in arrival order and read back by
-    /// timestamp.
+    /// The chunks need not tile the input grid: a position no chunk covers holds no sample, which
+    /// is the same state as a position whose chunk carries a missing value, so the positions a
+    /// chunk jumps over are simply reported as decided without a sample. They may not reach
+    /// *backwards*, though: this series' samples are stored in arrival order and read back by
+    /// binary search, so a chunk starting behind where the previous one ended is refused.
     ///
     /// A skipped position is what a producer settled without a result, so the positions before a
     /// chunk are all decided and the next sample can only arrive at or after its end. That is what
@@ -635,6 +642,7 @@ impl RangeEvaluator {
                     primary_key: None,
                     metric: chunk.series.metric.clone(),
                     last_ts,
+                    reached_end: 0,
                     cursor: 0,
                     closing: false,
                     emitted_end: 0,
@@ -658,32 +666,41 @@ impl RangeEvaluator {
                         chunk.series.metric, state.metric
                     )));
                 }
-                // The skipped positions hold no sample, so a window over them can never gain one;
-                // going backwards or repeating would store timestamps out of order, which the
-                // read-back by timestamp would answer from the wrong sample.
-                if range.timestamps()[0] <= state.last_ts {
-                    return Err(DataFusionError::Execution(format!(
-                        "evaluated series chunks are not increasing: {} after {}",
-                        range.timestamps()[0],
-                        state.last_ts
-                    )));
-                }
-                state.last_ts = last_ts;
+                // Where this chunk may begin is decided in grid-index space by the `reached_end`
+                // check below, which runs before anything is stored. It is not decided here: a
+                // timestamp comparison cannot undo a store, and `reached_end` is the state that
+                // records how far the series got. `last_ts` belongs to the raw path, whose
+                // `check_chunk` compares against it -- an evaluated series never consults it.
             }
         }
-        // The first position this chunk does not carry. A later chunk of the same series starts at
-        // or after it, so no sample can arrive before it: that is what bounds the settle below.
+        // The first position this chunk does not carry. Samples sit on grid timestamps, so no
+        // sample can arrive before it -- whether or not a later chunk ever covers it.
         let input_end = range.start() + range.len();
+        // Before anything is stored: a chunk reaching backwards would leave this series' samples
+        // out of order, and `evaluate` reads them back by binary search.
+        if let Some(state) = &self.series
+            && range.start() < state.reached_end
+        {
+            return Err(DataFusionError::Execution(format!(
+                "evaluated chunks are out of order: {} starts behind {}",
+                range.start(),
+                state.reached_end
+            )));
+        }
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
+        // Advanced only now: `ingest` may fail on a sample it cannot shift or convert.
+        if let Some(state) = self.series.as_mut() {
+            state.reached_end = state.reached_end.max(input_end);
+        }
         if chunk.is_last {
             return self.close_series();
         }
         // A point is decided once no sample that can still arrive falls in its window, and the next
-        // sample can only sit at `grid[input_end]`: a chunk carries only positions it decided, so
-        // the next one starts at or after its end. `ready` is inclusive and in the shifted sample
-        // domain, so it is that boundary shifted by the offset, minus one: a point at the boundary
-        // itself still reads a sample arriving there. At the end of the input grid no sample can
-        // follow at all, which is what `None` means.
+        // sample cannot arrive before `grid[input_end]`: a chunk carries only positions it decided,
+        // so the next one starts at or after its end. `ready` is inclusive and in the shifted
+        // sample domain, so it is that boundary shifted by the offset, minus one: a point at the
+        // boundary itself still reads a sample arriving there. At the end of the input grid no
+        // sample can follow at all, which is what `None` means.
         let ready = range
             .grid()
             .timestamps()
@@ -817,6 +834,7 @@ impl RangeEvaluator {
                     primary_key: Some(chunk.primary_key.clone()),
                     metric,
                     last_ts: time[time.len() - 1],
+                    reached_end: 0,
                     cursor: 0,
                     closing: false,
                     emitted_end: 0,
