@@ -243,6 +243,63 @@ fn a_map_needs_an_operation() {
     assert!(error.to_string().contains("no operation"), "{error}");
 }
 
+/// A map reports one value per input field, so it cannot declare a layout its input does not
+/// have. Without this check the tree would validate and only fail when the runtime compared the
+/// node's schema against the one its input actually produces.
+#[test]
+fn a_map_cannot_change_the_field_count() {
+    let inner = window_over(input(), None);
+    let out = inner.output.grid().unwrap().clone();
+    let node = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap {
+                ops: Arc::new([MathOp::Abs]),
+            },
+        },
+        output: evaluated(
+            Arc::new([datatypes::series::samples::FieldSpec {
+                name: Arc::from("value"),
+            }]),
+            out,
+        ),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(error.to_string().contains("field(s)"), "{error}");
+}
+
+/// A window reports one value per input field, so it carries the same rule as a map.
+#[test]
+fn a_window_cannot_change_the_field_count() {
+    let inner = window_over(input(), None);
+    // The output grid is the input's, so the grid check passes and the field check is what the
+    // test actually exercises.
+    let out = inner.output.grid().unwrap().clone();
+    let node = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: 30_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                },
+                input_grid: Some(Arc::clone(&out)),
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(
+            Arc::new([datatypes::series::samples::FieldSpec {
+                name: Arc::from("value"),
+            }]),
+            out,
+        ),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(error.to_string().contains("field(s)"), "{error}");
+}
+
 /// An instant selection reads raw samples; feeding it evaluated values would re-anchor a grid
 /// that is already fixed.
 #[test]
