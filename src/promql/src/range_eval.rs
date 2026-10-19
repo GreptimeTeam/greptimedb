@@ -113,9 +113,14 @@ const EVALUATION_BATCH: usize = 512;
 /// become final.
 ///
 /// Each series is pushed as its chunks in order. A push evaluates the grid points whose windows
-/// the pushed samples complete, and hands them out as an [`EvaluatedChunk`], so a consumer can
+/// the pushed samples complete and hands them out as [`EvaluatedChunk`]s, so a consumer can
 /// stream a long series instead of waiting for its last chunk. The series closes on a chunk marked
 /// `is_last`, which is handed out even when it holds no position.
+///
+/// One push can decide a very large span, so the hand-out is bounded: a piece covers at most one
+/// budget's worth of rows, the deciding stops at the same budget, and [`RangeEvaluator::pull`]
+/// takes the pieces of what is left. By default the budget is unbounded, so a push hands out its
+/// whole decided span; [`RangeEvaluator::set_pull_budget`] arms the bounded path.
 ///
 /// Fields are evaluated independently over their own valid samples; a row holding a stale
 /// marker in any field is dropped, as the ordinary range selector does. Only the samples later
@@ -149,6 +154,10 @@ pub struct RangeEvaluator {
     batch: Option<BatchKernel>,
     /// Windows accumulated for the next batch call.
     pending: PendingBatch,
+    /// Largest number of rows one hand-out may cover, and the deciding is bounded by it too:
+    /// `usize::MAX` (unbounded, the default) until [`RangeEvaluator::set_pull_budget`] arms a
+    /// bounded hand-out.
+    pull_budget: usize,
     /// Batch kernel calls made so far. Test-only: both dispatch shapes produce the same output,
     /// so a test comparing only output could not tell which one ran.
     #[cfg(test)]
@@ -277,8 +286,25 @@ struct SeriesState {
     /// not. This is what a consumer needs in order to advance, so it is reported as the chunk
     /// span even where no value was produced.
     completed: usize,
-    /// Grid index after the last position handed out to the consumer.
+    /// Grid index after the last position handed out to the consumer. Equal to `completed` between
+    /// two pieces: every step hands out the whole span it decided.
     emitted_end: usize,
+    /// The evaluation bound of the input pushed so far: a grid point whose window ends at or
+    /// before this, on the shifted sample timeline, can no longer gain a sample from a later
+    /// chunk. `None` once the last chunk of the series has arrived, which is what lets the rest of
+    /// the grid be decided. Kept here rather than passed along so that a bounded evaluation can be
+    /// carried on by [`RangeEvaluator::pull`].
+    ready: Option<i128>,
+    /// Whether the evaluation of the input pushed so far reached its end. A bounded step stops at
+    /// the budget, and the pull that follows carries the evaluation on from `cursor`.
+    decided: bool,
+    /// Whether the last chunk of the series has arrived: what is left is to drain the span with
+    /// [`RangeEvaluator::pull`], which also closes the series.
+    closing: bool,
+    /// Anchored replays only: the number of grid points the single anchored window has been
+    /// written to. That broadcast is decided progress like any other, so it can be handed out in
+    /// pieces instead of as one grid-long chunk.
+    broadcast_end: usize,
 }
 
 /// How the windows of an `@`-anchored selector map to the grid.
@@ -519,6 +545,7 @@ impl RangeEvaluator {
             bulk_ingests: 0,
             batch: None,
             pending: PendingBatch::with_fields(input.fields.len()),
+            pull_budget: usize::MAX,
             #[cfg(test)]
             batch_calls: 0,
         })
@@ -554,6 +581,10 @@ impl RangeEvaluator {
     /// The last chunk of a series is always returned, empty when it decided nothing new, because
     /// that chunk is what closes the series for the consumer.
     ///
+    /// A push hands out its whole decided span unless a pull budget is armed with
+    /// [`RangeEvaluator::set_pull_budget`]: then it hands out one budget's worth and the rest is
+    /// pulled. Either way the closing chunk is handed out, by this push or by the last pull.
+    ///
     /// The evaluator must not be reused after an error.
     pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<EvaluatedChunk>> {
         if self.input_grid.is_some() {
@@ -561,17 +592,18 @@ impl RangeEvaluator {
                 "raw series chunk pushed to an evaluator of evaluated series".into(),
             ));
         }
+        self.ensure_drained()?;
         self.check_chunk(chunk)?;
         self.ingest(chunk.time.as_buffer(), &chunk.fields, true)?;
         let last_ts = chunk.time.as_buffer()[chunk.time.len() - 1];
-        if !chunk.is_last {
-            // Later chunks only hold samples after `last_ts`.
-            self.evaluate(Some(
-                i128::from(last_ts) + i128::from(self.window.offset_ms),
-            ))?;
-            return self.emit(false);
+        if chunk.is_last {
+            return self.close_series();
         }
-        self.close_series()
+        // Later chunks only hold samples after `last_ts`.
+        self.expect_input(Some(
+            i128::from(last_ts) + i128::from(self.window.offset_ms),
+        ));
+        self.take_piece(self.pull_budget)
     }
 
     /// Consumes the next chunk of one evaluated series, such as the inner result of a subquery:
@@ -590,6 +622,9 @@ impl RangeEvaluator {
     /// what became final is handed out and the closing chunk always is. An empty chunk decides
     /// nothing and is only legal as that closing chunk.
     ///
+    /// As on the raw path, an armed pull budget makes the push hand out one piece and leave the
+    /// rest to [`RangeEvaluator::pull`].
+    ///
     /// The evaluator must not be reused after an error.
     pub fn push_evaluated(&mut self, chunk: &EvaluatedChunk) -> Result<Option<EvaluatedChunk>> {
         if self.input_grid.is_none() {
@@ -597,6 +632,7 @@ impl RangeEvaluator {
                 "evaluated chunk pushed to an evaluator of raw series".into(),
             ));
         }
+        self.ensure_drained()?;
         let TimeAxis::Grid(range) = &chunk.series.time else {
             return Err(DataFusionError::Execution(
                 "an evaluated chunk must be addressed on a grid".into(),
@@ -636,6 +672,10 @@ impl RangeEvaluator {
                 cursor: 0,
                 completed: 0,
                 emitted_end: 0,
+                ready: None,
+                decided: true,
+                closing: false,
+                broadcast_end: 0,
             });
         }
         // The first position this chunk does not carry. Samples sit on grid timestamps, so no
@@ -653,49 +693,107 @@ impl RangeEvaluator {
             )));
         }
         self.ingest(&range.timestamps(), &chunk.series.fields, false)?;
-        // Advanced only now: `ingest` may fail on a sample it cannot shift or convert.
-        if let Some(state) = self.series.as_mut() {
-            state.reached_end = state.reached_end.max(input_end);
+        if chunk.is_last {
+            return self.close_series();
         }
-        if !chunk.is_last {
-            // A point is decided once no sample that can still arrive falls in its window, and the
-            // next sample cannot arrive before `grid[input_end]`. `ready` is inclusive and in the
-            // shifted sample domain, so it is that boundary shifted by the offset, minus one: a
-            // point at the boundary itself still reads a sample arriving there. At the end of the
-            // input grid no sample can follow at all, which is what `None` means.
-            let ready = range
-                .grid()
-                .timestamps()
-                .get(input_end)
-                .map(|&next| i128::from(next) + i128::from(self.window.offset_ms) - 1);
-            self.evaluate(ready)?;
-            return self.emit(false);
-        }
-        self.close_series()
+        // A point is decided once no sample that can still arrive falls in its window, and the
+        // next sample cannot arrive before `grid[input_end]`. `ready` is inclusive and in the shifted
+        // sample domain, so it is that boundary shifted by the offset, minus one: a point at the
+        // boundary itself still reads a sample arriving there. At the end of the input grid no
+        // sample can follow at all, which is what `None` means.
+        let ready = range
+            .grid()
+            .timestamps()
+            .get(input_end)
+            .map(|&next| i128::from(next) + i128::from(self.window.offset_ms) - 1);
+        self.expect_input(ready);
+        self.take_piece(self.pull_budget)
     }
 
-    /// Evaluates the rest of the series of the last input chunk and closes it.
-    fn close_series(&mut self) -> Result<Option<EvaluatedChunk>> {
-        self.evaluate(None)?;
-        let chunk = self.emit(true)?;
-        self.series = None;
-        Ok(chunk)
-    }
-
-    /// Hands out the positions decided since the last chunk, if any.
+    /// Arms a bounded hand-out: a push then reports at most `budget` rows of what it decided and
+    /// leaves the rest to [`RangeEvaluator::pull`], which is also how a closed series is drained.
     ///
-    /// The span covers everything decided, so a position decided to hold no value travels with
-    /// the chunk that decided it: a consumer needs that progress to advance, and to tell a
-    /// finished position from one still waiting for input. `is_last` closes the series, and then a
-    /// chunk is always handed out, empty when there is nothing left to report.
-    fn emit(&mut self, is_last: bool) -> Result<Option<EvaluatedChunk>> {
+    /// Without it a push reports its whole decided span, as it always has. The budget bounds the
+    /// deciding as well as the hand-out, so it caps how much of a dense span is built at once.
+    ///
+    /// Returns an error for `budget == 0`, which is not a budget.
+    pub fn set_pull_budget(&mut self, budget: usize) -> Result<()> {
+        if budget == 0 {
+            return Err(zero_budget());
+        }
+        self.pull_budget = budget;
+        Ok(())
+    }
+
+    /// Hands out the next piece of the current series, covering at most `budget` rows.
+    ///
+    /// The piece continues exactly where the previous one ended and ends where the series stopped
+    /// deciding, so the pieces of one series tile its span. As on the push path, a position
+    /// decided to hold no value travels with the piece that decided it: a consumer needs that
+    /// progress to advance, and to tell a finished position from one still waiting for input.
+    ///
+    /// The series closes exactly once, on the piece carrying `is_last`, which ends the drain; after
+    /// it `pull` returns `None` and the series is dropped. A consumer that closes a series has to
+    /// pull it to its end before pushing the next one.
+    ///
+    /// The budget bounds the deciding as well as the hand-out: asking for smaller pieces yields
+    /// more of them, never a different result. `budget == 0` is an error, not "unlimited".
+    ///
+    /// The evaluator must not be reused after an error.
+    pub fn pull(&mut self, budget: usize) -> Result<Option<EvaluatedChunk>> {
+        if budget == 0 {
+            return Err(zero_budget());
+        }
+        self.take_piece(budget)
+    }
+
+    /// Evaluates the rest of the series of the last input chunk and starts its drain: the closing
+    /// piece is the one that ends the drain, not necessarily the one the push hands out.
+    fn close_series(&mut self) -> Result<Option<EvaluatedChunk>> {
+        let state = self.series.as_mut().expect("opened by the push");
+        state.closing = true;
+        state.decided = false;
+        state.ready = None;
+        self.take_piece(self.pull_budget)
+    }
+
+    /// Records the bound of the input pushed so far and marks the evaluation of this push as still
+    /// owed: a push decides at most one piece, and a bounded one leaves the rest to `pull`.
+    fn expect_input(&mut self, ready: Option<i128>) {
+        let state = self.series.as_mut().expect("opened by the push");
+        state.ready = ready;
+        state.decided = false;
+    }
+
+    /// Decides at most `budget` more positions and hands out the piece they make, if any.
+    fn take_piece(&mut self, budget: usize) -> Result<Option<EvaluatedChunk>> {
+        let Some(state) = self.series.as_ref() else {
+            return Ok(None);
+        };
+        if !state.decided {
+            self.evaluate(budget)?;
+        }
+        self.hand_out()
+    }
+
+    /// Hands out the positions decided but not yet handed out, one piece.
+    ///
+    /// `evaluate` decided at most one budget's worth of them, so the piece never covers more than
+    /// that and the builder never holds a larger span. Walking the pieces of a series therefore
+    /// builds each piece from the rows of that piece, instead of building the whole span as one
+    /// series and cutting it up.
+    ///
+    /// The last piece is the one that ends the drain of a closed series; it is handed out even when
+    /// it holds no position, and it releases the series.
+    fn hand_out(&mut self) -> Result<Option<EvaluatedChunk>> {
         let Some(state) = self.series.as_ref() else {
             return Ok(None);
         };
         let (start, end) = (state.emitted_end, state.completed);
+        let is_last = state.closing && state.decided;
         // `evaluate` opens the builder's span at the first not-yet-handed-out position even when
-        // this push completed nothing, so finishing here would produce a zero-length chunk that
-        // claims progress the push did not make. Only the last chunk is handed out regardless.
+        // this step decided nothing, so finishing here would produce a zero-length chunk that
+        // claims progress the step did not make. Only the closing piece is handed out regardless.
         if end == start && !is_last {
             return Ok(None);
         }
@@ -718,15 +816,24 @@ impl RangeEvaluator {
         };
         self.series
             .as_mut()
-            .expect("checked at the entry of emit")
+            .expect("checked at the entry of hand_out")
             .emitted_end = end;
-        EvaluatedChunk::try_new(series, is_last).map(Some)
+        let chunk = EvaluatedChunk::try_new(series, is_last)?;
+        if is_last {
+            self.series = None;
+        }
+        Ok(Some(chunk))
     }
 
-    /// A closing chunk without values, addressed after the last position handed out.
-    fn empty_chunk(&self, at: usize) -> Result<Option<EvaluatedChunk>> {
-        let state = self.series.as_ref().expect("checked by the caller");
-        let mut metric = state.metric.clone();
+    /// The closing piece of a series that has nothing left to report, addressed after the last
+    /// position handed out. This is where the drain of such a series ends, so it releases it.
+    fn empty_chunk(&mut self, at: usize) -> Result<Option<EvaluatedChunk>> {
+        let mut metric = self
+            .series
+            .as_ref()
+            .expect("checked by the caller")
+            .metric
+            .clone();
         if self.drops_metric_name {
             metric.remove_all(&METADATA_LABELS);
         }
@@ -736,17 +843,35 @@ impl RangeEvaluator {
         let time = GridRange::try_new(self.grid.clone(), at, 0).map_err(external)?;
         let series = Series::try_new(&self.output_schema, metric, TimeAxis::Grid(time), fields)
             .map_err(external)?;
+        self.series = None;
         EvaluatedChunk::try_new(series, true).map(Some)
     }
 
-    /// Checks that the input did not end inside a series.
+    /// Checks that the input did not end inside a series, and that every series it closed was
+    /// drained: the pieces of a closed series are the caller's to pull, and dropping them would
+    /// lose positions the evaluator had already decided.
     pub fn finish(self) -> Result<()> {
-        if self.series.is_some() {
+        let Some(state) = &self.series else {
+            return Ok(());
+        };
+        if state.closing {
             return Err(DataFusionError::Execution(
-                "series input ended before the last chunk of a series".into(),
+                "series input ended with pieces of the last series still to pull".into(),
             ));
         }
-        Ok(())
+        Err(DataFusionError::Execution(
+            "series input ended before the last chunk of a series".into(),
+        ))
+    }
+
+    /// Rejects a new series while the closed one still has pieces to hand out.
+    fn ensure_drained(&self) -> Result<()> {
+        match &self.series {
+            Some(state) if state.closing => Err(DataFusionError::Execution(
+                "a new series cannot start before the pieces of the previous one are pulled".into(),
+            )),
+            _ => Ok(()),
+        }
     }
 
     fn check_chunk(&mut self, chunk: &RawSeriesChunk) -> Result<()> {
@@ -778,6 +903,10 @@ impl RangeEvaluator {
                     cursor: 0,
                     completed: 0,
                     emitted_end: 0,
+                    ready: None,
+                    decided: true,
+                    closing: false,
+                    broadcast_end: 0,
                 });
             }
             Some(state) => {
@@ -913,24 +1042,47 @@ impl RangeEvaluator {
         Ok(())
     }
 
-    /// Evaluates grid points up to `ready` on the evaluation timeline, or all remaining points
-    /// when `ready` is `None`.
-    fn evaluate(&mut self, ready: Option<i128>) -> Result<()> {
+    /// Evaluates the grid points the input pushed so far completes, deciding at most `budget`
+    /// positions past the ones already handed out.
+    ///
+    /// The budget bounds the deciding, not only the hand-out: rows are pushed into the builder as
+    /// each point is settled, so stopping at the budget is what keeps the builder from holding a
+    /// whole dense span. Whatever is left is decided by the pieces that follow, either from a
+    /// further push or -- after the last chunk -- from the drain.
+    ///
+    /// The bound of this round is the one recorded for the input pushed so far, so a bounded round
+    /// can stop and be carried on with the same bound.
+    fn evaluate(&mut self, budget: usize) -> Result<()> {
         // Positions handed out so far stay behind the builder's span, so a chunk never repeats or
         // reorders them.
-        let emitted = self
-            .series
-            .as_ref()
-            .expect("checked by check_chunk")
-            .emitted_end;
+        let state = self.series.as_ref().expect("checked by check_chunk");
+        let (emitted, ready, decided) = (state.emitted_end, state.ready, state.completed);
+        // Nothing is left pending between two rounds: whatever a round decided, it handed out, so
+        // a new piece starts where the last one ended.
+        debug_assert_eq!(
+            emitted, decided,
+            "a round starts with nothing left to hand out"
+        );
+        // Past this grid index a piece would cover more rows than its budget, so the round stops
+        // there and the pieces that follow decide the rest.
+        let cap_end = decided.saturating_add(budget);
+        let range_ms = self.window.range_ms;
         self.output.cover_from(emitted)?;
         let points_read = self.points_read();
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
         let grid = self.grid.timestamps();
-        let range = i128::from(self.window.range_ms);
+        let range = i128::from(range_ms);
         let mut empty_tail = false;
+        // Set when the budget stopped this round: the rest of the span is decided by later pieces.
+        let mut stopped = false;
         while state.cursor < points_read {
+            // A bounded round decides at most one budget's worth of positions; the points behind
+            // it are settled by the pieces that follow.
+            if matches!(self.replay, Replay::PerPoint) && state.cursor >= cap_end {
+                stopped = true;
+                break;
+            }
             let eval_ts = grid[state.cursor];
             let lower = i128::from(eval_ts) - range;
             let mut earliest = None;
@@ -961,10 +1113,13 @@ impl RangeEvaluator {
                 break;
             };
             if earliest > eval_ts {
-                // Skip the points whose windows end before the earliest sample.
+                // Skip the points whose windows end before the earliest sample. The skipped points
+                // are decided without a value, so a bounded round stops the skip at its budget and
+                // leaves the points behind it to the pieces that follow.
                 let step = i128::from(spec.step_ms);
                 let steps = (i128::from(earliest) - i128::from(spec.start_ms) + step - 1) / step;
-                state.cursor = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
+                let next = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
+                state.cursor = next.min(cap_end);
                 continue;
             }
             if let Some(error) = &self.window_error {
@@ -1029,17 +1184,35 @@ impl RangeEvaluator {
                     self.output.push_samples(state.cursor, &self.row)?;
                 }
                 Replay::Once => {
-                    evaluator.evaluate(eval_ts, eval_ts, &mut self.row)?;
-                    for index in 0..grid.len() {
+                    // The one anchored window is reported at every point, so the broadcast is the
+                    // decided progress here: a bounded round writes its own piece of the grid and
+                    // leaves the rest to the pieces that follow. The window is read once and the
+                    // row kept, so a kernel that is asked for it again does not run again.
+                    if state.broadcast_end == 0 {
+                        evaluator.evaluate(eval_ts, eval_ts, &mut self.row)?;
+                    }
+                    let end = cap_end.min(grid.len());
+                    for index in state.broadcast_end..end {
                         self.output.push_samples(index, &self.row)?;
                     }
+                    state.broadcast_end = end;
+                    stopped = end < grid.len();
                 }
                 Replay::EveryPoint => {
-                    for (index, &point) in grid.iter().enumerate() {
+                    // Each point reads the same window at its own evaluation time, so the piece
+                    // just skips the points an earlier piece already wrote.
+                    let end = cap_end.min(grid.len());
+                    let points = grid.iter().enumerate().take(end).skip(state.broadcast_end);
+                    for (index, &point) in points {
                         evaluator.evaluate(eval_ts, point, &mut self.row)?;
                         self.output.push_samples(index, &self.row)?;
                     }
+                    state.broadcast_end = end;
+                    stopped = end < grid.len();
                 }
+            }
+            if stopped {
+                break;
             }
             state.cursor += 1;
         }
@@ -1073,28 +1246,38 @@ impl RangeEvaluator {
                     } else {
                         decided = points_read;
                     }
-                    // Later rounds start evaluating from here, and none of these points can gain
-                    // a value, so the cursor may skip them.
-                    state.cursor = decided;
-                    decided
+                    // A bounded round reports at most its budget of these settled points; the rest
+                    // are decided by the pieces that follow. Later rounds start from here either
+                    // way, and none of these points can gain a value, so the cursor may skip them.
+                    let end = decided.min(cap_end);
+                    stopped |= end < decided;
+                    state.cursor = end;
+                    end
                 }
                 // An anchored selector broadcasts its one window over the whole grid, so deciding
                 // that window decides every point. Its window ends at the grid's start rather than
                 // at each point, so it is decided once the input has ended or has passed that end.
-                Replay::Once | Replay::EveryPoint => match ready {
-                    None => grid.len(),
-                    Some(ready) if ready >= i128::from(spec.start_ms) => grid.len(),
-                    Some(_) => state.completed,
-                },
+                // A bounded round reports those points one budget at a time, without values.
+                Replay::Once | Replay::EveryPoint => {
+                    let decided = match ready {
+                        None => grid.len(),
+                        Some(ready) if ready >= i128::from(spec.start_ms) => grid.len(),
+                        Some(_) => state.completed,
+                    };
+                    let end = decided.min(cap_end);
+                    stopped |= end < decided;
+                    state.broadcast_end = state.broadcast_end.max(end);
+                    end
+                }
             }
         } else if matches!(self.replay, Replay::PerPoint) {
             state.cursor
-        } else if state.cursor > 0 {
-            grid.len()
         } else {
-            0
+            // An anchored selector has decided the points its broadcast reached, and no others.
+            state.broadcast_end
         };
         state.completed = state.completed.max(completed);
+        state.decided = !stopped;
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.
@@ -1167,6 +1350,12 @@ impl RowEvaluator<'_> {
         }
         Ok(())
     }
+}
+
+/// The error of a zero hand-out budget: zero rows is not a budget, and reading it as "unlimited"
+/// would let a bounded consumer pull a whole dense span at once.
+fn zero_budget() -> DataFusionError {
+    DataFusionError::Execution("a pull budget must be positive, got 0".into())
 }
 
 /// The offset samples are shifted by: the selector offset, or for `@` the offset that places

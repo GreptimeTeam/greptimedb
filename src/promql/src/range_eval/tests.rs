@@ -217,6 +217,14 @@ fn collect_chunks(
         .collect()
 }
 
+/// Feeds one whole evaluated series to the chunked entry point as its single closing chunk.
+impl RangeEvaluator {
+    fn push_series(&mut self, series: &Series) -> Result<Option<EvaluatedChunk>, DataFusionError> {
+        let chunk = EvaluatedChunk::try_new(series.clone(), true)?;
+        self.push_evaluated(&chunk)
+    }
+}
+
 /// Folds the chunks of one series back into one series, the way a consumer that keeps every value
 /// would, and checks the chunk protocol: absolute ranges, never going backwards, all of the same
 /// series, and one closing chunk last.
@@ -270,6 +278,35 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
     }
     assert!(closing, "the series never closed");
     builder.finish(metric).unwrap()
+}
+
+/// An evaluator over a dense grid of `len` points armed with a `budget`, and the one chunk whose
+/// push decides the whole grid: two samples settle the first two points, and the points behind
+/// them are decided to hold no value. One push therefore decides far more rows than the budget.
+fn dense_span(budget: usize, len: u64) -> (RangeEvaluator, RawSeriesChunk) {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator = probe_evaluator(1, grid(0, 10, len), window);
+    evaluator.set_pull_budget(budget).unwrap();
+    let rows = chunk(&[(0, vec![Some(1.0)]), (10, vec![Some(3.0)])], 1, 0, true);
+    (evaluator, rows)
+}
+
+/// Everything the evaluator hands out for one series: the piece a push returned, then the pieces
+/// pulled until the series is drained.
+fn drain(
+    evaluator: &mut RangeEvaluator,
+    first: Option<EvaluatedChunk>,
+    budget: usize,
+) -> Vec<EvaluatedChunk> {
+    let mut pieces: Vec<_> = first.into_iter().collect();
+    while let Some(piece) = evaluator.pull(budget).unwrap() {
+        pieces.push(piece);
+    }
+    pieces
 }
 
 fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
@@ -972,6 +1009,224 @@ fn a_chunk_of_decided_missing_positions_is_handed_out_before_the_series_ends() {
     let chunks = [first, second, last];
     let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
     assert_eq!(folded.metric, output_metric(RangeFunction::Rate, 0));
+}
+
+/// A push can decide a very large span on a dense grid, so it hands out at most one budget's worth
+/// of it and [`RangeEvaluator::pull`] takes the rest.
+///
+/// Every piece has to stay within the budget, there has to be more than one of them, and they have
+/// to tile the span: a piece starting anywhere but the end of the previous one either repeats rows
+/// a consumer already released or skips rows it will never see.
+#[test]
+fn a_dense_span_is_handed_out_in_budget_sized_pieces() {
+    const BUDGET: usize = 7;
+    let (mut evaluator, rows) = dense_span(BUDGET, 64);
+    let first = evaluator
+        .push(&rows)
+        .unwrap()
+        .expect("the last chunk of the series hands out a piece");
+    assert!(
+        first.range().len() <= BUDGET,
+        "the push handed out {} rows for a budget of {BUDGET}",
+        first.range().len()
+    );
+    let pieces = drain(&mut evaluator, Some(first), BUDGET);
+    assert!(
+        pieces.len() > 1,
+        "one push decided 64 positions, more than one budget of {BUDGET}"
+    );
+    for piece in &pieces {
+        assert!(
+            piece.range().len() <= BUDGET,
+            "a piece covers {} rows for a budget of {BUDGET}",
+            piece.range().len()
+        );
+    }
+    let mut end = 0;
+    for piece in &pieces {
+        assert_eq!(
+            piece.range().start(),
+            end,
+            "a piece does not start where the previous one ended"
+        );
+        end += piece.range().len();
+    }
+    assert_eq!(
+        end, 64,
+        "the pieces cover the whole span the series decided"
+    );
+    evaluator.finish().unwrap();
+}
+
+/// The pieces of one series fold back to what the unbounded path produces for the same input.
+///
+/// This is the chunking-invariance check behind the budget: a consumer that reassembles the pieces
+/// must not be able to tell which budget they were cut with, so no row may be dropped, duplicated
+/// or evaluated differently at a piece boundary.
+#[test]
+fn the_pieces_of_one_series_fold_back_to_the_whole_series() {
+    // The unbounded path is the reference: one push, one chunk covering the whole span.
+    let (mut unbounded, rows) = dense_span(usize::MAX, 64);
+    let whole = unbounded
+        .push(&rows)
+        .unwrap()
+        .expect("the last chunk of the series closes it");
+    assert!(whole.is_last);
+    let expected = expand(&whole.series);
+    unbounded.finish().unwrap();
+
+    // Every budget of the grid, including one row per piece and one covering the whole span.
+    for budget in [1, 2, 7, 63, 64, 65] {
+        let (mut evaluator, rows) = dense_span(budget, 64);
+        let first = evaluator.push(&rows).unwrap();
+        let pieces = drain(&mut evaluator, first, budget);
+        let folded = fold_chunks(&pieces, evaluator.output_schema()).expect("the series completed");
+        assert_series_eq(Some(&folded), &expected, &metric(0));
+        evaluator.finish().unwrap();
+    }
+}
+
+/// The remaining span of a closed series is handed out by pulling, and the series closes exactly
+/// once, on the final piece. A second `is_last` would make a consumer close a series twice, and a
+/// missing one would leave it waiting forever.
+#[test]
+fn the_last_piece_closes_the_series_exactly_once() {
+    const BUDGET: usize = 5;
+    const LEN: u64 = 23;
+    let (mut evaluator, rows) = dense_span(BUDGET, LEN);
+    let first = evaluator
+        .push(&rows)
+        .unwrap()
+        .expect("the last chunk of the series hands out a piece");
+    assert!(!first.is_last, "one budget cannot cover the whole span");
+    let mut pieces = vec![first];
+    while let Some(piece) = evaluator.pull(BUDGET).unwrap() {
+        pieces.push(piece);
+    }
+
+    let closing: Vec<_> = pieces
+        .iter()
+        .enumerate()
+        .filter(|(_, piece)| piece.is_last)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        closing,
+        vec![pieces.len() - 1],
+        "the final piece closes the series"
+    );
+    let last = pieces.last().expect("a series hands out its closing piece");
+    assert_eq!(
+        last.range().start() + last.range().len(),
+        LEN as usize,
+        "the closing piece ends where the series stopped deciding"
+    );
+    assert!(
+        evaluator.pull(BUDGET).unwrap().is_none(),
+        "a drained series hands out nothing more"
+    );
+    // The series is released with its closing piece, so there is nothing left to finish.
+    evaluator.finish().unwrap();
+}
+
+/// Zero is not a budget, on either entry point: reading it as "unlimited" would let a bounded
+/// consumer take a whole dense span at once, which is what the budget exists to prevent.
+#[test]
+fn a_budget_of_zero_is_rejected() {
+    const BUDGET: usize = 4;
+    let (mut evaluator, rows) = dense_span(BUDGET, 23);
+    execution_error(evaluator.set_pull_budget(0));
+    let first = evaluator
+        .push(&rows)
+        .unwrap()
+        .expect("the last chunk of the series hands out a piece");
+    execution_error(evaluator.pull(0));
+    // The rejected pull left the evaluator where it was: the next piece still fits its own budget
+    // and continues the span, and the series still drains to its end.
+    let next = evaluator
+        .pull(BUDGET)
+        .unwrap()
+        .expect("the span is longer than one budget");
+    assert!(next.range().len() <= BUDGET);
+    assert_eq!(
+        next.range().start(),
+        first.range().start() + first.range().len()
+    );
+    assert!(!next.is_last);
+    execution_error(evaluator.pull(0));
+    let pieces = drain(&mut evaluator, None, BUDGET);
+    assert_eq!(
+        pieces.iter().filter(|piece| piece.is_last).count(),
+        1,
+        "the series still closes exactly once"
+    );
+    evaluator.finish().unwrap();
+}
+
+/// Pushes `inputs` into a fresh probe evaluator armed with `budget`, draining each series before
+/// the next chunk arrives, and folds everything it handed out back into one series.
+fn bounded_fold(
+    step_invariant: bool,
+    fields: usize,
+    grid: Arc<EvalGrid>,
+    window: RangeWindow,
+    inputs: &[RawSeriesChunk],
+    budget: usize,
+) -> Option<Series> {
+    let mut evaluator = if step_invariant {
+        probe_evaluator(fields, grid, window)
+    } else {
+        per_point_probe_evaluator(fields, grid, window)
+    };
+    evaluator.set_pull_budget(budget).unwrap();
+    let mut pieces = Vec::new();
+    for piece in inputs {
+        pieces.extend(evaluator.push(piece).unwrap());
+        while let Some(pulled) = evaluator.pull(budget).unwrap() {
+            pieces.push(pulled);
+        }
+    }
+    let folded = fold_chunks(&pieces, evaluator.output_schema());
+    evaluator.finish().unwrap();
+    folded
+}
+
+/// A budget changes how a series is cut, never what it holds: for random input, anchored selectors
+/// included, the pieces pulled at any budget fold back to the unbounded result.
+#[test]
+fn a_bounded_hand_out_matches_the_unbounded_one_for_random_input() {
+    for seed in 0..120 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let fields = rng.random_range(1..=3);
+        let (grid, window) = random_window(&mut rng);
+        let step_invariant = rng.random_bool(0.5);
+        let rows = random_rows(&mut rng, fields);
+        let inputs = random_chunks(&mut rng, &rows, fields, 0);
+        let expected = bounded_fold(
+            step_invariant,
+            fields,
+            grid.clone(),
+            window,
+            &inputs,
+            usize::MAX,
+        )
+        .map(|series| (expand(&series), series.metric));
+        for budget in [1, 2, 5, 17] {
+            let bounded = bounded_fold(
+                step_invariant,
+                fields,
+                grid.clone(),
+                window,
+                &inputs,
+                budget,
+            )
+            .map(|series| (expand(&series), series.metric));
+            assert_eq!(
+                bounded, expected,
+                "seed {seed} with a budget of {budget} changed the series"
+            );
+        }
+    }
 }
 
 /// The closing chunk of a series is labelled like the chunks before it, including the metadata
