@@ -63,7 +63,7 @@ use tracing::instrument;
 
 use crate::error::{
     AmbiguousValueColumnSnafu, CatalogSnafu, ColumnNotFoundSnafu, ExecLogicalPlanSnafu,
-    PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
+    InvalidPromRemoteReadSchemaSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
 };
 use crate::instance::Instance;
 
@@ -200,11 +200,11 @@ fn resolve_value_column_name(table_name: &str, table: &TableRef) -> Result<Strin
     }
 }
 
-fn validate_labels_types(
+fn ensure_string_label_columns(
     schema: &Schema,
     timestamp_column_name: &str,
     value_column_name: &str,
-) -> ServerResult<()> {
+) -> Result<()> {
     for column in schema.column_schemas() {
         if column.name == timestamp_column_name || column.name == value_column_name {
             continue;
@@ -212,8 +212,8 @@ fn validate_labels_types(
         // All remaining columns are emitted as labels, including non-key columns.
         ensure!(
             matches!(column.data_type, ConcreteDataType::String(_)),
-            error::InvalidPromRemoteRequestSnafu {
-                msg: format!(
+            InvalidPromRemoteReadSchemaSnafu {
+                detail: format!(
                     "Prometheus remote read only supports string labels: column '{}' has type {:?}",
                     column.name, column.data_type
                 ),
@@ -259,8 +259,7 @@ impl Instance {
 
         let value_column_name = resolve_value_column_name(table_name, &table)?;
 
-        validate_labels_types(&table.schema(), &timestamp_column_name, &value_column_name)
-            .context(PromStoreRemoteQueryPlanSnafu)?;
+        ensure_string_label_columns(&table.schema(), &timestamp_column_name, &value_column_name)?;
 
         let dataframe = self
             .query_engine
@@ -845,6 +844,8 @@ mod tests {
     use std::sync::Arc;
 
     use api::prom_store::remote::LabelMatcher;
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use session::context::QueryContext;
 
     use super::*;
@@ -874,12 +875,20 @@ mod tests {
                 ColumnSchema::new("label", ConcreteDataType::string_datatype(), true),
             ]);
             // Value columns are validated separately, regardless of their type.
-            validate_labels_types(&schema, "ts", "value").unwrap();
+            ensure_string_label_columns(&schema, "ts", "value").unwrap();
 
-            let result = validate_labels_types(&schema, "ts", "label");
+            let result = ensure_string_label_columns(&schema, "ts", "label");
             assert_eq!(supported, result.is_ok(), "{label_type:?}");
             if let Err(err) = result {
-                assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
+                assert!(matches!(
+                    err,
+                    crate::error::Error::InvalidPromRemoteReadSchema { .. }
+                ));
+                assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+                assert!(
+                    err.to_string()
+                        .starts_with("Invalid Prometheus remote read schema: ")
+                );
                 assert!(
                     err.to_string()
                         .contains("only supports string labels: column 'value'")
