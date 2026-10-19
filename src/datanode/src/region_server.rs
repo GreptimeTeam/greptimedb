@@ -709,22 +709,10 @@ impl RegionServer {
         .map_err(BoxedError::new)
         .context(HandleRegionRequestSnafu {
             region_id: first_region_id,
-        });
-
-        match result {
-            Ok(total_affected) => {
-                crate::metrics::REGION_CHANGED_ROW_COUNT
-                    .with_label_values(&[request_type])
-                    .inc_by(total_affected as u64);
-                Ok(Either::Left(RegionResponse::new(total_affected)))
-            }
-            Err(err) => {
-                crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                    .with_label_values(&[request_type, err.status_code().as_ref()])
-                    .inc_by(batch_size as u64);
-                Err(err)
-            }
-        }
+        })
+        .map(RegionResponse::new);
+        record_ingest_result(request_type, batch_size, &result);
+        result.map(Either::Left)
     }
 
     /// Puts into ready mito regions together through
@@ -777,20 +765,16 @@ impl RegionServer {
                         .with_label_values(&[request_type])
                         .observe(elapsed);
                 }
-                match result.context(HandleRegionRequestSnafu {
+                let result = result.context(HandleRegionRequestSnafu {
                     region_id: region_ids[0],
-                }) {
+                });
+                record_ingest_result(request_type, region_ids.len(), &result);
+                match result {
                     Ok(response) => {
-                        crate::metrics::REGION_CHANGED_ROW_COUNT
-                            .with_label_values(&[request_type])
-                            .inc_by(response.affected_rows as u64);
                         affected_rows += response.affected_rows;
                         extensions.extend(response.extensions);
                     }
                     Err(err) => {
-                        crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                            .with_label_values(&[request_type, err.status_code().as_ref()])
-                            .inc_by(region_ids.len() as u64);
                         if let Some(result_tx) = result_tx.take() {
                             let _ = result_tx.send(Err(err));
                         }
@@ -1821,18 +1805,15 @@ impl RegionServerInner {
         // Sets corresponding region status to registering/deregistering before the operation.
         self.set_region_status_not_ready(region_id, &engine, &region_change);
 
-        match engine
+        let result = engine
             .handle_request(region_id, request)
             .await
-            .with_context(|_| HandleRegionRequestSnafu { region_id })
-        {
+            .with_context(|_| HandleRegionRequestSnafu { region_id });
+        if matches!(region_change, RegionChange::Ingest) {
+            record_ingest_result(request_type, 1, &result);
+        }
+        match result {
             Ok(result) => {
-                // Update metrics
-                if matches!(region_change, RegionChange::Ingest) {
-                    crate::metrics::REGION_CHANGED_ROW_COUNT
-                        .with_label_values(&[request_type])
-                        .inc_by(result.affected_rows as u64);
-                }
                 // Sets corresponding region status to ready.
                 self.set_region_status_ready(region_id, engine.clone(), region_change)
                     .await?;
@@ -1844,11 +1825,6 @@ impl RegionServerInner {
                 })
             }
             Err(err) => {
-                if matches!(region_change, RegionChange::Ingest) {
-                    crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                        .with_label_values(&[request_type, err.status_code().as_ref()])
-                        .inc();
-                }
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, &engine, region_change);
                 Err(err)
@@ -2173,6 +2149,19 @@ fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usi
     crate::metrics::REGION_OPEN_FAILURES_TOTAL
         .with_label_values(&[engine, status_code.as_ref()])
         .inc_by(count as u64);
+}
+
+/// Records the result of `count` ingest requests answered by one response: the rows they
+/// changed, or their failures.
+fn record_ingest_result(request_type: &str, count: usize, result: &Result<RegionResponse>) {
+    match result {
+        Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
+            .with_label_values(&[request_type])
+            .inc_by(response.affected_rows as u64),
+        Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+            .with_label_values(&[request_type, err.status_code().as_ref()])
+            .inc_by(count as u64),
+    }
 }
 
 fn parse_region_attribute(
