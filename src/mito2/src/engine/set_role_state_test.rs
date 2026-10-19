@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::{Rows, SemanticType};
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
@@ -1371,9 +1371,9 @@ async fn create_region_and_start_alter(
     alter
 }
 
-/// DowngradingLeader while an ALTER keeps the region in Altering must not
-/// report success unless later writes fail: the region becomes writable again
-/// once the ALTER finishes.
+/// DowngradingLeader while an ALTER keeps the region in Altering must fail
+/// with a retryable error, because the region becomes writable again once the
+/// ALTER finishes. A retry after the ALTER fences writes.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_downgrading_leader_during_alter_stops_writes() {
     common_telemetry::init_default_ut_logging();
@@ -1393,10 +1393,23 @@ async fn test_downgrading_leader_during_alter_stops_writes() {
         .await
         .unwrap();
     let state_after_downgrade = region.state();
-
     listener.wake_notify();
     tokio::time::timeout(WAIT, alter).await.unwrap().unwrap();
-    let result = engine
+    match &response {
+        SetRegionRoleStateResponse::InvalidTransition(err) => {
+            assert_eq!(RetryHint::Retryable, err.retry_hint(), "{err:?}")
+        }
+        _ => panic!(
+            "DowngradingLeader returned {response:?} with the region in {state_after_downgrade:?}"
+        ),
+    }
+
+    let response = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+        .await
+        .unwrap();
+    reported_last_entry_id(&response);
+    let err = engine
         .handle_request(
             region_id,
             put_request(Rows {
@@ -1404,13 +1417,9 @@ async fn test_downgrading_leader_during_alter_stops_writes() {
                 rows: build_rows(3, 5),
             }),
         )
-        .await;
-    assert!(
-        !matches!(response, SetRegionRoleStateResponse::Success(_)) || result.is_err(),
-        "DowngradingLeader returned {response:?} with the region in {state_after_downgrade:?}, \
-         but a later put was acknowledged ({result:?}) and the region is now {:?}",
-        region.state()
-    );
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionNotReady, err.status_code());
 }
 
 /// The datanode's downgrade steps (DowngradingLeader, Flush, Follower) with
@@ -1432,41 +1441,47 @@ async fn test_downgrade_during_alter_keeps_acknowledged_writes_with_local_wal() 
     let options = request.options.clone();
     let alter = create_region_and_start_alter(&env, &engine, region_id, request).await;
 
-    // Mirrors `DowngradeRegionsHandler::handle_downgrade_region` in the datanode.
-    let response = engine
+    // Mirrors `DowngradeRegionsHandler::handle_downgrade_region` in the
+    // datanode. Metasrv retries the downgrade on a retryable error.
+    let mut response = engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
         .await
         .unwrap();
-    let mut acknowledged_rows = 3;
-    let mut reported = None;
-    if matches!(response, SetRegionRoleStateResponse::Success(_)) {
-        listener.wake_notify();
-        tokio::time::timeout(WAIT, alter).await.unwrap().unwrap();
-        engine
-            .handle_request(
-                region_id,
-                RegionRequest::Flush(RegionFlushRequest::default()),
-            )
+    listener.wake_notify();
+    tokio::time::timeout(WAIT, alter).await.unwrap().unwrap();
+    if let SetRegionRoleStateResponse::InvalidTransition(err) = &response {
+        assert_eq!(RetryHint::Retryable, err.retry_hint(), "{err:?}");
+        response = engine
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
             .await
             .unwrap();
-        if let Ok(output) = engine
-            .handle_request(
-                region_id,
-                put_request(Rows {
-                    schema: column_schemas,
-                    rows: build_rows(3, 6),
-                }),
-            )
-            .await
-        {
-            acknowledged_rows += output.affected_rows;
-        }
-        let response = engine
-            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
-            .await
-            .unwrap();
-        reported = Some(reported_last_entry_id(&response));
     }
+    reported_last_entry_id(&response);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    let mut acknowledged_rows = 3;
+    if let Ok(output) = engine
+        .handle_request(
+            region_id,
+            put_request(Rows {
+                schema: column_schemas,
+                rows: build_rows(3, 6),
+            }),
+        )
+        .await
+    {
+        acknowledged_rows += output.affected_rows;
+    }
+    let response = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+    let reported = reported_last_entry_id(&response);
 
     // The candidate shares the object store but not the local WAL.
     let mut candidate_env = TestEnv::with_prefix("downgrade-during-alter-candidate").await;
@@ -1493,7 +1508,7 @@ async fn test_downgrade_during_alter_keeps_acknowledged_writes_with_local_wal() 
             region_id,
             RegionRequest::Catchup(RegionCatchupRequest {
                 set_writable: true,
-                entry_id: reported,
+                entry_id: Some(reported),
                 metadata_entry_id: None,
                 checkpoint: None,
             }),
@@ -1503,7 +1518,6 @@ async fn test_downgrade_during_alter_keeps_acknowledged_writes_with_local_wal() 
     assert_eq!(
         acknowledged_rows,
         count_rows(&candidate, region_id).await,
-        "the candidate misses rows the old leader acknowledged; DowngradingLeader returned {response:?}, \
-         Follower reported last_entry_id {reported:?}"
+        "the candidate misses rows the old leader acknowledged; Follower reported last_entry_id {reported}"
     );
 }
