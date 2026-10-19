@@ -1073,6 +1073,7 @@ mod test {
                     properties,
                     metadata: metadata.clone(),
                     dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+                    observed_pool: Default::default(),
                 });
                 let plan = RegionScanExec::new(
                     scanner,
@@ -1170,6 +1171,7 @@ mod test {
                 properties,
                 metadata: metadata.clone(),
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+                observed_pool: Default::default(),
             });
             let plan = RegionScanExec::new(
                 scanner,
