@@ -63,14 +63,7 @@ impl<R: Borrow<RegionRequest>> Encoder for RegionEncoder<R> {
         ) {
             // Only the header is copied; retries keep borrowing the shared rows.
             let mut header = request.header.clone().unwrap_or_default();
-            header
-                .query_context
-                .get_or_insert_with(Default::default)
-                .extensions
-                .insert(
-                    api::region::ACCEPT_PARTIAL_RESULT.to_string(),
-                    "true".to_string(),
-                );
+            api::region::set_accept_partial_result(&mut header);
             RegionRequest {
                 header: Some(header),
                 body: None,

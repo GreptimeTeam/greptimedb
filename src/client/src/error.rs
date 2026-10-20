@@ -29,7 +29,7 @@ pub enum Error {
     #[snafu(display(
         "Region request has {} failed entries; {}",
         response.failures.len(),
-        response.failures.iter().min_by_key(|(index, _)| *index).map(|(index, error)| format!("entry {index}: {}", error.output_msg())).unwrap_or_default()
+        response.first_failure().map(|(index, error)| format!("entry {index}: {}", error.output_msg())).unwrap_or_default()
     ))]
     PartialRegion {
         response: Box<api::region::BatchRegionResponse<Error>>,
@@ -174,9 +174,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::PartialRegion { response } => response
-                .failures
-                .iter()
-                .min_by_key(|(index, _)| *index)
+                .first_failure()
                 .map_or(StatusCode::Internal, |(_, error)| error.status_code()),
             Error::IllegalFlightMessages { .. }
             | Error::MissingField { .. }

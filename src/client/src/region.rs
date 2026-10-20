@@ -229,7 +229,10 @@ impl RegionRequester {
         .map_err(|status| map_region_error(status, addr))?
         .into_inner();
 
-        decode_region_response(response, request_count)
+        match request_count {
+            Some(count) => decode_write_response(response, count),
+            None => decode_region_response(response),
+        }
     }
 }
 
@@ -405,13 +408,23 @@ pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
     }
 }
 
-/// Decodes a region response, retaining partial failures for vector writes.
-///
-/// `request_count` is the original inserts/deletes entry count, or `None` for
-/// other request kinds. A failed single-entry request returns its underlying error.
-pub fn decode_region_response(
+/// Decodes an ordinary region response without per-entry write failures.
+pub fn decode_region_response(response: PbRegionResponse) -> Result<RegionResponse> {
+    if !response.failures.is_empty() {
+        return IllegalDatabaseResponseSnafu {
+            err_msg: "Failure details are only valid for inserts/deletes",
+        }
+        .fail();
+    }
+    check_response_header(&response.header)?;
+    Ok(RegionResponse::from_region_response(response))
+}
+
+/// Decodes an inserts/deletes response, validating failures against the original entry count.
+/// A failed single-entry request returns its underlying error.
+pub fn decode_write_response(
     response: PbRegionResponse,
-    request_count: Option<usize>,
+    entry_count: usize,
 ) -> Result<RegionResponse> {
     if response.failures.is_empty() {
         if response
@@ -425,12 +438,8 @@ pub fn decode_region_response(
             }
             .fail();
         }
-        check_response_header(&response.header)?;
-        return Ok(RegionResponse::from_region_response(response));
+        return decode_region_response(response);
     }
-    let request_count = request_count.context(IllegalDatabaseResponseSnafu {
-        err_msg: "Failure details are only valid for inserts/deletes",
-    })?;
     let status = response
         .header
         .as_ref()
@@ -448,7 +457,7 @@ pub fn decode_region_response(
     let mut failures = Vec::with_capacity(response.failures.len());
     for error in response.failures {
         let index = error.request_index as usize;
-        if index >= request_count || !seen.insert(index) {
+        if index >= entry_count || !seen.insert(index) {
             return IllegalDatabaseResponseSnafu {
                 err_msg: "Invalid or duplicate batch error index",
             }
@@ -466,7 +475,7 @@ pub fn decode_region_response(
         failures.push((index, error::Error::try_from_response_status(&status)?));
     }
     // A single failed entry has no successful peers to preserve.
-    if request_count == 1
+    if entry_count == 1
         && let Some((_, error)) = failures.pop()
     {
         return Err(error);
@@ -1292,7 +1301,10 @@ mod tests {
                 ..Default::default()
             };
             assert!(matches!(
-                decode_region_response(response, count),
+                match count {
+                    Some(count) => decode_write_response(response, count),
+                    None => decode_region_response(response),
+                },
                 Err(Error::IllegalDatabaseResponse { .. })
             ));
         }
@@ -1308,7 +1320,7 @@ mod tests {
         };
         // A partial envelope must not be interpreted as success by the header-only decoder.
         assert!(check_response_header(&response.header).is_err());
-        let error = decode_region_response(response, Some(1)).unwrap_err();
+        let error = decode_write_response(response, 1).unwrap_err();
         assert_eq!(error.status_code(), StatusCode::RegionNotFound);
         assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
     }
@@ -1344,7 +1356,7 @@ mod tests {
                 ],
                 ..Default::default()
             };
-            let error = decode_region_response(response, Some(2)).unwrap_err();
+            let error = decode_write_response(response, 2).unwrap_err();
             assert_eq!(code, error.status_code());
             assert_eq!(expected_message, error.to_string());
             assert_eq!(RetryHint::Retryable, error.retry_hint());

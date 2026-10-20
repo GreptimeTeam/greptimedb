@@ -90,16 +90,9 @@ impl Datanode for RegionInvoker {
             _ => None,
         };
         if request_count.is_some() {
-            request
-                .header
-                .get_or_insert_with(Default::default)
-                .query_context
-                .get_or_insert_with(Default::default)
-                .extensions
-                .insert(
-                    api::region::ACCEPT_PARTIAL_RESULT.to_string(),
-                    "true".to_string(),
-                );
+            api::region::set_accept_partial_result(
+                request.header.get_or_insert_with(Default::default),
+            );
         }
         let span = request
             .header
@@ -113,7 +106,11 @@ impl Datanode for RegionInvoker {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        region::decode_region_response(response, request_count).map_err(Into::into)
+        match request_count {
+            Some(count) => region::decode_write_response(response, count),
+            None => region::decode_region_response(response),
+        }
+        .map_err(Into::into)
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {

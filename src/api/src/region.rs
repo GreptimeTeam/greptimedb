@@ -15,10 +15,19 @@
 use std::collections::HashMap;
 
 use common_base::AffectedRows;
-use greptime_proto::v1::region::RegionResponse as RegionResponseV1;
+use greptime_proto::v1::region::{RegionRequestHeader, RegionResponse as RegionResponseV1};
 
 /// Request extension advertising support for per-entry write failures.
 pub const ACCEPT_PARTIAL_RESULT: &str = "accept_partial_result";
+
+/// Advertises support for per-entry write failures in the request header.
+pub fn set_accept_partial_result(header: &mut RegionRequestHeader) {
+    header
+        .query_context
+        .get_or_insert_with(Default::default)
+        .extensions
+        .insert(ACCEPT_PARTIAL_RESULT.to_string(), "true".to_string());
+}
 
 /// This result struct is derived from [RegionResponseV1]
 #[derive(Debug)]
@@ -34,6 +43,13 @@ pub struct BatchRegionResponse<E> {
     pub affected_rows: AffectedRows,
     pub extensions: HashMap<String, Vec<u8>>,
     pub failures: Vec<(usize, E)>,
+}
+
+impl<E> BatchRegionResponse<E> {
+    /// Returns the failure with the smallest original request index.
+    pub fn first_failure(&self) -> Option<&(usize, E)> {
+        self.failures.iter().min_by_key(|(index, _)| *index)
+    }
 }
 
 impl RegionResponse {

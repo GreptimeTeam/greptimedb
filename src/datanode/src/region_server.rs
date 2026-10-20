@@ -1083,32 +1083,18 @@ impl RegionServer {
         request: region_request::Body,
         accept_partial_result: bool,
     ) -> ServerResult<RegionResponseV1> {
-        let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
-            .with_label_values(&[request.as_ref()]);
         let request_count = match &request {
             region_request::Body::Inserts(requests) => Some(requests.requests.len()),
             region_request::Body::Deletes(requests) => Some(requests.requests.len()),
             _ => None,
         };
         if let Some(request_count) = request_count {
-            let mut result = self
-                .handle_requests_in_parallel(request)
-                .await
-                .map_err(BoxedError::new)
-                .inspect_err(|_| failed_requests_cnt.inc())
-                .context(ExecuteGrpcRequestSnafu)?;
-            if !result.failures.is_empty() {
-                failed_requests_cnt.inc();
-                // Old clients and single-entry writes retain tonic errors and retry metadata.
-                if (!accept_partial_result || request_count == 1)
-                    && let Some((_, error)) =
-                        result.failures.drain(..).min_by_key(|(index, _)| *index)
-                {
-                    return Err(BoxedError::new(error)).context(ExecuteGrpcRequestSnafu);
-                }
-            }
-            return Ok(encode_batch_write_response(result));
+            return self
+                .handle_write_request(request, request_count, accept_partial_result)
+                .await;
         }
+        let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
+            .with_label_values(&[request.as_ref()]);
         let response = match &request {
             region_request::Body::Creates(_)
             | region_request::Body::Drops(_)
@@ -1141,6 +1127,32 @@ impl RegionServer {
             metadata: response.metadata,
             failures: Vec::new(),
         })
+    }
+
+    async fn handle_write_request(
+        &self,
+        request: region_request::Body,
+        entry_count: usize,
+        accept_partial_result: bool,
+    ) -> ServerResult<RegionResponseV1> {
+        let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
+            .with_label_values(&[request.as_ref()]);
+        let mut result = self
+            .handle_requests_in_parallel(request)
+            .await
+            .map_err(BoxedError::new)
+            .inspect_err(|_| failed_requests_cnt.inc())
+            .context(ExecuteGrpcRequestSnafu)?;
+        if !result.failures.is_empty() {
+            failed_requests_cnt.inc();
+            // Old clients and single-entry writes retain tonic errors and retry metadata.
+            if (!accept_partial_result || entry_count == 1)
+                && let Some((_, error)) = result.failures.drain(..).min_by_key(|(index, _)| *index)
+            {
+                return Err(BoxedError::new(error)).context(ExecuteGrpcRequestSnafu);
+            }
+        }
+        Ok(encode_batch_write_response(result))
     }
 }
 
@@ -1249,9 +1261,7 @@ fn encode_batch_write_response(result: BatchRegionResponse<error::Error>) -> Reg
                 } else {
                     StatusCode::PartialFailure
                 } as u32,
-                err_msg: if let Some((index, error)) =
-                    result.failures.iter().min_by_key(|(index, _)| *index)
-                {
+                err_msg: if let Some((index, error)) = result.first_failure() {
                     format!(
                         "{} region requests failed; entry {index}: {}",
                         result.failures.len(),
