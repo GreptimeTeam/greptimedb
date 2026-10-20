@@ -358,6 +358,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         window: None,
         map: None,
         emitted: None,
+        open_source_series: false,
     }
 }
 
@@ -2057,6 +2058,53 @@ fn an_emptying_operation_hands_on_nothing_until_it_closes_the_series() {
     assert!(out.last().unwrap().is_last);
 }
 
+/// A tree with no window reports an input that ended mid-series as a truncated input.
+///
+/// A window's evaluator is what knows a series has not closed: it holds the series until the chunk
+/// carrying `is_last`, so closing the execution over what is left reports the input that never
+/// delivered it. A tree of an input alone, or of a map over one, has no evaluator at all, so
+/// without the input node saying so the series would reach the consumer open and never close. The
+/// input node is the only place that sees every chunk the caller queued, so the truncation is
+/// reported against it, for a tree of one node and for one with a map above it alike.
+#[test]
+fn an_input_that_ends_mid_series_is_reported_without_a_window() {
+    let map_grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let shapes = [
+        // The input alone, and the same input under a map: neither has a window above it.
+        ("an input", evaluated_input(Arc::clone(&map_grid))),
+        (
+            "a map over an input",
+            map(evaluated_input(Arc::clone(&map_grid)), vec![MathOp::Abs]),
+        ),
+    ];
+    for (what, root) in shapes {
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+        // A chunk that does not close its series: the chunk carrying `is_last` never arrives.
+        execution
+            .push_evaluated(evaluated_chunk(&schema, 0, vec![-1.0, -2.0], false))
+            .unwrap();
+        let handed = execution
+            .next_chunk()
+            .unwrap()
+            .expect("a chunk of a series still open is handed on as it arrives");
+        assert!(
+            !handed.is_last,
+            "{what} handed on a chunk that closed a series it never closed"
+        );
+        let error = execution
+            .finish()
+            .expect_err("an input that ended mid-series was accepted");
+        assert!(
+            error
+                .to_string()
+                .contains("ended before the last chunk of a series"),
+            "{what} reported {error} instead of a truncated input"
+        );
+    }
+}
+
 /// A window over native histograms reserves what it retains, payload included, and the label-set
 /// ledger it charges beside that agrees with a full walk of the table.
 ///
@@ -2456,6 +2504,38 @@ fn releasing_a_node_drops_the_queue_and_its_counts() {
     assert_eq!(source.buffer.held, 0);
     assert_eq!(pool.reserved(), 0, "the reservation was not returned");
     assert!(source.pop_source().unwrap().is_none());
+}
+
+/// A chunk whose axis and fields disagree is refused, not read past the end of a field.
+///
+/// [`Series`] keeps its fields public, so a chunk built by struct literal -- by a caller of this
+/// crate as much as by a mistake here -- can carry fewer samples than the axis places rows. The
+/// label-set ledger reads every row the axis names, so it is where such a chunk would be read out of
+/// bounds; it reports the misalignment against the node that was handed it instead.
+#[test]
+fn a_series_whose_axis_and_fields_disagree_is_rejected() {
+    let grid = grid(0, 60_000, 4);
+    // Two samples placed on a four-row axis: the third row the axis names has nothing to read.
+    let samples = Samples::from_float(Float64Array::from(vec![1.0, 2.0]));
+    let time = TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 4).unwrap());
+    let series = Series {
+        metric: named_metric("requests", "job"),
+        time,
+        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+    };
+    let chunk = EvaluatedChunk::try_new(series, false).expect("the axis is addressed on a grid");
+
+    let mut emitted = Emitted::default();
+    let error = emitted
+        .occupy(&NodePath::root(), &chunk)
+        .expect_err("a field with fewer samples than the axis places rows was accepted");
+    let message = error.to_string();
+    assert!(
+        message.contains("misaligned")
+            && message.contains("4 rows")
+            && message.contains("2 samples"),
+        "the rejection does not name what the axis places against what the field holds: {message}"
+    );
 }
 
 /// One entry's figure is the heap it owns, and its `History` header is charged once, by its slot.

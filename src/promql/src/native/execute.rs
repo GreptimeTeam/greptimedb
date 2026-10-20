@@ -507,6 +507,10 @@ impl Run {
 /// Occupancy is per field and per position, not per chunk range: a chunk reports the positions it
 /// decided, which include the ones holding no value, and series that share a decided range while
 /// sharing no sample merge cleanly, as they do in [`crate::grid_series::merge_same_labelset`].
+///
+/// The table is one node's own: a node knows what it has handed out itself and sees nothing of what
+/// the node below kept, so a label set costs its bytes again in every node that keeps a table, and
+/// what is deduplicated here is one node's history rather than a plan's.
 #[derive(Default)]
 struct Emitted {
     sets: HashMap<LabelSet, History>,
@@ -570,8 +574,9 @@ impl Emitted {
             .series
             .fields
             .iter()
-            .map(|field| occupied_runs(field, &chunk.series.time))
-            .collect();
+            .enumerate()
+            .map(|(index, field)| occupied_runs(path, index, field, &chunk.series.time))
+            .collect::<Result<_>>()?;
         // A chunk holding no value records nothing. If the label set is unknown or already closed,
         // the series this chunk belongs to contributed no sample at all -- either it is the first
         // such series, or a later one that also answers empty -- so there is nothing to report,
@@ -658,13 +663,22 @@ impl Emitted {
     }
 }
 
-/// The runs of positions holding a value in `field`, as the axis `time` places its rows.
+/// The runs of positions holding a value in field `index`, as the axis `time` places its rows.
 ///
 /// A missing sample holds no value; a `NaN` and a native histogram do, as they do for a merge.
 /// A hole between two rows is not a position either: the axis skips it, so a run open before the
 /// hole ends where the hole begins rather than reaching across it. A chunk of several runs is
 /// therefore recorded as the runs it holds, and a series that occupies the hole is not refused.
-fn occupied_runs(field: &Samples, time: &TimeAxis) -> Vec<Run> {
+///
+/// The axis is what says how many rows there are, so every field it reads has to hold one sample per
+/// row. [`Series`] keeps its fields public, so a chunk built by struct literal can carry fewer, and
+/// that is refused here rather than read past the end of the field.
+fn occupied_runs(
+    path: &NodePath,
+    index: usize,
+    field: &Samples,
+    time: &TimeAxis,
+) -> Result<Vec<Run>> {
     let mut runs: Vec<Run> = Vec::new();
     let mut open: Option<usize> = None;
     let mut previous: Option<usize> = None;
@@ -681,10 +695,10 @@ fn occupied_runs(field: &Samples, time: &TimeAxis) -> Vec<Run> {
                 end: previous + 1,
             });
         }
-        let present = !matches!(
-            cursor.at(row).expect("the axis and the fields are aligned"),
-            SampleRef::Missing
-        );
+        let sample = cursor
+            .at(row)
+            .ok_or_else(|| misaligned_field(path, index, time, field))?;
+        let present = !matches!(sample, SampleRef::Missing);
         match (present, open) {
             (true, None) => open = Some(position),
             (false, Some(start)) => {
@@ -706,7 +720,27 @@ fn occupied_runs(field: &Samples, time: &TimeAxis) -> Vec<Run> {
             end: previous.map_or(start, |last| last + 1),
         });
     }
-    runs
+    Ok(runs)
+}
+
+/// The rejection of a series whose axis and fields disagree on how many rows there are.
+///
+/// [`Series`] keeps its fields public, so a chunk built by struct literal — by a caller of this crate
+/// as much as by a mistake here — can carry fewer samples than the axis places rows, and then the row
+/// the axis names has nothing to read.
+fn misaligned_field(
+    path: &NodePath,
+    index: usize,
+    time: &TimeAxis,
+    field: &Samples,
+) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the node at {path} was handed a series whose axis and fields are misaligned: the axis \
+         places {} rows, but field {index} holds {} samples, so the axis names a row the field does \
+         not have",
+        time.len(),
+        field.len(),
+    ))
 }
 
 // How many times `absorb` rebuilt the stored runs instead of appending to them.
@@ -906,6 +940,23 @@ struct NodeRuntime {
     /// What this node has already handed out under each output label set, for a node that rewrites
     /// labels: a window drops the metric name and the empty-valued labels, a map drops the name.
     emitted: Option<Emitted>,
+    /// Whether the series the last chunk handed over belongs to is still open.
+    ///
+    /// Only an input node ever sets this, because its queue is the one the caller fills; the flag is
+    /// what reports a truncated input to a tree that has no window, since nothing else in such a
+    /// tree holds a series and so nothing else could notice one that never ended. It is assigned on
+    /// every handover -- `false` when that chunk carried `is_last`, `true` when it did not -- and
+    /// cleared when the node is released, so a true flag says exactly one thing: the last chunk the
+    /// consumer saw did not close its series, and no chunk came after it. Nothing else writes it, so
+    /// it cannot report a truncation that did not happen.
+    ///
+    /// One flag is enough under the `Contiguous` and `KeyThenTime` orderings, which keep the chunks
+    /// of a series together: only the series last handed over can be open, and one that closed
+    /// cannot resume. An `Interleaved` input does reach a tree with no window above it -- that
+    /// ordering is refused only where a window reads a series at a time -- and there an earlier
+    /// series left open behind another one's chunk is not reported. The flag under-reports such a
+    /// stream; it never over-reports one.
+    open_source_series: bool,
 }
 
 impl NodeRuntime {
@@ -943,6 +994,10 @@ impl NodeRuntime {
     }
 
     /// Hands over the next queued source chunk, if there is one.
+    ///
+    /// The handover is what [`Self::open_source_series`] follows: after this call the flag says
+    /// whether the series the consumer just received a chunk of is still open, which is what closing
+    /// the execution reads to tell a truncated input from one that ended cleanly.
     fn pop_source(&mut self) -> Result<Option<NativeChunk>> {
         let Some(chunk) = self.queued.pop_front() else {
             return Ok(None);
@@ -964,6 +1019,9 @@ impl NodeRuntime {
         if let NativeChunk::Evaluated(chunk) = &chunk {
             metrics.record_grid_points(chunk.series.time.len());
         }
+        // Assigned rather than only set: a chunk that closes its series is what says no series is
+        // open any more, so the flag follows the handover and not the history of handovers.
+        self.open_source_series = !chunk.is_last();
         if chunk.is_last() {
             metrics.record_completed_series(1);
         }
@@ -1100,6 +1158,10 @@ impl NodeRuntime {
         // caller keeps the stopped executor alive. The label sets this node handed out go with it.
         self.window = None;
         self.emitted = None;
+        // A node that holds no chunk holds no series either, so nothing it handed over is still
+        // open for it: the flag is what closing the execution reads, and it must not survive the
+        // state that could have kept a series alive.
+        self.open_source_series = false;
         self.queued.clear();
         self.queued.shrink_to_fit();
         // The queue's counts go with the queue: they are what a later chunk would be folded onto,
@@ -1247,6 +1309,7 @@ impl NativeExecutionState {
                 window: None,
                 map: None,
                 emitted: None,
+                open_source_series: false,
             };
             match &node.seed {
                 Seed::Input => {}
@@ -1440,15 +1503,22 @@ impl NativeExecutionState {
     ///
     /// A drain finds nothing left to emit: a window reports its results on the chunk that closes
     /// the series, so what is left to do is to check that every series did close, and to return
-    /// everything the execution reserved.
+    /// everything the execution reserved. A window's evaluator is what holds a series and so
+    /// notices one that never ended; a tree with no window has none, so there the input node answers
+    /// the same question from [`NodeRuntime::open_source_series`], which follows what it handed over.
+    /// The first error found is the one reported, and the nodes are walked from the root down, so a
+    /// window above the input reports its own truncation as it always did.
     fn close(&mut self) -> Result<()> {
         let mut result = Ok(());
-        for runtime in &mut self.runtimes {
+        for (path, runtime) in self.paths.iter().zip(self.runtimes.iter_mut()) {
             if let Some(window) = runtime.window.as_mut()
                 && let Err(error) = window.finish()
                 && result.is_ok()
             {
                 result = Err(error);
+            }
+            if runtime.open_source_series && result.is_ok() {
+                result = Err(truncated_input(path));
             }
             runtime.release();
         }
@@ -1524,6 +1594,11 @@ impl NativeExecutor {
     }
 
     /// Ends the input: drains what has settled, closes every node and releases every reservation.
+    ///
+    /// Every series must have closed by now, in every tree: a window's evaluator reports the series
+    /// it is still holding, and a tree with no window has its input node report one it handed over
+    /// without the chunk that ends it. An input that ends mid-series is an error here rather than a
+    /// series the caller never sees close.
     pub fn finish(&mut self) -> Result<Vec<EvaluatedChunk>> {
         let mut drained = Vec::new();
         loop {
@@ -1781,6 +1856,18 @@ fn occupied_position(
          value of field {field} at position {position}: one occupies {previous:?} and another \
          {run:?}. Merging them would need whole series, which this layer does not hold",
         position = run.start.max(previous.start),
+    ))
+}
+
+/// The rejection of an input that ended without the chunk closing its series.
+///
+/// It is what a window's evaluator reports for the input it reads, said by the node that handed the
+/// chunks over instead: a tree with no window has no evaluator to hold the series, so the input node
+/// is the one node left that can tell a series that ended from one that was cut off.
+fn truncated_input(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the input at {path} ended before the last chunk of a series: the last chunk it handed over \
+         did not say `is_last`"
     ))
 }
 
