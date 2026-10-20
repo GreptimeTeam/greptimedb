@@ -3495,14 +3495,17 @@ fn an_instant_selection_reserves_the_workspace_it_gathers() {
     );
 }
 
-/// A grid past the removed point limit is refused by the pool, not by a count of its own.
+/// A grid longer than any point limit is charged for, and the pool is what refuses it.
 ///
-/// `gather_bytes` used to return zero for a grid this long, so that the kernel's own point limit
-/// stayed the error reported. The kernel has no limit now, so the estimate applies to every gather
-/// and what refuses this one is the pool, exactly as it refuses a grid under the limit.
+/// `gather_bytes` used to return zero for a grid this long, so that a point limit inside the
+/// kernel stayed the error reported and the workspace of a long gather was never reserved. The
+/// estimate now applies to every gather, so the pool is asked before the kernel is and its refusal
+/// is the one the caller sees — a bound in bytes, on the path that decides the points, rather than
+/// a count that says nothing about what they cost.
 #[test]
 fn an_oversized_selection_is_refused_by_the_pool() {
-    // One million and two points over two samples: more points than the removed limit allowed.
+    // One million and two points over two samples: longer than the short circuit used to allow,
+    // so the estimate has to cover it rather than return zero.
     let out_grid = grid(0, 1, 1_000_002);
     let tree = NativeTree::try_new(instant(input(), 1_000_000, 0, out_grid)).unwrap();
     let pool = bounded_pool(8 * 1024);
