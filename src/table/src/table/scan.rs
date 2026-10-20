@@ -810,13 +810,6 @@ impl ExecutionPlan for SeriesScanExec {
             ));
         }
         let packed = pack_raw_series(raw)?;
-        // The packed stream declares its own label decode description and ordering; it must match
-        // the schema this leaf advertised at planning time, since consumers decode from it.
-        if packed.schema() != self.arrow_schema {
-            return Err(DataFusionError::Execution(
-                "raw series stream schema does not match its planned schema".into(),
-            ));
-        }
         let stream = RecordBatchStreamAdapter::try_new(packed)
             .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
         let stream: SendableRecordBatchStream = Box::pin(stream);

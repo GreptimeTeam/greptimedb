@@ -17,8 +17,9 @@
 //! Schema fields identify the ordered logical payload fields and codec layout; additional
 //! application metadata is permitted when stable across the stream. A key-encoded frame also
 //! declares its own label decode description, so a consumer can decode labels from the received
-//! schema; the caller-provided [`RawLabelSource`] is a scan-bound identity that must agree with
-//! that description, and neither is authenticated as field provenance. This adapter preserves
+//! schema; the caller-provided [`RawLabelSource`] is carried as the scan-bound identity — the
+//! physical region key layout a decoded identity came from — and must describe the same labels as
+//! that description. Neither is authenticated as field provenance. This adapter preserves
 //! scan candidates only; it is not a residual filter, authorization check, remote transport, or
 //! compaction boundary. Only
 //! [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] are accepted;
@@ -193,11 +194,19 @@ pub fn pack_raw_series(
 /// adjacent chunk conditions but does not certify nonadjacent recurrence for `Contiguous`
 /// ordering.
 ///
-/// Decoding no longer depends on this binding: the frame schema declares its own label decode
-/// description, and the supplied binding must agree with it exactly. A frame that omits the
-/// description for a key binding, or declares a different one, is rejected instead of decoding
-/// under either side silently. The binding stays on the returned stream as the scan-bound identity
-/// so callers can compare it before polling; it is not authenticated as field provenance.
+/// Decoding takes the label layout from the frame schema's own description, never from this
+/// binding: a frame that omits the description for a key binding, or describes a different label
+/// layout, is rejected instead of being decoded under either side silently. The binding is kept on
+/// the returned stream because it establishes identity — the physical region key layout a decoded
+/// identity came from — so a consumer can compare it before polling. It is not authenticated as
+/// field provenance.
+///
+/// "A different label layout" is compared the way each part of the description allows. The ordered
+/// `primary_key` columns are compared exactly as [`label_decode_spec`] writes them, because their
+/// array position *is* the encoding position: the same columns in another order are a different key,
+/// not the same key in another order. `logical_tags` are compared as an unordered set of tag
+/// identities, because their order carries no meaning to a decoder; a description listing the same
+/// tags in another order denotes the same labels and is accepted.
 pub fn unpack_raw_series(
     source: DfSendableRecordBatchStream,
     expected: Arc<SeriesSchema>,
@@ -208,7 +217,7 @@ pub fn unpack_raw_series(
     let mode = label_mode(&label_source);
     let frame_schema = source.schema();
     let declared = raw_series_frame_label_decode(frame_schema.as_ref()).map_err(codec_error)?;
-    if declared != label_decode_spec(&label_source) {
+    if !same_label_layout(&declared, &label_decode_spec(&label_source)) {
         return Err(invalid(
             "raw frame label decode description does not match the supplied binding",
         ));
@@ -234,6 +243,34 @@ fn label_mode(source: &RawLabelSource) -> RawLabelMode {
         RawLabelSource::PrimaryKey { .. } => RawLabelMode::Key,
         RawLabelSource::Explicit => RawLabelMode::Explicit,
     }
+}
+
+/// Compares a frame's declared description with the one a binding derives.
+///
+/// The two are compared for structural equality after canonicalising the one part whose order
+/// carries no meaning. `primary_key` is left exactly in place: for a dense key the array position
+/// *is* the encoding position, so the same columns in another order are a different key layout and
+/// must not compare equal. `logical_tags` are sorted, because a decoder binds them sorted and their
+/// order is only what the producer happened to write.
+fn same_label_layout(declared: &Option<LabelDecodeSpec>, bound: &Option<LabelDecodeSpec>) -> bool {
+    match (declared, bound) {
+        (None, None) => true,
+        (Some(declared), Some(bound)) => canonical_layout(declared) == canonical_layout(bound),
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+/// Returns the description with its order-insensitive part in canonical order.
+///
+/// Sorting by `(column_id, name)` is a total order: a validated description names each tag column
+/// and each tag name at most once. Comparing the canonical forms structurally keeps every other
+/// field, including any added later, part of the equality check.
+fn canonical_layout(spec: &LabelDecodeSpec) -> LabelDecodeSpec {
+    let mut canonical = spec.clone();
+    canonical
+        .logical_tags
+        .sort_unstable_by(|a, b| (a.column_id, &a.name).cmp(&(b.column_id, &b.name)));
+    canonical
 }
 
 /// Rejects orderings this adapter cannot validate; a bad declaration is an error, not a fallback.

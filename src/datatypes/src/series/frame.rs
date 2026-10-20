@@ -131,11 +131,17 @@ pub struct LabelDecodeSpec {
     /// Every tag column of the primary key, in primary-key encoding order. This is exactly the
     /// set of encoded key fields: region metadata forbids a primary key from naming the time
     /// index or a field column, and requires it to name every tag column, so no time-index or
-    /// field entry can appear here.
+    /// field entry can appear here. The order is significant and is compared as written: a dense
+    /// decode reads field *n* at position *n*, so the same columns in another order describe a
+    /// different key, not the same key in another order.
     pub primary_key: Vec<LabelDecodeColumn>,
     /// Logical tags, as bound by the producer. Their semantic checks (reserved and internal
     /// names, name equality with the bound column, membership in `primary_key`) are the decoder's,
     /// matching the checks a typed binding gets.
+    ///
+    /// The order is what the producer wrote, not part of the meaning: the decoder binds the tags
+    /// sorted by name, and a consumer comparing two descriptions compares them as a set of tag
+    /// identities, so the same tags in another order denote the same labels.
     pub logical_tags: Vec<LabelDecodeTag>,
 }
 

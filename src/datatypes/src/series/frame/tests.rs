@@ -3200,56 +3200,12 @@ fn label_decode_description_rejects_inconsistent_bindings() {
     }
 }
 
+/// A frame declaring no label mode has no label layout to describe. The rest of the parse and
+/// validation rejections (unknown version, missing/unknown/wrongly typed fields, malformed JSON,
+/// and mode and description disagreeing in either direction) are pinned case for case by
+/// [`raw_series_label_decode_metadata_fixture`], so they are not re-asserted here.
 #[test]
-fn label_decode_description_rejects_malformed_metadata() {
-    let description = dense_description();
-    let encoded = serde_json::to_string(&description).unwrap();
-    let with = |labels: &str, payload: &str| {
-        let mut metadata = base_metadata(labels);
-        metadata.push((LABEL_DECODE.to_string(), payload.to_string()));
-        schema_with_metadata(metadata)
-    };
-
-    assert_eq!(
-        raw_series_frame_label_decode(&with("key", &encoded)).unwrap(),
-        Some(description.clone()),
-        "the well-formed description decodes"
-    );
-
-    for (label, payload) in [
-        (
-            "unknown version",
-            encoded.replace("\"version\":1", "\"version\":2"),
-        ),
-        (
-            "missing field",
-            encoded.replace("\"metric_name\":\"cpu_usage\",", ""),
-        ),
-        (
-            "unknown field",
-            encoded.replace("\"version\":1", "\"version\":1,\"extra\":0"),
-        ),
-        (
-            "wrong type",
-            encoded.replace("\"version\":1", "\"version\":\"1\""),
-        ),
-        ("not json", "greptime".to_string()),
-    ] {
-        assert!(
-            raw_series_frame_label_decode(&with("key", &payload)).is_err(),
-            "{label}: a description this revision cannot honour is an error"
-        );
-    }
-
-    // The label mode and the description must agree in both directions.
-    assert!(
-        raw_series_frame_label_decode(&with("explicit", &encoded)).is_err(),
-        "explicit frames carry complete labels"
-    );
-    assert!(
-        raw_series_frame_label_decode(&schema_with_metadata(base_metadata("key"))).is_err(),
-        "a key-encoded frame without a description is not decodable"
-    );
+fn label_decode_rejects_a_frame_without_a_label_mode() {
     let without_mode = base_metadata("key")
         .into_iter()
         .filter(|(key, _)| key != LABELS)

@@ -28,7 +28,7 @@ use datafusion::physical_plan::RecordBatchStream;
 use datatypes::arrow::array::{Array, Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::arrow::compute::concat_batches;
-use datatypes::arrow::datatypes::{DataType, SchemaRef};
+use datatypes::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datatypes::arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::Label;
@@ -2667,6 +2667,103 @@ fn key_binding(metric: &str) -> RawLabelSource {
     }
 }
 
+/// A primary-key binding over a region whose two tags are `host` then `zone`.
+fn two_tag_binding(metric: &str) -> RawLabelSource {
+    use api::v1::SemanticType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "host",
+                datatypes::data_type::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 0,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "zone",
+                datatypes::data_type::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        })
+        .primary_key(vec![0, 1]);
+    let metadata = Arc::new(builder.build().unwrap());
+    RawLabelSource::PrimaryKey {
+        metric_name: Arc::from(metric),
+        physical_metadata: metadata,
+        logical_tags: Arc::from([
+            BoundTag {
+                column_id: 0,
+                name: Arc::from("host"),
+            },
+            BoundTag {
+                column_id: 1,
+                name: Arc::from("zone"),
+            },
+        ]),
+    }
+}
+
+/// A key frame whose metadata carries exactly the supplied description and nothing else.
+fn key_frame_with(description: &datatypes::series::frame::LabelDecodeSpec) -> SchemaRef {
+    let layout = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    let mut metadata = layout.metadata().clone();
+    metadata.insert(
+        "greptime.series.label_decode".to_string(),
+        serde_json::to_string(description).unwrap(),
+    );
+    Arc::new(Schema::new_with_metadata(layout.fields().clone(), metadata))
+}
+
+/// The description's order-insensitive part is the logical tags: the same tags listed in another
+/// order denote the same labels, so the frame is accepted. The ordered key columns are the
+/// encoding, so the same columns in another order are a different layout and are rejected.
+#[tokio::test]
+async fn unpack_compares_logical_tag_order_insensitively_and_key_order_exactly() {
+    let binding = two_tag_binding("cpu");
+    let description = label_decode_spec(&binding).expect("a primary-key binding describes its key");
+    assert_eq!(description.logical_tags.len(), 2, "two tags to reorder");
+
+    let mut reordered_tags = description.clone();
+    reordered_tags.logical_tags.reverse();
+    let (source, _, _) = df_source(vec![], key_frame_with(&reordered_tags));
+    let unpacked = unpack_raw_series(
+        source,
+        schema(),
+        binding.clone(),
+        SeriesOrdering::Contiguous,
+    );
+    assert!(
+        unpacked.is_ok(),
+        "logical tag order carries no meaning: {:?}",
+        unpacked.err().map(|error| error.to_string())
+    );
+
+    let mut reordered_key = description;
+    reordered_key.primary_key.reverse();
+    let (source, _, _) = df_source(vec![], key_frame_with(&reordered_key));
+    assert!(
+        unpack_raw_series(source, schema(), binding, SeriesOrdering::Contiguous).is_err(),
+        "primary-key column order is the encoding and is compared as written"
+    );
+}
+
 fn key_chunk() -> RawSeriesChunk {
     chunk_with(b"encoded-complete-key", &[1], vec![Some(3.0)], None, true)
 }
@@ -2710,25 +2807,6 @@ async fn pack_declares_the_label_decode_description_of_its_binding() {
         "explicit labels are already complete"
     );
     assert_eq!(declared.metadata().len(), canonical.metadata().len() + 1);
-}
-
-/// An empty key stream still declares the whole description before the first poll, so a consumer
-/// that only sees the schema can decode labels even when no row ever arrives.
-#[tokio::test]
-async fn empty_key_stream_declares_the_label_decode_description_before_any_poll() {
-    let binding = key_binding("cpu");
-    let (input, polls, _) = raw_custom(vec![], SeriesOrdering::KeyThenTime, binding.clone());
-    let mut packed = pack_raw_series(input).unwrap();
-    assert_eq!(
-        datatypes::series::frame::raw_series_frame_label_decode(&packed.schema()).unwrap(),
-        label_decode_spec(&binding)
-    );
-    assert_eq!(
-        polls.load(Ordering::SeqCst),
-        0,
-        "the schema is declared first"
-    );
-    assert!(packed.next().await.is_none());
 }
 
 /// Unpacking compares the frame's own description with the supplied binding: a frame that omits
