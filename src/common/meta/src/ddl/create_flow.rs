@@ -447,6 +447,13 @@ impl Procedure for CreateFlowProcedure {
     }
 }
 
+/// Reads the flow type recorded in the flow options.
+///
+/// `FlowType::Streaming` is still recognized because flows created before the
+/// streaming executor was removed carry it in their persisted options and in
+/// in-flight procedure data. Nothing can create a new streaming flow: the operator
+/// always records `batching` and rejects `flow_type` from users as a reserved key,
+/// and the flownode refuses to run a flow whose options say `streaming`.
 pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType> {
     let flow_type = flow_task
         .flow_options
