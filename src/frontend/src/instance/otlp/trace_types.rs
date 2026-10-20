@@ -519,31 +519,34 @@ mod tests {
         );
     }
 
-    /// The PHP instrumentation case: an empty string must be distinguishable
-    /// from any other unparsable value in the reported diagnostics.
+    /// The PHP instrumentation case: `getHeaderLine('Content-Length')` sends ""
+    /// when the header is absent. The span must be kept with a null attribute.
     #[test]
-    fn test_prepare_trace_column_rewrites_reports_empty_string_value() {
-        let rows = vec![Row {
-            values: vec![Value {
-                value_data: Some(ValueData::StringValue(String::new())),
+    fn test_prepare_trace_column_rewrites_nulls_empty_string_value() {
+        let mut rows = Rows {
+            schema: vec![ColumnSchema {
+                column_name: "span_attributes.http.response.body.size".to_string(),
+                datatype: ColumnDataType::String as i32,
+                ..Default::default()
             }],
-        }];
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::StringValue(String::new())),
+                }],
+            }],
+        };
         let pending_rewrites = vec![PendingTraceColumnRewrite {
             col_idx: 0,
             target_type: ColumnDataType::Int64,
             column_name: "span_attributes.http.response.body.size".to_string(),
         }];
 
-        let err = prepare_trace_column_rewrites(&rows, pending_rewrites, "opentelemetry_traces")
-            .unwrap_err();
-        assert!(
-            err.error.to_string().contains(
-                "'span_attributes.http.response.body.size' in table 'opentelemetry_traces' \
-                 from String(\"\") to Int64"
-            ),
-            "unexpected error message: {}",
-            err.error
-        );
+        prepare_trace_column_rewrites(&rows.rows, pending_rewrites, "opentelemetry_traces")
+            .unwrap()
+            .apply(&mut rows);
+
+        assert_eq!(rows.schema[0].datatype, ColumnDataType::Int64 as i32);
+        assert_eq!(rows.rows[0].values[0].value_data, None);
     }
 
     #[test]

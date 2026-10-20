@@ -1554,6 +1554,18 @@ impl PromPlanner {
                     }
                 } else if right_is_empty_metric && !left_is_empty_metric {
                     self.ctx = left_context.clone();
+                } else if rhs.value_type() == ValueType::Scalar
+                    && lhs.value_type() == ValueType::Vector
+                {
+                    // A computed scalar on the right (`time()`, `scalar(...)`) has no labels;
+                    // the result keeps the labels of the vector on the left.
+                    self.ctx = left_context.clone();
+                }
+                // An operand without a table name, such as a comparison filter's projection, is
+                // joined under the `""` qualifier; resolve the projected columns against it.
+                // Otherwise a time index present on both sides is ambiguous.
+                if self.ctx.table_name.is_none() {
+                    self.ctx.table_name = Some(String::new());
                 }
                 // Computed scalars reach this join path instead of the literal projection paths.
                 // Broadcast them for arithmetic in the same way as literal scalars.
@@ -2596,13 +2608,17 @@ impl PromPlanner {
 
             let accepts_empty = matcher.is_match("");
             let column_name = Self::find_case_sensitive_column(table_schema, matcher.name.as_str());
+            // Prometheus reads a label a series does not carry as the empty
+            // string. A row can miss a label two ways: the table has no column
+            // for it, or the column exists but is NULL on that row — the latter
+            // is the norm for logical metrics sharing a physical table, which
+            // holds the union of their label columns.
             let col = if let Some(column_name) = column_name {
                 let column = DfExpr::Column(Column::from_name(&column_name));
                 let field = table_schema
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && column_name == OTLP_AGGREGATION_TEMPORALITY_LABEL
                     && let Some(data_type) = field
                         .filter(|field| {
                             field.is_nullable()
@@ -2621,7 +2637,6 @@ impl PromPlanner {
                 }
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
-                    .alias(matcher.name.clone())
             };
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)), None);
             let expr = match matcher.op {

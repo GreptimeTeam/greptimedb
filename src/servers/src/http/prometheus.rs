@@ -49,13 +49,13 @@ use futures::future::join_all;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token::{self};
+use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier, MatrixSelector, ParenExpr,
-    SubqueryExpr, UnaryExpr, VectorSelector,
+    AggregateExpr, BinModifier, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier,
+    MatrixSelector, ParenExpr, SubqueryExpr, UnaryExpr, VectorMatchCardinality, VectorSelector,
 };
-use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryStatement};
+use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -74,7 +74,7 @@ use table::requests::{
 pub use super::result::prometheus_resp::{PromSampleValue, PrometheusJsonResponse};
 use crate::error::{
     CollectRecordbatchSnafu, ConvertScalarValueSnafu, DataFusionSnafu, Error, InvalidQuerySnafu,
-    NotSupportedSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
+    NotSupportedSnafu, ParseTimestampSnafu, Result, TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
 use crate::otlp::metrics::ucum_to_openmetrics_unit;
@@ -1373,6 +1373,72 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
     }
 }
 
+/// Whether the metric name survives a binary operation; see
+/// [`binary_metric_name_side`] for the operand that supplies it.
+///
+/// Follows Prometheus' `shouldDropMetricName` and `resultMetric`: set operators
+/// and comparisons keep the name, while arithmetic operators drop it. A
+/// comparison also drops it when it returns a bool or is a one-to-one
+/// `on(...)` match that does not keep `__name__` or an `ignoring(...)` match
+/// that excludes it. Prometheus keeps only the `on(...)` labels or deletes the
+/// `ignoring(...)` labels for one-to-one matches.
+fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> bool {
+    if op.is_set_operator() {
+        return true;
+    }
+
+    if !op.is_comparison_operator() {
+        return false;
+    }
+
+    let Some(m) = modifier else {
+        return true;
+    };
+
+    if m.return_bool {
+        return false;
+    }
+
+    if m.card == VectorMatchCardinality::OneToOne {
+        match &m.matching {
+            Some(LabelModifier::Include(labels))
+                if !labels.labels.contains(&METRIC_NAME.to_string()) =>
+            {
+                return false;
+            }
+            Some(LabelModifier::Exclude(labels))
+                if labels.labels.contains(&METRIC_NAME.to_string()) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    true
+}
+
+/// The operand whose labels supply the result metric name of a binary
+/// operation.
+///
+/// Prometheus builds the result from the side whose labels it carries, i.e. the
+/// "many" side of the match: `group_right` makes the right-hand operand that
+/// side, and a scalar left-hand operand (for example `0.5 < a`) leaves the
+/// vector on the right. Every other case takes the left-hand operand.
+fn binary_metric_name_side<'a>(
+    lhs: &'a PromqlExpr,
+    rhs: &'a PromqlExpr,
+    modifier: Option<&BinModifier>,
+) -> &'a PromqlExpr {
+    let group_right =
+        modifier.is_some_and(|m| matches!(m.card, VectorMatchCardinality::OneToMany(_)));
+    if group_right || matches!(lhs.value_type(), ValueType::Scalar) {
+        rhs
+    } else {
+        lhs
+    }
+}
+
 /// Recursively collect all metric names from a PromQL expression
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
@@ -1395,14 +1461,16 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
             collect_metric_names(expr, metric_names)
         }
         PromqlExpr::Unary(UnaryExpr { .. }) => metric_names.clear(),
-        PromqlExpr::Binary(BinaryExpr { lhs, op, .. }) => {
-            if matches!(
-                op.id(),
-                token::T_LAND // INTERSECT
-                    | token::T_LOR // UNION
-                    | token::T_LUNLESS // EXCEPT
-            ) {
-                collect_metric_names(lhs, metric_names)
+        PromqlExpr::Binary(BinaryExpr {
+            lhs,
+            op,
+            rhs,
+            modifier,
+            ..
+        }) => {
+            if binary_keeps_metric_name(op, modifier.as_ref()) {
+                let side = binary_metric_name_side(lhs, rhs, modifier.as_ref());
+                collect_metric_names(side, metric_names)
             } else {
                 metric_names.clear()
             }
@@ -1711,9 +1779,35 @@ pub async fn label_values_query(
         );
         let catalog_manager = handler.catalog_manager();
 
-        let mut table_names = try_call_return_response!(
-            retrieve_table_names(&query_ctx, catalog_manager, matches).await
-        );
+        // An empty `match[]` enumerates every metric; otherwise only the
+        // selectors answerable from metadata go down that path.
+        let enumerate_all = matches.is_empty();
+        let (metadata_selectors, label_selectors) =
+            try_call_return_response!(split_selectors_by_label_use(&matches));
+
+        let mut table_names = if enumerate_all || !metadata_selectors.is_empty() {
+            try_call_return_response!(
+                retrieve_table_names(&query_ctx, catalog_manager, metadata_selectors).await
+            )
+        } else {
+            Vec::new()
+        };
+
+        if !label_selectors.is_empty() {
+            table_names.extend(try_call_return_response!(
+                retrieve_table_names_by_labels(
+                    &handler,
+                    label_selectors,
+                    params.start.as_deref(),
+                    params.end.as_deref(),
+                    &query_ctx,
+                )
+                .await
+            ));
+            table_names.sort_unstable();
+            table_names.dedup();
+        }
+
         table_names = try_call_return_response!(
             handler
                 .filter_metadata_metric_names(
@@ -1895,6 +1989,131 @@ fn take_metric_name(selector: &mut VectorSelector) -> Option<String> {
     selector.matchers.matchers.remove(pos);
 
     Some(name)
+}
+
+/// Removes every `__name__` matcher from the selector and returns them, so the
+/// rest can be planned as column predicates. A name given as `VectorSelector::name`
+/// comes back as an equality matcher, making both spellings filter alike.
+fn take_metric_name_matchers(selector: &mut VectorSelector) -> Vec<Matcher> {
+    let mut taken = Vec::new();
+    if let Some(name) = selector.name.take() {
+        taken.push(Matcher::new(MatchOp::Equal, METRIC_NAME_LABEL, &name));
+    }
+
+    let (name_matchers, rest) = std::mem::take(&mut selector.matchers.matchers)
+        .into_iter()
+        .partition(|matcher| matcher.name == METRIC_NAME_LABEL);
+    selector.matchers.matchers = rest;
+    taken.extend(name_matchers);
+
+    taken
+}
+
+/// Whether a metric name satisfies every `__name__` matcher of one selector.
+///
+/// Negated matchers are honoured here, unlike in [`retrieve_table_names`] where
+/// they keep every table so the caller authorizes the full candidate set: the
+/// names reaching this point are already narrowed by the data, so filtering them
+/// can only remove names, never widen what a caller gets to see.
+fn metric_name_matches(table_name: &str, matchers: &[Matcher]) -> bool {
+    matchers.iter().all(|matcher| match &matcher.op {
+        MatchOp::Equal => table_name == matcher.value,
+        MatchOp::NotEqual => table_name != matcher.value,
+        MatchOp::Re(re) => re.is_match(table_name),
+        MatchOp::NotRe(re) => !re.is_match(table_name),
+    })
+}
+
+/// Whether a matcher constrains an ordinary label. The others name the metric,
+/// the database or the field, none of which is a column to scan.
+fn is_ordinary_label_matcher(matcher: &Matcher) -> bool {
+    matcher.name != METRIC_NAME_LABEL
+        && matcher.name != FIELD_NAME_LABEL
+        && !is_database_selection_label(&matcher.name)
+}
+
+/// Splits `match[]` selectors by whether they constrain an ordinary label. The
+/// first group is answerable from table metadata; the second needs the data read
+/// and is returned as parsed selectors.
+///
+/// `or` matchers stay in the metadata group, which ignores them, rather than
+/// being silently dropped from a data scan that cannot express them.
+fn split_selectors_by_label_use(matches: &[String]) -> Result<(Vec<String>, Vec<VectorSelector>)> {
+    let mut metadata_only = Vec::new();
+    let mut with_labels = Vec::new();
+
+    for selector in matches {
+        let expr = promql_parser::parser::parse(selector)
+            .map_err(|reason| InvalidQuerySnafu { reason }.build())?;
+        let PromqlExpr::VectorSelector(vector_selector) = expr else {
+            return InvalidQuerySnafu {
+                reason: "expected vector selector".to_string(),
+            }
+            .fail();
+        };
+
+        let constrains_labels = vector_selector.matchers.or_matchers.is_empty()
+            && vector_selector
+                .matchers
+                .matchers
+                .iter()
+                .any(is_ordinary_label_matcher);
+        if constrains_labels {
+            with_labels.push(vector_selector);
+        } else {
+            metadata_only.push(selector.clone());
+        }
+    }
+
+    Ok((metadata_only, with_labels))
+}
+
+/// Resolves selectors constraining ordinary labels into metric names: the data
+/// answers the label matchers, then each selector's `__name__` matchers narrow
+/// the names it found.
+async fn retrieve_table_names_by_labels(
+    handler: &PrometheusHandlerRef,
+    selectors: Vec<VectorSelector>,
+    start: Option<&str>,
+    end: Option<&str>,
+    query_ctx: &QueryContextRef,
+) -> Result<Vec<String>> {
+    let start_arg = start.map(str::to_string).unwrap_or_else(yesterday_rfc3339);
+    let end_arg = end.map(str::to_string).unwrap_or_else(current_time_rfc3339);
+    let start = QueryLanguageParser::parse_promql_timestamp(&start_arg).with_context(|_| {
+        ParseTimestampSnafu {
+            timestamp: start_arg.clone(),
+        }
+    })?;
+    let end = QueryLanguageParser::parse_promql_timestamp(&end_arg).with_context(|_| {
+        ParseTimestampSnafu {
+            timestamp: end_arg.clone(),
+        }
+    })?;
+
+    let schema = query_ctx.current_schema();
+    let mut table_names = Vec::new();
+    for mut selector in selectors {
+        let name_matchers = take_metric_name_matchers(&mut selector);
+        // The database and field matchers name no column, and the metadata path
+        // ignores them too.
+        let label_matchers = selector
+            .matchers
+            .matchers
+            .into_iter()
+            .filter(is_ordinary_label_matcher)
+            .collect();
+        let matched = handler
+            .query_metric_names_by_labels(label_matchers, &schema, start, end, query_ctx)
+            .await?;
+        table_names.extend(
+            matched
+                .into_iter()
+                .filter(|name| metric_name_matches(name, &name_matchers)),
+        );
+    }
+
+    Ok(table_names)
 }
 
 async fn retrieve_table_names(
@@ -2407,6 +2626,10 @@ mod tests {
         deny_operation: bool,
         denied_table: Option<&'static str>,
         metric_names: Vec<String>,
+        /// Names the label-matcher path resolves, kept apart from `metric_names`
+        /// so a test can tell which path answered.
+        label_metric_names: Vec<String>,
+        label_lookups: Mutex<Vec<Vec<Matcher>>>,
         queries: Mutex<Vec<String>>,
         ordered_outputs: Mutex<Vec<bool>>,
     }
@@ -2482,6 +2705,18 @@ mod tests {
             Ok(self.metric_names.clone())
         }
 
+        async fn query_metric_names_by_labels(
+            &self,
+            matchers: Vec<Matcher>,
+            _: &str,
+            _: std::time::SystemTime,
+            _: std::time::SystemTime,
+            _: &QueryContextRef,
+        ) -> Result<Vec<String>> {
+            self.label_lookups.lock().unwrap().push(matchers);
+            Ok(self.label_metric_names.clone())
+        }
+
         async fn query_label_values(
             &self,
             _: String,
@@ -2547,6 +2782,8 @@ mod tests {
             deny_operation: false,
             denied_table: None,
             metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
         });
@@ -2600,6 +2837,8 @@ mod tests {
             deny_operation: false,
             denied_table: None,
             metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
         });
@@ -2684,6 +2923,8 @@ mod tests {
                 deny_operation: false,
                 denied_table: Some("denied"),
                 metric_names: Vec::new(),
+                label_metric_names: Vec::new(),
+                label_lookups: Mutex::new(Vec::new()),
                 queries: Mutex::new(Vec::new()),
                 ordered_outputs: Mutex::new(Vec::new()),
             })),
@@ -2697,6 +2938,153 @@ mod tests {
         assert_eq!(
             axum::http::StatusCode::FORBIDDEN,
             response.into_response().status()
+        );
+    }
+
+    /// A handler over the logical metric tables `cpu_user` and `cpu_system`,
+    /// which is what the metadata path enumerates, with the label-matcher path
+    /// answering `label_metric_names`.
+    fn label_values_handler(label_metric_names: Vec<&str>) -> Arc<TestPrometheusHandler> {
+        let mut cpu_user = test_table_info(
+            1024,
+            "cpu_user",
+            DEFAULT_SCHEMA_NAME,
+            DEFAULT_CATALOG_NAME,
+            Arc::new(Schema::new(vec![])),
+        );
+        cpu_user.meta.options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "physical_metrics".to_string(),
+        );
+        let manager = MemoryCatalogManager::new_with_table(EmptyTable::from_table_info(&cpu_user));
+        let mut cpu_system = cpu_user.clone();
+        cpu_system.ident.table_id = 1025;
+        cpu_system.name = "cpu_system".to_string();
+        manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: cpu_system.name.clone(),
+                table_id: cpu_system.table_id(),
+                table: EmptyTable::from_table_info(&cpu_system),
+            })
+            .unwrap();
+
+        Arc::new(TestPrometheusHandler {
+            catalog_manager: manager,
+            deny_operation: false,
+            denied_table: None,
+            metric_names: Vec::new(),
+            label_metric_names: label_metric_names.into_iter().map(String::from).collect(),
+            label_lookups: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        })
+    }
+
+    async fn query_metric_name_values(
+        handler: Arc<TestPrometheusHandler>,
+        matches: Vec<&str>,
+    ) -> Vec<String> {
+        let state: PrometheusHandlerRef = handler;
+        let response = label_values_query(
+            State(state),
+            Path(METRIC_NAME_LABEL.to_string()),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Query(LabelValueQuery {
+                matches: Matches(matches.into_iter().map(String::from).collect()),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        match response.data {
+            PrometheusResponse::LabelValues(values) => values,
+            other => panic!("expected label values, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn label_matchers_resolve_metric_names_from_data() {
+        let handler = label_values_handler(vec!["cpu_user"]);
+        let values = query_metric_name_values(handler.clone(), vec![r#"{pod="abc"}"#]).await;
+
+        // The metadata path would have enumerated both metrics.
+        assert_eq!(vec!["cpu_user".to_string()], values);
+
+        let lookups = handler.label_lookups.lock().unwrap();
+        assert_eq!(1, lookups.len());
+        assert_eq!(
+            vec!["pod".to_string()],
+            lookups[0]
+                .iter()
+                .map(|matcher| matcher.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_matchers_narrow_data_resolved_names() {
+        let handler = label_values_handler(vec!["cpu_user", "cpu_system"]);
+        let values =
+            query_metric_name_values(handler, vec![r#"{__name__=~"cpu_u.*", pod="abc"}"#]).await;
+
+        assert_eq!(vec!["cpu_user".to_string()], values);
+    }
+
+    #[tokio::test]
+    async fn special_matchers_are_stripped_before_the_data_lookup() {
+        let handler = label_values_handler(vec!["cpu_user"]);
+        let values = query_metric_name_values(
+            handler.clone(),
+            vec![r#"{pod="abc", __field__="value", __database__="public"}"#],
+        )
+        .await;
+
+        assert_eq!(vec!["cpu_user".to_string()], values);
+        let lookups = handler.label_lookups.lock().unwrap();
+        assert_eq!(
+            vec!["pod".to_string()],
+            lookups[0]
+                .iter()
+                .map(|matcher| matcher.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn database_and_field_matchers_stay_on_the_metadata_path() {
+        let handler = label_values_handler(vec!["never_returned"]);
+        let values = query_metric_name_values(
+            handler.clone(),
+            vec![r#"{__name__=~"cpu_.*", __field__="value", __database__="other"}"#],
+        )
+        .await;
+
+        assert_eq!(
+            vec!["cpu_system".to_string(), "cpu_user".to_string()],
+            values
+        );
+        assert!(handler.label_lookups.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_match_still_enumerates_every_metric() {
+        let handler = label_values_handler(Vec::new());
+        let values = query_metric_name_values(handler, Vec::new()).await;
+
+        assert_eq!(
+            vec!["cpu_system".to_string(), "cpu_user".to_string()],
+            values
         );
     }
 
@@ -2728,6 +3116,8 @@ mod tests {
             deny_operation: false,
             denied_table: None,
             metric_names: vec!["cpu_user".to_string(), "cpu_system".to_string()],
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
         });
@@ -2886,6 +3276,134 @@ mod tests {
                 name: "unless with same metric",
                 promql: "cpu_usage unless cpu_usage",
                 expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Arithmetic operators always drop the metric name.
+            TestCase {
+                name: "arithmetic between metrics",
+                promql: "a + b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "arithmetic with scalar",
+                promql: "a * 2",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Comparisons keep the metric name from the side whose labels the
+            // result carries, i.e. the "many" side of the match: normally the
+            // left operand, but `group_right` takes it from the right operand and
+            // a scalar left operand leaves the vector on the right. The name is
+            // dropped when the comparison returns a bool or is a one-to-one
+            // `on(...)` match that does not keep `__name__` or an `ignoring(...)`
+            // match that excludes it. A `group_left`/`group_right` modifier does
+            // not reduce the labels, so the name is kept.
+            TestCase {
+                name: "bool comparison between metrics",
+                promql: "a > bool b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "bool comparison with scalar",
+                promql: "a > bool 0.5",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with scalar",
+                promql: "a > 0.5",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with scalar on the left",
+                promql: "0.5 < a",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "equality comparison with scalar",
+                promql: "up == 0",
+                expected_metric: Some("up"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison between metrics",
+                promql: "a > b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring",
+                promql: "a > ignoring(x) b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring __name__",
+                promql: "a > ignoring(__name__) b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring __name__ and group_left",
+                promql: "a > ignoring(__name__) group_left b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring __name__ and group_right",
+                promql: "a > ignoring(__name__) group_right b",
+                expected_metric: Some("b"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "unless with ignoring __name__",
+                promql: "a unless ignoring(__name__) b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with on",
+                promql: "a > on(x) b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with on keeping __name__",
+                promql: "a > on(__name__) b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with on and group_left",
+                promql: "a > on(x) group_left b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with on and group_right",
+                promql: "a > on(x) group_right b",
+                expected_metric: Some("b"),
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
@@ -3635,6 +4153,8 @@ mod tests {
                 deny_operation: true,
                 denied_table: None,
                 metric_names: Vec::new(),
+                label_metric_names: Vec::new(),
+                label_lookups: Mutex::new(Vec::new()),
                 queries: Mutex::new(Vec::new()),
                 ordered_outputs: Mutex::new(Vec::new()),
             })),
@@ -3649,6 +4169,8 @@ mod tests {
             deny_operation: false,
             denied_table: Some("denied"),
             metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
         });

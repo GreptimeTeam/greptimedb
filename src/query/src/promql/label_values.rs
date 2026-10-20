@@ -23,8 +23,30 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::promql::error::{
-    DataFusionPlanningSnafu, Result, TimeIndexNotFoundSnafu, TimestampOutOfRangeSnafu,
+    DataFusionPlanningSnafu, Result, SystemTimeOutOfRangeSnafu, TimeIndexNotFoundSnafu,
+    TimestampOutOfRangeSnafu,
 };
+
+/// Converts a [`SystemTime`] to a millisecond [`Timestamp`].
+///
+/// `duration_since` reports an instant before the epoch as an error rather than
+/// a negative duration, and an RFC3339 query parameter can name one, so the sign
+/// is recovered here instead of unwrapping.
+fn millis_since_epoch(time: SystemTime) -> Result<Timestamp> {
+    let (millis, before_epoch) = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => (duration.as_millis(), false),
+        Err(earlier) => (earlier.duration().as_millis(), true),
+    };
+    let millis = i64::try_from(millis)
+        .ok()
+        .with_context(|| SystemTimeOutOfRangeSnafu { time })?;
+
+    Ok(Timestamp::new_millisecond(if before_epoch {
+        -millis
+    } else {
+        millis
+    }))
+}
 
 fn build_time_filter(time_index_expr: Expr, start: Timestamp, end: Timestamp) -> Expr {
     time_index_expr
@@ -67,14 +89,12 @@ pub fn rewrite_label_values_query(
         })?;
 
     // We only support millisecond precision at most.
-    let start =
-        Timestamp::new_millisecond(start.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64);
+    let start = millis_since_epoch(start)?;
     let start = start.convert_to(unit).context(TimestampOutOfRangeSnafu {
         timestamp: start.value(),
         unit,
     })?;
-    let end =
-        Timestamp::new_millisecond(end.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64);
+    let end = millis_since_epoch(end)?;
     let end = end.convert_to(unit).context(TimestampOutOfRangeSnafu {
         timestamp: end.value(),
         unit,
@@ -97,4 +117,29 @@ pub fn rewrite_label_values_query(
         .context(DataFusionPlanningSnafu)?;
 
     Ok(logical_plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn millis_before_the_epoch_are_negative() {
+        // `SystemTime::duration_since` reports these as an error; unwrapping it
+        // panicked on any request whose RFC3339 start named a pre-epoch instant.
+        let time = UNIX_EPOCH - Duration::from_millis(1);
+        assert_eq!(millis_since_epoch(time).unwrap().value(), -1);
+        assert_eq!(millis_since_epoch(UNIX_EPOCH).unwrap().value(), 0);
+
+        let time = UNIX_EPOCH + Duration::from_millis(1);
+        assert_eq!(millis_since_epoch(time).unwrap().value(), 1);
+    }
+
+    #[test]
+    fn millis_beyond_i64_are_rejected() {
+        let time = UNIX_EPOCH + Duration::from_secs(1 << 60);
+        assert!(millis_since_epoch(time).is_err());
+    }
 }

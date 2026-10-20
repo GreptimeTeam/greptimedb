@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::time::SystemTime;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -202,6 +203,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Time out of the representable millisecond range: {:?}", time))]
+    SystemTimeOutOfRange {
+        time: SystemTime,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("vector cannot contain metrics with the same labelset"))]
     SameLabelSet {
         #[snafu(implicit)]
@@ -243,6 +251,7 @@ impl ErrorExt for Error {
             | UnsupportedMatcherOp { .. }
             | SameLabelSet { .. }
             | TimestampOutOfRange { .. }
+            | SystemTimeOutOfRange { .. }
             | InvalidRegularExpression { .. }
             | InvalidDestinationLabelName { .. } => StatusCode::InvalidArguments,
 

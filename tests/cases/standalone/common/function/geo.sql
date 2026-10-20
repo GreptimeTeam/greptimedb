@@ -180,3 +180,27 @@ FROM
             'POLYGON ((-121.491698 38.653343, -121.582353 38.556757, -121.469721 38.449287, -121.315883 38.541721, -121.491698 38.653343))' AS polygon2,
             'POLYGON ((-122.089628 37.450332, -122.20535 37.378342, -122.093062 37.36088, -122.044301 37.372886, -122.089628 37.450332))' AS polygon3,
     );
+
+CREATE TABLE geo_path_partitioned (
+  ts TIMESTAMP TIME INDEX,
+  k INT,
+  lat DOUBLE,
+  lon DOUBLE,
+  PRIMARY KEY(k)
+)
+PARTITION ON COLUMNS (k) (k < 10, k >= 10 AND k < 20, k >= 20);
+
+INSERT INTO geo_path_partitioned VALUES
+  (1000, 1, 1, 11),
+  (2000, 11, 2, 12),
+  (3000, 21, 3, 13),
+  (4000, 2, 4, 14),
+  (5000, 12, 5, 15),
+  (6000, 22, 6, 16),
+  (7000, 3, 7, 17);
+
+SELECT lat > 3 AS g, geo_path(lat, lon, ts) FROM geo_path_partitioned GROUP BY g ORDER BY g;
+
+SELECT lat > 3 AS g, json_encode_path(lat, lon, ts) FROM geo_path_partitioned GROUP BY g ORDER BY g;
+
+DROP TABLE geo_path_partitioned;
