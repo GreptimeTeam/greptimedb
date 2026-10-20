@@ -1339,7 +1339,6 @@ impl BulkPartEncoder {
         let key_value_meta =
             parquet::file::metadata::KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
-        // TODO(yingwen): Do we need compression?
         let mut props = WriterProperties::builder()
             .set_key_value_metadata(Some(vec![key_value_meta]))
             .set_write_batch_size(row_group_size)
