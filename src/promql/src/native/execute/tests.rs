@@ -34,8 +34,9 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis}
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
-    ChargedAllocations, Emitted, History, NativeChunk, NativeExecutionState, NativeExecutor,
-    NodeBuffer, NodeRuntime, QueuedCharge, Run, absorb_rebuilds, label_bytes, map_chunk, raw_bytes,
+    BinaryRuntime, ChargedAllocations, Emitted, History, NativeChunk, NativeExecutionState,
+    NativeExecutor, NodeBuffer, NodeRuntime, QueuedCharge, Run, absorb_rebuilds, fields_bytes,
+    label_bytes, map_chunk, raw_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
@@ -477,6 +478,27 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         instant: None,
         window: None,
         map: None,
+        binary: None,
+        source_schema: None,
+        emitted: None,
+        open_source_series: false,
+    }
+}
+
+/// A binary node's runtime: both operands bound to `schema` and the reservation they are held for.
+fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> NodeRuntime {
+    NodeRuntime {
+        buffer: NodeBuffer::new(&NodePath::root(), Arc::new(NodeMetrics::default()), pool),
+        queued: VecDeque::new(),
+        queued_charge: QueuedCharge::default(),
+        instant: None,
+        window: None,
+        map: None,
+        binary: Some(BinaryRuntime::new(
+            Arc::new(binary_matching(BinaryOp::Add)),
+            [Arc::clone(schema), Arc::clone(schema)],
+        )),
+        source_schema: None,
         emitted: None,
         open_source_series: false,
     }
@@ -509,7 +531,21 @@ fn evaluated_chunk_of(
     values: Vec<Option<f64>>,
     is_last: bool,
 ) -> EvaluatedChunk {
-    let samples = Samples::from_float(Float64Array::from(values));
+    evaluated_array_chunk_of(schema, metric, start, Float64Array::from(values), is_last)
+}
+
+/// One evaluated chunk of the series `metric` whose one field holds `values`, addressed at `start`.
+///
+/// The array is passed in rather than built here so that two chunks can hold sibling slices of one
+/// Arrow allocation, which is what a source handing over the chunks of one batch does.
+fn evaluated_array_chunk_of(
+    schema: &SeriesSchema,
+    metric: MetricName,
+    start: usize,
+    values: Float64Array,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let samples = Samples::from_float(values);
     let range =
         GridRange::try_new(schema.eval_grid.clone().unwrap(), start, samples.len()).unwrap();
     let series = Series {
@@ -3598,4 +3634,1308 @@ fn a_chunk_of_another_series_is_refused() {
         0,
         "the refused series is still reserved for"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Vector–vector binary operations, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// The matching most tests here start from: no label list, one-to-one, no `bool`.
+fn binary_matching(op: BinaryOp) -> BinaryMatching {
+    BinaryMatching {
+        op,
+        return_bool: false,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+    }
+}
+
+/// A binary node over `left` and `right`, bound the way the compiler binds it: the left side's
+/// fields paired by position, on the grid both operands are evaluated on.
+fn binary_of(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let left_schema = left.output.samples().expect("binary reads samples").clone();
+    let right_schema = right
+        .output
+        .samples()
+        .expect("binary reads samples")
+        .clone();
+    let fields = field_count(left_schema.fields.len().min(right_schema.fields.len()));
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields,
+            eval_grid: Some(
+                left_schema
+                    .eval_grid
+                    .clone()
+                    .expect("binary reads evaluated samples"),
+            ),
+        })),
+    }
+}
+
+/// A source of evaluated chunks over `count` float fields.
+fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: field_count(count),
+        eval_grid: Some(grid),
+    }));
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            ordering: SeriesOrdering::KeyThenTime,
+        }),
+        output,
+    }
+}
+
+/// One evaluated chunk of `metric` whose fields carry `columns`, one column per field.
+fn evaluated_columns(
+    schema: &SeriesSchema,
+    metric: MetricName,
+    start: usize,
+    columns: Vec<Vec<Option<f64>>>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let rows = columns.first().map_or(0, Vec::len);
+    evaluated_on(schema, metric, start, rows, columns, is_last)
+}
+
+/// One evaluated chunk of `metric` addressed on `rows` positions from `start`, carrying `columns`.
+///
+/// The axis and the columns are given independently so that a chunk whose two disagree can be built:
+/// [`Series`] keeps its fields public, so nothing between a caller and a kernel refuses such a chunk
+/// on its way in.
+fn evaluated_on(
+    schema: &SeriesSchema,
+    metric: MetricName,
+    start: usize,
+    rows: usize,
+    columns: Vec<Vec<Option<f64>>>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let fields = SeriesFields::try_from_vec(
+        columns
+            .into_iter()
+            .map(|values| Samples::from_float(Float64Array::from(values)))
+            .collect(),
+    )
+    .unwrap();
+    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, rows).unwrap();
+    EvaluatedChunk::try_new(
+        Series {
+            metric,
+            time: TimeAxis::Grid(range),
+            fields,
+        },
+        is_last,
+    )
+    .unwrap()
+}
+
+/// One evaluated chunk of `metric` whose one field holds a `buckets`-wide histogram at each of
+/// `len` positions from `start`.
+fn evaluated_histograms(
+    schema: &SeriesSchema,
+    metric: MetricName,
+    start: usize,
+    buckets: i32,
+    len: usize,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let mut builder = HistogramBatchBuilder::new();
+    let indices: UInt32Array = (0..len)
+        .map(|_| Some(push_histogram(&mut builder, buckets)))
+        .collect();
+    let samples = Samples::try_from_histogram(indices, builder.finish().unwrap()).unwrap();
+    let range = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, len).unwrap();
+    EvaluatedChunk::try_new(
+        Series {
+            metric,
+            time: TimeAxis::Grid(range),
+            fields: SeriesFields::one(samples),
+        },
+        is_last,
+    )
+    .unwrap()
+}
+
+/// The `count` of the histogram at every carried row of a chunk.
+fn histogram_counts(chunk: &EvaluatedChunk) -> Vec<f64> {
+    let mut cursor = chunk.series.fields.as_slice()[0].cursor();
+    chunk
+        .series
+        .time
+        .positions()
+        .filter_map(
+            |(_, row)| match cursor.at(row).expect("the axis and the fields align") {
+                SampleRef::Histogram(view) => Some(view.count),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// A source bound in label mode: `name{job="api",pod="a"}` and the other series here.
+fn pod_metric(name: &str, job: &str, pod: &str) -> MetricName {
+    MetricName::try_new(
+        Some(name.into()),
+        vec![
+            Label {
+                name: "job".into(),
+                value: job.into(),
+            },
+            Label {
+                name: "pod".into(),
+                value: pod.into(),
+            },
+        ],
+    )
+    .unwrap()
+}
+
+/// The one side of a `group_left` match: `one{job=...,instance=...}`.
+fn one_metric(job: &str, instance: &str) -> MetricName {
+    MetricName::try_new(
+        Some("one".into()),
+        vec![
+            Label {
+                name: "job".into(),
+                value: job.into(),
+            },
+            Label {
+                name: "instance".into(),
+                value: instance.into(),
+            },
+        ],
+    )
+    .unwrap()
+}
+
+/// A tree of two evaluated sources over `points` points under a binary node, with the two paths a
+/// caller queues at.
+fn binary_tree(op: BinaryOp, points: u64) -> (NativeTree, Arc<EvalGrid>, NodePath, NodePath) {
+    let grid = grid(0, 60_000, points);
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&grid)),
+        evaluated_input_of(1, Arc::clone(&grid)),
+        binary_matching(op),
+    );
+    (
+        NativeTree::try_new(root).unwrap(),
+        grid,
+        NodePath::root().left(),
+        NodePath::root().right(),
+    )
+}
+
+/// Two evaluated sources under a binary node add the series they match, point by point.
+#[test]
+fn a_binary_of_two_inputs_adds_the_matched_series() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated_at(
+            &right,
+            evaluated_chunk(&schema, 0, vec![10.0, 20.0, 30.0, 40.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(11.0), Some(22.0), Some(33.0), Some(44.0)])]
+    );
+}
+
+/// Neither the order the sides arrive in nor the chunk boundaries of one side change the result.
+///
+/// A binary node matches whole series, so the two deliveries below are the same vector: one splits
+/// the right side over two chunks, the other queues the right side first. `is_last` is the only
+/// thing that ends a series, so a chunk boundary carries no meaning of its own.
+#[test]
+fn a_binary_result_does_not_depend_on_arrival_order_or_chunk_boundaries() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Sub, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut split = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    split
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+        )
+        .unwrap();
+    split
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], false))
+        .unwrap();
+    split
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 2, vec![30.0, 40.0], true))
+        .unwrap();
+    let split = decided(&run(&mut split));
+
+    let mut reversed = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    reversed
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], false))
+        .unwrap();
+    reversed
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+        )
+        .unwrap();
+    reversed
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 2, vec![30.0, 40.0], true))
+        .unwrap();
+    let reversed = decided(&run(&mut reversed));
+
+    let expected = vec![
+        (0, Some(-9.0)),
+        (1, Some(-18.0)),
+        (2, Some(-27.0)),
+        (3, Some(-36.0)),
+    ];
+    assert_eq!(split, expected);
+    assert_eq!(reversed, expected);
+}
+
+/// Two series that arrive in separate chunks and hold a value at the same point are refused.
+///
+/// Each chunk is a series of its own, closed by its own `is_last`, and the two claim one label set:
+/// Prometheus reports the duplicate at the first point both are present at, which no chunk boundary
+/// can resolve. Two such series whose positions do not meet are accepted instead, as
+/// `a_sparse_binary_keeps_the_shared_positions` shows.
+#[test]
+fn a_cross_chunk_duplicate_on_one_side_is_refused() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    // The same label set twice on the right, each delivered in the chunk that closes it, and both
+    // holding values at positions 0 and 1.
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![30.0, 40.0], true))
+        .unwrap();
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("found duplicate series for the match group"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0, "the refused operands are still held");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// An operand that closes without a row contributes nothing, and pairing it is not an error.
+#[test]
+fn an_empty_side_yields_no_series() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    // A closing chunk with no row: the series ends before its first point.
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk_of(&schema, metric(), 0, Vec::new(), true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    assert!(run(&mut execution).is_empty());
+}
+
+/// An empty closing chunk after rows is not the series going backwards.
+#[test]
+fn an_empty_closing_chunk_does_not_rewind_a_series() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0], false))
+        .unwrap();
+    // The chunk that closes the series holds no row, so where it addresses says nothing.
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk_of(&schema, metric(), 0, Vec::new(), true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    assert_eq!(decided(&run(&mut execution)), vec![(0, Some(11.0))]);
+}
+
+/// Two sparse operands meet at the positions both carry.
+#[test]
+fn a_sparse_binary_keeps_the_shared_positions() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    // The left side decides positions 0 and 2 only, in two chunks.
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0], false))
+        .unwrap();
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 2, vec![3.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(
+            &right,
+            evaluated_chunk(&schema, 0, vec![10.0, 20.0, 30.0, 40.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (2, Some(33.0))]
+    );
+}
+
+/// Fields are paired by position, and a field that misses a position keeps it null.
+#[test]
+fn a_binary_pairs_the_fields_of_each_operand() {
+    let grid = grid(0, 60_000, 2);
+    let root = binary_of(
+        evaluated_input_of(2, Arc::clone(&grid)),
+        evaluated_input_of(2, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let schema = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(grid),
+    });
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, pool(), &set);
+    execution
+        .push_evaluated_at(
+            &NodePath::root().left(),
+            evaluated_columns(
+                &schema,
+                metric(),
+                0,
+                vec![vec![Some(1.0), None], vec![Some(5.0), Some(6.0)]],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated_at(
+            &NodePath::root().right(),
+            evaluated_columns(
+                &schema,
+                metric(),
+                0,
+                vec![vec![Some(10.0), Some(20.0)], vec![Some(7.0), Some(8.0)]],
+                true,
+            ),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    // Position 1 holds no left value of field 0, so that field keeps it null while field 1 has one.
+    assert_eq!(field_values(&out[0], 0), vec![Some(11.0), None]);
+    assert_eq!(field_values(&out[0], 1), vec![Some(12.0), Some(14.0)]);
+    // The result decided two positions and holds three values: the two positions are what the node
+    // evaluated, and a value is what a field sample holds, which is one fewer for the null.
+    let root_path = NodePath::root();
+    assert_eq!(
+        count(&set, &root_path, NodeMetric::EVALUATED_GRID_POINTS),
+        2
+    );
+    assert_eq!(count(&set, &root_path, NodeMetric::OUTPUT_VALUES), 3);
+}
+
+/// A comparison without `bool` filters the points it does not hold at; with `bool` it reports both.
+#[test]
+fn a_comparison_filters_and_a_bool_comparison_reports_both_outcomes() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    for (return_bool, expected) in [
+        (false, vec![(2, Some(3.0)), (3, Some(4.0))]),
+        (
+            true,
+            vec![
+                (0, Some(0.0)),
+                (1, Some(0.0)),
+                (2, Some(1.0)),
+                (3, Some(1.0)),
+            ],
+        ),
+    ] {
+        let matching = BinaryMatching {
+            op: BinaryOp::Gt,
+            return_bool,
+            labels: MatchingLabels::Ignoring(Vec::new()),
+            cardinality: Cardinality::OneToOne,
+        };
+        let root = binary_of(
+            evaluated_input_of(1, Arc::clone(&grid)),
+            evaluated_input_of(1, Arc::clone(&grid)),
+            matching,
+        );
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+        execution
+            .push_evaluated_at(
+                &NodePath::root().left(),
+                evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true),
+            )
+            .unwrap();
+        execution
+            .push_evaluated_at(
+                &NodePath::root().right(),
+                evaluated_chunk(&schema, 0, vec![2.0, 2.0, 2.0, 2.0], true),
+            )
+            .unwrap();
+        assert_eq!(
+            decided(&run(&mut execution)),
+            expected,
+            "bool={return_bool}"
+        );
+    }
+}
+
+/// `group_left(instance)` keeps every many-side series and copies the label from its match.
+#[test]
+fn a_group_modifier_copies_the_one_side_label() {
+    let grid = grid(0, 60_000, 2);
+    let matching = BinaryMatching {
+        op: BinaryOp::Add,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("job")]),
+        cardinality: Cardinality::ManyToOne(vec![Arc::from("instance")]),
+    };
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&grid)),
+        evaluated_input_of(1, Arc::clone(&grid)),
+        matching,
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let (left, right) = (NodePath::root().left(), NodePath::root().right());
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (metric, values) in [
+        (pod_metric("a", "api", "p1"), vec![Some(1.0), Some(2.0)]),
+        (pod_metric("b", "db", "p2"), vec![Some(3.0), Some(4.0)]),
+    ] {
+        execution
+            .push_evaluated_at(&left, evaluated_chunk_of(&schema, metric, 0, values, true))
+            .unwrap();
+    }
+    for (metric, values) in [
+        (one_metric("api", "i1"), vec![Some(10.0), Some(20.0)]),
+        (one_metric("db", "i2"), vec![Some(100.0), Some(200.0)]),
+    ] {
+        execution
+            .push_evaluated_at(&right, evaluated_chunk_of(&schema, metric, 0, values, true))
+            .unwrap();
+    }
+
+    // The result is compared as label sets, so the two series are sorted by the labels they carry:
+    // the value lists of `f64` have no total order, and none is needed here.
+    let mut results: Vec<(Vec<(String, String)>, Vec<Option<f64>>)> = run(&mut execution)
+        .iter()
+        .map(|chunk| {
+            let mut tags: Vec<(String, String)> = chunk
+                .series
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| (tag.name.to_string(), tag.value.to_string()))
+                .collect();
+            tags.sort();
+            (tags, sample_values(chunk))
+        })
+        .collect();
+    results.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        results,
+        vec![
+            (
+                vec![
+                    ("instance".to_string(), "i1".to_string()),
+                    ("job".to_string(), "api".to_string()),
+                    ("pod".to_string(), "p1".to_string()),
+                ],
+                vec![Some(11.0), Some(22.0)],
+            ),
+            (
+                vec![
+                    ("instance".to_string(), "i2".to_string()),
+                    ("job".to_string(), "db".to_string()),
+                    ("pod".to_string(), "p2".to_string()),
+                ],
+                vec![Some(103.0), Some(204.0)],
+            ),
+        ]
+    );
+}
+
+/// Two native histograms are added bucket by bucket.
+#[test]
+fn a_binary_adds_the_native_histograms_of_both_sides() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_histograms(&schema, metric(), 0, 4, 2, true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated_at(
+            &right,
+            evaluated_histograms(&schema, metric(), 0, 4, 2, true),
+        )
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    // Each side holds four buckets of one count at each point, so the sum counts eight.
+    assert_eq!(histogram_counts(&out[0]), vec![8.0, 8.0]);
+}
+
+/// Nothing is decided before the input ends; `finish` is what hands the result over.
+#[test]
+fn a_binary_yields_nothing_until_the_input_finishes() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a binary node answered before its input ended"
+    );
+    assert_eq!(
+        addressed(&execution.finish().unwrap()),
+        vec![(0, vec![Some(11.0), Some(22.0)])]
+    );
+}
+
+/// A truncated operand is refused before the kernel is handed anything.
+///
+/// The right side also carries a duplicate series, which the kernel would report: the truncation is
+/// what comes back, so the kernel never ran over half a vector.
+#[test]
+fn a_truncated_operand_is_refused_before_the_kernel_runs() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    // The left side holds a duplicate the kernel would report if it were reached.
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![3.0, 4.0], true))
+        .unwrap();
+    // The right side never hands over the chunk that closes its series.
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0], false))
+        .unwrap();
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        error.to_string().contains("ended before the last chunk"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().nodes_holding_binary(), 0);
+}
+
+/// A workspace the pool cannot hold is refused, and what the node retained is given back with it.
+#[test]
+fn an_oversized_binary_workspace_is_refused_by_the_pool() {
+    let points = 100_000;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points);
+    let schema = evaluated_schema(grid);
+    // Enough for the two one-row operands, far less than the presence arrays the kernel builds.
+    let pool = bounded_pool(60_000);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0], true))
+        .unwrap();
+    let error = execution.finish().unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "a point limit answered in the pool's place: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(execution.state().nodes_holding_binary(), 0);
+}
+
+/// A pool that cannot hold both operands refuses the second one, and the first is given back.
+///
+/// Both chunks sit in their input's queue until the input ends, so the reservation covers them at
+/// once: the second one is what the pool refuses, and stopping the execution returns what the first
+/// one held.
+#[test]
+fn an_oversized_binary_operand_is_refused_by_the_pool() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 100_000);
+    let schema = evaluated_schema(grid);
+    let pool = bounded_pool(60_000);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    let values: Vec<f64> = (0..50_000).map(f64::from).collect();
+    let error = execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, values, true))
+        .unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "an operand limit answered in the pool's place: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// Two chunks of one series that share one Arrow allocation are charged for it once, and the pool
+/// is asked for the increment rather than for the chunk.
+///
+/// A source hands over sibling slices of one batch, so both chunks reference one allocation: the
+/// second costs the operand the descriptor that refers to it and nothing else. The budget here is
+/// exactly what the operand holds, so a chunk reserved for on top of the allocation it shares would
+/// be refused even though the node never holds more than it reserved.
+#[test]
+fn a_binary_operand_is_charged_the_increment_of_a_shared_allocation() {
+    let grid = grid(0, 60_000, 40_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from((0..40_000).map(f64::from).collect::<Vec<_>>());
+    let first = evaluated_array_chunk_of(&schema, metric(), 0, batch.slice(0, 20_000), false);
+    let second =
+        evaluated_array_chunk_of(&schema, metric(), 20_000, batch.slice(20_000, 20_000), true);
+
+    // What one chunk costs the operand on its own: the descriptor and the allocation, because a
+    // pass over one chunk does not know what the operand already holds.
+    let alone = |chunk: &EvaluatedChunk| {
+        let mut charged = ChargedAllocations::default();
+        std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
+    };
+    let (first_alone, second_alone) = (alone(&first), alone(&second));
+    // What both cost together: the one allocation they are slices of, and a descriptor each.
+    let mut charged = ChargedAllocations::default();
+    let held = [&first, &second]
+        .iter()
+        .map(|chunk| {
+            std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
+        })
+        .fold(0usize, usize::saturating_add);
+    assert!(
+        first_alone + second_alone > held,
+        "the two chunks are not slices of one allocation: {first_alone} and {second_alone} bytes \
+         add up to no more than the {held} they are charged together, so nothing would be charged \
+         twice"
+    );
+
+    // The budget is the figure the operand holds, which a chunk reserved for on top of the
+    // allocation it shares would not fit into.
+    let pool = bounded_pool(held);
+    let mut runtime = binary_runtime(&pool, &schema);
+    let before = runtime.buffer.held;
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    assert_eq!(
+        runtime.buffer.held - before,
+        first_alone,
+        "the first chunk of an allocation does not cost the descriptor and the allocation"
+    );
+    let before = runtime.buffer.held;
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second))
+        .unwrap();
+    assert_eq!(
+        runtime.buffer.held - before,
+        std::mem::size_of::<Series>(),
+        "a chunk of the allocation the operand already retains cost more than its descriptor"
+    );
+    assert_eq!(
+        runtime.buffer.held, held,
+        "the operand does not reserve what it holds"
+    );
+    assert_eq!(pool.reserved(), held);
+
+    // An allocation the operand does not hold yet is still charged: the increment is the descriptor
+    // and the new allocation, not the descriptor alone.
+    let own = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
+    assert_eq!(
+        runtime
+            .binary
+            .as_ref()
+            .unwrap()
+            .pending(&NodePath::root(), 0, &own)
+            .unwrap(),
+        alone(&own),
+        "a chunk of an allocation the operand does not hold is not charged for it"
+    );
+}
+
+/// The executor's binary node never reserves a chunk on top of the allocation it shares: the peak
+/// of its own reservation is the operand it retains, not that plus the chunk it was handed.
+///
+/// The source queue holds one chunk while the node retains the other, so what is read here is the
+/// binary node's own figure rather than the pool's: the overlap of the two nodes is a charge of the
+/// input and says nothing about what the operand costs.
+#[test]
+fn a_binary_beneath_the_executor_does_not_reserve_a_shared_chunk_on_top() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let batch = Float64Array::from(vec![1.0; 4_000]);
+    let first = evaluated_array_chunk_of(&schema, metric(), 0, batch.slice(0, 2_000), false);
+    let second =
+        evaluated_array_chunk_of(&schema, metric(), 2_000, batch.slice(2_000, 2_000), true);
+    // What the left operand holds once both chunks are retained, counted the way its ledger counts:
+    // the one allocation the chunks are slices of, and one descriptor per chunk.
+    let mut charged = ChargedAllocations::default();
+    let retained = [&first, &second]
+        .iter()
+        .map(|chunk| {
+            std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
+        })
+        .fold(0usize, usize::saturating_add);
+
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, bounded_pool(1 << 22), &set);
+    execution.push_evaluated_at(&left, first).unwrap();
+    execution.push_evaluated_at(&left, second).unwrap();
+    // Nothing is queued on the right, so the pull retains both chunks of the left operand and
+    // nothing else: the kernel has not run and the node holds what it retains.
+    assert!(execution.next_chunk().unwrap().is_none());
+    let peak = NodePath::root().partitioned_metric_name(NodeMetric::PEAK_RESERVED_BYTES, 0);
+    assert_eq!(
+        gauge(&set, &peak),
+        retained,
+        "the binary node reserved the chunk it was handed on top of the allocation it retains"
+    );
+
+    // The right operand matches the label set, so the operation answers every point of the grid.
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![2.0; 4_000], true))
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(3.0); 4_000])]
+    );
+}
+
+/// A kernel error and dropping the execution both give back everything the node reserved.
+#[test]
+fn a_kernel_error_and_a_drop_release_the_binary_reservation() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    // The same label set twice on the right, both holding a value at position 0.
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![2.0], true))
+        .unwrap();
+    let error = execution.finish().unwrap_err();
+    assert!(error.to_string().contains("duplicate series"), "{error}");
+    assert_eq!(pool.reserved(), 0, "the kernel error kept its reservation");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+
+    // A dropped execution returns its reservation without being told to.
+    let mut dropped = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    dropped
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    assert!(pool.reserved() > 0, "the operand reserved nothing");
+    drop(dropped);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A queued chunk of a two-input tree has to name the input it belongs to.
+#[test]
+fn a_queued_chunk_names_its_input() {
+    let (tree, grid, left, _right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
+
+    // Unnamed: two inputs make "the input" ambiguous, so nothing is queued at either.
+    let mut ambiguous = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let error = ambiguous.push_evaluated(chunk.clone()).unwrap_err();
+    assert!(error.to_string().contains("has 2 inputs"), "{error}");
+
+    // A path that names the binary node rather than an input.
+    let mut wrong_node = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let error = wrong_node
+        .push_evaluated_at(&NodePath::root(), chunk.clone())
+        .unwrap_err();
+    assert!(error.to_string().contains("only an input node"), "{error}");
+
+    // A path that names no node at all.
+    let mut missing = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let error = missing
+        .push_evaluated_at(&NodePath::root().right().right(), chunk)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("has no node at root.right.right"),
+        "{error}"
+    );
+
+    // An input bound to evaluated samples refuses raw ones, naming the input it was queued at.
+    let mut fresh = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let error = fresh
+        .push_raw_at(&left, raw_chunk(&raw_schema(), &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(&format!(
+            "the native source at {left} is bound to an evaluated series"
+        )),
+        "{error}"
+    );
+    assert_eq!(left, NodePath::root().left());
+}
+
+/// A map above a binary, and a window above a binary, pull its result through their own loops.
+#[test]
+fn a_binary_beneath_a_map_and_a_window_is_pulled_recursively() {
+    // A map over the binary result: the subtraction is mapped to its magnitude.
+    let inner_grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // The map and the window below are the outermost nodes, so the binary node is one step down
+    // from the root and its two inputs one step below that: `root.input.left` and
+    // `root.input.right`, not `root.left` and `root.right`.
+    let (left, right) = (
+        NodePath::root().input().left(),
+        NodePath::root().input().right(),
+    );
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        binary_matching(BinaryOp::Sub),
+    );
+    let mapped = NativeTree::try_new(map(root, vec![MathOp::Abs])).unwrap();
+    let mut execution = executor(&mapped, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![4.0, 5.0], true))
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(3.0)), (1, Some(3.0))]
+    );
+
+    // A window over the binary result, evaluated on its own outer grid.
+    let outer = grid(0, 60_000, 2);
+    let root = binary_of(
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        evaluated_input_of(1, Arc::clone(&inner_grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let windowed = NativeTree::try_new(window_with(
+        root,
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer),
+    ))
+    .unwrap();
+    let mut execution = executor(&windowed, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    // The outer window decides each point from the binary result, on its own grid.
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (1, Some(22.0))]
+    );
+}
+
+/// A binary over two windows reads what each window decided, and over two selections what each
+/// selection picked.
+#[test]
+fn a_binary_over_two_windows_and_selections_is_executed() {
+    let inner = grid(0, 60_000, 2);
+    let schema = raw_schema();
+
+    let root = binary_of(
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            60_000,
+            None,
+            Arc::clone(&inner),
+        ),
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            60_000,
+            None,
+            Arc::clone(&inner),
+        ),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (path, key, values) in [
+        (
+            NodePath::root().left().input(),
+            b"series-a".as_slice(),
+            [1.0, 2.0],
+        ),
+        (
+            NodePath::root().right().input(),
+            b"series-b".as_slice(),
+            [10.0, 20.0],
+        ),
+    ] {
+        execution
+            .push_raw_at(
+                &path,
+                raw_chunk_of(&schema, key, metric(), &[0, 60_000], &values, true),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (1, Some(22.0))]
+    );
+
+    // The same two grid points, selected from raw samples on each side.
+    let root = binary_of(
+        instant(input(), 300_000, 0, Arc::clone(&inner)),
+        instant(input(), 300_000, 0, Arc::clone(&inner)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (path, key, value) in [
+        (NodePath::root().left().input(), b"series-a".as_slice(), 1.0),
+        (
+            NodePath::root().right().input(),
+            b"series-b".as_slice(),
+            10.0,
+        ),
+    ] {
+        execution
+            .push_raw_at(
+                &path,
+                raw_chunk_of(&schema, key, metric(), &[0], &[value], true),
+            )
+            .unwrap();
+    }
+    // The one sample of each side is the last at or before both grid points.
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (1, Some(11.0))]
+    );
+}
+
+/// The chain Prometheus evaluates as `abs(instant - last_over_time)`, with the raw samples of each
+/// side and the literal rows it decides.
+///
+/// The left side is a selection reading back 1001 ms and the right side a 1000 ms window, on a grid
+/// of 1000 ms steps: the two report different samples of the two raw series, which is what the
+/// subtraction then pairs.
+#[test]
+fn a_binary_of_a_selection_and_a_window_matches_prometheus() {
+    let out = grid(0, 1_000, 4);
+    let left = instant(input(), 1_001, 0, Arc::clone(&out));
+    let right = window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        1_000,
+        None,
+        Arc::clone(&out),
+    );
+    let tree = NativeTree::try_new(map(
+        binary_of(left, right, binary_matching(BinaryOp::Sub)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_raw_at(
+            &NodePath::root().input().left().input(),
+            raw_chunk_of(
+                &schema,
+                b"left_raw",
+                named_metric("left_raw", "x"),
+                &[0, 500, 2_000],
+                &[-2.0, -4.0, -8.0],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_raw_at(
+            &NodePath::root().input().right().input(),
+            raw_chunk_of(
+                &schema,
+                b"right_raw",
+                named_metric("right_raw", "x"),
+                &[0, 1_000, 2_000, 3_000],
+                &[1.0, 3.0, 2.0, 4.0],
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![
+            (0, Some(3.0)),
+            (1, Some(7.0)),
+            (2, Some(10.0)),
+            (3, Some(12.0)),
+        ]
+    );
+}
+
+/// An operand chunk whose series changes before it ends is refused, naming the side and the node.
+///
+/// A binary node matches whole series, so the pairs of a series that is still open cannot be
+/// computed from a chunk of another one: the two are reported instead of being paired as though the
+/// second were a continuation of the first.
+#[test]
+fn a_chunk_of_another_series_on_one_operand_is_refused() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(
+            &right,
+            evaluated_chunk_of(&schema, named_metric("api", "x"), 0, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    // The chunk that arrived while `api` is open names another series.
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0], true))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    execution
+        .push_evaluated_at(
+            &right,
+            evaluated_chunk_of(&schema, named_metric("db", "x"), 1, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("the binary node at root")
+            && message.contains("its right operand")
+            && message.contains("before"),
+        "{message}"
+    );
+    // The execution stopped rather than handing on the pairs it had, and it holds nothing.
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(execution.state().nodes_holding_binary(), 0);
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+    // No partial answer surfaced through `finish` either.
+    assert!(execution.finish().is_err());
+}
+
+/// An operand chunk that starts behind the end of the open series is refused, values or not.
+///
+/// The overlap is read off the axes, not off the samples they carry: a chunk whose every sample is
+/// missing still occupies the positions its axis places, so a second chunk that reaches back into
+/// them is a rewind rather than a continuation.
+#[test]
+fn an_operand_chunk_that_rewinds_is_refused_with_or_without_values() {
+    let (tree, grid, left, _right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    // Two positions that hold no value at all, and a series that did not close on them.
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk_of(&schema, metric(), 0, vec![None, None], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    // Position 1 is one of the two the series already placed.
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 1, vec![1.0], true))
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("do not continue each other")
+            && message.contains("the left operand of the binary node at root")
+            && message.contains("after the series already reached 2"),
+        "{message}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().nodes_holding_binary(), 0);
+}
+
+/// A chunk that does not match the layout its operand is bound to is refused before the kernel.
+///
+/// Each case is a chunk a caller can build: [`Series`] keeps its fields public, so an axis and the
+/// fields beside it can disagree, and a chunk can be addressed on a grid no operand was bound to.
+#[test]
+fn a_chunk_that_does_not_match_its_operand_is_refused_before_the_kernel() {
+    let (tree, out_grid, left, _right) = binary_tree(BinaryOp::Add, 4);
+    let pool = pool();
+    // What each operand of `binary_tree` is bound to: one float field on the tree's own grid.
+    let schema = evaluated_schema(Arc::clone(&out_grid));
+    let two_fields = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&out_grid)),
+    });
+    let elsewhere = grid(1, 60_000, 4);
+
+    let cases: Vec<(&str, EvaluatedChunk)> = vec![
+        (
+            // An axis on another grid: one step from the one the operand is bound to.
+            "the other grid",
+            evaluated_on(
+                &evaluated_schema(Arc::clone(&elsewhere)),
+                metric(),
+                0,
+                2,
+                vec![vec![Some(1.0), Some(2.0)]],
+                true,
+            ),
+        ),
+        (
+            // Two fields where the operand is bound to one.
+            "the field count",
+            evaluated_on(
+                &two_fields,
+                metric(),
+                0,
+                2,
+                vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]],
+                true,
+            ),
+        ),
+        (
+            // Two rows of axis, one sample of the one field.
+            "the field length",
+            evaluated_on(&schema, metric(), 0, 2, vec![vec![Some(1.0)]], true),
+        ),
+    ];
+    for (case, chunk) in cases {
+        let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+        execution.push_evaluated_at(&left, chunk).unwrap();
+        let error = execution.next_chunk().unwrap_err();
+        assert!(
+            error.to_string().contains("rejected its left operand"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            pool.reserved(),
+            0,
+            "{case}: the refused chunk is still held"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0, "{case}");
+        assert_eq!(execution.state().nodes_holding_binary(), 0, "{case}");
+    }
+}
+
+/// A series cannot be built with no field at all, which is what keeps a zero-field check honest.
+///
+/// The validator's field-count check is not skipped by an empty field list because an empty one
+/// cannot exist: [`SeriesFields`] refuses it, so every chunk any caller can build carries at least
+/// one field. The boundary is the constructor's, and it is recorded here rather than loosened there.
+#[test]
+fn a_series_cannot_carry_no_fields() {
+    let error =
+        SeriesFields::try_from_vec(Vec::new()).expect_err("a series with no field was accepted");
+    assert!(error.to_string().contains("must not be empty"), "{error}");
+    // The one-field and many-field shapes a chunk can have are not empty either.
+    let one = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0])));
+    assert!(!one.is_empty());
+    assert_eq!(one.len(), 1);
+}
+
+/// A binary node with no chunk at all on either side answers nothing, and holds nothing.
+///
+/// The input ending without a chunk is a stream that held no series, not a tree that never ran: the
+/// kernel is asked about two empty vectors and reports none, so the answer is the empty one.
+#[test]
+fn an_absent_operand_yields_no_series() {
+    let (tree, grid, _left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+
+    // Neither side queued a chunk.
+    let mut empty = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    assert!(empty.finish().unwrap().is_empty());
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(empty.state().nodes_holding_binary(), 0);
+
+    // Only the right side ran, and it closed: nothing matches a series that is not there.
+    let mut one_side = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    one_side
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    assert!(one_side.finish().unwrap().is_empty());
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(one_side.state().nodes_holding_binary(), 0);
+}
+
+/// A binary node counts the series it closes on its output, and does not count an operand chunk
+/// that already closed its input series.
+#[test]
+fn a_binary_counts_each_closed_result_once() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, pool(), &set);
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![10.0, 20.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].is_last, "a result series is handed over closed");
+    let root = NodePath::root();
+    // One matched result closed, not one per operand chunk and not one per handover of the result.
+    assert_eq!(count(&set, &root, NodeMetric::COMPLETED_SERIES), 1);
+    assert_eq!(count(&set, &root, NodeMetric::INPUT_BATCHES), 2);
+    assert_eq!(count(&set, &root, NodeMetric::OUTPUT_BATCHES), 1);
 }
