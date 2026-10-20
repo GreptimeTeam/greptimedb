@@ -246,12 +246,11 @@ pub(crate) fn pick_closed_merge(
             return;
         }
         let units = &units[range.clone()];
-        let unit_files = || units.iter().flat_map(|unit| unit.files.iter().copied());
         // Overlap merges must not rewrite a dominant run for a small peer. A
         // file-reducing merge is already bounded by its rewrite budget.
         if !reduces_files
             && !options.allow_unbalanced
-            && !has_balanced_runs(unit_files(), files, &extents, limits.run_tolerance())
+            && !has_balanced_components(units, files, &extents, limits.run_tolerance())
         {
             return;
         }
@@ -328,16 +327,21 @@ impl Extent {
 
     /// Whether two files overlap for the picker.
     ///
-    /// Key ranges that share only a boundary key do not conflict unless both
-    /// hold that single key. A compaction output split by size shares boundary
-    /// keys with its neighbors, and counting them would make every sorted run
-    /// look overlapping.
+    /// Key ranges that share only a key at the boundary of both do not conflict
+    /// unless both hold that single key. A compaction output split by size
+    /// shares boundary keys with its neighbors, and counting them would make
+    /// every sorted run look overlapping. A key inside the other range is a real
+    /// overlap.
     pub(crate) fn conflicts(&self, other: &Self) -> bool {
         self.time_overlaps(other)
             && match (&self.primary_key, &other.primary_key) {
                 (Some(lhs), Some(rhs)) => {
                     let (low, high) = ((&lhs.0).max(&rhs.0), (&lhs.1).min(&rhs.1));
-                    low < high || (low == high && is_single_key(lhs) && is_single_key(rhs))
+                    low < high
+                        || (low == high
+                            && ((is_single_key(lhs) && is_single_key(rhs))
+                                || is_inner_key(low, lhs)
+                                || is_inner_key(low, rhs)))
                 }
                 _ => true,
             }
@@ -345,12 +349,15 @@ impl Extent {
 
     /// Whether `self` may conflict with a file inside `area`, which is the
     /// bounding box of a group of files.
+    ///
+    /// Sharing a single key with the area is enough if `self` holds only that
+    /// key, or holds it inside its range and the area is that single key.
     fn intrudes(&self, area: &Self) -> bool {
         self.time_overlaps(area)
             && match (&self.primary_key, &area.primary_key) {
                 (Some(lhs), Some(rhs)) => {
                     let (low, high) = ((&lhs.0).max(&rhs.0), (&lhs.1).min(&rhs.1));
-                    low < high || (low == high && is_single_key(lhs))
+                    low < high || (low == high && (is_single_key(lhs) || is_inner_key(low, lhs)))
                 }
                 _ => true,
             }
@@ -359,6 +366,11 @@ impl Extent {
 
 fn is_single_key(range: &(Bytes, Bytes)) -> bool {
     range.0 == range.1
+}
+
+/// Whether `key` lies strictly inside `range`, not at its bounds.
+fn is_inner_key(key: &Bytes, range: &(Bytes, Bytes)) -> bool {
+    range.0 < *key && *key < range.1
 }
 
 fn extents_of(files: &[FileHandle], mapper: &PrimaryKeyRangeMapper) -> Vec<Extent> {
@@ -624,6 +636,41 @@ fn adds_no_conflicts(units: &[Unit], extents: &[Extent], outputs: usize) -> bool
     outputs.saturating_mul(intruders.len()) <= existing
 }
 
+/// Whether every group of conflicting files among `units` is balanced, see
+/// [`has_balanced_runs`]. Runs of separate groups never overlap, so pairing a
+/// dominant run with the peer of another group would hide it. Takes O(K²)
+/// conflict checks for K files.
+fn has_balanced_components(
+    units: &[Unit],
+    files: &[FileHandle],
+    extents: &[Extent],
+    tolerance: u64,
+) -> bool {
+    let members: Vec<usize> = units
+        .iter()
+        .flat_map(|unit| unit.files.iter().copied())
+        .collect();
+    let mut sets = DisjointSet::new(members.len());
+    for (i, &lhs) in members.iter().enumerate() {
+        for (j, &rhs) in members.iter().enumerate().skip(i + 1) {
+            if extents[lhs].conflicts(&extents[rhs]) {
+                sets.union(i, j);
+            }
+        }
+    }
+    sets.groups()
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .all(|group| {
+            has_balanced_runs(
+                group.into_iter().map(|i| members[i]),
+                files,
+                extents,
+                tolerance,
+            )
+        })
+}
+
 /// Whether the largest sorted run among `files` holds at most `tolerance` bytes
 /// more than all other runs together. Runs are built greedily in time order,
 /// which takes O(K²) conflict checks for K files.
@@ -779,6 +826,9 @@ mod tests {
         assert!(!extent(0, 10, b"m", b"m").conflicts(&extent(0, 10, b"m", b"z")));
         // A single key shared by two single-key files is a real overlap.
         assert!(extent(0, 10, b"m", b"m").conflicts(&extent(5, 15, b"m", b"m")));
+        // So is a single key inside another range.
+        assert!(extent(0, 10, b"m", b"m").conflicts(&extent(0, 10, b"a", b"z")));
+        assert!(extent(0, 10, b"a", b"z").conflicts(&extent(0, 10, b"m", b"m")));
         assert!(extent(0, 10, b"a", b"n").conflicts(&extent(0, 10, b"m", b"z")));
         // Touching time ranges do not overlap.
         assert!(!extent(0, 10, b"a", b"z").conflicts(&extent(10, 20, b"a", b"z")));
@@ -793,6 +843,34 @@ mod tests {
         assert!(!extent(0, 10, b"a", b"m").intrudes(&area));
         assert!(extent(0, 10, b"a", b"n").intrudes(&area));
         assert!(!extent(10, 20, b"a", b"z").intrudes(&area));
+        // A range may conflict with a single-key file inside a single-key area.
+        let point = extent(0, 10, b"m", b"m");
+        assert!(extent(0, 10, b"a", b"z").intrudes(&point));
+        assert!(!extent(0, 10, b"a", b"m").intrudes(&point));
+    }
+
+    #[test]
+    fn test_intrusion_covers_conflicts_of_random_files() {
+        let mut rng = Rng(23);
+        let random_extent = |rng: &mut Rng| {
+            let start = rng.next(10) as i64;
+            let end = start + 1 + rng.next(10) as i64;
+            let min = rng.next(6) as u8;
+            let max = min + rng.next(3) as u8;
+            extent(start, end, &[b'0' + min], &[b'0' + max])
+        };
+        for _ in 0..2_000 {
+            let group: Vec<_> = (0..1 + rng.next(3))
+                .map(|_| random_extent(&mut rng))
+                .collect();
+            let area = group[1..]
+                .iter()
+                .fold(group[0].clone(), |area, extent| area.union(extent));
+            let other = random_extent(&mut rng);
+            if group.iter().any(|extent| other.conflicts(extent)) {
+                assert!(other.intrudes(&area), "{other:?} conflicts inside {area:?}");
+            }
+        }
     }
 
     #[test]
@@ -912,20 +990,21 @@ mod tests {
     fn test_closed_merge_rejects_dominant_runs() {
         // Each of these components has a 3 GiB run and a 512 MiB peer.
         let size = 512 * 1024 * 1024;
+        // The peer spans the keys of its run, written before or after it.
         let mut files = (0..6u8)
-            .map(|idx| file(idx.into(), 10_000, &[b'a' + idx], &[b'a' + idx], size))
+            .map(|idx| file(idx.into(), 10_000, &[b'b' + idx], &[b'b' + idx], size))
             .collect::<Vec<_>>();
-        files.push(file(6, 10_000, b"a", b"f", size));
+        files.push(file(6, 10_000, b"a", b"h", size));
         files.extend((0..6u8).map(|idx| {
             file(
                 8 + i64::from(idx),
                 10_000,
-                &[b'm' + idx],
-                &[b'm' + idx],
+                &[b'n' + idx],
+                &[b'n' + idx],
                 size,
             )
         }));
-        files.push(file(7, 10_000, b"m", b"r", size));
+        files.push(file(7, 10_000, b"m", b"t", size));
         // A separate balanced pair is still resolved.
         let pair = [
             file(14, 10_000, b"x", b"y", size),

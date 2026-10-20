@@ -1066,7 +1066,12 @@ fn is_settling_window(
 /// Whether the region has written at least as many rows as `files` hold, and at
 /// least one row, since the newest of them was written. Sequences are assigned
 /// per row and compaction keeps the inputs' maximum, so this needs no state.
+/// Files written before row counts were recorded have zero rows, so a window
+/// holding them is not quiet.
 fn is_quiet_window(files: &[FileHandle], region_sequence: u64) -> bool {
+    if files.iter().any(|file| file.num_rows() == 0) {
+        return false;
+    }
     let Some(window_sequence) = files
         .iter()
         .filter_map(|file| file.meta_ref().sequence)
@@ -4159,42 +4164,57 @@ mod tests {
     #[tokio::test]
     async fn test_quiet_or_manual_window_resolves_dominant_run_overlap() {
         let file_size = 512 * 1024 * 1024;
-        // A run of eight key-sliced files and one small file overlapping all of
-        // them: resolving the overlap rewrites the run for its small peer.
-        let mut window_files = (0..8)
-            .map(|idx| {
-                let key = b'a' + idx as u8;
-                new_file_handle_with_size_sequence_and_primary_key_range(
+        let l1_file =
+            |start, end, sequence, size, range: Option<(bytes::Bytes, bytes::Bytes)>, num_rows| {
+                let file = new_file_handle_with_size_sequence_and_primary_key_range(
                     FileId::random(),
-                    idx,
-                    10_000,
+                    start,
+                    end,
                     1,
-                    100,
-                    file_size,
-                    pk_range(&[key, b'0'], &[key, b'9']),
+                    sequence,
+                    size,
+                    range.clone(),
+                );
+                FileHandle::new_with_primary_key_range(
+                    FileMeta {
+                        num_rows,
+                        ..file.meta_ref().clone()
+                    },
+                    crate::test_util::new_noop_file_purger(),
+                    range,
                 )
-            })
-            .collect::<Vec<_>>();
-        window_files.push(new_file_handle_with_size_sequence_and_primary_key_range(
-            FileId::random(),
-            1_000,
-            1_999,
-            1,
-            100,
-            file_size / 8,
-            pk_range(b"a0", b"h9"),
-        ));
-        let expected = window_files
-            .iter()
-            .map(FileHandle::file_id)
-            .collect::<HashSet<_>>();
+            };
 
-        // The newest file of the region is written after the window (quiet) or
-        // with it (still receiving data). A manual compaction does not wait,
-        // even for the active window.
-        for (newer_sequence, manual, resolves) in
-            [(100, false, false), (101, false, true), (100, true, true)]
-        {
+        // The window holds 9 rows. It is quiet once the region writes 9 more
+        // rows after it, and only if its row counts are known. A manual
+        // compaction does not wait, even for the active window.
+        for (newer_sequence, num_rows, manual, resolves) in [
+            (108, 1, false, false),
+            (109, 1, false, true),
+            (109, 0, false, false),
+            (100, 1, true, true),
+        ] {
+            // A run of eight key-sliced files and one small file overlapping all
+            // of them: resolving the overlap rewrites the run for its small peer.
+            let mut window_files = (0..8)
+                .map(|idx| {
+                    let key = b'a' + idx as u8;
+                    let range = pk_range(&[key, b'0'], &[key, b'9']);
+                    l1_file(idx, 10_000, 100, file_size, range, num_rows)
+                })
+                .collect::<Vec<_>>();
+            window_files.push(l1_file(
+                1_000,
+                1_999,
+                100,
+                file_size / 8,
+                pk_range(b"a0", b"h9"),
+                num_rows,
+            ));
+            let expected = window_files
+                .iter()
+                .map(FileHandle::file_id)
+                .collect::<HashSet<_>>();
             let picker = TwcsPicker {
                 trigger_file_num: 4,
                 active_window_l1_merge_trigger: 4,
@@ -4207,15 +4227,14 @@ mod tests {
                 time_range: None,
                 all_windows_inactive: manual,
             };
-            let mut files = window_files.clone();
-            files.push(new_file_handle_with_size_sequence_and_primary_key_range(
-                FileId::random(),
+            let mut files = window_files;
+            files.push(l1_file(
                 120_000,
                 120_999,
-                1,
                 newer_sequence,
                 file_size,
                 pk_range(b"a0", b"h9"),
+                1,
             ));
             let outputs = picker
                 .build_output_with_time_range(
@@ -4230,10 +4249,11 @@ mod tests {
                 .iter()
                 .flat_map(|output| output.inputs.iter().map(FileHandle::file_id))
                 .collect::<HashSet<_>>();
+            let case = format!("sequence {newer_sequence}, rows {num_rows}, manual {manual}");
             if resolves {
-                assert_eq!(expected, actual, "manual: {manual}");
+                assert_eq!(expected, actual, "{case}");
             } else {
-                assert!(actual.is_empty(), "{actual:?}");
+                assert!(actual.is_empty(), "{case}: {actual:?}");
             }
         }
     }
