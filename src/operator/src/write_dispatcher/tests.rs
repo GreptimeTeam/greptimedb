@@ -112,12 +112,19 @@ impl Region for RecordingRegionService {
         for (index, result) in results.into_iter().enumerate() {
             match result {
                 Ok(result) => response.affected_rows += result.into_inner().affected_rows,
-                Err(status) => response
-                    .failures
-                    .push(api::v1::region::RegionRequestFailure {
-                        request_index: index as u32,
-                        status: Some(api::region::status_from_error(&client::Error::from(status))),
-                    }),
+                Err(status) => {
+                    let error = client::Error::from(status);
+                    response
+                        .failures
+                        .push(api::v1::region::RegionRequestFailure {
+                            request_index: index as u32,
+                            status: Some(PbStatus {
+                                status_code: error.status_code() as u32,
+                                err_msg: error.output_msg(),
+                                retry_hint: error.retry_hint().as_str().to_string(),
+                            }),
+                        });
+                }
             }
         }
         if !response.failures.is_empty() {

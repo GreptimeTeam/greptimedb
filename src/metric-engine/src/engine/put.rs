@@ -97,56 +97,13 @@ impl MetricEngineInner {
             }
         }
         for (physical_region_id, group) in groups {
-            let encoding =
-                match self.get_primary_key_encoding(to_data_region_id(physical_region_id)) {
-                    Ok(encoding) => encoding,
-                    Err(error) => {
-                        results.push(PutGroupResult {
-                            request_indices: group.request_indices,
-                            result: Err(error),
-                        });
-                        continue;
-                    }
-                };
-            let mut batches: Vec<PutGroup> = Vec::new();
-            for (index, (region_id, mut request)) in
-                group.request_indices.into_iter().zip(group.requests)
-            {
-                if let Err(error) = self
-                    .verify_rows(region_id, physical_region_id, &mut request.rows, true)
-                    .await
-                {
-                    results.push(PutGroupResult {
-                        request_indices: vec![index],
-                        result: Err(error),
-                    });
-                    continue;
-                }
-                // Keep consecutive compatible writes together without reordering repeated regions.
-                if let Some(batch) = batches.last_mut()
-                    && batch.requests.first().is_some_and(|(_, previous)| {
-                        previous.skip_wal == request.skip_wal
-                            && previous.partition_expr_version == request.partition_expr_version
-                    })
-                {
-                    batch.request_indices.push(index);
-                    batch.requests.push((region_id, request));
-                } else {
-                    batches.push(PutGroup {
-                        request_indices: vec![index],
-                        requests: vec![(region_id, request)],
-                    });
-                }
-            }
-            for batch in batches {
-                let result = self
-                    .write_validated_batch(physical_region_id, encoding, batch.requests)
-                    .await;
-                results.push(PutGroupResult {
-                    request_indices: batch.request_indices,
-                    result,
-                });
-            }
+            let result = self
+                .put_regions_batch_single_physical(physical_region_id, group.requests)
+                .await;
+            results.push(PutGroupResult {
+                request_indices: group.request_indices,
+                result,
+            });
         }
         results
     }
@@ -193,18 +150,6 @@ impl MetricEngineInner {
         self.validate_batch_requests(physical_region_id, &mut requests)
             .await?;
 
-        self.write_validated_batch(physical_region_id, primary_key_encoding, requests)
-            .await
-    }
-
-    /// Merges validated requests with matching WAL and partition-version policies, then writes once.
-    async fn write_validated_batch(
-        &self,
-        physical_region_id: RegionId,
-        primary_key_encoding: PrimaryKeyEncoding,
-        requests: Vec<(RegionId, RegionPutRequest)>,
-    ) -> Result<AffectedRows> {
-        let data_region_id = to_data_region_id(physical_region_id);
         // Merge requests according to encoding strategy
         let (merged_request, total_affected_rows) = match primary_key_encoding {
             PrimaryKeyEncoding::Sparse => self.merge_sparse_batch(physical_region_id, requests)?,
@@ -1861,17 +1806,16 @@ mod tests {
                 .iter()
                 .map(|result| result.request_indices.clone())
                 .collect::<Vec<_>>(),
-            vec![vec![0, 4], vec![1], vec![2], vec![3], vec![5]]
+            vec![vec![0, 4], vec![1], vec![2, 3], vec![5]]
         );
         assert_eq!(results[0].result.as_ref().unwrap(), &2);
         assert!(results[1].result.is_err());
         assert!(results[2].result.is_err());
-        assert_eq!(results[3].result.as_ref().unwrap(), &1);
         assert!(matches!(
-            results[4].result,
+            results[3].result,
             Err(crate::error::Error::ForbiddenPhysicalWrite { .. })
         ));
-        for (region, expected) in [(physical, 2), (other_physical, 1)] {
+        for (region, expected) in [(physical, 2), (other_physical, 0)] {
             let stream = env
                 .metric()
                 .scan_to_stream(region, ScanRequest::default())
@@ -1883,111 +1827,6 @@ mod tests {
                 expected
             );
         }
-    }
-
-    #[tokio::test]
-    async fn test_batch_results_isolate_invalid_entries() {
-        for encoding in ["sparse", "dense"] {
-            for missing_field in [false, true] {
-                let env = TestEnv::new().await;
-                let physical = env.default_physical_region_id();
-                let logical = env.default_logical_region_id();
-                env.create_physical_region(
-                    physical,
-                    &TestEnv::default_table_dir(),
-                    vec![(PRIMARY_KEY_ENCODING.to_string(), encoding.to_string())],
-                )
-                .await;
-                env.create_logical_region(physical, logical).await;
-                let request = |timestamp: i64| {
-                    let mut rows = test_util::build_rows(1, 1);
-                    rows[0].values[0].value_data = Some(
-                        api::v1::value::ValueData::TimestampMillisecondValue(timestamp),
-                    );
-                    RegionPutRequest {
-                        rows: Rows {
-                            schema: test_util::row_schema_with_tags(&["job"]),
-                            rows,
-                        },
-                        skip_wal: false,
-                        hint: None,
-                        partition_expr_version: None,
-                    }
-                };
-                let mut bad = request(1);
-                if missing_field {
-                    bad.rows.schema.remove(1);
-                    bad.rows.rows[0].values.remove(1);
-                } else {
-                    bad.rows.schema[1].datatype = api::v1::ColumnDataType::String as i32;
-                }
-                let mut results = env
-                    .metric()
-                    .put_regions_batch_with_results(vec![
-                        (logical, request(0)),
-                        (logical, bad),
-                        (logical, request(2)),
-                    ])
-                    .await;
-                results.sort_by_key(|result| result.request_indices[0]);
-                assert_eq!(vec![0, 2], results[0].request_indices);
-                assert_eq!(2, *results[0].result.as_ref().unwrap());
-                assert_eq!(vec![1], results[1].request_indices);
-                assert!(results[1].result.is_err());
-                let stream = env
-                    .metric()
-                    .scan_to_stream(physical, ScanRequest::default())
-                    .await
-                    .unwrap();
-                let batches = RecordBatches::try_collect(stream).await.unwrap();
-                assert_eq!(
-                    2,
-                    batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_batch_results_separate_wal_policies() {
-        let env = TestEnv::new().await;
-        env.init_metric_region().await;
-        let logical = env.default_logical_region_id();
-        let requests = [false, true, false]
-            .into_iter()
-            .enumerate()
-            .map(|(index, skip_wal)| {
-                let mut rows = test_util::build_rows(1, 1);
-                rows[0].values[0].value_data = Some(
-                    api::v1::value::ValueData::TimestampMillisecondValue(index as i64),
-                );
-                (
-                    logical,
-                    RegionPutRequest {
-                        rows: Rows {
-                            schema: test_util::row_schema_with_tags(&["job"]),
-                            rows,
-                        },
-                        skip_wal,
-                        hint: None,
-                        partition_expr_version: None,
-                    },
-                )
-            })
-            .collect();
-        let results = env.metric().put_regions_batch_with_results(requests).await;
-        assert_eq!(
-            vec![vec![0], vec![1], vec![2]],
-            results
-                .iter()
-                .map(|result| result.request_indices.clone())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            results
-                .iter()
-                .all(|result| result.result.as_ref().is_ok_and(|rows| *rows == 1))
-        );
     }
 
     #[tokio::test]
