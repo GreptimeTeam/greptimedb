@@ -37,7 +37,6 @@
 //! whose output turns out to hold native histograms is refused when such a sample is converted
 //! rather than before the child runs.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -598,7 +597,6 @@ impl ExecutionPlan for NativeTreeExec {
             source: Some(source),
             executor: Some(NativeExecutor::new(state)),
             binding: self.binding.clone(),
-            closing: VecDeque::new(),
             closed: false,
         }))
     }
@@ -612,8 +610,6 @@ struct NativeTreeStream {
     executor: Option<NativeExecutor>,
     /// Which part of a root chunk every output column reads.
     binding: Arc<OutputBinding>,
-    /// What closing the tree yielded, handed out one chunk at a time.
-    closing: VecDeque<EvaluatedChunk>,
     /// Whether the tree is closed, so nothing can settle any more.
     closed: bool,
 }
@@ -626,7 +622,6 @@ impl NativeTreeStream {
     fn fail(&mut self, error: DataFusionError) -> Poll<Option<DfResult<RecordBatch>>> {
         self.source = None;
         self.executor = None;
-        self.closing.clear();
         self.closed = true;
         Poll::Ready(Some(Err(error)))
     }
@@ -671,30 +666,36 @@ impl Stream for NativeTreeStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         for _ in 0..POLL_BUDGET {
+            // A closed tree settles nothing, so there is nothing left to hand over.
+            if self.closed {
+                return Poll::Ready(None);
+            }
             // What the tree already settled is handed over first, so a chunk that is ready now
             // never waits for another raw chunk to arrive.
-            let settled = match self.closing.pop_front() {
-                Some(chunk) => self.binding.convert(chunk),
-                None if !self.closed => self.next_from_tree(),
-                None => return Poll::Ready(None),
-            };
-            match settled {
+            match self.next_from_tree() {
                 Ok(Some(batch)) => return Poll::Ready(Some(Ok(batch))),
-                // A closing chunk is a lifecycle signal rather than a row: it is handed to the
-                // tree, and dropped here only once it converted to no row at all.
+                // A chunk that carries no row is a lifecycle signal rather than a row: it is
+                // dropped here, and no row at this step is not the same as no input left.
                 Ok(None) => {}
                 Err(error) => return self.fail(error),
             }
             if self.source.is_none() {
                 // The child ended: closing the tree once is what reports a series that never
-                // closed, and what hands over what the tree held back until then.
+                // closed, and a closed tree settles nothing more, so nothing is kept from it.
                 let closed = match self.executor.as_mut() {
                     Some(executor) => executor.finish(),
                     None => return Poll::Ready(None),
                 };
                 match closed {
+                    // `finish` drains an executor whose last pull already reported no chunk, so
+                    // nothing can be left to collect here. The assertion states the proof instead
+                    // of leaving a reader to guess what is dropped; a series that never closed is
+                    // reported by `close` as an error, not returned as a chunk.
                     Ok(chunks) => {
-                        self.closing = chunks.into();
+                        debug_assert!(
+                            chunks.is_empty(),
+                            "closing a drained executor yielded chunks"
+                        );
                         self.closed = true;
                     }
                     Err(error) => return self.fail(error),

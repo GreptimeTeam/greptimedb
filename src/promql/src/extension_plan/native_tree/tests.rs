@@ -1677,7 +1677,6 @@ fn a_source_that_ends_inside_a_series_is_a_truncation_error() {
         source: Some(Box::pin(source)),
         executor: Some(NativeExecutor::new(state)),
         binding,
-        closing: VecDeque::new(),
         closed: false,
     });
     let error = error_of(&mut stream);
