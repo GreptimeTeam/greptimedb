@@ -15,6 +15,7 @@
 //! What the runtime has to get right: each layer's grid, per-node accounting, rejection and
 //! release.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
@@ -23,7 +24,7 @@ use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue};
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::histogram::{
-    BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
+    BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
@@ -33,13 +34,13 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis}
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
-    ChargedAllocations, Emitted, History, NativeExecutionState, NativeExecutor, Run, label_bytes,
-    map_chunk, raw_bytes,
+    ChargedAllocations, Emitted, History, NativeChunk, NativeExecutionState, NativeExecutor,
+    NodeBuffer, NodeRuntime, QueuedCharge, Run, label_bytes, map_chunk, raw_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
 use crate::map::MathOp;
-use crate::native::metrics::{NodeMetric, NodePath};
+use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -317,6 +318,47 @@ fn raw_histogram_chunk(
         is_last,
     )
     .unwrap()
+}
+
+/// One raw chunk of `series-a` whose one field holds the histogram at `index` of `table`.
+///
+/// Two chunks built this way share one `Arc<HistogramBatch>`, which is what makes the allocation
+/// one table for accounting even though each chunk carries its own indices into it.
+fn raw_shared_histogram_chunk(
+    schema: &SeriesSchema,
+    table: &Arc<HistogramBatch>,
+    index: u32,
+    timestamp: i64,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let samples =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(index)]), Arc::clone(table))
+            .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![timestamp])).unwrap(),
+        SeriesFields::one(samples),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// A source node's runtime: the queue, its accounting and the reservation the two are held for.
+fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
+    NodeRuntime {
+        buffer: NodeBuffer::new(
+            &NodePath::root().input(),
+            Arc::new(NodeMetrics::default()),
+            pool,
+        ),
+        queued: VecDeque::new(),
+        queued_charge: QueuedCharge::default(),
+        window: None,
+        map: None,
+        emitted: None,
+    }
 }
 
 /// One evaluated chunk of an input series: `values` at `start` and onwards on `schema`'s grid.
@@ -2110,6 +2152,310 @@ fn a_histogram_table_is_charged_once_per_pass() {
         queue,
         "the queue of two chunks sharing one table was not charged as one pass",
     );
+}
+
+/// A queue of two chunks that share one table charges it once, and the running total is what one
+/// pass over the queue counts.
+///
+/// The figure the node reserves while both chunks are queued is the incremental one: the table is
+/// met by the first chunk that references it and is not charged again by the second. Charging it
+/// per chunk fails the record check, and recounting the queue per enqueue fails the count of
+/// chunks walked in the test below.
+#[test]
+fn a_queued_allocation_is_charged_once() {
+    let pool = pool();
+    let mut source = source_runtime(&pool);
+    let schema = raw_schema();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = builder.finish().unwrap();
+    let chunk = |timestamp: i64, is_last: bool| {
+        raw_shared_histogram_chunk(&schema, &table, index, timestamp, is_last)
+    };
+    let (first, second) = (chunk(0, false), chunk(10_000, true));
+
+    // What the two chunks cost charged apart, and what the second one costs on its own: the
+    // difference between the two is what the shared table is worth.
+    let apart = raw_bytes(&first, &mut ChargedAllocations::default())
+        .saturating_add(raw_bytes(&second, &mut ChargedAllocations::default()));
+    let second_alone = raw_bytes(&second, &mut ChargedAllocations::default());
+
+    source.enqueue(NativeChunk::Raw(first)).unwrap();
+    let one = source.queued_charge.bytes;
+    assert_eq!(
+        one,
+        source.queued_bytes_recomputed(),
+        "one queued chunk is not charged what one pass over it counts"
+    );
+    assert_eq!(
+        source.buffer.held, one,
+        "the reservation is not the queue's figure"
+    );
+    assert_eq!(pool.reserved(), one);
+
+    source.enqueue(NativeChunk::Raw(second)).unwrap();
+    let two = source.queued_charge.bytes;
+    let counted = *source
+        .queued_charge
+        .tables
+        .get(&(Arc::as_ptr(&table) as usize))
+        .expect("the queue did not count the table both chunks index into");
+    assert_eq!(
+        counted.chunks, 2,
+        "two queued chunks reference the table, but the queue counts {}",
+        counted.chunks
+    );
+    assert_eq!(
+        two,
+        source.queued_bytes_recomputed(),
+        "the running total is not what one pass over the queue counts"
+    );
+    assert_eq!(
+        two - one,
+        second_alone - counted.bytes,
+        "the chunk that entered charged the shared table a second time"
+    );
+    assert!(
+        two < apart,
+        "a queue of two chunks sharing one table is charged {two} bytes, no less than the {apart} \
+         bytes they are charged apart: the table was counted twice",
+    );
+    assert_eq!(source.buffer.held, two);
+    assert_eq!(pool.reserved(), two);
+}
+
+/// A shared table is given back with the last queued chunk that references it, not the first.
+///
+/// A leak here shows as a reservation that never returns: the first pop takes one reference away
+/// and the table stays charged, the second takes the last one and the table goes with it.
+#[test]
+fn a_queued_allocation_is_given_back_with_its_last_chunk() {
+    let pool = pool();
+    let mut source = source_runtime(&pool);
+    let schema = raw_schema();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = builder.finish().unwrap();
+    let address = Arc::as_ptr(&table) as usize;
+    let chunk = |timestamp: i64, is_last: bool| {
+        raw_shared_histogram_chunk(&schema, &table, index, timestamp, is_last)
+    };
+
+    source.enqueue(NativeChunk::Raw(chunk(0, false))).unwrap();
+    source
+        .enqueue(NativeChunk::Raw(chunk(10_000, true)))
+        .unwrap();
+    assert_eq!(source.queued_charge.tables[&address].chunks, 2);
+
+    let first = source
+        .pop_source()
+        .unwrap()
+        .expect("the queue held two chunks");
+    assert!(!first.is_last());
+    assert_eq!(
+        source.queued_charge.tables[&address].chunks, 1,
+        "the chunk left in the queue still references the table, so it is still charged"
+    );
+    assert!(
+        source.queued_charge.bytes > 0,
+        "the queue still holds a chunk, but charges for nothing"
+    );
+    assert_eq!(
+        source.queued_charge.bytes,
+        source.queued_bytes_recomputed(),
+        "the pop did not leave the running total at one pass over the queue"
+    );
+    assert_eq!(source.buffer.held, source.queued_charge.bytes);
+
+    source
+        .pop_source()
+        .unwrap()
+        .expect("the queue held two chunks");
+    assert!(
+        !source.queued_charge.tables.contains_key(&address),
+        "the last chunk referencing the table left, but the queue still counts it"
+    );
+    assert!(
+        source.queued_charge.buffers.is_empty(),
+        "a buffer outlived the chunks that referenced it"
+    );
+    assert_eq!(
+        source.queued_charge.bytes, 0,
+        "the queue is empty, but it is still charged for"
+    );
+    assert_eq!(
+        source.buffer.held, 0,
+        "the reservation did not come back with the queue"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert!(source.pop_source().unwrap().is_none());
+}
+
+/// Queueing a chunk accounts for that chunk alone, however deep the queue is.
+///
+/// The figure is the number of chunks the accounting walked, not wall time: `N` enqueues have to
+/// walk `N` chunks and `N` pops another `N`, whatever the queue held. Recounting the queue per
+/// operation -- the defect this refuses -- walks `N * (N + 1) / 2` chunks for the enqueues alone.
+#[test]
+fn queueing_a_chunk_walks_one_chunk() {
+    let pool = pool();
+    let mut source = source_runtime(&pool);
+    let schema = raw_schema();
+    let chunks = 64;
+    for index in 0..chunks {
+        let timestamp = i64::try_from(index).unwrap() * 10_000;
+        let chunk = raw_chunk(&schema, &[timestamp], &[1.0], index + 1 == chunks);
+        source.enqueue(NativeChunk::Raw(chunk)).unwrap();
+    }
+    assert_eq!(
+        source.queued_charge.walked, chunks,
+        "queueing {chunks} chunks walked {} chunk(s): the figure is recounted from the queue",
+        source.queued_charge.walked,
+    );
+    assert_eq!(
+        source.queued_charge.bytes,
+        source.queued_bytes_recomputed(),
+        "the running total is not what one pass over the queue counts"
+    );
+
+    let mut popped = 0;
+    while source.pop_source().unwrap().is_some() {
+        popped += 1;
+    }
+    assert_eq!(popped, chunks, "the queue did not hand back every chunk");
+    assert_eq!(
+        source.queued_charge.walked,
+        2 * chunks,
+        "popping {chunks} chunks walked {} chunk(s): the figure is recounted from the queue",
+        source.queued_charge.walked,
+    );
+    assert_eq!(source.queued_charge.bytes, 0);
+}
+
+/// A mixed sequence of pushes and pulls leaves the queue's figure equal to one pass over what is
+/// left in it, and the reservation equal to that figure.
+///
+/// The chunks mix ones that share a table with ones that share nothing, so an allocation is
+/// referenced by one, two or no queued chunk as the sequence runs. Both the node's own reservation
+/// and the pool's are checked, so a total that drifts from the queue is caught by the figure the
+/// memory pool actually holds.
+#[test]
+fn a_queue_figure_survives_a_mixed_push_and_pull_sequence() {
+    let pool = pool();
+    let mut source = source_runtime(&pool);
+    let schema = raw_schema();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = builder.finish().unwrap();
+
+    for round in 0..6i64 {
+        for step in 0..2 {
+            let chunk =
+                raw_shared_histogram_chunk(&schema, &table, index, round * 10_000 + step, false);
+            source.enqueue(NativeChunk::Raw(chunk)).unwrap();
+        }
+        let chunk = raw_chunk(&schema, &[round * 10_000 + 2], &[1.0], false);
+        source.enqueue(NativeChunk::Raw(chunk)).unwrap();
+        let folded = source.queued_charge.bytes;
+        assert_eq!(
+            folded,
+            source.queued_bytes_recomputed(),
+            "round {round}: the running total is not one pass over the queue"
+        );
+        assert_eq!(source.buffer.held, folded);
+        assert_eq!(pool.reserved(), folded);
+
+        for _ in 0..2 {
+            if source.pop_source().unwrap().is_none() {
+                break;
+            }
+        }
+        let folded = source.queued_charge.bytes;
+        assert_eq!(
+            folded,
+            source.queued_bytes_recomputed(),
+            "round {round}: the running total is not one pass over what is left"
+        );
+        assert_eq!(source.buffer.held, folded);
+        assert_eq!(pool.reserved(), folded);
+    }
+
+    while source.pop_source().unwrap().is_some() {}
+    assert_eq!(source.queued_charge.bytes, 0);
+    assert!(
+        source.queued_charge.tables.is_empty(),
+        "a table outlived the chunks that referenced it"
+    );
+    assert!(
+        source.queued_charge.buffers.is_empty(),
+        "a buffer outlived the chunks that referenced it"
+    );
+    assert_eq!(source.buffer.held, 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// What a source reserves through the executor is the figure one pass over its queue counts.
+#[test]
+fn the_executor_reserves_what_one_pass_over_the_queue_counts() {
+    let tree = NativeTree::try_new(window(input(), grid(0, 10_000, 4))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for step in 0..3 {
+        let chunk = raw_chunk(&schema, &[step * 10_000], &[1.0], false);
+        execution.push_raw(chunk).unwrap();
+    }
+    let (folded, walked) = execution
+        .state()
+        .queued_charge_pair(&NodePath::root().input());
+    assert_eq!(
+        folded, walked,
+        "the executor's queue is not charged what one pass over it counts"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        folded,
+        "the source's reservation is not its queue's figure"
+    );
+}
+
+/// Releasing a node drops the queue's counts with the queue and returns the reservation once.
+///
+/// A count left behind would be folded onto by the next chunk the node queues, and the reservation
+/// shown as returned while the counts still hold the bytes is the leak this refuses.
+#[test]
+fn releasing_a_node_drops_the_queue_and_its_counts() {
+    let pool = pool();
+    let mut source = source_runtime(&pool);
+    let schema = raw_schema();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = builder.finish().unwrap();
+    source
+        .enqueue(NativeChunk::Raw(raw_shared_histogram_chunk(
+            &schema, &table, index, 0, false,
+        )))
+        .unwrap();
+    source
+        .enqueue(NativeChunk::Raw(raw_shared_histogram_chunk(
+            &schema, &table, index, 10_000, true,
+        )))
+        .unwrap();
+    assert_eq!(pool.reserved(), source.queued_charge.bytes);
+
+    source.release();
+    assert!(source.queued.is_empty(), "the queue outlived its release");
+    assert!(
+        source.queued_charge.tables.is_empty(),
+        "the queue's table counts outlived the queue"
+    );
+    assert!(
+        source.queued_charge.buffers.is_empty(),
+        "the queue's buffer counts outlived the queue"
+    );
+    assert_eq!(source.queued_charge.bytes, 0);
+    assert_eq!(source.buffer.held, 0);
+    assert_eq!(pool.reserved(), 0, "the reservation was not returned");
+    assert!(source.pop_source().unwrap().is_none());
 }
 
 /// One entry's figure is the heap it owns, and its `History` header is charged once, by its slot.

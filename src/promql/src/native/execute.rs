@@ -107,6 +107,18 @@ impl NativeChunk {
             Self::Evaluated(chunk) => evaluated_bytes(chunk, charged),
         }
     }
+
+    /// The bytes this chunk occupies on its own, which no other chunk holds a reference to.
+    ///
+    /// It is the struct term of [`Self::bytes`] and nothing else: everything beside it is a buffer or
+    /// a histogram table, which a sibling chunk of the series can share and which the queue counts
+    /// per allocation rather than per chunk.
+    fn own_bytes(&self) -> usize {
+        match self {
+            Self::Raw(_) => std::mem::size_of::<RawSeriesChunk>(),
+            Self::Evaluated(_) => std::mem::size_of::<EvaluatedChunk>(),
+        }
+    }
 }
 
 /// The shared allocations one accounting pass has already counted.
@@ -119,28 +131,31 @@ impl NativeChunk {
 /// referencing chunk instead would make the reservation grow with the number of chunks a node holds
 /// rather than with the data in them -- the figure the pool has to rank.
 ///
-/// One pass walks one chunk, or the queue of one node, so the list stays as short as the
-/// allocations it met and is dropped with the pass; nothing outlives the call it was made for.
+/// One pass walks one chunk, so the list stays as short as the allocations that chunk met and is
+/// dropped with the pass; nothing outlives the call it was made for. The queue of one node is not
+/// recounted by such a pass: [`QueuedCharge`] folds a chunk in as it enters and out as it leaves,
+/// carrying the same dedupe across the queue.
 #[derive(Default)]
 struct ChargedAllocations {
-    /// The address of every histogram table this pass has counted.
-    tables: Vec<*const HistogramBatch>,
-    /// The address of every Arrow buffer this pass has counted.
-    buffers: Vec<*const u8>,
+    /// The address of every histogram table this pass has counted, with the bytes it contributes.
+    tables: Vec<(*const HistogramBatch, usize)>,
+    /// The address of every Arrow buffer this pass has counted, with the bytes it contributes.
+    buffers: Vec<(*const u8, usize)>,
 }
 
 impl ChargedAllocations {
     /// The bytes `table` holds, or zero when this pass has already counted it.
     fn table(&mut self, table: &Arc<HistogramBatch>) -> usize {
         let address = Arc::as_ptr(table);
-        if self.tables.contains(&address) {
+        if self.tables.iter().any(|(counted, _)| *counted == address) {
             return 0;
         }
-        self.tables.push(address);
         // The batch struct holds the struct array and the column arrays beside it, which are views
         // of that array's children: the array reports the buffers of all of them, once.
-        std::mem::size_of::<HistogramBatch>()
-            .saturating_add(table.as_arrow().get_array_memory_size())
+        let bytes = std::mem::size_of::<HistogramBatch>()
+            .saturating_add(table.as_arrow().get_array_memory_size());
+        self.tables.push((address, bytes));
+        bytes
     }
 
     /// The bytes the allocation `buffer` is a slice of, or zero when this pass has already counted
@@ -151,11 +166,12 @@ impl ChargedAllocations {
     /// no memory of its own reports no capacity, and then the bytes it shows are all there is.
     fn buffer(&mut self, buffer: &Buffer) -> usize {
         let address = buffer.data_ptr().as_ptr().cast_const();
-        if self.buffers.contains(&address) {
+        if self.buffers.iter().any(|(counted, _)| *counted == address) {
             return 0;
         }
-        self.buffers.push(address);
-        buffer.capacity().max(buffer.len())
+        let bytes = buffer.capacity().max(buffer.len());
+        self.buffers.push((address, bytes));
+        bytes
     }
 
     /// The bytes the buffers of one Arrow array hold.
@@ -170,6 +186,144 @@ impl ChargedAllocations {
             .nulls()
             .map_or(0, |nulls| self.buffer(nulls.inner().inner()));
         values.saturating_add(nulls)
+    }
+}
+
+/// The bytes the chunks one node queues hold, kept as chunks enter and leave the queue.
+///
+/// A node is asked for its queue's figure on every enqueue and every pop, and the queue can hold a
+/// whole series at once, for a caller that pushes a series before pulling it. Recounting the queue
+/// with a [`ChargedAllocations`] pass each time is one pass over every queued chunk per operation,
+/// which is quadratic in the chunks that caller queues. What is kept here instead is a count per
+/// shared allocation, with the bytes that allocation contributes and the running total they add up
+/// to, so an operation walks only the allocations of the one chunk it names.
+///
+/// The dedupe is the one [`ChargedAllocations`] makes inside a chunk, carried across the queue. It
+/// is per queued chunk that references an allocation, not per field or per segment that does: the
+/// chunk is walked with one pass, so a chunk whose two fields index one table is one reference to
+/// it, and the walk a pop makes of the same chunk meets the same references. A chunk is therefore
+/// charged its own struct once, and an allocation once for as long as at least one queued chunk
+/// references it -- the figure a whole-queue pass would give, without the pass.
+#[derive(Default)]
+struct QueuedCharge {
+    /// Every histogram table the queued chunks reference, by address, with how many queued chunks
+    /// reference it and the bytes it contributes to the total while at least one does.
+    tables: HashMap<usize, Counted>,
+    /// Every Arrow buffer the queued chunks reference, likewise: two chunks of one series hold
+    /// sibling slices of one buffer, and the address of the allocation is what makes them one.
+    buffers: HashMap<usize, Counted>,
+    /// What the queued chunks hold: their own structs, and the allocations above added once each.
+    /// This is what the node reserves for its queue.
+    bytes: usize,
+    /// How many chunks the accounting has walked, test-only.
+    ///
+    /// An enqueue or a pop walks the chunk it names, so this grows by one per operation whatever
+    /// the queue holds. A figure recounted from the whole queue would grow with the depth of the
+    /// queue, which is what a test refuses.
+    #[cfg(test)]
+    walked: usize,
+}
+
+/// How many queued chunks reference one shared allocation, and the bytes it contributes while at
+/// least one of them does.
+#[derive(Clone, Copy)]
+struct Counted {
+    chunks: usize,
+    bytes: usize,
+}
+
+impl QueuedCharge {
+    /// Counts the allocations `chunk` references, as that chunk enters the queue, and returns the
+    /// queue's new total.
+    fn enqueue(&mut self, chunk: &NativeChunk) -> usize {
+        let charged = self.walk(chunk);
+        // The struct a chunk is held by is its own; only what it points at can be shared.
+        self.bytes = self.bytes.saturating_add(chunk.own_bytes());
+        for &(table, bytes) in &charged.tables {
+            count_reference(&mut self.tables, &mut self.bytes, table as usize, bytes);
+        }
+        for &(buffer, bytes) in &charged.buffers {
+            count_reference(&mut self.buffers, &mut self.bytes, buffer as usize, bytes);
+        }
+        self.bytes
+    }
+
+    /// Gives the allocations `chunk` references back, as that chunk leaves the queue, and returns
+    /// the queue's new total.
+    ///
+    /// An allocation another queued chunk still references stays charged: only the last reference
+    /// takes its bytes out, which is what keeps a shared table counted once for as long as the
+    /// queue holds it.
+    fn pop(&mut self, chunk: &NativeChunk) -> usize {
+        let charged = self.walk(chunk);
+        self.bytes = self.bytes.saturating_sub(chunk.own_bytes());
+        for &(table, _) in &charged.tables {
+            drop_reference(&mut self.tables, &mut self.bytes, table as usize);
+        }
+        for &(buffer, _) in &charged.buffers {
+            drop_reference(&mut self.buffers, &mut self.bytes, buffer as usize);
+        }
+        self.bytes
+    }
+
+    /// The shared allocations one chunk references, each met once.
+    ///
+    /// The pass is over `chunk` alone: what the queue holds is folded in from the allocations the
+    /// pass met rather than recounted by walking the queue. The same chunk walked again meets the
+    /// same addresses, which is what makes the subtraction on the way out match the addition on the
+    /// way in.
+    fn walk(&mut self, chunk: &NativeChunk) -> ChargedAllocations {
+        let mut charged = ChargedAllocations::default();
+        // The figure this sums is the chunk's own; the queue needs the allocations behind it, which
+        // `charged` now holds.
+        let _ = chunk.bytes(&mut charged);
+        #[cfg(test)]
+        {
+            self.walked += 1;
+        }
+        charged
+    }
+}
+
+/// Counts one more reference to the allocation at `address`, which contributes `bytes`, and adds
+/// those bytes to `total` when the queue did not already hold it.
+fn count_reference(
+    counts: &mut HashMap<usize, Counted>,
+    total: &mut usize,
+    address: usize,
+    bytes: usize,
+) {
+    let entry = counts
+        .entry(address)
+        .or_insert(Counted { chunks: 0, bytes });
+    if entry.chunks == 0 {
+        // The first chunk to meet the allocation is what makes the queue pay for it: a chunk
+        // sharing it afterwards adds a reference, not bytes.
+        *total = total.saturating_add(entry.bytes);
+    }
+    entry.chunks += 1;
+}
+
+/// Gives one reference to the allocation at `address` back, and takes its bytes out of `total` when
+/// it was the last one, so a queue that emptied leaves no entry and no bytes behind.
+fn drop_reference(counts: &mut HashMap<usize, Counted>, total: &mut usize, address: usize) {
+    let last = match counts.get_mut(&address) {
+        // The chunk entered the queue before it left it, so one leaving cannot reach zero while
+        // another chunk of the queue still references the allocation.
+        Some(entry) if entry.chunks > 1 => {
+            entry.chunks -= 1;
+            false
+        }
+        Some(_) => true,
+        // Every chunk that leaves was queued, so its allocations were counted on the way in. An
+        // address missing here is exactly the asymmetry that would leak or undercharge silently.
+        None => {
+            debug_assert!(false, "the queue released an allocation it never counted");
+            false
+        }
+    };
+    if last && let Some(entry) = counts.remove(&address) {
+        *total = total.saturating_sub(entry.bytes);
     }
 }
 
@@ -677,6 +831,8 @@ struct NodeRuntime {
     buffer: NodeBuffer,
     /// Source chunks queued by the caller, for an input node.
     queued: VecDeque<NativeChunk>,
+    /// What `queued` holds, folded in as chunks enter and out as they leave.
+    queued_charge: QueuedCharge,
     /// What a window node holds.
     window: Option<WindowRuntime>,
     /// What a map node applies.
@@ -689,21 +845,30 @@ struct NodeRuntime {
 impl NodeRuntime {
     /// Queues a source chunk, holding the bytes it needs until it leaves.
     ///
-    /// What this node holds is its queue and nothing else, so the queue is counted in one pass and
-    /// the reservation set from that figure: a chunk of a series can share its histogram table with
-    /// a chunk of the same series beside it, and counting the queue chunk by chunk would charge
-    /// that one table once per chunk instead of once for the allocation.
+    /// What this node holds is its queue and nothing else, so the reservation is the queue's
+    /// running total: a chunk of a series can share its histogram table with a chunk of the same
+    /// series beside it, and counting the queue chunk by chunk would charge that one table once per
+    /// chunk instead of once for the allocation.
+    ///
+    /// The total is kept incrementally rather than recounted from the queue: recomputing it here
+    /// costs a pass over every queued chunk per chunk queued, so a caller that queues a whole series
+    /// before pulling it pays quadratically in the chunks it holds. What this costs instead is one
+    /// pass over the chunk entering, and the same on the way out.
     fn enqueue(&mut self, chunk: NativeChunk) -> Result<()> {
         let positions = chunk.positions();
+        let bytes = self.queued_charge.enqueue(&chunk);
         self.queued.push_back(chunk);
-        let bytes = self.queued_bytes();
         self.buffer.hold_exactly(bytes)?;
         self.buffer.metrics.record_input(1, positions);
         Ok(())
     }
 
     /// The bytes the chunks this node still queues hold, counted as one accounting pass.
-    fn queued_bytes(&self) -> usize {
+    ///
+    /// Test-only: what the node reserves for its queue is the running total of [`QueuedCharge`], so
+    /// this walk is the figure that total is checked against rather than the figure it is read from.
+    #[cfg(test)]
+    fn queued_bytes_recomputed(&self) -> usize {
         let mut charged = ChargedAllocations::default();
         self.queued
             .iter()
@@ -716,7 +881,9 @@ impl NodeRuntime {
         let Some(chunk) = self.queued.pop_front() else {
             return Ok(None);
         };
-        let bytes = self.queued_bytes();
+        // The leaving chunk gives back only what it alone held: an allocation a chunk still in the
+        // queue references stays charged, and no chunk left behind is walked to find that out.
+        let bytes = self.queued_charge.pop(&chunk);
         let metrics = Arc::clone(&self.buffer.metrics);
         {
             // An input node's own work is handing the chunk over, so its self time covers that and
@@ -869,6 +1036,10 @@ impl NodeRuntime {
         self.emitted = None;
         self.queued.clear();
         self.queued.shrink_to_fit();
+        // The queue's counts go with the queue: they are what a later chunk would be folded onto,
+        // and a chunk that is dropped is a chunk the pool no longer has to hold. The reservation is
+        // returned below, once, for everything this node still held.
+        self.queued_charge = QueuedCharge::default();
         self.buffer.release();
     }
 }
@@ -1006,6 +1177,7 @@ impl NativeExecutionState {
             let mut runtime = NodeRuntime {
                 buffer,
                 queued: VecDeque::new(),
+                queued_charge: QueuedCharge::default(),
                 window: None,
                 map: None,
                 emitted: None,
@@ -1165,6 +1337,24 @@ impl NativeExecutionState {
             .map_or((0, 0), |emitted| {
                 (emitted.bytes(), emitted.bytes_recomputed())
             })
+    }
+
+    /// The bytes the queue at `path` charges for, and the same figure recounted by walking it.
+    ///
+    /// Test-only: the queue's running total is only correct if folding one chunk in as it enters and
+    /// out as it leaves agrees with one pass over what is left, so a test compares the two after the
+    /// queue has changed shape.
+    #[cfg(test)]
+    fn queued_charge_pair(&self, path: &NodePath) -> (usize, usize) {
+        let index = *self
+            .by_path
+            .get(path)
+            .expect("the path names a node of this tree");
+        let runtime = &self.runtimes[index];
+        (
+            runtime.queued_charge.bytes,
+            runtime.queued_bytes_recomputed(),
+        )
     }
 
     /// How many nodes still hold the state a window buffers into.
