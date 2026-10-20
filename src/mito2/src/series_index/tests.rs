@@ -63,7 +63,7 @@ pub(crate) async fn prepare_region_with_timestamps(
     .await
 }
 
-async fn prepare_region_with_config(
+pub(crate) async fn prepare_region_with_config(
     env: &mut TestEnv,
     timestamps: &[i64],
     config: MitoConfig,
@@ -891,6 +891,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     let store = ObjectStore::new(Memory::default()).unwrap();
     let region_id = RegionId::new(1, 1);
     let entry = SeriesIndexEntry {
+        artifact: None,
         file_size: 0,
         index_uuid: FileId::random(),
         bucket_start: Timestamp::new_second(0),

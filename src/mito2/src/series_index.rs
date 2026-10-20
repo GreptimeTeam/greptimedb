@@ -16,9 +16,11 @@
 //!
 //! Under development. Index files are currently stored on the local filesystem.
 
+pub(crate) mod artifact;
 mod bucket;
 mod builder;
 mod catalog;
+pub(crate) mod format;
 mod maintenance;
 mod purger;
 mod searcher;
@@ -56,6 +58,7 @@ pub use crate::series_index::writer::{
 /// Index storage and pinned catalog snapshot for a query.
 #[derive(Clone)]
 pub(crate) struct SeriesIndexReadContext {
+    pub(crate) formats: Arc<format::SeriesFormats>,
     pub(crate) store: ObjectStore,
     pub(crate) version: Arc<SeriesIndexVersion>,
 }

@@ -96,6 +96,32 @@ impl SeriesIndexSearcher {
         })
     }
 
+    /// Returns complete identities for prepared sources without reading sample payloads.
+    pub(crate) fn search_primary_keys(&self) -> Result<crate::read::BoxedRecordBatchStream> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Ok(Box::pin(futures::stream::empty()));
+        };
+        let mut columns = vec!["__primary_key"];
+        columns.extend(self.filters.iter().map(SimpleFilterEvaluator::column_name));
+        let mut batches = reader.read(&self.pruning_predicate, &columns)?;
+        let filters = self.filters.clone();
+        let handle = self.file_handle.clone();
+        Ok(Box::pin(try_stream! {
+            while let Some(batch) = batches.try_next().await? {
+                let mut mask = BooleanBuffer::new_set(batch.num_rows());
+                for filter in &filters {
+                    let evaluated = filter.evaluate_array(column(&batch, filter.column_name())?).context(RecordBatchSnafu)?;
+                    mask = &mask & &evaluated;
+                }
+                let batch = datatypes::arrow::compute::filter_record_batch(&batch, &datatypes::arrow::array::BooleanArray::new(mask, None))
+                    .context(crate::error::ComputeArrowSnafu)?;
+                let index = batch.schema().index_of("__primary_key").context(crate::error::ComputeArrowSnafu)?;
+                yield batch.project(&[index]).context(crate::error::ComputeArrowSnafu)?;
+            }
+            drop(handle);
+        }))
+    }
+
     /// Searches the index file and returns sorted batches of matching
     /// metric-series IDs.
     pub fn search(&self) -> Result<MetricSeriesIdStream> {
@@ -312,6 +338,7 @@ mod tests {
     ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
         let (purger, receiver) = series_index_channel(store.clone());
         let entry = SeriesIndexEntry {
+            artifact: None,
             file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: common_time::Timestamp::new_second(0),

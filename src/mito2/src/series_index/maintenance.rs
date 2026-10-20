@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use common_telemetry::{debug, info};
 use object_store::ObjectStore;
+use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
 
 use crate::error::Result;
@@ -40,16 +41,23 @@ use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
 
 /// Retires newly completed series files unless their snapshot is published.
 #[derive(Default)]
-struct UnpublishedSeriesFiles(Vec<SeriesIndexFileHandle>);
+struct UnpublishedSeriesFiles(
+    Vec<SeriesIndexFileHandle>,
+    Vec<crate::series_index::artifact::SamplesFileHandle>,
+);
 
 impl UnpublishedSeriesFiles {
     fn disarm(&mut self) {
         self.0.clear();
+        self.1.clear();
     }
 }
 
 impl Drop for UnpublishedSeriesFiles {
     fn drop(&mut self) {
+        for handle in &self.1 {
+            handle.mark_deleted();
+        }
         for handle in &self.0 {
             handle.mark_deleted();
         }
@@ -58,6 +66,8 @@ impl Drop for UnpublishedSeriesFiles {
 
 #[derive(Debug, Default)]
 pub(crate) struct ReconcileStats {
+    pub(crate) built_samples: usize,
+    pub(crate) removed_samples: usize,
     pub(crate) source_files: usize,
     pub(crate) built_range: usize,
     pub(crate) built_series: usize,
@@ -69,7 +79,13 @@ pub(crate) struct ReconcileStats {
 
 impl ReconcileStats {
     fn changed(&self) -> bool {
-        self.built_range + self.built_series + self.removed_range + self.removed_series > 0
+        self.built_samples
+            + self.removed_samples
+            + self.built_range
+            + self.built_series
+            + self.removed_range
+            + self.removed_series
+            > 0
     }
 }
 
@@ -201,9 +217,41 @@ async fn build_index_version(
         }
         (false, _) => Vec::new(),
     };
+    let formats = region
+        .series_index_version_control
+        .formats
+        .read()
+        .unwrap()
+        .clone();
+    let mut matching_format = true;
+    for handle in current.series_indexes.values() {
+        let entry = handle.entry();
+        if let Some(artifact) = &entry.artifact {
+            matching_format &= artifact.format == formats.index.name();
+            for object in &artifact.objects {
+                matching_format &= store
+                    .exists(object)
+                    .await
+                    .context(crate::error::OpenDalSnafu)?;
+            }
+        } else {
+            matching_format &= formats.index.name() == "parquet";
+            matching_format &= store
+                .exists(&crate::series_index::catalog::series_index_path(
+                    region.region_id,
+                    entry.index_uuid,
+                ))
+                .await
+                .context(crate::error::OpenDalSnafu)?;
+        }
+    }
     let plan = plan_series_indexes(
         buckets,
-        current.index_buckets.clone(),
+        if matching_format {
+            current.index_buckets.clone()
+        } else {
+            Default::default()
+        },
         version.options.ttl,
         now_ms,
     );
@@ -218,6 +266,7 @@ async fn build_index_version(
     }
     if plan.builds.is_empty()
         && next.is_none()
+        && formats.samples.is_none()
         && (!enable_range_index || current.range_indexes.len() == visible.len())
     {
         return Ok((None, stats));
@@ -225,13 +274,53 @@ async fn build_index_version(
     let SeriesIndexVersion {
         mut range_indexes,
         mut series_indexes,
+        mut samples,
         ..
     } = next.unwrap_or_else(|| SeriesIndexVersion {
+        samples: current.samples.clone(),
         range_indexes: current.range_indexes.clone(),
         series_indexes: current.series_indexes.clone(),
         index_buckets: Default::default(),
     });
     let index_buckets = plan.index_buckets;
+    if !matching_format {
+        series_indexes.clear();
+    }
+    if let Some(backend) = &formats.samples {
+        for file in &files {
+            let id = file.file_id().file_id();
+            let reusable = if let Some(handle) = samples.get(&id) {
+                let artifact = &handle.entry().artifact;
+                let mut exists = artifact.format == backend.name();
+                for path in &artifact.objects {
+                    exists &= store
+                        .exists(path)
+                        .await
+                        .context(crate::error::OpenDalSnafu)?;
+                }
+                exists
+            } else {
+                false
+            };
+            if reusable {
+                continue;
+            }
+            if let Some(handle) = crate::series_index::builder::build_samples(
+                store,
+                region,
+                version,
+                file.clone(),
+                backend.as_ref(),
+                purger,
+            )
+            .await?
+            {
+                unpublished.1.push(handle.clone());
+                samples.insert(id, handle);
+                stats.built_samples += 1;
+            }
+        }
+    }
     for id in &plan.superseded_index_ids {
         series_indexes.remove(id);
     }
@@ -276,6 +365,7 @@ async fn build_index_version(
         return Ok((None, stats));
     }
     let next = SeriesIndexVersion {
+        samples,
         range_indexes,
         series_indexes,
         index_buckets,
@@ -293,7 +383,8 @@ fn prune_index_version(
     expired_index_ids: &[FileId],
     stats: &mut ReconcileStats,
 ) -> Option<SeriesIndexVersion> {
-    if current.range_indexes.keys().all(|id| visible.contains(id))
+    if current.samples.keys().all(|id| visible.contains(id))
+        && current.range_indexes.keys().all(|id| visible.contains(id))
         && expired_index_ids
             .iter()
             .all(|id| !current.series_indexes.contains_key(id))
@@ -301,10 +392,13 @@ fn prune_index_version(
         return None;
     }
     let mut next = SeriesIndexVersion {
+        samples: current.samples.clone(),
         range_indexes: current.range_indexes.clone(),
         series_indexes: current.series_indexes.clone(),
         index_buckets: current.index_buckets.clone(),
     };
+    next.samples.retain(|id, _| visible.contains(id));
+    stats.removed_samples = current.samples.len() - next.samples.len();
     next.range_indexes
         .retain(|file_id, _| visible.contains(file_id));
     for id in expired_index_ids {
@@ -322,6 +416,31 @@ async fn persist_index_catalogs(
     next: &SeriesIndexVersion,
     stats: &ReconcileStats,
 ) -> Result<()> {
+    let samples_path = crate::series_index::catalog::samples_catalog_path(region_id);
+    if !next.samples.is_empty()
+        || stats.removed_samples > 0
+        || store
+            .exists(&samples_path)
+            .await
+            .context(crate::error::OpenDalSnafu)?
+    {
+        // A single object write commits all references. A failed write leaves the prior
+        // catalog usable while the unpublished-output guard retires the new artifacts.
+        return store_catalog(
+            store,
+            &samples_path,
+            &crate::series_index::catalog::SamplesCatalog {
+                entries: next.samples.values().map(|h| h.entry().clone()).collect(),
+                series: next
+                    .series_indexes
+                    .values()
+                    .map(|h| h.entry().clone())
+                    .collect(),
+                ranges: next.range_indexes.values().copied().collect(),
+            },
+        )
+        .await;
+    }
     if stats.built_range + stats.removed_range > 0 {
         let mut range_entries = next.range_indexes.values().copied().collect::<Vec<_>>();
         range_entries
@@ -364,6 +483,13 @@ async fn persist_index_catalogs(
 /// Publishes the snapshot and retires series files absent from the new version.
 fn publish_index_version(region: &MitoRegionRef, next: Arc<SeriesIndexVersion>) {
     let previous = region.series_index_version_control.publish(next.clone());
+    for (id, handle) in &previous.samples {
+        if next.samples.get(id).is_none_or(|next| {
+            next.entry().artifact.generation != handle.entry().artifact.generation
+        }) {
+            handle.mark_deleted();
+        }
+    }
     for (id, handle) in &previous.series_indexes {
         if !next.series_indexes.contains_key(id) {
             // Purge only after readers release their retained handles.
@@ -405,6 +531,7 @@ mod tests {
                 SeriesIndexFileHandle::new(
                     RegionId::new(1, 1),
                     SeriesIndexEntry {
+                        artifact: None,
                         index_uuid: series_id,
                         file_size: 20,
                         bucket_start: Timestamp::new_second(0),

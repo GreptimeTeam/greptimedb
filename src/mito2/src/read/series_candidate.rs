@@ -54,7 +54,7 @@ use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
 use crate::series_index::{
     METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream, SeriesIndexFileHandle,
-    SeriesIndexReadContext, SeriesIndexSearcher,
+    SeriesIndexReadContext,
 };
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::PrimaryKeyArray;
@@ -139,6 +139,13 @@ impl SeriesCandidateScanner {
 
     /// Builds a globally sorted stream of candidate metric-series IDs.
     pub(crate) async fn build_stream(&self) -> Result<MetricSeriesIdStream> {
+        decode_metric_series(
+            self.build_primary_key_stream().await?,
+            self.stream_ctx.input.region_metadata().clone(),
+        )
+    }
+
+    pub(crate) async fn build_primary_key_stream(&self) -> Result<BoxedRecordBatchStream> {
         let all_ranges = self
             .partitions
             .iter()
@@ -206,7 +213,7 @@ impl SeriesCandidateScanner {
             self.partitions.len(),
             "SeriesCandidateScanner::final_merge",
         )?;
-        decode_metric_series(merged, self.stream_ctx.input.region_metadata().clone())
+        Ok(merged)
     }
 
     /// Returns the partition pruner shared with the data phase.
@@ -243,6 +250,14 @@ impl SeriesIndexCoverage {
             .version
             .series_indexes
             .values()
+            .filter(|index| {
+                index
+                    .entry()
+                    .artifact
+                    .as_ref()
+                    .map_or("parquet", |a| a.format.as_str())
+                    == context.formats.index.name()
+            })
             .map(|index| {
                 let files: HashSet<_> = uncovered
                     .iter()
@@ -307,37 +322,15 @@ fn index_primary_key_stream(
 ) -> BoxedRecordBatchStream {
     Box::pin(try_stream! {
         let metadata = stream_ctx.input.region_metadata();
-        let codec = SparsePrimaryKeyCodec::new(metadata);
-        let mut series = {
+        let mut keys = context.formats.index.search(
+            metadata.clone(), context.store.clone(), index,
+            stream_ctx.input.predicate_group().predicate().cloned(), stream_ctx.input.time_range,
+        ).await?;
+        while let Some(batch) = keys.try_next().await? {
             let _permit = semaphore.acquire().await.map_err(|error| UnexpectedSnafu {
                 reason: format!("failed to acquire candidate index permit: {error}"),
             }.build())?;
-            SeriesIndexSearcher::try_new(
-                metadata.clone(),
-                context.store.clone(),
-                index,
-                stream_ctx.input.predicate_group().predicate(),
-                stream_ctx.input.time_range,
-            ).await?.search()?
-        };
-        loop {
-            let batch = {
-                let _permit = semaphore.acquire().await.map_err(|error| UnexpectedSnafu {
-                    reason: format!("failed to acquire candidate index permit: {error}"),
-                }.build())?;
-                series.try_next().await?
-            };
-            let Some(batch) = batch else { break };
-            let mut builder = BinaryBuilder::new();
-            let mut key = Vec::new();
-            for series in batch {
-                key.clear();
-                codec.encode_internal(series.table_id, series.tsid, &mut key)
-                    .context(crate::error::EncodeSnafu)?;
-                builder.append_value(&key);
-            }
-            yield RecordBatch::try_new(primary_key_schema(), vec![Arc::new(builder.finish())])
-                .context(NewRecordBatchSnafu)?;
+            yield batch;
         }
     })
 }
@@ -778,6 +771,7 @@ mod tests {
         ));
         let store = env.access_layer.object_store().clone();
         let entry = SeriesIndexEntry {
+            artifact: None,
             file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
@@ -829,8 +823,10 @@ mod tests {
         let (purger, _receiver) = series_index_channel(store.clone());
         let handle = SeriesIndexFileHandle::new(metadata.region_id, entry.clone(), purger);
         let context = SeriesIndexReadContext {
+            formats: Default::default(),
             store,
             version: Arc::new(SeriesIndexVersion {
+                samples: Default::default(),
                 series_indexes: [(entry.index_uuid, handle)].into(),
                 ..Default::default()
             }),

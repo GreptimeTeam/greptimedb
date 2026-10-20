@@ -1549,6 +1549,7 @@ async fn check_two_phase_series_scan(
         let store = region.series_index_store.clone().unwrap();
         let sequence = region.flushed_sequence();
         let entry = SeriesIndexEntry {
+            artifact: None,
             file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
