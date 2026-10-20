@@ -42,6 +42,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
+use crate::optimizer::expr_depth;
 use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
@@ -107,6 +108,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         let mut config = config.clone();
         // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
         config.optimizer.filter_null_join_keys = true;
@@ -129,6 +131,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let plan = plan
             .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
+        expr_depth::validate_plan(&plan)?;
 
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);

@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
@@ -463,5 +463,51 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
+                RetryHint::RetryAfterRouteRefresh
+            }
+            CreateMitoRegion { source, .. }
+            | OpenMitoRegion { source, .. }
+            | BatchOpenMitoRegion { source, .. }
+            | BatchCatchupMitoRegion { source, .. }
+            | CloseMitoRegion { source, .. }
+            | MitoReadOperation { source, .. }
+            | MitoWriteOperation { source, .. }
+            | MitoFlushOperation { source, .. }
+            | MitoSyncOperation { source, .. }
+            | MitoEnterStagingOperation { source, .. }
+            | MitoCopyRegionFromOperation { source, .. }
+            | MitoEditRegion { source, .. } => source.retry_hint(),
+
+            EncodePrimaryKey { source, .. } => source.retry_hint(),
+            CollectRecordBatchStream { source, .. } => source.retry_hint(),
+            StartRepeatedTask { source, .. } => source.retry_hint(),
+            CacheGet { source, .. } => source.retry_hint(),
+
+            _ => RetryHint::NonRetryable,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_missing_region_retry_hints() {
+        let region_id = RegionId::new(1024, 1);
+        for error in [
+            PhysicalRegionNotFoundSnafu { region_id }.build(),
+            LogicalRegionNotFoundSnafu { region_id }.build(),
+        ] {
+            assert_eq!(error.status_code(), StatusCode::RegionNotFound);
+            assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+        }
     }
 }

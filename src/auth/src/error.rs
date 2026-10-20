@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -110,6 +110,14 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::Io { error, .. } => retry_hint_from_io_error(error),
+            Error::AuthBackend { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 

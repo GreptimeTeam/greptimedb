@@ -18,11 +18,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{assert_matches, fs};
 
-use api::v1::Rows;
-use common_error::ext::ErrorExt;
+use api::v1::{ArrowIpc, Rows};
+use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_function::utils::partition_expr_version;
+use common_grpc::flight;
 use common_recordbatch::RecordBatches;
+use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::value::Value;
 use object_store::Buffer;
 use object_store::layers::mock::{
@@ -34,8 +37,9 @@ use store_api::region_engine::{
     RegionEngine, RemapManifestsRequest, SetRegionRoleStateResponse, SettableRegionRoleState,
 };
 use store_api::region_request::{
-    ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionFlushRequest,
-    RegionPutRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
+    ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest, RegionBulkInsertsRequest,
+    RegionFlushRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
+    StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -252,7 +256,7 @@ fn default_partition_expr() -> String {
 }
 
 #[tokio::test]
-async fn test_staging_reject_all_writes_rejects_put() {
+async fn test_staging_reject_all_writes_rejects_put_and_bulk() {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -279,22 +283,48 @@ async fn test_staging_reject_all_writes_rejects_put() {
         schema: column_schemas,
         rows: build_rows(0, 2),
     };
-    let err = engine
-        .handle_request(
+    let payload = RecordBatch::try_from_iter([
+        (
+            "tag_0",
+            Arc::new(StringArray::from(vec!["0", "1"])) as ArrayRef,
+        ),
+        (
+            "field_0",
+            Arc::new(Float64Array::from(vec![0.0, 1.0])) as ArrayRef,
+        ),
+        (
+            "ts",
+            Arc::new(TimestampMillisecondArray::from(vec![0, 1000])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let (schema, data_header, data) = flight::record_batch_to_ipc(payload.clone()).unwrap();
+    for request in [
+        RegionRequest::Put(RegionPutRequest {
+            rows,
+            hint: None,
+            partition_expr_version: None,
+        }),
+        RegionRequest::BulkInserts(RegionBulkInsertsRequest {
             region_id,
-            RegionRequest::Put(RegionPutRequest {
-                rows,
-                hint: None,
-                partition_expr_version: None,
-            }),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
-    assert_matches!(
-        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
-        Error::RejectWrite { .. }
-    );
+            payload,
+            raw_data: ArrowIpc {
+                schema,
+                data_header,
+                payload: data,
+            },
+            partition_expr_version: None,
+            aligned_schema_version: None,
+        }),
+    ] {
+        let err = engine.handle_request(region_id, request).await.unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+        assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+        assert_matches!(
+            err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+            Error::RejectWriteInStaging { .. }
+        );
+    }
 }
 
 #[tokio::test]

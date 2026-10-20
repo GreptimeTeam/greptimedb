@@ -94,5 +94,6 @@ meta-srv.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
+temp-env = "0.3"
 tower.workspace = true
 uuid.workspace = true

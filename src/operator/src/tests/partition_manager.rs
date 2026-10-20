@@ -75,7 +75,7 @@ fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumb
     HashMap::default()
 }
 
-fn test_new_table_route_cache(kv_backend: KvBackendRef) -> TableRouteCacheRef {
+pub(crate) fn test_new_table_route_cache(kv_backend: KvBackendRef) -> TableRouteCacheRef {
     let cache = CacheBuilder::new(128).build();
     Arc::new(new_table_route_cache(
         "table_route_cache".to_string(),
@@ -84,7 +84,9 @@ fn test_new_table_route_cache(kv_backend: KvBackendRef) -> TableRouteCacheRef {
     ))
 }
 
-fn test_new_partition_info_cache(table_route_cache: TableRouteCacheRef) -> PartitionInfoCacheRef {
+pub(crate) fn test_new_partition_info_cache(
+    table_route_cache: TableRouteCacheRef,
+) -> PartitionInfoCacheRef {
     let cache = CacheBuilder::new(128).build();
     Arc::new(new_partition_info_cache(
         "partition_info_cache".to_string(),

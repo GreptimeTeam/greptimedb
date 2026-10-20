@@ -27,6 +27,7 @@ use crate::status_code::StatusCode;
 // please define in `src/servers/src/http/header.rs`.
 pub const GREPTIME_DB_HEADER_ERROR_CODE: &str = "x-greptime-err-code";
 pub const GREPTIME_DB_HEADER_ERROR_MSG: &str = "x-greptime-err-msg";
+pub const GREPTIME_DB_HEADER_ERROR_RETRY_HINT: &str = "x-greptime-err-retry-hint";
 
 /// Create a http header map from error code and message.
 /// using `GREPTIME_DB_HEADER_ERROR_CODE` and `GREPTIME_DB_HEADER_ERROR_MSG` as keys.

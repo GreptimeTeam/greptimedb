@@ -129,6 +129,7 @@ where
                 PendingRowsBatcher::try_new(
                     self.instance.partition_manager().clone(),
                     self.instance.node_manager().clone(),
+                    self.instance.inserter().write_dispatcher().clone(),
                     self.instance.catalog_manager().clone(),
                     opts.prom_store.with_metric_engine,
                     self.instance.clone(),

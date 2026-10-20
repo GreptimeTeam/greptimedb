@@ -101,6 +101,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_TableScan: test_|
 |_| ]]_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| logical_plan after expr_depth_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
@@ -250,6 +251,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_TableScan: test_|
 |_| ]]_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| logical_plan after expr_depth_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
@@ -439,6 +441,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_| TableScan: test_nano_|
 |_| ]]_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| logical_plan after expr_depth_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|

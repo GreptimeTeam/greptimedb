@@ -1926,7 +1926,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{Rows, SemanticType};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
@@ -2387,7 +2387,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::Unexpected);
+        assert_matches!(&err, error::Error::HandleBatchOpenRequest { .. });
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
     }
 
     struct CurrentEngineTest {

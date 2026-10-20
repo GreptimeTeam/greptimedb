@@ -316,6 +316,11 @@
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans (only applies to datanodes). |
+| `write_retry` | -- | -- | Retry retryable distributed write failures.<br/>Backoff grows exponentially, with jitter to spread concurrent retries. |
+| `write_retry.max_retries` | Integer | `3` | Maximum retries after the initial write attempt. Set to 0 to disable retries. |
+| `write_retry.initial_backoff` | String | `1500ms` | Initial backoff before jitter is applied. Must be positive. |
+| `write_retry.max_backoff` | String | `10s` | Maximum backoff before jitter is applied. Must be at least initial_backoff. |
+| `write_retry.backoff_multiplier` | Float | `2.0` | Backoff multiplier. Must be finite and at least 1. |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.connect_timeout` | String | `10s` | -- |

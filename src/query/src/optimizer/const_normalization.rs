@@ -23,8 +23,6 @@ use datafusion_expr::{Between, BinaryExpr, Expr, ExprSchemable, LogicalPlan, Ope
 use datafusion_expr_common::casts::try_cast_literal_to_type;
 use datafusion_optimizer::analyzer::AnalyzerRule;
 
-use crate::plan::ExtractExpr;
-
 /// ConstNormalizationRule rewrites castable constants against their
 /// non-constant comparison operand ahead of filter pushdown.
 #[derive(Debug)]
@@ -52,26 +50,12 @@ impl AnalyzerRule for ConstNormalizationRule {
 }
 
 fn rewrite_plan_exprs(plan: LogicalPlan, schema: DFSchemaRef) -> Result<Transformed<LogicalPlan>> {
-    let mut rewriter = ConstNormalizationRewriter {
-        schema,
-        transformed: false,
-    };
-    let exprs = plan
-        .expressions_consider_join()
-        .into_iter()
-        .map(|expr| expr.rewrite(&mut rewriter).map(|rewritten| rewritten.data))
-        .collect::<Result<Vec<_>>>()?;
-    if !rewriter.transformed {
-        return Ok(Transformed::no(plan));
-    }
-
-    let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
-    plan.with_new_exprs(exprs, inputs).map(Transformed::yes)
+    let mut rewriter = ConstNormalizationRewriter { schema };
+    plan.map_expressions(|expr| expr.rewrite(&mut rewriter))
 }
 
 struct ConstNormalizationRewriter {
     schema: DFSchemaRef,
-    transformed: bool,
 }
 
 impl TreeNodeRewriter for ConstNormalizationRewriter {
@@ -91,44 +75,36 @@ impl TreeNodeRewriter for ConstNormalizationRewriter {
     }
 
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
-        let rewritten = rewrite_expr_node(expr, &self.schema)?;
-        self.transformed |= rewritten.transformed;
-        Ok(rewritten)
+        rewrite_expr_node(expr, &self.schema)
     }
 }
 
 fn rewrite_expr_node(expr: Expr, schema: &DFSchemaRef) -> Result<Transformed<Expr>> {
-    match expr {
-        Expr::BinaryExpr(binary) => match rewrite_binary_expr(binary.clone(), schema)? {
-            Some(expr) => Ok(Transformed::yes(expr)),
-            None => Ok(Transformed::no(Expr::BinaryExpr(binary))),
-        },
-        Expr::Between(between) => match rewrite_between_expr(between.clone(), schema)? {
-            Some(expr) => Ok(Transformed::yes(expr)),
-            None => Ok(Transformed::no(Expr::Between(between))),
-        },
-        Expr::InList(in_list) => match rewrite_in_list_expr(in_list.clone(), schema)? {
-            Some(expr) => Ok(Transformed::yes(expr)),
-            None => Ok(Transformed::no(Expr::InList(in_list))),
-        },
-        Expr::Like(like) => rewrite_like_expr(like, PatternMatchKind::Like, schema),
-        Expr::SimilarTo(like) => rewrite_like_expr(like, PatternMatchKind::SimilarTo, schema),
-        expr => Ok(Transformed::no(expr)),
-    }
+    // Borrow while checking eligibility: cloning unchanged subtrees here can overflow
+    // the stack even though DataFusion protects the surrounding rewrite traversal.
+    let rewritten = match &expr {
+        Expr::BinaryExpr(binary) => rewrite_binary_expr(binary, schema)?,
+        Expr::Between(between) => rewrite_between_expr(between, schema)?,
+        Expr::InList(in_list) => rewrite_in_list_expr(in_list, schema)?,
+        Expr::Like(like) => rewrite_like_expr(like, PatternMatchKind::Like, schema)?,
+        Expr::SimilarTo(like) => rewrite_like_expr(like, PatternMatchKind::SimilarTo, schema)?,
+        _ => None,
+    };
+    Ok(match rewritten {
+        Some(rewritten) => Transformed::yes(rewritten),
+        None => Transformed::no(expr),
+    })
 }
 
-fn rewrite_between_expr(between: Between, schema: &DFSchemaRef) -> Result<Option<Expr>> {
+fn rewrite_between_expr(between: &Between, schema: &DFSchemaRef) -> Result<Option<Expr>> {
     let Between {
         expr,
         negated,
         low,
         high,
     } = between;
-    let expr = *expr;
-    let low_expr = *low;
-    let high_expr = *high;
     let Some((target, constants)) =
-        extract_rewrite_operands(&expr, &[low_expr.clone(), high_expr.clone()], schema)?
+        extract_rewrite_operands(expr, [low.as_ref(), high.as_ref()], schema)?
     else {
         return Ok(None);
     };
@@ -142,7 +118,7 @@ fn rewrite_between_expr(between: Between, schema: &DFSchemaRef) -> Result<Option
             .expect("between normalization expects low constant");
         return Ok(Some(Expr::Between(Between {
             expr: Box::new(target.expr.clone()),
-            negated,
+            negated: *negated,
             low: Box::new(lit(low)),
             high: Box::new(lit(high)),
         })));
@@ -153,14 +129,13 @@ fn rewrite_between_expr(between: Between, schema: &DFSchemaRef) -> Result<Option
         .flatten())
 }
 
-fn rewrite_in_list_expr(in_list: InList, schema: &DFSchemaRef) -> Result<Option<Expr>> {
+fn rewrite_in_list_expr(in_list: &InList, schema: &DFSchemaRef) -> Result<Option<Expr>> {
     let InList {
         expr,
         list,
         negated,
     } = in_list;
-    let expr = *expr;
-    let Some((target, constants)) = extract_rewrite_operands(&expr, &list, schema)? else {
+    let Some((target, constants)) = extract_rewrite_operands(expr, list, schema)? else {
         return Ok(None);
     };
 
@@ -168,19 +143,15 @@ fn rewrite_in_list_expr(in_list: InList, schema: &DFSchemaRef) -> Result<Option<
         target
             .expr
             .clone()
-            .in_list(constants.into_iter().map(lit).collect(), negated)
+            .in_list(constants.into_iter().map(lit).collect(), *negated)
     }))
 }
 
 fn rewrite_like_expr(
-    like: Like,
+    like: &Like,
     kind: PatternMatchKind,
     schema: &DFSchemaRef,
-) -> Result<Transformed<Expr>> {
-    let original = match kind {
-        PatternMatchKind::Like => Expr::Like(like.clone()),
-        PatternMatchKind::SimilarTo => Expr::SimilarTo(like.clone()),
-    };
+) -> Result<Option<Expr>> {
     let Like {
         negated,
         expr,
@@ -188,43 +159,38 @@ fn rewrite_like_expr(
         escape_char,
         case_insensitive,
     } = like;
-    let expr = *expr;
-    let pattern = *pattern;
-    let Some((target, constants)) =
-        extract_rewrite_operands(&expr, std::slice::from_ref(&pattern), schema)?
+    let Some((target, constants)) = extract_rewrite_operands(expr, [pattern.as_ref()], schema)?
     else {
-        return Ok(Transformed::no(original));
+        return Ok(None);
     };
     let Some(mut constants) = target.normalize_constants(&constants) else {
-        return Ok(Transformed::no(original));
+        return Ok(None);
     };
 
     let pattern = lit(constants
         .pop()
         .expect("pattern normalization expects one constant"));
     let like = Like::new(
-        negated,
+        *negated,
         Box::new(target.expr.clone()),
         Box::new(pattern),
-        escape_char,
-        case_insensitive,
+        *escape_char,
+        *case_insensitive,
     );
     let rewritten = match kind {
         PatternMatchKind::Like => Expr::Like(like),
         PatternMatchKind::SimilarTo => Expr::SimilarTo(like),
     };
-    Ok(Transformed::yes(rewritten))
+    Ok(Some(rewritten))
 }
 
-fn rewrite_binary_expr(binary: BinaryExpr, schema: &DFSchemaRef) -> Result<Option<Expr>> {
+fn rewrite_binary_expr(binary: &BinaryExpr, schema: &DFSchemaRef) -> Result<Option<Expr>> {
     if !binary.op.supports_propagation() {
         return Ok(None);
     }
 
     let BinaryExpr { left, op, right } = binary;
-    let left = *left;
-    let right = *right;
-    if let Some(expr) = rewrite_binary_side(left.clone(), op, right.clone(), schema)? {
+    if let Some(expr) = rewrite_binary_side(left, *op, right, schema)? {
         return Ok(Some(expr));
     }
 
@@ -236,13 +202,12 @@ fn rewrite_binary_expr(binary: BinaryExpr, schema: &DFSchemaRef) -> Result<Optio
 }
 
 fn rewrite_binary_side(
-    target_expr: Expr,
+    target_expr: &Expr,
     op: Operator,
-    constant_expr: Expr,
+    constant_expr: &Expr,
     schema: &DFSchemaRef,
 ) -> Result<Option<Expr>> {
-    let Some((target, constants)) =
-        extract_rewrite_operands(&target_expr, std::slice::from_ref(&constant_expr), schema)?
+    let Some((target, constants)) = extract_rewrite_operands(target_expr, [constant_expr], schema)?
     else {
         return Ok(None);
     };
@@ -261,11 +226,11 @@ fn rewrite_binary_side(
     Ok(target.normalize_timestamp_binary(op, &constants[0]))
 }
 
-fn extract_rewrite_operands(
-    target_expr: &Expr,
-    constant_exprs: &[Expr],
+fn extract_rewrite_operands<'a, 'b>(
+    target_expr: &'a Expr,
+    constant_exprs: impl IntoIterator<Item = &'b Expr>,
     schema: &DFSchemaRef,
-) -> Result<Option<(NormalizationTarget, Vec<ScalarValue>)>> {
+) -> Result<Option<(NormalizationTarget<'a>, Vec<ScalarValue>)>> {
     let Some(target) = extract_normalization_target(target_expr, schema)? else {
         return Ok(None);
     };
@@ -275,8 +240,8 @@ fn extract_rewrite_operands(
 }
 
 #[derive(Clone)]
-struct NormalizationTarget {
-    expr: Expr,
+struct NormalizationTarget<'a> {
+    expr: &'a Expr,
     data_type: DataType,
     kind: NormalizationKind,
 }
@@ -293,7 +258,7 @@ enum NormalizationKind {
     },
 }
 
-impl NormalizationTarget {
+impl NormalizationTarget<'_> {
     /// Normalizes constants for rewrites that can preserve the original predicate with a direct
     /// literal cast. Timestamp precision-changing casts are handled by timestamp-specific helpers.
     fn normalize_constants(&self, constants: &[ScalarValue]) -> Option<Vec<ScalarValue>> {
@@ -394,17 +359,17 @@ impl NormalizationTarget {
 ///
 /// Plain expressions normalize literals to their own type. Cast expressions only participate when
 /// the cast is lossless or when timestamp downcasts can be rewritten as wider source-side bounds.
-fn extract_normalization_target(
-    expr: &Expr,
+fn extract_normalization_target<'a>(
+    expr: &'a Expr,
     schema: &DFSchemaRef,
-) -> Result<Option<NormalizationTarget>> {
+) -> Result<Option<NormalizationTarget<'a>>> {
     if extract_constant_scalar(expr)?.is_some() {
         return Ok(None);
     }
 
     let Some((_, source_expr, target_type)) = extract_cast_input(expr) else {
         return Ok(Some(NormalizationTarget {
-            expr: expr.clone(),
+            expr,
             data_type: expr.get_type(schema)?,
             kind: NormalizationKind::Lossless,
         }));
@@ -416,7 +381,7 @@ fn extract_normalization_target(
     };
 
     Ok(Some(NormalizationTarget {
-        expr: source_expr.clone(),
+        expr: source_expr,
         data_type,
         kind,
     }))
@@ -476,8 +441,11 @@ enum PatternMatchKind {
     SimilarTo,
 }
 
-fn extract_constant_scalars(exprs: &[Expr]) -> Result<Option<Vec<ScalarValue>>> {
-    let mut values = Vec::with_capacity(exprs.len());
+fn extract_constant_scalars<'a>(
+    exprs: impl IntoIterator<Item = &'a Expr>,
+) -> Result<Option<Vec<ScalarValue>>> {
+    let exprs = exprs.into_iter();
+    let mut values = Vec::with_capacity(exprs.size_hint().0);
     for expr in exprs {
         let Some(value) = extract_constant_scalar(expr)? else {
             return Ok(None);
@@ -606,11 +574,11 @@ mod tests {
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{DFSchema, ScalarValue, ToDFSchema};
-    use datafusion_expr::expr::{Between, Like};
+    use datafusion_expr::expr::{Between, BinaryExpr, Like};
     use datafusion_expr::expr_fn::{cast, col, try_cast};
     use datafusion_expr::{
-        Expr, LogicalPlan, LogicalPlanBuilder, TableProviderFilterPushDown, TableScan, TableSource,
-        TableType, lit,
+        Expr, LogicalPlan, LogicalPlanBuilder, Operator, TableProviderFilterPushDown, TableScan,
+        TableSource, TableType, lit,
     };
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datafusion_optimizer::optimizer::{Optimizer, OptimizerContext};
@@ -620,6 +588,41 @@ mod tests {
     use super::{
         ConstNormalizationRule, PatternMatchKind, lower_bound_for_ge, try_cast_literal_to_type,
     };
+
+    #[test]
+    fn test_normalize_deep_predicate() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let mut predicate = col("t.v").eq(lit(0_i64));
+                for value in 1..1024_i64 {
+                    predicate = predicate.or(col("t.v").eq(lit(value)));
+                }
+                let schema = test_schema(vec![Field::new("v", DataType::Int32, false)]);
+                // Construct the filter directly to isolate this rule from other planner passes.
+                let plan = analyze_plan(LogicalPlan::Filter(
+                    datafusion_expr::Filter::try_new(predicate, Arc::new(build_scan_plan(schema)))
+                        .unwrap(),
+                ));
+                let LogicalPlan::Filter(filter) = plan else {
+                    panic!("expected filter");
+                };
+                // Inspect and consume the chain without recursive formatting or equality.
+                let mut predicate = filter.predicate;
+                for value in (1..1024_i32).rev() {
+                    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = predicate else {
+                        panic!("expected binary predicate");
+                    };
+                    assert_eq!(op, Operator::Or);
+                    assert_eq!(*right, col("t.v").eq(lit(value)));
+                    predicate = *left;
+                }
+                assert_eq!(predicate, col("t.v").eq(lit(0_i32)));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn test_normalize_direct_integer_cast_comparison() {

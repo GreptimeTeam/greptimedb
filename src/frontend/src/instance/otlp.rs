@@ -543,7 +543,12 @@ impl Instance {
             | StatusCode::TableColumnNotFound => ChunkFailureReaction::RetryPerSpan,
             StatusCode::DatabaseNotFound => ChunkFailureReaction::DiscardChunk,
             StatusCode::Cancelled | StatusCode::DeadlineExceeded => ChunkFailureReaction::Propagate,
-            _ if status.is_retryable() => ChunkFailureReaction::Propagate,
+            StatusCode::StorageUnavailable
+            | StatusCode::RuntimeResourcesExhausted
+            | StatusCode::Internal
+            | StatusCode::RegionNotReady
+            | StatusCode::TableUnavailable
+            | StatusCode::RegionBusy => ChunkFailureReaction::Propagate,
             _ => ChunkFailureReaction::DiscardChunk,
         }
     }

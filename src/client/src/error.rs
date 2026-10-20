@@ -15,10 +15,10 @@
 use std::any::Any;
 
 use common_error::define_from_tonic_status;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use snafu::{Location, Snafu};
+use snafu::{Location, Snafu, location};
 use tonic::Code;
 use tonic::metadata::errors::InvalidMetadataValue;
 
@@ -130,6 +130,7 @@ pub enum Error {
         code: StatusCode,
         msg: String,
         tonic_code: Code,
+        retry_hint: RetryHint,
         #[snafu(implicit)]
         location: Location,
     },
@@ -168,9 +169,46 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::Tonic { retry_hint, .. } => *retry_hint,
+            Error::FlightGet { source, .. }
+            | Error::FlowServer { source, .. }
+            | Error::External { source, .. } => source.retry_hint(),
+            Error::RegionServer { code, source, .. } => {
+                let hint = source.retry_hint();
+                // Preserve the transport retry policy previously applied by should_retry().
+                if !hint.is_retryable()
+                    && matches!(
+                        code,
+                        Code::Unavailable | Code::Cancelled | Code::DeadlineExceeded
+                    )
+                {
+                    RetryHint::Retryable
+                } else {
+                    hint
+                }
+            }
+            Error::ConvertFlightData { source, .. }
+            | Error::CreateChannel { source, .. }
+            | Error::CreateTlsChannel { source, .. } => source.retry_hint(),
+            Error::ConvertSchema { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 define_from_tonic_status!(Error, Tonic);
+
+impl From<Error> for common_meta::error::Error {
+    fn from(error: Error) -> Self {
+        Self::External {
+            source: BoxedError::new(error),
+            location: location!(),
+        }
+    }
+}
 
 impl Error {
     /// Returns the gRPC status code if this error is caused by a gRPC request failure.
@@ -194,7 +232,8 @@ impl Error {
     }
 
     pub fn should_retry(&self) -> bool {
-        self.is_connection_error()
+        self.retry_hint().is_retryable()
+            || self.is_connection_error()
             || matches!(
                 self.tonic_code(),
                 Some(Code::Cancelled) | Some(Code::DeadlineExceeded)

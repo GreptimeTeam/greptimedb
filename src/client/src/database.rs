@@ -868,13 +868,17 @@ mod tests {
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::{AuthHeader, Basic};
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_error::status_code::StatusCode;
+    use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_query::OutputData;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
+    use tonic::codegen::http::{HeaderMap, HeaderValue};
+    use tonic::metadata::MetadataMap;
     use tonic::{Code, Status};
 
     use super::*;
@@ -1008,6 +1012,7 @@ mod tests {
             code: StatusCode::Internal,
             msg: "blabla".to_string(),
             tonic_code: Code::Internal,
+            retry_hint: RetryHint::NonRetryable,
         }
         .build();
 
@@ -1015,6 +1020,52 @@ mod tests {
         let actual: Error = status.into();
 
         assert_eq!(expected.to_string(), actual.to_string());
+        assert_eq!(expected.retry_hint(), actual.retry_hint());
+        assert_eq!(expected.should_retry(), actual.should_retry());
+    }
+
+    #[test]
+    fn test_from_tonic_status_with_retry_hint() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GREPTIME_DB_HEADER_ERROR_CODE,
+            HeaderValue::from(StatusCode::Internal as u32),
+        );
+        headers.insert(
+            GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+            HeaderValue::from_static(RetryHint::Retryable.as_str()),
+        );
+        let status =
+            Status::with_metadata(Code::Internal, "blabla", MetadataMap::from_headers(headers));
+
+        let actual: Error = status.into();
+
+        assert_eq!(actual.retry_hint(), RetryHint::Retryable);
+        assert!(actual.should_retry());
+    }
+
+    #[test]
+    fn test_from_tonic_status_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GREPTIME_DB_HEADER_ERROR_CODE,
+            HeaderValue::from(StatusCode::InvalidArguments as u32),
+        );
+        let status =
+            Status::with_metadata(Code::Internal, "blabla", MetadataMap::from_headers(headers));
+
+        let actual: Error = status.into();
+
+        assert_eq!(actual.retry_hint(), RetryHint::NonRetryable);
+        assert!(!actual.should_retry());
+    }
+
+    #[test]
+    fn test_should_retry_preserves_transport_retry() {
+        let status = Status::new(Code::Unavailable, "blabla");
+        let actual: Error = status.into();
+
+        assert!(actual.should_retry());
     }
 
     #[tokio::test]

@@ -28,3 +28,4 @@ pub mod table;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod utils;
+pub mod write_dispatcher;

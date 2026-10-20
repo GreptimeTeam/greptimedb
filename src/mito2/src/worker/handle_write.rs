@@ -27,7 +27,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{
     InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RejectWriteSnafu, Result,
+    RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
 };
 use crate::metrics;
 use crate::metrics::{
@@ -320,7 +320,7 @@ impl<S> RegionWorkerLoop<S> {
                         if region.reject_all_writes_in_staging() {
                             sender_req
                                 .sender
-                                .send(RejectWriteSnafu { region_id }.fail());
+                                .send(RejectWriteInStagingSnafu { region_id }.fail());
                             continue;
                         }
 
@@ -383,7 +383,7 @@ impl<S> RegionWorkerLoop<S> {
             if region.reject_all_writes_in_staging() {
                 sender_req
                     .sender
-                    .send(RejectWriteSnafu { region_id }.fail());
+                    .send(RejectWriteInStagingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();
@@ -464,7 +464,9 @@ impl<S> RegionWorkerLoop<S> {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         if region.reject_all_writes_in_staging() {
-                            bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                            bulk_req
+                                .sender
+                                .send(RejectWriteInStagingSnafu { region_id }.fail());
                             continue;
                         }
                         let region_ctx = RegionWriteCtx::new(
@@ -511,7 +513,9 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             };
             if region.reject_all_writes_in_staging() {
-                bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                bulk_req
+                    .sender
+                    .send(RejectWriteInStagingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();

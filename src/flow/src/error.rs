@@ -18,12 +18,15 @@ use std::any::Any;
 
 use api::v1::CreateTableExpr;
 use arrow_schema::ArrowError;
-use common_error::ext::BoxedError;
-use common_error::{define_into_tonic_status, from_err_code_msg_to_header};
+use common_error::ext::{BoxedError, RetryHint};
+use common_error::{
+    GREPTIME_DB_HEADER_ERROR_RETRY_HINT, define_into_tonic_status, from_err_code_msg_to_header,
+};
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, ResultExt, Snafu};
+use tonic::codegen::http::HeaderValue;
 use tonic::metadata::MetadataMap;
 
 use crate::FlowId;
@@ -308,7 +311,11 @@ pub fn to_status_with_last_err(err: impl ErrorExt) -> tonic::Status {
     let msg = err.to_string();
     let last_err_msg = common_error::ext::StackError::last(&err).to_string();
     let code = err.status_code() as u32;
-    let header = from_err_code_msg_to_header(code, &last_err_msg);
+    let mut header = from_err_code_msg_to_header(code, &last_err_msg);
+    header.insert(
+        GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+        HeaderValue::from_static(err.retry_hint().as_str()),
+    );
 
     tonic::Status::with_metadata(
         tonic::Code::InvalidArgument,
@@ -365,6 +372,35 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Self::FlowNotRecovered { .. } | Self::NoAvailableFrontend { .. } => {
+                RetryHint::Retryable
+            }
+
+            Self::InsertIntoFlow { source, .. }
+            | Self::CreateFlow { source, .. }
+            | Self::CreateSinkTable { source, .. }
+            | Self::External { source, .. } => source.retry_hint(),
+
+            Self::Time { source, .. } => source.retry_hint(),
+            Self::TableNotFoundMeta { source, .. } | Self::ListFlows { source, .. } => {
+                source.retry_hint()
+            }
+            Self::Datatypes { source, .. } => source.retry_hint(),
+            Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
+                source.retry_hint()
+            }
+            Self::MetaClientInit { source, .. } => source.retry_hint(),
+            Self::InvalidRequest { source, .. } => source.retry_hint(),
+            Self::SubstraitEncodeLogicalPlan { source, .. } => source.retry_hint(),
+            Self::ConvertColumnSchema { source, .. } => source.retry_hint(),
+            Self::InvalidClientConfig { source, .. } => source.retry_hint(),
+
+            _ => RetryHint::NonRetryable,
+        }
     }
 }
 

@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -213,6 +213,25 @@ impl ErrorExt for Error {
             Error::ImportStateParse { .. } => StatusCode::Internal,
             Error::ImportStateIo { .. } => StatusCode::StorageUnavailable,
             Error::ImportStateLocked { .. } => StatusCode::IllegalState,
+        }
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            #[cfg(test)]
+            Error::TestTaskFailed { retryable, .. } => {
+                if *retryable {
+                    RetryHint::Retryable
+                } else {
+                    RetryHint::NonRetryable
+                }
+            }
+            Error::Database { error, .. } => error.retry_hint(),
+            Error::SnapshotStorage { error, .. } | Error::ChunkImportFailed { error, .. } => {
+                error.retry_hint()
+            }
+            Error::ImportStateIo { error, .. } => retry_hint_from_io_error(error),
+            _ => RetryHint::NonRetryable,
         }
     }
 

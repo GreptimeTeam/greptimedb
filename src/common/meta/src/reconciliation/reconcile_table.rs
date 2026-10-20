@@ -21,6 +21,7 @@ pub(crate) mod update_table_info;
 use std::any::Any;
 use std::fmt::Debug;
 
+use common_error::ext::ErrorExt;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
@@ -216,7 +217,7 @@ impl Procedure for ReconcileTableProcedure {
                 Ok(status)
             }
             Err(e) => {
-                if e.is_retry_later() {
+                if e.retry_hint().is_retryable() {
                     metrics::METRIC_META_RECONCILIATION_PROCEDURE_ERROR
                         .with_label_values(&[procedure_name, step, metrics::ERROR_TYPE_RETRYABLE])
                         .inc();

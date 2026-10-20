@@ -128,15 +128,25 @@ pub fn convert_to_region_leader_map(region_routes: &[RegionRoute]) -> HashMap<Re
         .collect::<HashMap<_, _>>()
 }
 
+/// Returns the leader of the first route matching the region number.
 pub fn find_region_leader(
     region_routes: &[RegionRoute],
     region_number: RegionNumber,
 ) -> Option<Peer> {
+    find_region_leader_ref(region_routes, region_number).cloned()
+}
+
+/// Borrows the leader of the first route matching the region number.
+///
+/// Returns `None` if no route matches or the first matching route has no leader.
+pub fn find_region_leader_ref(
+    region_routes: &[RegionRoute],
+    region_number: RegionNumber,
+) -> Option<&Peer> {
     region_routes
         .iter()
         .find(|x| x.region.id.region_number() == region_number)
         .and_then(|r| r.leader_peer.as_ref())
-        .cloned()
 }
 
 /// Returns the region numbers of the leader regions on the target datanode.
@@ -614,6 +624,27 @@ mod tests {
             leader_down_since: None,
             write_route_policy: None,
         }
+    }
+
+    #[test]
+    fn test_find_region_leader() {
+        let mut routes = vec![
+            new_test_region_route(RegionId::new(1, 1)),
+            new_test_region_route(RegionId::new(1, 1)),
+        ];
+        routes[1].leader_peer = Some(Peer::new(2, "a2"));
+
+        assert_eq!(
+            find_region_leader_ref(&routes, 1),
+            routes[0].leader_peer.as_ref()
+        );
+        assert_eq!(find_region_leader(&routes, 1), routes[0].leader_peer);
+        assert_eq!(find_region_leader_ref(&routes, 2), None);
+        assert_eq!(find_region_leader(&routes, 2), None);
+
+        routes[0].leader_peer = None;
+        assert_eq!(find_region_leader_ref(&routes, 1), None);
+        assert_eq!(find_region_leader(&routes, 1), None);
     }
 
     #[test]

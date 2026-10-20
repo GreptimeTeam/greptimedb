@@ -15,11 +15,13 @@
 use std::str::Utf8Error;
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
+use common_wal::kafka::rskafka_client_error_to_retry_hint;
 use common_wal::options::WalOptions;
+use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -1281,6 +1283,50 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            RetryLater { source, .. } => match source.retry_hint() {
+                RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
+                RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,
+            },
+            GetLatestCacheRetryExceeded { .. }
+            | NoLeader { .. }
+            | ElectionNoLeader { .. }
+            | ElectionLeaderLeaseExpired { .. }
+            | ElectionLeaderLeaseChanged { .. } => RetryHint::Retryable,
+            WriteObject { error, .. } | ReadObject { error, .. } => {
+                retry_hint_from_opendal_error(error)
+            }
+            BuildKafkaClient { error, .. }
+            | BuildKafkaCtrlClient { error, .. }
+            | KafkaPartitionClient { error, .. }
+            | KafkaGetOffset { error, .. }
+            | ProduceRecord { error, .. }
+            | CreateKafkaWalTopic { error, .. } => rskafka_client_error_to_retry_hint(error),
+            SubmitProcedure { source, .. }
+            | QueryProcedure { source, .. }
+            | WaitProcedure { source, .. }
+            | StartProcedureManager { source, .. }
+            | StopProcedureManager { source, .. }
+            | RegisterProcedureLoader { source, .. }
+            | PutPoison { source, .. } => source.retry_hint(),
+            External { source, .. }
+            | ResponseExceededSizeLimit { source, .. }
+            | OperateDatanode { source, .. }
+            | RegisterRepartitionProcedureLoader { source, .. }
+            | CreateRepartitionProcedure { source, .. } => source.retry_hint(),
+            // These errors end an operation; their sources cannot make it retryable.
+            AbortProcedure { .. } | ProcedureStateReceiver { .. } => RetryHint::NonRetryable,
+            Table { source, .. } => source.retry_hint(),
+            ConvertAlterTableRequest { source, .. } => source.retry_hint(),
+            ConvertColumnDef { source, .. } => source.retry_hint(),
+            GetCache { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 impl Error {
@@ -1348,5 +1394,83 @@ impl Error {
             Error::ResponseExceededSizeLimit { .. } => true,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_hint_tests {
+    use std::sync::Arc;
+
+    use common_error::mock::MockError;
+    use snafu::ResultExt;
+
+    use super::*;
+
+    #[test]
+    fn test_retry_later_hint_is_retryable() {
+        let err = Error::retry_later(MockError::new(StatusCode::Internal));
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_latest_cache_retry_exceeded_hint_is_retryable() {
+        let err = GetLatestCacheRetryExceededSnafu { attempts: 3_usize }.build();
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_leader_retry_hints() {
+        for (error, expected) in [
+            (
+                NoLeaderSnafu { table_id: 1_u32 }.build(),
+                RetryHint::Retryable,
+            ),
+            (ElectionNoLeaderSnafu.build(), RetryHint::Retryable),
+            (
+                ElectionLeaderLeaseExpiredSnafu.build(),
+                RetryHint::Retryable,
+            ),
+            (
+                ElectionLeaderLeaseChangedSnafu.build(),
+                RetryHint::Retryable,
+            ),
+        ] {
+            assert_eq!(error.retry_hint(), expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn test_procedure_error_retry_hints() {
+        let source = common_procedure::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(source).context(PutPoisonSnafu).unwrap_err();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+
+        let source = common_procedure::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(source)
+            .context(ProcedureStateReceiverSnafu {
+                procedure_id: ProcedureId::random(),
+            })
+            .unwrap_err();
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+    }
+
+    #[test]
+    fn test_get_cache_forwards_retry_hint() {
+        let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
+        let err = Error::GetCache { source };
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_default_hint_is_non_retryable() {
+        let err = UnexpectedSnafu {
+            err_msg: "mock error",
+        }
+        .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 }
