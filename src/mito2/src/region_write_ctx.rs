@@ -23,7 +23,7 @@ use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::{Error, Result, WriteGroupSnafu};
+use crate::error::{Error, Result, UnexpectedSnafu, WriteGroupSnafu};
 use crate::memtable::KeyValues;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics;
@@ -66,6 +66,15 @@ impl WriteNotify {
 
 impl Drop for WriteNotify {
     fn drop(&mut self) {
+        // A panic may have interrupted the write, so it must not be reported as written.
+        if self.err.is_none() && std::thread::panicking() {
+            self.err = Some(Arc::new(
+                UnexpectedSnafu {
+                    reason: "the write was interrupted by a panic",
+                }
+                .build(),
+            ));
+        }
         self.notify_result();
     }
 }
@@ -582,6 +591,18 @@ mod tests {
     use crate::error::UnexpectedSnafu;
     use crate::memtable::bulk::part::BulkPart;
     use crate::test_util::version_util::VersionControlBuilder;
+
+    #[test]
+    fn test_write_notify_dropped_by_panic_reports_error() {
+        let (tx, rx) = oneshot::channel();
+        let notify = WriteNotify::new(OptionOutputTx::from(tx), 3);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _notify = notify;
+            panic!("interrupt the write");
+        }))
+        .unwrap_err();
+        assert!(rx.blocking_recv().unwrap().is_err());
+    }
 
     #[test]
     fn test_request_skip_wal_preserves_sequences_and_other_writes() {
