@@ -631,11 +631,11 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
             SeriesOrdering::KeyThenTime,
             Expected::Rejected(Rejection::Plan),
         ),
-        // A range window reads one series to its last chunk before the next, so a scan whose
-        // chunks of different series interleave is refused instead of recorded onto an input the
-        // window would fail on.
+        // Every shape reads one series to its last chunk before the next, so a scan whose chunks
+        // of different series interleave is refused instead of recorded onto an input that shape
+        // would fail on.
         (
-            "an interleaved ordering, which a window cannot consume to its last chunk",
+            "an interleaved ordering, which no shape can consume to its last chunk",
             eval_stmt("rate(x[5m])"),
             SeriesOrdering::Interleaved,
             Expected::Rejected(Rejection::NotImplemented),
@@ -705,6 +705,30 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
             }
         }
     }
+}
+
+/// An interleaved scan is refused whatever shape the statement has. The refusal sits at the entry
+/// of the compiler rather than in one shape's branch, because a bare selector returns before any
+/// window exists and would otherwise be accepted with an ordering it cannot be evaluated on.
+#[test]
+fn an_interleaved_scan_is_refused_whatever_the_shape() {
+    for query in ["x", "rate(x[5m])", "quantile_over_time(0.9, x[5m])"] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::Interleaved)
+            .expect_err(&format!("`{query}` compiled over an interleaved scan"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("reads one series to its last chunk before the next"),
+            "`{query}` did not say why the ordering is refused: {message}"
+        );
+    }
+    // A scan whose chunks of one series are contiguous is recorded and compiles, which is what
+    // makes the refusal above about the ordering rather than about the shape.
+    compile(&eval_stmt("x"), raw_schema(), SeriesOrdering::Contiguous)
+        .expect("a contiguous scan compiles a bare selector");
 }
 
 /// A shape outside the subset is refused, and the error says what was found so the query can be

@@ -34,7 +34,9 @@
 //! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
 //! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
 //! single authority on that, so a node added later cannot be legal in one place and illegal in
-//! another.
+//! another. What is refused before a tree exists is the scan's shape: no shape below can consume
+//! chunks of different series that interleave, so an `Interleaved` ordering is refused once, at the
+//! entry, and [`NativeTree::validate`] refuses the same ordering for a tree built some other way.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,12 +74,12 @@ const SUPPORTED: &str = "a bare selector, a range function over a selector — \
 /// one.
 ///
 /// `ordering` is what the caller's scan guarantees, and the tree records it rather than assuming
-/// one. Only `Contiguous` and `KeyThenTime` are accepted: a native range window consumes one series
-/// to its last chunk before the next, so chunks of different series may not interleave, and an
-/// `Interleaved` declaration is refused here — which is where the refusal belongs, since a tree that
-/// declares it under a window cannot be built by this compiler at all. [`NativeTree::validate`]'s
-/// window branch checks the same thing, so if both land this refusal comes first and the tree check
-/// is a backstop for a tree built some other way.
+/// one. Only `Contiguous` and `KeyThenTime` are accepted: every shape this compiler accepts reads
+/// one series to its last chunk before the next, so an `Interleaved` declaration is refused at the
+/// entry, before any shape is built — the bare selector included, which returns before a window
+/// exists — and a shape added later inherits the refusal instead of restating it.
+/// [`NativeTree::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
+/// backstop for a tree built some other way.
 ///
 /// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
 /// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
@@ -88,6 +90,17 @@ pub fn compile(
     input: Arc<SeriesSchema>,
     ordering: SeriesOrdering,
 ) -> Result<NativeTree> {
+    // Every shape this compiler accepts reads one series to its last chunk before the next, so raw
+    // samples whose chunks of different series interleave cannot be fed to any of them. The refusal
+    // is here rather than in a shape's branch so that a shape added later inherits it, and it comes
+    // before the early return below for a bare selector.
+    if ordering == SeriesOrdering::Interleaved {
+        return Err(not_implemented(
+            "raw samples whose series interleave, which this compiler cannot consume: a native \
+             evaluation reads one series to its last chunk before the next, so chunks of different \
+             series may not interleave",
+        ));
+    }
     // A bare selector is the other shape: an instant selection over the same raw input.
     if let PromExpr::VectorSelector(selector) = unparen(&stmt.expr) {
         return instant_selection(stmt, selector, input, ordering);
@@ -126,16 +139,8 @@ pub fn compile(
             func.name, argument
         )));
     };
-    // A native range window reads one series to its last chunk before it reads the next, so raw
-    // samples whose chunks of different series interleave cannot be folded by it. The declaration
-    // is refused here rather than recorded onto an input the tree is built over and fails on.
-    if ordering == SeriesOrdering::Interleaved {
-        return Err(not_implemented(
-            "raw samples whose series interleave, which this compiler cannot consume: its range \
-             window reads one series to its last chunk before the next, so chunks of different \
-             series may not interleave",
-        ));
-    }
+    // The ordering was refused at the entry above, so every shape below is built over a scan whose
+    // series' chunks do not interleave.
     window_selection(stmt, function, vs, range, input, ordering)
 }
 
