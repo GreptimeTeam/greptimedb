@@ -724,7 +724,7 @@ mod tests {
         }
         // Kept but never consumed, as a caller that holds a stream across shutdown would.
         let stream = logstore
-            .read(&Provider::raft_engine_provider(1), 1, None)
+            .read(&Provider::raft_engine_provider(1), 1)
             .await
             .unwrap();
         let preallocated = log_files_size(dir.path()) >= PREALLOCATION_THRESHOLD;
@@ -744,7 +744,7 @@ mod tests {
                 .unwrap();
         let entries = collect_entries(
             reopened
-                .read(&Provider::raft_engine_provider(1), 1, None)
+                .read(&Provider::raft_engine_provider(1), 1)
                 .await
                 .unwrap(),
         )
@@ -783,7 +783,7 @@ mod tests {
         .unwrap();
         let entries = collect_entries(
             reopened
-                .read(&Provider::raft_engine_provider(1), 1, None)
+                .read(&Provider::raft_engine_provider(1), 1)
                 .await
                 .unwrap(),
         )
