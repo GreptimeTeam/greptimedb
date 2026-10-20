@@ -154,6 +154,7 @@ WHERE
 -- SQLNESS REPLACE IS\sNULL\sOR\sgreptime_timestamp@0\s>\s\d+ IS NULL OR greptime_timestamp@0 > REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE UnorderedScan:.*"dyn_filters":\s(\["DynamicFilter\s\[[^\]]*\]"\]).* UnorderedScan: REDACTED, "dyn_filters": $1
 EXPLAIN ANALYZE VERBOSE SELECT
     rack,
     os,

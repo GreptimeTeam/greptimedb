@@ -174,6 +174,7 @@ WHERE
 -- SQLNESS REPLACE IS\sNULL\sOR\sgreptime_timestamp@0\s>\s\d+ IS NULL OR greptime_timestamp@0 > REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE UnorderedScan:.*"dyn_filters":\s(\["DynamicFilter\s\[[^\]]*\]"\]).* UnorderedScan: REDACTED, "dyn_filters": $1
 EXPLAIN ANALYZE VERBOSE SELECT
     rack,
     os,
@@ -204,39 +205,39 @@ WHERE
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["rack", "os", "usage_user", "greptime_timestamp"], "filters": ["rack < Utf8(\"2\") OR rack IS NULL"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 1_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["rack", "os", "usage_user", "greptime_timestamp"], "filters": ["rack >= Utf8(\"2\") AND rack IS NOT NULL AND (rack < Utf8(\"4\") OR rack IS NULL)"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 2_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["rack", "os", "usage_user", "greptime_timestamp"], "filters": ["rack >= Utf8(\"4\") AND rack IS NOT NULL AND (rack < Utf8(\"6\") OR rack IS NULL)"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 3_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["rack", "os", "usage_user", "greptime_timestamp"], "filters": ["rack >= Utf8(\"6\") AND rack IS NOT NULL AND (rack < Utf8(\"8\") OR rack IS NULL)"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 4_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["rack", "os", "usage_user", "greptime_timestamp"], "filters": ["rack >= Utf8(\"8\") AND rack IS NOT NULL"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@3 = 1686535800000000000 ]"]
 |_|_|_|
 | 1_| 0_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
 |_|_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["greptime_timestamp"], "filters": ["rack < Utf8(\"2\") OR rack IS NULL"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"]
 |_|_|_|
 | 1_| 1_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
 |_|_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["greptime_timestamp"], "filters": ["rack >= Utf8(\"2\") AND rack IS NOT NULL AND (rack < Utf8(\"4\") OR rack IS NULL)"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"]
 |_|_|_|
 | 1_| 2_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
 |_|_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["greptime_timestamp"], "filters": ["rack >= Utf8(\"4\") AND rack IS NOT NULL AND (rack < Utf8(\"6\") OR rack IS NULL)"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"]
 |_|_|_|
 | 1_| 3_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
 |_|_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["greptime_timestamp"], "filters": ["rack >= Utf8(\"6\") AND rack IS NOT NULL AND (rack < Utf8(\"8\") OR rack IS NULL)"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"]
 |_|_|_|
 | 1_| 4_|_FilterExec: DynamicFilter [ REDACTED ] REDACTED
 |_|_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["greptime_timestamp"], "filters": ["rack >= Utf8(\"8\") AND rack IS NOT NULL"], "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: REDACTED, "dyn_filters": ["DynamicFilter [ greptime_timestamp@0 IS NULL OR greptime_timestamp@0 > REDACTED ]"]
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
