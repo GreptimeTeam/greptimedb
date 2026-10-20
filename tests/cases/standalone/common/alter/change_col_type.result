@@ -341,8 +341,8 @@ SELECT * FROM ts_widen_part ORDER BY ts;
 | b    | 2.0 | 2024-01-02T00:00:00.000250 |
 +------+-----+----------------------------+
 
--- force the rows into SSTs so partition pruning reads old-unit data with the
--- widened schema (https://github.com/GreptimeTeam/greptimedb/issues/9747)
+-- force the rows into SSTs so scans read old-unit data through the widened
+-- schema of a time-index-partitioned table (https://github.com/GreptimeTeam/greptimedb/issues/9747)
 ADMIN FLUSH_TABLE('ts_widen_part');
 
 +------------------------------------+
