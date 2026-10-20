@@ -80,7 +80,8 @@ pub(crate) struct FloatWindows<'a> {
     pub resets: &'a [CounterReset],
     /// Absolute position of `timestamps[0]`: a reset position is `base` plus a sample index.
     pub base: u64,
-    /// One range per window, ascending and left-open at the start.
+    /// One range per window, ascending. Each is a half-open index range `[start, end)`; the time
+    /// window it was derived from is left-open, `(T - range_ms, T]`.
     pub windows: &'a [Range<usize>],
     /// The evaluation timestamp of each window.
     pub eval_ts: &'a [i64],
@@ -90,8 +91,11 @@ pub(crate) struct FloatWindows<'a> {
 impl FloatWindows<'_> {
     /// The resets inside window `index`.
     ///
-    /// `windows` are absolute indices into `timestamps`, so a window whose start has already
-    /// been released still maps to the right reset.
+    /// `windows` index the retained arrays as they stand in this batch, not absolutely: each
+    /// span is relative to `timestamps` and `values` as they were when it was recorded, so it is
+    /// only valid until the next `advance` drains those arrays, and a batch must be flushed
+    /// before any `advance`. Nothing has advanced since these spans were recorded, which is why
+    /// `base` plus a span start is the absolute position of the sample the span starts at.
     pub(crate) fn resets_of(&self, index: usize) -> &[CounterReset] {
         let span = &self.windows[index];
         resets_between(
@@ -167,6 +171,10 @@ struct PendingBatch {
     /// Evaluation timestamp of each accumulated point.
     eval_ts: Vec<i64>,
     /// The retained-sample range of each point's window, one list per field.
+    ///
+    /// A span is relative to the retained arrays at the time it was recorded, not an absolute
+    /// index, so [`FieldSamples::advance`] invalidates it: that is why `evaluate` flushes the
+    /// batch before advancing.
     spans: Vec<Vec<Range<usize>>>,
     /// One output column per field, written by the batch kernel.
     columns: Vec<Vec<Option<f64>>>,
@@ -236,8 +244,9 @@ fn flush_batch(
         *batch_calls += 1;
     }
     for (index, field) in fields.iter().enumerate() {
-        // `pending.spans` index the retained arrays absolutely, so no adjustment is needed for
-        // samples `advance` has released: those sit before every span start.
+        // `pending.spans` are meaningful only because nothing has advanced since they were
+        // recorded: `evaluate` flushes before `advance`, so the retained arrays still start where
+        // they did and each span still covers the samples it named.
         let batch = FloatWindows {
             timestamps: &field.timestamps,
             values: &field.values,
