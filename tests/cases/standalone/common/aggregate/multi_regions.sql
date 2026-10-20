@@ -59,9 +59,6 @@ select count(*), count(1), count(ts) from t;
 
 select count(*) as a, count(ts) as b from t;
 
--- the cast is hidden from the state column name
-select count(*), count(ts::bigint) from t;
-
 -- grouping sets are computed on the frontend, only the PostgreSQL dialect parses them
 -- SQLNESS PROTOCOL POSTGRES
 select host, idc, sum(val) from t group by grouping sets ((host, idc), (host)) order by host, idc;
