@@ -182,7 +182,7 @@ fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<Quer
     })
 }
 
-fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
+pub(crate) fn is_merge_mode_last_non_null(options: &HashMap<String, String>) -> bool {
     options
         .get(MERGE_MODE_KEY)
         .map(|mode| mode.eq_ignore_ascii_case("last_non_null"))
