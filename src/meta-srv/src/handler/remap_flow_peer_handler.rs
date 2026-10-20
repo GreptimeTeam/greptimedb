@@ -64,18 +64,20 @@ impl HeartbeatHandler for RemapFlowPeerHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use api::v1::meta::Peer;
+
     use super::*;
     use crate::handler::test_utils::TestEnv;
-    use api::v1::meta::Peer;
-    use std::sync::Arc;
     #[tokio::test]
     async fn test_notification_failure_keeps_persisted_epoch() {
-        use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
         use api::v1::meta::HeartbeatRequest;
-
-        use crate::handler::test_utils::FailingCacheInvalidator;
         use common_meta::key::MetadataValue;
         use common_meta::key::node_address::NodeAddressValue;
+
+        use crate::handler::test_utils::FailingCacheInvalidator;
+        use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
         let mut ctx = TestEnv::new().ctx();
         let invalidator = Arc::new(FailingCacheInvalidator::default());
         ctx.cache_invalidator = invalidator.clone();

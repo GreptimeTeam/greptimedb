@@ -539,15 +539,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_persistence_failure_retries_but_notification_failure_does_not() {
-        use crate::handler::collect_stats_handler::CollectStatsHandler;
-        use crate::handler::test_utils::FailingCacheInvalidator;
-        use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
-        use crate::service::store::cached_kv::LeaderCachedKvBackend;
         use api::v1::meta::HeartbeatRequest;
         use common_meta::key::MetadataValue;
         use common_meta::key::node_address::NodeAddressValue;
         use common_meta::kv_backend::test_util::MockKvBackendBuilder;
         use common_meta::rpc::store::PutResponse;
+
+        use crate::handler::collect_stats_handler::CollectStatsHandler;
+        use crate::handler::test_utils::FailingCacheInvalidator;
+        use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
+        use crate::service::store::cached_kv::LeaderCachedKvBackend;
         let mut ctx = TestEnv::new().ctx();
         let puts = Arc::new(std::sync::Mutex::new(Vec::<PutRequest>::new()));
         let backend = MockKvBackendBuilder::default()
