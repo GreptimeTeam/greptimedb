@@ -144,7 +144,7 @@ TQL ANALYZE (0, 10, '5s') test;
 | 1_| 1_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-299999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\") AND k IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-299999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -179,7 +179,7 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-9999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\") AND k IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-9999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -252,7 +252,7 @@ TQL ANALYZE FORMAT TEXT (0, 10, '5s') test;
 | 1_| 1_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-299999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\") AND k IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-299999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -317,7 +317,7 @@ TQL ANALYZE sum(test2);
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, greptime_value@1 as greptime_value] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["shard"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["greptime_timestamp", "greptime_value", "shard"], "filters": ["greptime_timestamp >= TimestampMillisecond(-299999, None)", "greptime_timestamp <= TimestampMillisecond(0, None)", "shard > Utf8(\"2\") AND shard IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["greptime_timestamp", "greptime_value", "shard"], "filters": ["greptime_timestamp >= TimestampMillisecond(-299999, None)", "greptime_timestamp <= TimestampMillisecond(0, None)", "shard > Utf8(\"2\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

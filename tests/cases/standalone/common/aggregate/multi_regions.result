@@ -41,7 +41,7 @@ select sum(val) from t group by host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[sum(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "host"], "filters": ["host >= Utf8(\"1024\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "host"], "filters": ["host >= Utf8(\"1024\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -75,7 +75,7 @@ select sum(val) from t;
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(t.val)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_state(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val"], "filters": ["host >= Utf8(\"1024\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val"], "filters": ["host >= Utf8(\"1024\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -111,7 +111,7 @@ select sum(val) from t group by idc;
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_state(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[idc@1 as idc], aggr=[__sum_state(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "idc"], "filters": ["host >= Utf8(\"1024\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "idc"], "filters": ["host >= Utf8(\"1024\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

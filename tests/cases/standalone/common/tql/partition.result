@@ -94,7 +94,7 @@ tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[60000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-59999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\") AND k IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-59999, None)", "j <= TimestampMillisecond(10000, None)", "k >= Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -147,7 +147,7 @@ tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-59999, None)", "j <= TimestampMillisecond(10000, None)", "i < Float64(1) OR i IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-59999, None)", "j <= TimestampMillisecond(10000, None)", "i >= Float64(1) AND i IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k", "l"], "filters": ["j >= TimestampMillisecond(-59999, None)", "j <= TimestampMillisecond(10000, None)", "i >= Float64(1)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

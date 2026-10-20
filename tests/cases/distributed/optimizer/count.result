@@ -329,7 +329,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts"], "filters": ["tag = Dictionary(UInt32, Utf8(\"b\"))", "tag > Utf8(\"a\") AND tag IS NOT NULL"], "time_range":REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts"], "filters": ["tag = Dictionary(UInt32, Utf8(\"b\"))", "tag > Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -357,7 +357,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts"], "filters": ["tag = Dictionary(UInt32, Utf8(\"b\"))", "tag > Utf8(\"a\") AND tag IS NOT NULL"], "time_range":REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts"], "filters": ["tag = Dictionary(UInt32, Utf8(\"b\"))", "tag > Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -400,7 +400,7 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED, "projection": ["ts"], "filters": ["ts > TimestampMillisecond(1725602404000, None)", "tag > Utf8(\"a\") AND tag IS NOT NULL"], "time_range":REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED, "projection": ["ts"], "filters": ["ts > TimestampMillisecond(1725602404000, None)", "tag > Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -443,7 +443,7 @@ select count(1) from count_where_bug where num != 3;
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(count_where_bug.ts)] REDACTED
 |_|_|_FilterExec: num@1 != 3, projection=[ts@0] REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "num"], "filters": ["num != Int64(3)", "tag > Utf8(\"a\") AND tag IS NOT NULL"], "time_range":REDACTED
+|_|_|_UnorderedScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "num"], "filters": ["num != Int64(3)", "tag > Utf8(\"a\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+

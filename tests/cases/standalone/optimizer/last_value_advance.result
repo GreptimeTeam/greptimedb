@@ -290,7 +290,7 @@ order by ordered_host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts", "host", "not_pk", "val"], "filters": ["host >= Utf8(\"b\") AND host IS NOT NULL AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts", "host", "not_pk", "val"], "filters": ["host >= Utf8(\"b\") AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ordered_host@0 ASC NULLS LAST], preserve_REDACTED
@@ -298,7 +298,7 @@ order by ordered_host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts", "host", "not_pk", "val"], "filters": ["host >= Utf8(\"d\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts", "host", "not_pk", "val"], "filters": ["host >= Utf8(\"d\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -365,12 +365,12 @@ explain analyze
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["host >= Utf8(\"b\") AND host IS NOT NULL AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["host >= Utf8(\"b\") AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=Final, gby=[], aggr=[__last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["host >= Utf8(\"d\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["host >= Utf8(\"d\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -468,12 +468,12 @@ order by time_window, ordered_host;
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t.ts)@0 as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[__last_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 5000000 }, ts@0) as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[__last_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["ts", "host", "val"], "filters": ["host >= Utf8(\"b\") AND host IS NOT NULL AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["ts", "host", "val"], "filters": ["host >= Utf8(\"b\") AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t.ts)@0 as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[__last_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 5000000 }, ts@0) as date_bin(Utf8("5 milliseconds"),t.ts)], aggr=[__last_value_state(t.host) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.val) ORDER BY [t.ts ASC NULLS LAST], __last_value_state(t.ts) ORDER BY [t.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["ts", "host", "val"], "filters": ["host >= Utf8(\"d\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["ts", "host", "val"], "filters": ["host >= Utf8(\"d\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -573,12 +573,12 @@ explain analyze
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"b\") AND host IS NOT NULL AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"b\") AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=Final, gby=[], aggr=[__last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"d\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["ts"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"d\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -666,7 +666,7 @@ order by ordered_host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], last_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@0 as host], aggr=[last_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], last_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"b\") AND host IS NOT NULL AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"b\") AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ordered_host@0 ASC NULLS LAST], preserve_REDACTED
@@ -674,7 +674,7 @@ order by ordered_host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], last_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@0 as host], aggr=[last_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], last_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"d\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "selector":"LastRow { after_merge: false }", "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"d\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -772,12 +772,12 @@ order by time_window, ordered_host;
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t1.ts)@0 as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[__last_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 5000000 }, ts@1) as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[__last_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"b\") AND host IS NOT NULL AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"b\") AND (host < Utf8(\"d\") OR host IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("5 milliseconds"),t1.ts)@0 as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[__last_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 5000000 }, ts@1) as date_bin(Utf8("5 milliseconds"),t1.ts)], aggr=[__last_value_state(t1.host) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.val) ORDER BY [t1.ts ASC NULLS LAST], __last_value_state(t1.ts) ORDER BY [t1.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"d\") AND host IS NOT NULL"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["host", "ts", "val"], "filters": ["__table_id=UInt32(REDACTED)", "host >= Utf8(\"d\")"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
