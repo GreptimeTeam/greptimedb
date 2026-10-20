@@ -238,8 +238,7 @@ fn all_missing(series: &Series) -> bool {
 
 /// Pushes every chunk of one series, keeping what the evaluator hands out on the way.
 ///
-/// A push can decide several runs of positions, and one chunk carries one run, so every push is
-/// followed by taking the rest.
+/// A push hands out at most one chunk, which carries every run of positions it decided.
 fn collect_chunks(
     evaluator: &mut RangeEvaluator,
     pieces: &[RawSeriesChunk],
@@ -247,26 +246,17 @@ fn collect_chunks(
     let mut chunks = Vec::new();
     for piece in pieces {
         chunks.extend(evaluator.push(piece).unwrap());
-        drain_chunks(evaluator, &mut chunks);
     }
     chunks
 }
 
-/// Takes every piece the evaluator already holds, without pushing anything more.
-fn drain_chunks(evaluator: &mut RangeEvaluator, chunks: &mut Vec<EvaluatedChunk>) {
-    while let Some(chunk) = evaluator.pull().unwrap() {
-        chunks.push(chunk);
-    }
-}
-
 /// Ingests one complete evaluated series and returns every chunk it produced.
 fn evaluate_series(evaluator: &mut RangeEvaluator, series: &Series) -> Vec<EvaluatedChunk> {
-    let mut chunks: Vec<_> = evaluator
+    let chunks: Vec<_> = evaluator
         .push_series(series, true)
         .unwrap()
         .into_iter()
         .collect();
-    drain_chunks(evaluator, &mut chunks);
     chunks
 }
 
@@ -1048,7 +1038,6 @@ fn a_push_that_completes_nothing_hands_out_no_chunk() {
             .push(&chunk(&[(100, vec![Some(2.0)])], 1, 0, true))
             .unwrap(),
     );
-    drain_chunks(&mut evaluator, &mut chunks);
     assert_eq!(
         chunks.len(),
         1,
@@ -1145,17 +1134,12 @@ fn decided_missing_positions_cost_no_rows_and_do_not_delay_the_close() {
         evaluator.push(&b).unwrap().is_none(),
         "settled positions holding no value are not rows"
     );
-    assert!(
-        evaluator.pull().unwrap().is_none(),
-        "the series is still open"
-    );
 
     // C closes the series. 3s and 4s hold no rate either, so the close carries the progress: it
     // starts where the last row ended and holds none.
     let c = chunk(&[(4_000, vec![Some(4.0)])], 1, 0, true);
     let mut chunks = vec![first];
     chunks.extend(evaluator.push(&c).unwrap());
-    drain_chunks(&mut evaluator, &mut chunks);
     let last = chunks.last().expect("a series always closes");
     assert!(last.is_last);
     assert_eq!((chunk_run(last).start(), chunk_run(last).len()), (1, 0));
@@ -1193,7 +1177,6 @@ fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
     let last = chunk(&[(45, vec![Some(5.0)])], 1, 0, true);
     let mut chunks = vec![handed];
     chunks.extend(evaluator.push(&last).unwrap());
-    drain_chunks(&mut evaluator, &mut chunks);
     let closed = chunks.last().expect("a series always closes");
     assert!(closed.is_last);
     assert_eq!(
@@ -1317,7 +1300,6 @@ fn a_very_early_last_value_closes_without_rows_for_the_rest() {
             .push(&chunk(&[(5, vec![Some(2.0)])], 1, 0, true))
             .unwrap(),
     );
-    drain_chunks(&mut evaluator, &mut chunks);
 
     assert_eq!(chunk_ranges(&chunks), vec![(0, 1), (5, 1)]);
     assert_eq!(
@@ -1346,14 +1328,12 @@ fn a_blank_stretch_hands_out_nothing_and_loses_the_next_value() {
         "only the position holding a value is handed out"
     );
     assert!(!chunks[0].is_last);
-    assert!(evaluator.pull().unwrap().is_none());
 
     chunks.extend(
         evaluator
             .push(&chunk(&[(900_000, vec![Some(2.0)])], 1, 0, true))
             .unwrap(),
     );
-    drain_chunks(&mut evaluator, &mut chunks);
     assert_eq!(chunk_ranges(&chunks), vec![(10, 1), (900_000, 1)]);
     assert_eq!(total_rows(&chunks), 2);
     assert!(chunks.last().unwrap().is_last);
@@ -1378,13 +1358,11 @@ fn a_series_without_any_result_closes_once() {
             .push(&chunk(&[(0, vec![Some(1.0)])], 1, 0, true))
             .unwrap(),
     );
-    drain_chunks(&mut evaluator, &mut chunks);
 
     assert_eq!(chunks.len(), 1, "a series closes exactly once");
     assert!(chunks[0].is_last);
     assert_eq!(chunk_ranges(&chunks), vec![(0, 0)]);
     assert_eq!(total_rows(&chunks), 0);
-    assert!(evaluator.pull().unwrap().is_none());
     evaluator.finish().unwrap();
 }
 
@@ -1405,7 +1383,6 @@ fn a_valued_prefix_and_an_empty_remainder_still_close() {
     // The last row is stale, so it is dropped and the remainder holds no value at all.
     let last = chunk(&[(900_000, vec![Some(stale())])], 1, 0, true);
     chunks.extend(evaluator.push(&last).unwrap());
-    drain_chunks(&mut evaluator, &mut chunks);
 
     assert_eq!(chunk_ranges(&chunks), vec![(3, 1), (4, 0)]);
     assert_eq!(total_rows(&chunks), 1, "the remainder holds no rows");
@@ -1486,13 +1463,11 @@ fn a_window_reads_across_the_gap_between_runs_of_one_series() {
 
     let mut chunks = Vec::new();
     chunks.extend(evaluator.push_series(&run(0, 2.0), false).unwrap());
-    drain_chunks(&mut evaluator, &mut chunks);
     assert!(
         chunks.is_empty(),
         "the run at 0ms decides no point of the outer grid"
     );
     chunks.extend(evaluator.push_series(&run(10, 3.0), true).unwrap());
-    drain_chunks(&mut evaluator, &mut chunks);
 
     let closed = chunks.last().expect("the series closes");
     assert!(closed.is_last);
@@ -1532,7 +1507,6 @@ fn raw_chunk_boundaries_do_not_change_the_rows() {
         for end in split.iter().copied().chain(std::iter::once(rows.len())) {
             let piece = chunk(&rows[start..end], 1, 0, end == rows.len());
             chunks.extend(evaluator.push(&piece).unwrap());
-            drain_chunks(&mut evaluator, &mut chunks);
             start = end;
         }
         let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
@@ -2183,7 +2157,6 @@ fn deliver_as_a_stream(
         if let Some(chunk) = evaluator.push_series(series, true).unwrap() {
             chunks.push(chunk);
         }
-        drain_chunks(evaluator, &mut chunks);
         return chunks;
     }
     if let Some(chunk) = evaluator
@@ -2192,14 +2165,12 @@ fn deliver_as_a_stream(
     {
         chunks.push(chunk);
     }
-    drain_chunks(evaluator, &mut chunks);
     if let Some(chunk) = evaluator
         .push_series(&rows_of(schema, series, cut, len - cut), true)
         .unwrap()
     {
         chunks.push(chunk);
     }
-    drain_chunks(evaluator, &mut chunks);
     chunks
 }
 
@@ -3105,10 +3076,6 @@ fn an_empty_delivery_closes_only_when_it_is_last() {
         closed.series.metric,
         output_metric(RangeFunction::SumOverTime, 0)
     );
-    assert!(
-        evaluator.pull().unwrap().is_none(),
-        "the series closed once"
-    );
     evaluator.finish().unwrap();
 }
 
@@ -3145,7 +3112,6 @@ fn a_valued_prefix_composes_with_an_empty_closing_chunk() {
             .unwrap();
     let mut chunks = Vec::new();
     chunks.extend(composed.push_series(&valued, false).unwrap());
-    drain_chunks(&mut composed, &mut chunks);
     assert!(
         total_rows(&chunks) > 0,
         "the valued prefix already decided some points"
@@ -3157,7 +3123,6 @@ fn a_valued_prefix_composes_with_an_empty_closing_chunk() {
     // The empty close keeps the identity of the series it closes.
     let empty = empty_series(&schema, &outer, metric_of(&labels), 6);
     chunks.extend(composed.push_series(&empty, true).unwrap());
-    drain_chunks(&mut composed, &mut chunks);
     let actual = fold_chunks(&chunks, composed.output_schema()).expect("the series completed");
     composed.finish().unwrap();
     assert_eq!(
@@ -3462,7 +3427,6 @@ fn a_series_with_holes_and_the_same_positions_in_several_pushes_expand_alike() {
                 .push_series(&piece, end == sparse.time.len())
                 .unwrap(),
         );
-        drain_chunks(&mut delivered, &mut chunks);
         start = end;
     }
     assert!(
@@ -3514,7 +3478,6 @@ fn input_chunk_boundaries_do_not_change_the_evaluated_rows() {
         for end in split.iter().copied().chain(std::iter::once(rows.len())) {
             let piece = chunk(&rows[start..end], 1, 0, end == rows.len());
             chunks.extend(evaluator.push(&piece).unwrap());
-            drain_chunks(&mut evaluator, &mut chunks);
             start = end;
         }
         let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
@@ -3585,7 +3548,6 @@ fn a_prefix_hands_out_its_rows_before_the_series_ends() {
         "the series keeps going, so the prefix chunk does not close it"
     );
     let mut chunks = vec![first];
-    drain_chunks(&mut evaluator, &mut chunks);
     assert_eq!(chunks.len(), 1, "one push hands out one chunk");
     assert_eq!(
         run_ranges_of(&chunks[0]),
@@ -3599,7 +3561,6 @@ fn a_prefix_hands_out_its_rows_before_the_series_ends() {
             .push(&chunk(&[(3_000, vec![Some(4.0)])], 1, 0, true))
             .unwrap(),
     );
-    drain_chunks(&mut evaluator, &mut chunks);
     let closing = chunks.last().expect("a closing chunk");
     assert!(closing.is_last, "exactly one chunk closes the series");
     assert_eq!(
@@ -3659,10 +3620,6 @@ fn a_prefix_hands_out_its_rows_before_the_series_ends() {
         "the prefix carries the first positions of the whole series"
     );
     assert_eq!(whole_positions, vec![0, 1, 3]);
-    assert!(
-        one_piece.pull().unwrap().is_none(),
-        "the series closed once"
-    );
     one_piece.finish().unwrap();
     evaluator.finish().unwrap();
 }
@@ -3731,13 +3688,11 @@ fn a_window_at_a_later_run_reads_the_earlier_run() {
         .unwrap()
         .into_iter()
         .collect::<Vec<_>>();
-    drain_chunks(&mut evaluator, &mut chunks);
     assert!(
         chunks.is_empty(),
         "the first run alone decides no point of the one-point outer grid"
     );
     chunks.extend(evaluator.push_series(&late, true).unwrap());
-    drain_chunks(&mut evaluator, &mut chunks);
 
     let closing = chunks.last().expect("the series closes");
     assert!(closing.is_last, "exactly one chunk closes the series");
@@ -3809,7 +3764,6 @@ fn a_fragmented_prefix_closed_by_an_empty_chunk_equals_one_piece() {
         .unwrap()
         .into_iter()
         .collect::<Vec<_>>();
-    drain_chunks(&mut composed, &mut chunks);
     assert!(
         !chunks.is_empty(),
         "the valued prefix decides some points before the series ends"
@@ -3825,7 +3779,6 @@ fn a_fragmented_prefix_closed_by_an_empty_chunk_equals_one_piece() {
     );
     let empty = empty_series(&schema, &outer, metric_of(&labels), 8);
     chunks.extend(composed.push_series(&empty, true).unwrap());
-    drain_chunks(&mut composed, &mut chunks);
     let closing = chunks.last().expect("the series closes");
     assert!(closing.is_last);
     assert!(
@@ -3892,10 +3845,6 @@ fn a_series_outside_every_window_closes_on_an_empty_chunk() {
         closing.series.time
     );
     assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
-    assert!(
-        evaluator.pull().unwrap().is_none(),
-        "the series closed once and has nothing more"
-    );
     evaluator.finish().unwrap();
 }
 
@@ -3937,7 +3886,6 @@ fn two_composed_evaluators_agree_with_the_dense_reference() {
     for end in [2, 4, rows.len()] {
         let piece = chunk(&rows[start..end], 1, 0, end == rows.len());
         upstream.extend(stage_one.push(&piece).unwrap());
-        drain_chunks(&mut stage_one, &mut upstream);
         start = end;
     }
     let first = fold_chunks(&upstream, stage_one.output_schema()).expect("stage one completed");
@@ -3971,7 +3919,6 @@ fn two_composed_evaluators_agree_with_the_dense_reference() {
                 .push_series(&chunk.series, index == last_index)
                 .unwrap(),
         );
-        drain_chunks(&mut composed, &mut chunks);
     }
     let streamed = fold_chunks(&chunks, composed.output_schema()).expect("the series completed");
     composed.finish().unwrap();

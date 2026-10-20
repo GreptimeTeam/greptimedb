@@ -544,8 +544,7 @@ impl RangeEvaluator {
     /// Returns every position this chunk decided, in one chunk addressed absolutely on the
     /// evaluation grid; `None` when it decided no position holding a value. A decided position
     /// without a result is a row of no chunk, so the positions between two runs of one chunk hold
-    /// no value and cost nothing. More can follow as later pushes decide them, so a caller takes
-    /// what [`Self::pull`] still holds before concluding the series is over.
+    /// no value and cost nothing. One push hands out at most one chunk.
     ///
     /// A series always closes exactly once: on the chunk holding its last rows, or on an empty
     /// chunk after it when nothing is left. The evaluator must not be reused after an error.
@@ -673,27 +672,13 @@ impl RangeEvaluator {
     /// Evaluates the rest of the series of the last input chunk and closes it.
     ///
     /// The rows still buffered are handed out here as one chunk, and the chunk that sees nothing
-    /// behind it carries `is_last`. A value [`Self::pull`] would hand out belongs to that same
-    /// chunk, so the caller takes it once.
+    /// behind it carries `is_last`.
     fn close_series(&mut self) -> Result<Option<EvaluatedChunk>> {
         self.evaluate(None)?;
         self.series
             .as_mut()
             .expect("every path that closes a series started one")
             .closing = true;
-        self.emit()
-    }
-
-    /// Hands out whatever the last push decided but the caller has not taken, or the closing chunk
-    /// once there is nothing left.
-    ///
-    /// `None` means nothing is deliverable right now. It does **not** mean the series has ended --
-    /// only `is_last` on a chunk does -- and it does not mean every later position is settled: more
-    /// input can still decide them.
-    pub fn pull(&mut self) -> Result<Option<EvaluatedChunk>> {
-        if self.series.is_none() {
-            return Ok(None);
-        }
         self.emit()
     }
 
@@ -765,11 +750,6 @@ impl RangeEvaluator {
         if self.series.is_some() {
             return Err(DataFusionError::Execution(
                 "raw series input ended before the last chunk of a series".into(),
-            ));
-        }
-        if self.output.has_pending() {
-            return Err(DataFusionError::Execution(
-                "range evaluation ended with rows still to pull".into(),
             ));
         }
         Ok(())

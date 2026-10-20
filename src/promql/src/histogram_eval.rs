@@ -87,10 +87,18 @@ pub fn evaluate_histograms(
         }
         if has_histograms(series) {
             let metric = series.metric.clone();
-            groups
+            let group = groups
                 .entry(label_set(&metric))
-                .or_insert_with(|| Group::new(metric))
-                .native = Some(series);
+                .or_insert_with(|| Group::new(metric));
+            // A label set carries at most one native histogram series: a second one would
+            // overwrite the first and drop it from the result.
+            debug_assert!(
+                group.native.is_none(),
+                "one label set carries at most one native histogram series; a second one for \
+                 the same label set means the input handed one label set over as several \
+                 series, which a gap in the axis is there to avoid"
+            );
+            group.native = Some(series);
         }
     }
 

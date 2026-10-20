@@ -18,8 +18,8 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::Series;
 use datatypes::series::time::GridRange;
 
-/// One slice of one evaluated series: the rows it decided, which may form several runs of
-/// consecutive positions holding a value.
+/// One slice of one evaluated series: the rows holding a value that its evaluator handed over at
+/// once, which may form several runs of consecutive positions.
 ///
 /// The series' [`TimeAxis`](datatypes::series::time::TimeAxis) covers the positions this chunk
 /// holds, and those positions are absolute on the grid: a consumer that concatenates the chunks of
@@ -28,12 +28,12 @@ use datatypes::series::time::GridRange;
 /// holds through [`TimeAxis::positions`](datatypes::series::time::TimeAxis::positions) -- so a
 /// consumer reads them with that traversal instead of indexing from the first position.
 ///
-/// A decided position without a result is not a row of any chunk. It either lies between two runs
-/// of one chunk, or between two chunks, and the positions after the last row handed out have not
-/// been decided yet, so the chunks of a series may leave gaps -- no chunk ever carries a row at a
-/// position that holds no value. That is what keeps a sparse series from costing a row per empty
-/// position. A single field may still hold a null at a position another field fills, since the
-/// fields of one chunk are row-aligned.
+/// A chunk carries only positions that hold a value. A position no chunk carries either holds no
+/// value or has not been decided yet, and a consumer cannot tell the two apart, so it must not
+/// infer progress from the last row it saw: only `is_last` says the series is complete. The gaps
+/// this leaves between the chunks of a series are what keeps a sparse series from costing a row
+/// per empty position. A single field may still hold a null at a position another field fills,
+/// since the fields of one chunk are row-aligned.
 ///
 /// A series closes exactly once, on the chunk that carries `is_last`. A closed prefix is followed
 /// by a closing chunk when nothing is left, even when that chunk holds no values, so a consumer
@@ -61,9 +61,9 @@ impl EvaluatedChunk {
     /// The absolute grid range this chunk holds rows for, when its rows form one run.
     ///
     /// Ranges of one series never go backwards and never overlap, and they need not be adjacent:
-    /// the positions between two chunks hold no value. Together with
-    /// [`EvaluatedChunk::is_last`] they say how far the series has been evaluated. An empty range is
-    /// meaningful: it reports that the chunk closed the series without holding a row of its own.
+    /// the positions between two chunks either hold no value or have not been decided yet. An
+    /// empty range is meaningful: it reports that the chunk closed the series without holding a
+    /// row of its own.
     ///
     /// `None` means the chunk holds several runs: it is addressed on a grid, but its rows are not
     /// one range, and reading the positions between them would read holes. Walk the axis instead

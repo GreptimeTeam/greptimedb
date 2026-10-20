@@ -152,17 +152,30 @@ fn grid_series(schema: &SeriesSchema, metric: MetricName, points: &Points) -> Op
 
 /// Compares labels and the absolute range a result covers, and its values with [`close`].
 ///
-/// An operator hands out one series per logical output, and a stream may hand one of them over as
-/// several chunks, so one label set can arrive as several series. They are folded back together
-/// here, in label order, before the comparison: the values are what a fixture pins down, not how
-/// the result was cut.
+/// One label set must arrive as one series: a gap belongs in the series' axis, not in a second
+/// series, so two of `actual` sharing a label set fail the comparison rather than being folded
+/// back together and hiding a wrong cut.
 ///
 /// `actual` is whatever the operator produced: one series for a kernel with one output identity
-/// (an `Option`, so `None` is "no row survived"), or several for one with several (an aggregation
-/// over groups, or the chunk sequence of a stream).
+/// (an `Option`, so `None` is "no row survived"), or one per output label set for a kernel with
+/// several (an aggregation over groups). A producer that hands its result over in pieces folds
+/// them itself before comparing, as [`fold_pieces`] does for a scan's chunks: this comparison
+/// deliberately does not, so a wrong cut cannot hide behind it.
 pub(crate) fn assert_result(case: &Case, actual: impl IntoIterator<Item = Series>) {
     let context = || format!("{} ({})", case.expr, case.header.join(" "));
-    let mut actual = fold_pieces(actual.into_iter().collect());
+    let mut actual = actual.into_iter().collect::<Vec<_>>();
+    let mut seen: Vec<LabelKey> = Vec::new();
+    for series in &actual {
+        let key = label_key(&series.metric);
+        assert!(
+            !seen.contains(&key),
+            "{}: label set {:?} arrived as more than one series; a gap belongs in the axis, not \
+             in a second series",
+            context(),
+            key,
+        );
+        seen.push(key);
+    }
     actual.sort_by_key(|series| label_key(&series.metric));
     let mut expected = case.result.iter().collect::<Vec<_>>();
     expected.sort_by_key(|(metric, _)| label_key(metric));

@@ -402,9 +402,7 @@ fn skipped_and_all_missing_positions_are_the_same_series() {
     let mut pushed = GridSeriesBuilder::try_new(grid_schema(1, 10)).unwrap();
     for index in 0..10 {
         let value = [0, 1, 5].contains(&index).then_some(index as f64);
-        if value.is_none() {
-            skipped.push(index, &[None]).unwrap();
-        } else {
+        if value.is_some() {
             skipped.push(index, &[value]).unwrap();
         }
         pushed.push(index, &[value]).unwrap();
