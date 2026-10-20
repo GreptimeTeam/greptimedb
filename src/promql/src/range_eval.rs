@@ -1082,6 +1082,14 @@ impl RangeEvaluator {
             }
             state.cursor = decided;
         }
+        // Pending is meaningful only with a kernel, and no accumulated point may survive the
+        // drain: a span indexes the retained arrays `advance` rewrites just below, so a point
+        // still pending here would be flushed against shifted samples.
+        debug_assert!(
+            self.batch.is_none() || self.pending.is_empty(),
+            "pending spans index the retained arrays `advance` rewrites below, so the batch \
+             must flush before the drain"
+        );
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.
