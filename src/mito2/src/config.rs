@@ -255,7 +255,8 @@ impl Default for MitoConfig {
             min_compaction_interval: Duration::from_secs(0),
             schedule_compaction_after_edit: true,
             default_flat_format: true,
-            experimental_series_scan_v2: true,
+            // FIXME(#9435): Keep v2 opt-in while long-range scan memory usage is investigated.
+            experimental_series_scan_v2: false,
             gc: GcConfig::default(),
         };
 
@@ -461,14 +462,6 @@ mod tests {
             config.experimental_series_index_maintenance_interval,
             MitoConfig::default().experimental_series_index_maintenance_interval
         );
-    }
-
-    #[test]
-    fn test_experimental_series_scan_v2_config() {
-        assert!(MitoConfig::default().experimental_series_scan_v2);
-
-        let config: MitoConfig = toml::from_str("experimental_series_scan_v2 = false").unwrap();
-        assert!(!config.experimental_series_scan_v2);
     }
 }
 
