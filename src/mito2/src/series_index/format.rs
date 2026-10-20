@@ -27,12 +27,11 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::read::BoxedRecordBatchStream;
-use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::series_scan::prepared::PreparedSeriesSourceFactory;
 use crate::series_index::artifact::ArtifactMetadata;
 use crate::series_index::catalog::{SeriesIndexEntry, series_index_path, series_metadata};
 use crate::series_index::{
-    MetricSeriesId, SeriesIndexFileHandle, SeriesIndexSearcher, SeriesIndexWriter,
-    SeriesIndexWriterOptions,
+    SeriesIndexFileHandle, SeriesIndexSearcher, SeriesIndexWriter, SeriesIndexWriterOptions,
 };
 
 /// Writers own partial outputs until finish succeeds; abort removes every partial object.
@@ -65,24 +64,7 @@ pub(crate) trait SeriesIndexFormat: Debug + Send + Sync {
     ) -> Result<BoxedRecordBatchStream>;
 }
 
-/// A samples read retains original field types and sequence/op columns until storage merge.
-/// The backend projects to mapper.input_arrow_schema(false), selects the requested IDs
-/// and time range, and
-/// returns rows sorted by full primary key, timestamp and descending sequence.
-#[derive(Clone)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Consumed by samples backends after the format benchmark; the skeleton has only a test backend"
-    )
-)]
-pub(crate) struct SamplesReadRequest {
-    pub(crate) mapper: Arc<FlatProjectionMapper>,
-    pub(crate) series: Arc<Vec<MetricSeriesId>>,
-    pub(crate) time_range: Option<TimestampRange>,
-}
-
+/// Builds samples artifacts; reading belongs to the prepared-source factory.
 #[async_trait]
 pub(crate) trait SamplesFormat: Debug + Send + Sync {
     fn name(&self) -> &str;
@@ -94,19 +76,13 @@ pub(crate) trait SamplesFormat: Debug + Send + Sync {
         prefix: &str,
         generation: FileId,
     ) -> Result<Box<dyn FormatWriter>>;
-    /// This capability check must not read payloads. Unsupported reads use the SST instead.
-    fn supports(&self, request: &SamplesReadRequest) -> bool;
-    async fn read(
-        &self,
-        store: ObjectStore,
-        artifact: &ArtifactMetadata,
-        request: SamplesReadRequest,
-    ) -> Result<BoxedRecordBatchStream>;
 }
 
 /// Independent backend selection, captured by readers with their catalog snapshot.
 #[derive(Debug, Clone)]
 pub(crate) struct SeriesFormats {
+    /// Optional complete read path; independent of the artifact writers and batch adapters.
+    pub(crate) prepared_source: Option<Arc<dyn PreparedSeriesSourceFactory>>,
     pub(crate) index: Arc<dyn SeriesIndexFormat>,
     pub(crate) samples: Option<Arc<dyn SamplesFormat>>,
 }
@@ -114,6 +90,7 @@ pub(crate) struct SeriesFormats {
 impl Default for SeriesFormats {
     fn default() -> Self {
         Self {
+            prepared_source: None,
             index: Arc::new(ParquetSeriesIndex),
             samples: None,
         }

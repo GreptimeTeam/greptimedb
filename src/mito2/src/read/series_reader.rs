@@ -263,7 +263,6 @@ fn filter_flat_stream_by_series(
 
 /// Reads all collected metric series assigned to one partition.
 pub(crate) struct SeriesReader {
-    use_samples: bool,
     stream_ctx: Arc<StreamContext>,
     partition_ranges: Vec<PartitionRange>,
     filter: MetricSeriesFilter,
@@ -304,7 +303,6 @@ impl SeriesReader {
         let filter = MetricSeriesFilter::new(&assigned_series);
         let codec = SparsePrimaryKeyCodec::new(stream_ctx.input.region_metadata());
         Ok(Self {
-            use_samples: false,
             stream_ctx,
             partition_ranges,
             filter,
@@ -313,11 +311,6 @@ impl SeriesReader {
             range_semaphore,
             part_metrics,
         })
-    }
-
-    pub(crate) fn with_samples(mut self) -> Self {
-        self.use_samples = true;
-        self
     }
 
     pub(crate) async fn build_stream(&self) -> Result<BoxedRecordBatchStream> {
@@ -333,7 +326,6 @@ impl SeriesReader {
             let partition_pruner = self.partition_pruner.clone();
             let range_semaphore = self.range_semaphore.clone();
             let part_metrics = self.part_metrics.clone();
-            let use_samples = self.use_samples;
             tasks.push(common_runtime::spawn_query(async move {
                 let _permit = range_semaphore.acquire().await.map_err(|error| {
                     UnexpectedSnafu {
@@ -348,7 +340,6 @@ impl SeriesReader {
                     codec,
                     partition_pruner,
                     part_metrics,
-                    use_samples,
                 )
                 .await
             }));
@@ -370,7 +361,7 @@ impl SeriesReader {
             range_streams,
             Some(self.range_semaphore.clone()),
             Some(&self.part_metrics),
-            !self.use_samples,
+            true,
             compute_parallel_channel_size(estimated_batch_size),
         )
         .await
@@ -384,7 +375,6 @@ async fn build_series_partition_range(
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
     part_metrics: PartitionMetrics,
-    use_samples: bool,
 ) -> Result<(BoxedRecordBatchStream, usize)> {
     let range = filter.range;
     let cache_key = filter
@@ -430,15 +420,6 @@ async fn build_series_partition_range(
             }
 
             if partition_pruner.try_skip_manifest_pruned_file_range(index, &part_metrics) {
-                continue;
-            }
-            // Whole-SST sidecars cannot serve a subset of original Parquet row groups.
-            // Such ranges continue through the ordinary reader below.
-            if use_samples
-                && index.row_group_index == -1
-                && let Some(stream) = samples_stream(&stream_ctx, file, &filter).await?
-            {
-                sources.push(stream);
                 continue;
             }
             let mut reader_metrics = ReaderMetrics {
@@ -513,63 +494,6 @@ async fn build_series_partition_range(
         None => stream,
     };
     Ok((stream, estimated_batch_size))
-}
-
-async fn samples_stream(
-    stream_ctx: &Arc<StreamContext>,
-    file: &crate::sst::file::FileHandle,
-    filter: &MetricSeriesFilter,
-) -> Result<Option<BoxedRecordBatchStream>> {
-    let Some(context) = &stream_ctx.input.series_index else {
-        return Ok(None);
-    };
-    let Some(backend) = context.formats.samples.as_ref() else {
-        return Ok(None);
-    };
-    let Some(handle) = context
-        .version
-        .samples
-        .get(&file.file_id().file_id())
-        .cloned()
-    else {
-        return Ok(None);
-    };
-    if handle.entry().artifact.format != backend.name() {
-        return Ok(None);
-    }
-    let request = crate::series_index::format::SamplesReadRequest {
-        mapper: stream_ctx.input.mapper.clone(),
-        series: filter.sorted_series.clone(),
-        time_range: stream_ctx.input.time_range,
-    };
-    if !backend.supports(&request) {
-        return Ok(None);
-    }
-    for path in &handle.entry().artifact.objects {
-        if !context
-            .store
-            .exists(path)
-            .await
-            .context(crate::error::OpenDalSnafu)?
-        {
-            return Ok(None);
-        }
-    }
-    let backend = backend.clone();
-    let store = context.store.clone();
-    let sequence_range = stream_ctx.input.sequence_range;
-    let trusted =
-        file.is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
-    let file = file.clone();
-    let stream = Box::pin(try_stream! {
-        let mut input = backend.read(store, &handle.entry().artifact, request).await?;
-        while let Some(batch) = input.try_next().await? {
-            if let Some(batch) = filter_flat_batch_by_sequence(batch, sequence_range, trusted)? { yield batch; }
-        }
-        drop(file);
-        drop(handle);
-    });
-    Ok(Some(stream))
 }
 
 fn scan_series_file_ranges(

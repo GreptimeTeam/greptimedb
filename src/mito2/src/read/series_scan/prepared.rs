@@ -15,9 +15,11 @@
 //! Snapshot-bound series discovery and independently repeatable ordinal reads.
 
 use std::collections::HashSet;
+use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::physical_plan::PhysicalExpr;
@@ -46,6 +48,32 @@ use crate::read::series_scan::{new_partition_metrics, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::MetricSeriesId;
 
+/// Snapshot and query contract supplied to a replaceable prepared-source implementation.
+/// Dispatch does not construct a candidate scanner or reader, or require flat-batch output.
+#[derive(Clone)]
+pub(crate) struct PrepareSeriesRequest {
+    pub(crate) stream_ctx: Arc<StreamContext>,
+    pub(crate) partitions: Vec<Vec<PartitionRange>>,
+    pub(crate) partition: usize,
+    pub(crate) labels: RawLabelSource,
+    pub(crate) metrics_set: ExecutionPlanMetricsSet,
+    pub(crate) metrics_list: Arc<PartitionMetricsList>,
+    pub(crate) explain_verbose: bool,
+}
+
+/// Creates a complete partition source without requiring the existing candidate/reader path.
+#[async_trait]
+pub(crate) trait PreparedSeriesSourceFactory: Debug + Send + Sync {
+    /// Returns `None` only when declining the whole request before reading sample payloads.
+    /// Errors propagate; they never trigger fallback. An accepted source owns discovery,
+    /// partition assignment, sidecar/SST exclusivity, and mixed-source visibility/merge.
+    /// It must retain the request's snapshot and satisfy the PreparedSeriesSource contract.
+    async fn prepare(
+        &self,
+        request: PrepareSeriesRequest,
+    ) -> Result<Option<Arc<dyn PreparedSeriesSource>>>;
+}
+
 #[derive(Clone)]
 pub(crate) struct RawOptions {
     pub(crate) schema: Arc<SeriesSchema>,
@@ -66,17 +94,20 @@ struct PreparedSource {
     options: RawOptions,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Default adapter using the existing candidate scanner and typed storage merge pipeline.
 pub(crate) async fn prepare(
-    stream_ctx: Arc<StreamContext>,
-    partitions: Vec<Vec<PartitionRange>>,
-    partition: usize,
-    labels: RawLabelSource,
+    request: PrepareSeriesRequest,
     options: RawOptions,
-    metrics_set: ExecutionPlanMetricsSet,
-    metrics_list: Arc<PartitionMetricsList>,
-    explain_verbose: bool,
 ) -> Result<Arc<dyn PreparedSeriesSource>> {
+    let PrepareSeriesRequest {
+        stream_ctx,
+        partitions,
+        partition,
+        labels,
+        metrics_set,
+        metrics_list,
+        explain_verbose,
+    } = request;
     ensure!(
         partition < partitions.len(),
         PartitionOutOfRangeSnafu {
@@ -205,8 +236,7 @@ impl PreparedSeriesSource for PreparedSource {
             self.semaphore.clone(),
             self.metrics.clone(),
         )
-        .map_err(BoxedError::new)?
-        .with_samples();
+        .map_err(BoxedError::new)?;
         let reservation = self.reservation.clone();
         let batches = Box::pin(async_stream::try_stream! {
             let mut stream = reader.build_stream().await?;

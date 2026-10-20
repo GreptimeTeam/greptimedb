@@ -66,7 +66,7 @@ filtered `RecordBatch` stream.
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may
   overshoot; closed-region files are not counted. Series handles and the SST purger own file deletion.
-- **Series format PoC**: samples are rebuildable local SST sidecars; `format.rs` defaults to Parquet indexes and no samples backend. Samples-enabled reconciliation commits all artifact references in one catalog. Prepared reads (`read/series_scan/prepared.rs`) discover full keys asynchronously and reuse typed merge/dedup for sidecars, Parquet, and memtables. Subsets of Parquet row groups use Parquet until a codec supports finer selection.
+- **Series format PoC**: samples are rebuildable local SST sidecars; `format.rs` defaults to Parquet indexes and no samples backend. Samples-enabled reconciliation commits all artifact references in one catalog. Prepared reads (`read/series_scan/prepared.rs`) dispatch to an optional complete-source factory before default-adapter eligibility checks. The default adapter discovers full keys and reuses Parquet/memtable reads; native factories own sidecar reads and mixed-source correctness. SamplesFormat only builds artifacts.
 - **Series-index coverage** (`series_index/catalog.rs`): `SeriesIndexEntry` stores
   compaction-window width and SST summaries keyed by aligned start in both catalogs and Parquet footers.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.

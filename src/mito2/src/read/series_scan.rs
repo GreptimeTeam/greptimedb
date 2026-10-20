@@ -14,7 +14,7 @@
 
 //! Per-series scan implementation.
 
-mod prepared;
+pub(crate) mod prepared;
 mod raw;
 
 use std::collections::HashSet;
@@ -805,32 +805,50 @@ impl RegionScanner for SeriesScan {
     > {
         let options = self.raw_options(label_source);
         let supported = Self::supports_two_phase(&self.stream_ctx.input);
-        let stream_ctx = self.stream_ctx.clone();
-        let partitions = self.properties.partitions.clone();
-        let label_source = label_source.clone();
-        let metrics_set = metrics_set.clone();
-        let metrics_list = self.metrics_list.clone();
-        let explain_verbose = ctx.explain_verbose;
+        let request = prepared::PrepareSeriesRequest {
+            stream_ctx: self.stream_ctx.clone(),
+            partitions: self.properties.partitions.clone(),
+            partition,
+            labels: label_source.clone(),
+            metrics_set: metrics_set.clone(),
+            metrics_list: self.metrics_list.clone(),
+            explain_verbose: ctx.explain_verbose,
+        };
         Box::pin(async move {
+            if partition >= request.partitions.len() {
+                return Err(BoxedError::new(
+                    crate::error::PartitionOutOfRangeSnafu {
+                        given: partition,
+                        all: request.partitions.len(),
+                    }
+                    .build(),
+                ));
+            }
+            // Native formats may bypass both candidate discovery and the flat-batch reader.
+            // Default-adapter eligibility must not restrict a replacement implementation.
+            if let Some(factory) = request
+                .stream_ctx
+                .input
+                .series_index
+                .as_ref()
+                .and_then(|context| context.formats.prepared_source.clone())
+                && let Some(source) = factory
+                    .prepare(request.clone())
+                    .await
+                    .map_err(BoxedError::new)?
+            {
+                return Ok(Some(source));
+            }
             let Some(options) = options? else {
                 return Ok(None);
             };
             if !supported {
                 return Ok(None);
             }
-            prepared::prepare(
-                stream_ctx,
-                partitions,
-                partition,
-                label_source,
-                options,
-                metrics_set,
-                metrics_list,
-                explain_verbose,
-            )
-            .await
-            .map(Some)
-            .map_err(BoxedError::new)
+            prepared::prepare(request, options)
+                .await
+                .map(Some)
+                .map_err(BoxedError::new)
         })
     }
 
