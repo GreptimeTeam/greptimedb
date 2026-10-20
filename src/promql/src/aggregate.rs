@@ -70,15 +70,39 @@ pub fn aggregate_float(
     grouping: Grouping<'_>,
 ) -> Result<Vec<Series>> {
     validate_input(schema, input, grouping)?;
-    let groups = group_series(input, grouping, |state: &mut FloatState, sample| {
-        state.update(op, sample)
-    })?;
-    build_output(
-        schema,
-        groups,
-        |state| state.seen,
-        |state, _| state.finish(op),
-    )
+    let mut group_index = HashMap::new();
+    let mut groups = Vec::new();
+    for series in input {
+        let metric = grouping.apply(&series.metric)?;
+        let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
+            groups.push(Group {
+                metric,
+                blocks: BTreeMap::new(),
+            });
+            groups.len() - 1
+        });
+        groups[index].accumulate(series, op)?;
+    }
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    let mut output = Vec::with_capacity(groups.len());
+    let mut row = Vec::with_capacity(schema.fields.len());
+    for group in groups {
+        // One builder serves every group, so each result series starts explicitly.
+        builder.begin_series();
+        for (&block, states) in &group.blocks {
+            // The last block can extend past the grid; only points with a sample are pushed.
+            for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
+                if !point.iter().any(|state| state.seen) {
+                    continue;
+                }
+                row.clear();
+                row.extend(point.iter().map(|state| state.finish(op)));
+                builder.push(block * BLOCK_POINTS + offset, &row)?;
+            }
+        }
+        output.extend(builder.finish(group.metric)?);
+    }
+    Ok(output)
 }
 
 /// `quantile(q, v)`, with `q` read at each grid point from an unlabelled single-field scalar on
@@ -100,19 +124,66 @@ pub fn aggregate_quantile(
             _ => None,
         })
         .collect();
-    let groups = group_series(input, grouping, |values: &mut Vec<f64>, sample| {
-        values.push(sample)
-    })?;
-    let mut sorted = Vec::new();
-    build_output(
-        schema,
-        groups,
-        |values| !values.is_empty(),
-        |values, point| {
-            let index = q.binary_search_by_key(&point, |&(point, _)| point).ok()?;
-            Some(quantile(q[index].1, values, &mut sorted))
-        },
-    )
+    // Members keep input order, the order Prometheus appends to its per-step heap.
+    let mut group_index = HashMap::new();
+    let mut groups: Vec<(MetricName, Vec<&Series>)> = Vec::new();
+    for series in input {
+        let metric = grouping.apply(&series.metric)?;
+        let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
+            groups.push((metric, Vec::new()));
+            groups.len() - 1
+        });
+        groups[index].1.push(series);
+    }
+    let width = schema.fields.len();
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    let mut output = Vec::with_capacity(groups.len());
+    let (mut values, mut sorted, mut row) = (Vec::new(), Vec::new(), Vec::with_capacity(width));
+    for (metric, members) in groups {
+        builder.begin_series();
+        // Points are visited in order with one forward cursor per member and field, so only one
+        // point's values are held at a time.
+        let mut positions: Vec<_> = members
+            .iter()
+            .map(|series| series.time.positions().peekable())
+            .collect();
+        let mut cursors: Vec<Vec<_>> = members
+            .iter()
+            .map(|series| series.fields.iter().map(|field| field.cursor()).collect())
+            .collect();
+        while let Some(point) = positions
+            .iter_mut()
+            .filter_map(|positions| positions.peek().map(|&(point, _)| point))
+            .min()
+        {
+            let q = q
+                .binary_search_by_key(&point, |&(point, _)| point)
+                .ok()
+                .map(|index| q[index].1);
+            row.clear();
+            for field in 0..width {
+                values.clear();
+                for (positions, cursors) in positions.iter_mut().zip(&mut cursors) {
+                    if let Some(&(at, row)) = positions.peek()
+                        && at == point
+                        && let Some(SampleRef::Float(value)) = cursors[field].at(row)
+                    {
+                        values.push(value);
+                    }
+                }
+                row.push(match q {
+                    Some(q) if !values.is_empty() => Some(quantile(q, &values, &mut sorted)),
+                    _ => None,
+                });
+            }
+            for positions in &mut positions {
+                positions.next_if(|&(at, _)| at == point);
+            }
+            builder.push(point, &row)?;
+        }
+        output.extend(builder.finish(metric)?);
+    }
+    Ok(output)
 }
 
 /// `count_values(label, v)`: at each grid point, the number of samples in each group of series
@@ -140,7 +211,9 @@ pub fn count_values(
     };
     let width = schema.fields.len();
     let mut group_index = HashMap::new();
-    let mut groups: Vec<Group<f64>> = Vec::new();
+    // Counts are kept per point that has one, not in blocks: a gauge with distinct values makes
+    // about one group per sample.
+    let mut groups: Vec<(MetricName, BTreeMap<usize, Vec<f64>>)> = Vec::new();
     for series in input {
         // Equal bits format to the same label value, so each distinct value of a series
         // resolves its group once.
@@ -159,88 +232,76 @@ pub fn count_values(
                             .map_err(external)?;
                         let metric = grouping.apply(&metric)?;
                         let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
-                            groups.push(Group::new(metric));
+                            groups.push((metric, BTreeMap::new()));
                             groups.len() - 1
                         });
                         *entry.insert(index)
                     }
                 };
-                groups[group].update_point(point, width, field_index, |count| *count += 1.0);
+                groups[group]
+                    .1
+                    .entry(point)
+                    .or_insert_with(|| vec![0.0; width])[field_index] += 1.0;
             }
         }
     }
-    build_output(
-        schema,
-        groups,
-        |count| *count > 0.0,
-        |count, _| Some(*count),
-    )
-}
-
-/// Go's `strconv.FormatFloat(value, 'f', -1, 64)`; Rust's shortest round-trip decimal matches it
-/// for finite values.
-fn format_value(value: f64) -> String {
-    match value {
-        f64::INFINITY => "+Inf".to_string(),
-        f64::NEG_INFINITY => "-Inf".to_string(),
-        _ => value.to_string(),
-    }
-}
-
-/// Groups `input` by `grouping` in first-seen order and folds each series into its group.
-fn group_series<S: Clone + Default>(
-    input: &[Series],
-    grouping: Grouping<'_>,
-    mut update: impl FnMut(&mut S, f64),
-) -> Result<Vec<Group<S>>> {
-    let mut group_index = HashMap::new();
-    let mut groups = Vec::new();
-    for series in input {
-        let metric = grouping.apply(&series.metric)?;
-        let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
-            groups.push(Group::new(metric));
-            groups.len() - 1
-        });
-        groups[index].accumulate(series, &mut update);
-    }
-    Ok(groups)
-}
-
-/// Writes one series per group, from the points where any field's state has a sample. `finish`
-/// receives the absolute grid index.
-fn build_output<S>(
-    schema: &Arc<SeriesSchema>,
-    groups: Vec<Group<S>>,
-    seen: impl Fn(&S) -> bool,
-    mut finish: impl FnMut(&S, usize) -> Option<f64>,
-) -> Result<Vec<Series>> {
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut output = Vec::with_capacity(groups.len());
-    let mut row = Vec::with_capacity(schema.fields.len());
-    for group in groups {
-        // One builder serves every group, so each result series starts explicitly.
+    let mut row = Vec::with_capacity(width);
+    for (metric, counts) in groups {
         builder.begin_series();
-        for (&block, states) in &group.blocks {
-            // The last block can extend past the grid; only points with a sample are pushed.
-            for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
-                if !point.iter().any(&seen) {
-                    continue;
-                }
-                let index = block * BLOCK_POINTS + offset;
-                row.clear();
-                row.extend(point.iter().map(|state| {
-                    if seen(state) {
-                        finish(state, index)
-                    } else {
-                        None
-                    }
-                }));
-                builder.push(index, &row)?;
-            }
+        for (point, counts) in counts {
+            row.clear();
+            row.extend(counts.iter().map(|&count| (count > 0.0).then_some(count)));
+            builder.push(point, &row)?;
         }
-        output.extend(builder.finish(group.metric)?);
+        output.extend(builder.finish(metric)?);
     }
     Ok(output)
+}
+
+/// Go's `strconv.FormatFloat(value, 'f', -1, 64)`: the fewest significant digits that round-trip,
+/// in positional notation. When two candidates of that length are equally close, Go takes the
+/// even one while Rust's shortest formatting rounds up, so the digits are recomputed with Rust's
+/// exact formatting, which rounds half to even.
+fn format_value(value: f64) -> String {
+    match value {
+        f64::INFINITY => return "+Inf".to_string(),
+        f64::NEG_INFINITY => return "-Inf".to_string(),
+        _ if value.is_nan() => return "NaN".to_string(),
+        _ => {}
+    }
+    let shortest = format!("{value:e}");
+    let mantissa = shortest.split_once('e').expect("exponent format").0;
+    let significant = mantissa.chars().filter(char::is_ascii_digit).count();
+    let exact = format!("{value:.precision$e}", precision = significant - 1);
+    let (mantissa, exponent) = exact.split_once('e').expect("exponent format");
+    let exponent: i64 = exponent.parse().expect("integer exponent");
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(unsigned) => ("-", unsigned),
+        None => ("", mantissa),
+    };
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    // The decimal point goes after `exponent + 1` digits.
+    let point = exponent + 1;
+    let mut out = String::from(sign);
+    if point <= 0 {
+        out.push_str("0.");
+        out.extend(std::iter::repeat_n('0', (-point) as usize));
+        out.push_str(digits.trim_end_matches('0'));
+    } else if point as usize >= digits.len() {
+        out.push_str(&digits);
+        out.extend(std::iter::repeat_n('0', point as usize - digits.len()));
+    } else {
+        let (whole, fraction) = digits.split_at(point as usize);
+        out.push_str(whole);
+        let fraction = fraction.trim_end_matches('0');
+        if !fraction.is_empty() {
+            out.push('.');
+            out.push_str(fraction);
+        }
+    }
+    out
 }
 
 /// Schema validation is repeated because Series exposes its fields publicly.
@@ -304,22 +365,15 @@ fn label_key(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
 /// input never expands to the full grid and dense input costs one allocation per block.
 const BLOCK_POINTS: usize = 64;
 
-struct Group<S> {
+struct Group {
     metric: MetricName,
     /// Keyed by absolute grid index / `BLOCK_POINTS`; each block holds one state per field for
     /// each of its points, point by point.
-    blocks: BTreeMap<usize, Box<[S]>>,
+    blocks: BTreeMap<usize, Box<[FloatState]>>,
 }
 
-impl<S: Clone + Default> Group<S> {
-    fn new(metric: MetricName) -> Self {
-        Self {
-            metric,
-            blocks: BTreeMap::new(),
-        }
-    }
-
-    fn accumulate(&mut self, series: &Series, update: &mut impl FnMut(&mut S, f64)) {
+impl Group {
+    fn accumulate(&mut self, series: &Series, op: AggregateOp) -> Result<()> {
         let width = series.fields.len();
         let mut pending = Vec::with_capacity(BLOCK_POINTS);
         for (field_index, field) in series.fields.iter().enumerate() {
@@ -330,15 +384,16 @@ impl<S: Clone + Default> Group<S> {
             let mut block = usize::MAX;
             for ((index, _), sample) in series.time.positions().zip(field.iter()) {
                 if index / BLOCK_POINTS != block {
-                    self.update_block(block, width, field_index, update, &mut pending);
+                    self.update_block(block, width, field_index, op, &mut pending);
                     block = index / BLOCK_POINTS;
                 }
                 if let SampleRef::Float(sample) = sample {
                     pending.push((index % BLOCK_POINTS, sample));
                 }
             }
-            self.update_block(block, width, field_index, update, &mut pending);
+            self.update_block(block, width, field_index, op, &mut pending);
         }
+        Ok(())
     }
 
     /// Applies one field's samples within a block, so a block costs one lookup per field run.
@@ -347,34 +402,18 @@ impl<S: Clone + Default> Group<S> {
         block: usize,
         width: usize,
         field_index: usize,
-        update: &mut impl FnMut(&mut S, f64),
+        op: AggregateOp,
         pending: &mut Vec<(usize, f64)>,
     ) {
         if pending.is_empty() {
             return;
         }
-        let states = self.block(block, width);
+        let states = self.blocks.entry(block).or_insert_with(|| {
+            vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice()
+        });
         for (offset, sample) in pending.drain(..) {
-            update(&mut states[offset * width + field_index], sample);
+            states[offset * width + field_index].update(op, sample);
         }
-    }
-
-    /// Updates the state of one field at absolute grid `point`.
-    fn update_point(
-        &mut self,
-        point: usize,
-        width: usize,
-        field_index: usize,
-        update: impl FnOnce(&mut S),
-    ) {
-        let states = self.block(point / BLOCK_POINTS, width);
-        update(&mut states[point % BLOCK_POINTS * width + field_index]);
-    }
-
-    fn block(&mut self, block: usize, width: usize) -> &mut [S] {
-        self.blocks
-            .entry(block)
-            .or_insert_with(|| vec![S::default(); BLOCK_POINTS * width].into_boxed_slice())
     }
 }
 

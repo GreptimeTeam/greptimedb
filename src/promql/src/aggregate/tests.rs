@@ -893,3 +893,55 @@ fn an_aggregation_of_sparse_inputs_is_compared_in_full_against_the_reference() {
     assert_pieces_eq(&counts, &counted, &metric_of(&Labels::new()));
     assert_eq!(piece_ranges(&counts), vec![(2, 1), (6, 1)]);
 }
+
+/// `count_values` writes value labels the way Go's `strconv.FormatFloat(v, 'f', -1, 64)` does,
+/// including the round-half-even choice of the last shortest digit; see the header of
+/// `format_float_cases.txt` (promql-compat `cmd/narthex-golden-formatfloat`).
+#[test]
+fn value_labels_format_like_go() {
+    let mut checked = 0;
+    for line in include_str!("format_float_cases.txt").lines() {
+        let (bits, expected) = line.split_once(' ').unwrap();
+        let value = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
+        assert_eq!(format_value(value), expected, "{bits}");
+        checked += 1;
+    }
+    assert!(checked > 1_800, "{checked}");
+    for (value, expected) in [
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "+Inf"),
+        (f64::NEG_INFINITY, "-Inf"),
+    ] {
+        assert_eq!(format_value(value), expected);
+    }
+}
+
+/// A point where the `q` scalar has no value has no `quantile` result, as a missing scalar point
+/// yields no output in the other scalar operators.
+#[test]
+fn quantile_without_q_at_a_point_has_no_result() {
+    let schema = schema(&["value"]);
+    let series = [
+        input(
+            &schema,
+            metric("a", &[("i", "0")]),
+            10,
+            &[vec![Some(1.0); 3]],
+        ),
+        input(
+            &schema,
+            metric("a", &[("i", "1")]),
+            10,
+            &[vec![Some(3.0); 3]],
+        ),
+    ];
+    let q = input(
+        &schema,
+        MetricName::try_new(None, Vec::new()).unwrap(),
+        10,
+        &[vec![Some(0.5), None, Some(0.5)]],
+    );
+    let output = aggregate_quantile(&schema, &series, &q, Grouping::By(&[])).unwrap();
+    let (start, values) = values_of(&output, 0, 128);
+    assert_eq!((start, values), (10, vec![Some(2.0), None, Some(2.0)]));
+}
