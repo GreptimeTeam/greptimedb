@@ -192,8 +192,7 @@ mod tests {
             produce_one_row: false,
             schema,
         });
-        let merge_scan =
-            MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
+        let merge_scan = MergeScanLogicalPlan::new(input, false).into_logical_plan();
         let plan = LogicalPlanBuilder::from(merge_scan)
             .project(vec![col("j")])?
             .build()?;

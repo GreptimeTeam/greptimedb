@@ -182,7 +182,6 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
-| physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
 | physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
@@ -335,7 +334,6 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
-| physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
 | physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
@@ -518,7 +516,6 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
-| physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
 | physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
