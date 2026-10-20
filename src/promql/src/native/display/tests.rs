@@ -20,7 +20,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::super::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -286,7 +286,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             )),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
             },
         },
@@ -336,6 +336,44 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             "  root Binary + ignoring [] one-to-one",
             "    left Scalar 2",
             "    right Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
+            "      input Input raw samples",
+        ])
+    );
+}
+
+/// A `without` grouping reads as `without [...]`, not as `by [...]`.
+///
+/// The two are different queries over the same label list: `by(job)` keeps `job` and drops the
+/// rest, `without(job)` drops `job` and keeps the rest. A rendering that spelled both `by` would
+/// show two different queries as one.
+#[test]
+fn a_without_grouping_does_not_read_as_by() {
+    let out = grid(0, 60_000, 4);
+    let aggregate = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_over(
+                raw_input(),
+                RangeFunction::Rate,
+                300_000,
+                0,
+                None,
+                Arc::clone(&out),
+            )),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::Without(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(Arc::clone(&out)),
+    };
+    let tree = NativeTree::try_new(aggregate).unwrap();
+    assert_eq!(
+        tree.to_string(),
+        shown(&[
+            "NativeTree",
+            "  root Aggregate sum without [job] complete",
+            "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
             "      input Input raw samples",
         ])
     );
