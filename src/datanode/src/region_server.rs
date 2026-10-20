@@ -1310,11 +1310,8 @@ impl RegionServerInner {
         }
 
         if !errors.is_empty() {
-            return error::UnexpectedSnafu {
-                // Returns the first error.
-                violated: format!("Failed to open batch regions: {:?}", errors[0]),
-            }
-            .fail();
+            // Preserve the first region error so callers can honor its status code and retry hint.
+            return Err(errors.swap_remove(0)).context(HandleBatchOpenRequestSnafu);
         }
 
         Ok(open_regions)
