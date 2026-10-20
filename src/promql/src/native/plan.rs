@@ -111,8 +111,8 @@ impl NativeType {
 /// accumulated on. It is not a query value and does not pretend to be one.
 #[derive(Clone, Debug)]
 pub struct AggregateStateSchema {
-    /// The labels a group is identified by, in output order.
-    pub group: Arc<[Arc<str>]>,
+    /// How the groups its rows are indexed by are identified.
+    pub group: Grouping,
     /// The accumulator columns, one per aggregated field.
     pub accumulators: Arc<[FieldSpec]>,
     /// The grid the state is indexed on.
@@ -195,13 +195,29 @@ pub enum AggregateStage {
     Final,
 }
 
+/// How an aggregate's groups are identified, in the binding's own terms.
+///
+/// The kernel already takes both shapes ([`aggregate::Grouping`]), and the two are not
+/// interchangeable: `by(job)` keeps `job` and drops everything else, while `without(job)` keeps
+/// every other label and drops `job` too. A list of group labels can only spell the first, so a
+/// `without` written that way would group a query by labels it meant to remove.
+///
+/// [`aggregate::Grouping`]: crate::aggregate::Grouping
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Grouping {
+    /// The labels a group is identified by; every other label is dropped.
+    By(Arc<[Arc<str>]>),
+    /// The labels a group is not identified by; these are dropped, and so is `__name__`.
+    Without(Arc<[Arc<str>]>),
+}
+
 /// An aggregate bound to its kind, grouping and stage.
 #[derive(Clone, Debug)]
 pub struct BoundAggregate {
     /// Which aggregate to compute.
     pub kind: AggregateKind,
-    /// The labels a group is identified by.
-    pub group: Arc<[Arc<str>]>,
+    /// How its groups are identified.
+    pub group: Grouping,
     /// Where this aggregate sits in the execution.
     pub stage: AggregateStage,
 }
@@ -432,7 +448,10 @@ impl NativeNode {
                             ));
                         }
                         if state.group != op.group {
-                            return Err(invalid("aggregate state groups differ from the binding"));
+                            return Err(invalid(
+                                "aggregate state groups differ from the binding: state built for \
+                                 one `by` or `without` cannot be merged into another",
+                            ));
                         }
                     }
                     AggregateStage::Final => {
@@ -445,7 +464,10 @@ impl NativeNode {
                             )));
                         };
                         if state.group != op.group {
-                            return Err(invalid("aggregate state groups differ from the binding"));
+                            return Err(invalid(
+                                "aggregate state groups differ from the binding: state built for \
+                                 one `by` or `without` cannot be merged into another",
+                            ));
                         }
                         let output = ensure_samples(&self.output, "a final aggregate")?;
                         // The merged value carries one value per accumulator the state holds.

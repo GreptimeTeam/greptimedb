@@ -20,7 +20,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -123,12 +123,12 @@ fn partial_aggregate(inner: NativeNode) -> NativeNode {
             input: Box::new(inner),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
-            group: Arc::new(["job".into()]),
+            group: Grouping::By(Arc::new(["job".into()])),
             accumulators: Arc::new([]),
             grid,
         })),
@@ -142,7 +142,7 @@ fn final_aggregate(state: NativeNode) -> NativeNode {
             input: Box::new(state),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Final,
             },
         },
@@ -784,7 +784,7 @@ fn an_aggregate_output_matches_its_stage() {
             input: Box::new(inner.clone()),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
             },
         },
@@ -797,12 +797,12 @@ fn an_aggregate_output_matches_its_stage() {
             input: Box::new(inner),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
-            group: Arc::new(["job".into()]),
+            group: Grouping::By(Arc::new(["job".into()])),
             accumulators: Arc::new([]),
             grid: value_grid,
         })),
@@ -821,7 +821,7 @@ fn a_complete_aggregate_cannot_change_the_field_count() {
             input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
             },
         },
@@ -846,7 +846,7 @@ fn an_aggregate_stage_must_agree_with_its_type() {
             input: Box::new(inner),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
             },
         },
@@ -870,12 +870,12 @@ fn a_partial_aggregate_cannot_change_the_accumulator_count() {
             input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
-            group: Arc::new(["job".into()]),
+            group: Grouping::By(Arc::new(["job".into()])),
             accumulators: fields(1),
             grid: out,
         })),
@@ -897,7 +897,7 @@ fn a_partial_aggregate_groups_its_state_like_its_binding() {
     let NativeExpr::Aggregate { op, .. } = &mut node.expr else {
         unreachable!("a partial aggregate tree has an aggregate root")
     };
-    op.group = Arc::new(["instance".into()]);
+    op.group = Grouping::By(Arc::new(["instance".into()]));
     let error = node.validate().unwrap_err();
     assert!(
         error.to_string().contains("groups differ from the binding"),
@@ -914,12 +914,12 @@ fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
             input: Box::new(window_over(input(), None)),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
-            group: Arc::new(["job".into()]),
+            group: Grouping::By(Arc::new(["job".into()])),
             accumulators: Arc::new([]),
             grid: grid(0, 30_000, 8),
         })),
@@ -941,12 +941,39 @@ fn a_final_aggregate_groups_its_state_like_its_binding() {
     let NativeExpr::Aggregate { op, .. } = &mut node.expr else {
         unreachable!("a final aggregate tree has an aggregate root")
     };
-    op.group = Arc::new(["instance".into()]);
+    op.group = Grouping::By(Arc::new(["instance".into()]));
     let error = node.validate().unwrap_err();
     assert!(
         error.to_string().contains("groups differ from the binding"),
         "{error}"
     );
+}
+
+/// `by` and `without` are not interchangeable, even over the same label.
+///
+/// `by(job)` keeps `job` and drops every other label; `without(job)` drops `job` and keeps the
+/// rest. A binding that spelled `without` as a label list could only produce the first, so state
+/// built for one has to be refused for the other rather than merged under the wrong labels.
+#[test]
+fn a_grouping_cannot_swap_by_for_without() {
+    let mut node = final_aggregate(partial_aggregate(window_over(input(), None)));
+    let NativeExpr::Aggregate { op, .. } = &mut node.expr else {
+        unreachable!("a final aggregate tree has an aggregate root")
+    };
+    op.group = Grouping::Without(Arc::new(["job".into()]));
+    let error = node.validate().unwrap_err();
+    assert!(
+        error.to_string().contains("groups differ from the binding"),
+        "{error}"
+    );
+
+    // The same labels under the same shape validate, so the refusal is about the shape.
+    let mut node = final_aggregate(partial_aggregate(window_over(input(), None)));
+    let NativeExpr::Aggregate { op, .. } = &mut node.expr else {
+        unreachable!("a final aggregate tree has an aggregate root")
+    };
+    op.group = Grouping::By(Arc::new(["job".into()]));
+    assert!(node.validate().is_ok());
 }
 
 /// A `Final` aggregate consumes the state a `Partial` produced, which is what an exchange
@@ -973,12 +1000,12 @@ fn a_final_aggregate_cannot_change_the_field_count() {
             input: Box::new(window_fields(input_with_fields(2), Arc::clone(&out), 2)),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Partial,
             },
         },
         output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
-            group: Arc::new(["job".into()]),
+            group: Grouping::By(Arc::new(["job".into()])),
             accumulators: fields(2),
             grid: Arc::clone(&out),
         })),
@@ -995,7 +1022,7 @@ fn a_final_aggregate_cannot_change_the_field_count() {
             input: Box::new(state),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Final,
             },
         },
@@ -1020,7 +1047,7 @@ fn a_final_aggregate_cannot_consume_a_window() {
             input: Box::new(inner),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Final,
             },
         },
@@ -1043,7 +1070,7 @@ fn a_complete_aggregate_cannot_consume_state() {
             input: Box::new(state),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
             },
         },
@@ -1074,7 +1101,7 @@ fn the_walkthrough_shapes_are_trees() {
             input: Box::new(window_on(input(), None, Arc::clone(&statement_grid))),
             op: BoundAggregate {
                 kind: AggregateKind::Sum,
-                group: Arc::new(["job".into()]),
+                group: Grouping::By(Arc::new(["job".into()])),
                 stage: AggregateStage::Complete,
             },
         },

@@ -136,7 +136,8 @@ impl NodeMetric {
     pub const CURRENT_RESERVED_BYTES: &'static str = "current_reserved_bytes";
     /// The highest byte count this node reserved during the execution.
     pub const PEAK_RESERVED_BYTES: &'static str = "peak_reserved_bytes";
-    /// How many groups this node tracks.
+    /// How many groups this node tracks, counted per partition: a group reached by several
+    /// partitions is one entry in each.
     pub const GROUPS: &'static str = "groups";
     /// How many state entries this node tracks.
     pub const STATE_ENTRIES: &'static str = "state_entries";
@@ -262,8 +263,10 @@ impl NodeMetrics {
         );
         // The peak is the one figure named per partition. The collector groups by name and sums
         // gauges, and a sum of two peaks is neither peak: partitions peak at different moments.
-        // Summing the other gauges and counts stays meaningful — the memory held now, the groups
-        // tracked and the samples seen all add up across partitions.
+        // Summing the other gauges and counts stays meaningful — the memory held now and the
+        // samples seen add up across partitions. `groups` does not: a `Partial` aggregate sees the
+        // same group in every partition it reaches, so the sum is per-partition entries, not
+        // distinct groups.
         gauge(
             set,
             partition,
