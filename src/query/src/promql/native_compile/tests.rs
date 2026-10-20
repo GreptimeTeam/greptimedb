@@ -22,7 +22,7 @@ use promql::native::plan::{
     BoundInstant, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
-use promql_parser::parser::{EvalStmt, Expr as PromExpr};
+use promql_parser::parser::{EvalStmt, Expr as PromExpr, NumberLiteral};
 
 use super::compile;
 
@@ -66,6 +66,19 @@ fn with_selector_range(range: Duration) -> EvalStmt {
         unreachable!("`rate(x[5m])`'s argument parses to a range selector");
     };
     selector.range = range;
+    stmt
+}
+
+/// `query`'s statement with its call's arguments edited by `edit`.
+///
+/// The parser checks arity, so a call with the wrong number of arguments cannot be parsed: the only
+/// way to hand one to the compiler is to edit a tree the parser accepted.
+fn with_call_arguments(query: &str, edit: impl FnOnce(&mut Vec<Box<PromExpr>>)) -> EvalStmt {
+    let mut stmt = eval_stmt(query);
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("`{query}` parses to a call");
+    };
+    edit(&mut call.args.args);
     stmt
 }
 
@@ -166,6 +179,214 @@ fn the_supported_range_functions_map_to_their_kernels() {
         };
         assert_eq!(op.function, kernel, "`{name}` produced the wrong kernel");
         assert_eq!(op.window.range_ms, 60_000, "`{name}` lost its window");
+    }
+}
+
+/// `quantile_over_time(0.9, x[5m])` binds the quantile the query wrote, over the same window a
+/// function without parameters would fold: a parameter decides what folds the window, not which
+/// window is folded.
+#[test]
+fn a_quantile_over_time_binds_its_quantile_and_its_window() {
+    let tree = compile(
+        &eval_stmt("quantile_over_time(0.9, x[5m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+
+    let (_, op) = root_window(&tree);
+    assert_eq!(op.function, RangeFunction::QuantileOverTime(0.9));
+    assert_eq!(op.window.range_ms, 300_000);
+    assert_eq!(op.window.offset_ms, 0);
+    assert_eq!(op.window.anchor_ms, None);
+    assert!(op.input_grid.is_none(), "raw input has no grid to declare");
+
+    // The statement's grid: 0, 5s, ..., 100s.
+    let spec = op.output_grid.spec();
+    assert_eq!(
+        (spec.start_ms, spec.step_ms, spec.len),
+        (0, 5_000, 21),
+        "the window does not land on the statement's grid"
+    );
+}
+
+/// A quantile outside `[0, 1]` compiles, because it is not an error in Prometheus: the kernel
+/// returns `-Infinity` below zero, `+Infinity` above one, and a real quantile at either bound. A
+/// compiler that refused it would invent a rule the query engine does not have, so the number is
+/// bound exactly as written.
+#[test]
+fn a_quantile_outside_the_unit_interval_is_bound_as_given() {
+    let cases = [("-1.0", -1.0), ("2.0", 2.0), ("0.0", 0.0), ("1.0", 1.0)];
+
+    for (written, quantile) in cases {
+        let query = format!("quantile_over_time({written}, x[5m])");
+        let tree = compile(
+            &eval_stmt(&query),
+            raw_schema(),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` did not compile: {error}"));
+        let (_, op) = root_window(&tree);
+        assert_eq!(
+            op.function,
+            RangeFunction::QuantileOverTime(quantile),
+            "`{query}` did not bind the quantile it wrote"
+        );
+        assert_eq!(op.window.range_ms, 300_000, "`{query}` lost its window");
+    }
+}
+
+/// A parameter in parentheses binds the same quantile, because it is the same query: the planner
+/// already looks through the parentheses when it reads a literal, so the native compiler does too.
+#[test]
+fn a_parenthesised_quantile_binds_as_written() {
+    let tree = compile(
+        &eval_stmt("quantile_over_time((0.9), x[5m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("a parenthesised literal is the same quantile");
+
+    let (_, op) = root_window(&tree);
+    assert_eq!(op.function, RangeFunction::QuantileOverTime(0.9));
+}
+
+/// The selector of a parameterised function is looked through its parentheses too, so the range
+/// function and the parameter are both read from a statement that was merely typed with grouping.
+#[test]
+fn a_parenthesised_selector_binds_as_written() {
+    let bare = compile(
+        &eval_stmt("quantile_over_time(0.9, x[5m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("the bare selector binds");
+
+    for query in [
+        "quantile_over_time(0.9, (x[5m]))",
+        "quantile_over_time((0.9), (x[5m]))",
+        "(quantile_over_time(0.9, (x[5m])))",
+    ] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(
+            tree.to_string(),
+            bare.to_string(),
+            "`{query}` did not compile to the tree `quantile_over_time(0.9, x[5m])` does"
+        );
+    }
+}
+
+/// A parameter the planner folds to a literal is still refused, and that gap is deliberate: the
+/// kernel's constant is a field of the tree, so binding `1 - 0.1` means folding it here rather than
+/// carrying an expression. A refusal is the agreed behaviour for this stage; an answer computed
+/// from the wrong number would not be.
+#[test]
+fn a_parameter_folded_from_an_expression_is_refused() {
+    for query in [
+        "quantile_over_time(1 - 0.1, x[5m])",
+        "quantile_over_time(-(0.9), x[5m])",
+    ] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("number literal"),
+            "`{query}` did not say what the argument has to be: {message}"
+        );
+    }
+}
+
+/// A parameter computed at query time is refused, and the error names it: the tree binds a kernel's
+/// constant, so a quantile that would only exist at run time has no field to go in.
+#[test]
+fn a_computed_quantile_is_refused_and_names_what_it_found() {
+    // `time()` is a scalar, so the parser accepts it as the quantile; the compiler binds literals.
+    let query = "quantile_over_time(time(), x[5m])";
+    let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err(&format!("`{query}` compiled, and it should not have"));
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "`{query}` did not report NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("whose first argument is `time()`"),
+        "`{query}` did not name the argument it found: {message}"
+    );
+    assert!(
+        message.contains("number literal"),
+        "`{query}` did not say what the argument has to be: {message}"
+    );
+}
+
+/// A parameterised window binds its anchor and its offset exactly as an unparameterised one does.
+/// The two are asserted apart because the runtime folds `anchor - offset`, so a binding that
+/// dropped either number would still compile a window, and only these assertions would notice.
+#[test]
+fn a_quantile_over_time_binds_an_anchor_and_an_offset_apart() {
+    let tree = compile(
+        &eval_stmt("quantile_over_time(0.9, x[5m] @ 1234 offset 1m)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+
+    let (_, op) = root_window(&tree);
+    assert_eq!(op.function, RangeFunction::QuantileOverTime(0.9));
+    assert_eq!(op.window.range_ms, 300_000, "the window was not bound");
+    assert_eq!(
+        op.window.anchor_ms,
+        Some(1_234_000),
+        "the anchor was not bound"
+    );
+    assert_eq!(op.window.offset_ms, 60_000, "the offset was not bound");
+}
+
+/// A call with the wrong number of arguments names the count its function takes, rather than
+/// reporting whatever the compiler does with one argument. The parser checks arity too, so a
+/// mismatched call can only reach the compiler as an edited tree.
+#[test]
+fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
+    let cases = [
+        // `quantile_over_time` takes its quantile and its range selector: two arguments.
+        (
+            with_call_arguments("quantile_over_time(0.9, x[5m])", |args| {
+                args.remove(1);
+            }),
+            "quantile_over_time",
+            "where it takes 2",
+        ),
+        // `rate` takes one argument, so nothing can be passed in front of its range selector.
+        (
+            with_call_arguments("rate(x[5m])", |args| {
+                args.push(Box::new(PromExpr::NumberLiteral(NumberLiteral::new(1.0))));
+            }),
+            "rate",
+            "where it takes 1",
+        ),
+    ];
+
+    for (stmt, name, expected) in cases {
+        let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{name}` with the wrong argument count compiled"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{name}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("a call to `{name}`")),
+            "`{name}` did not name itself: {message}"
+        );
+        assert!(
+            message.contains(expected),
+            "`{name}` did not name the count it takes: {message}"
+        );
     }
 }
 
@@ -503,8 +724,8 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
         ),
         // A function with no kernel, whether or not it takes a constant argument.
         (
-            "quantile_over_time(0.9, x[5m])",
-            "a call to `quantile_over_time`",
+            "predict_linear(x[5m], 300)",
+            "a call to `predict_linear`, which has no native range kernel",
         ),
         (
             "absent(x)",

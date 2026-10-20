@@ -16,11 +16,12 @@
 //!
 //! This is the front half of the native evaluation model: it reads the parsed statement and writes
 //! down what it means as bound nodes. It runs nothing, and nothing calls it yet, so the subset it
-//! accepts is deliberately two shapes:
+//! accepts is deliberately three shapes:
 //!
 //! ```text
-//! <selector>                              e.g. x
-//! <range function>(<selector>[<range>])   e.g. rate(x[5m])
+//! <selector>                                       e.g. x
+//! <range function>(<selector>[<range>])            e.g. rate(x[5m])
+//! <range function>(<number>, <selector>[<range>])  e.g. quantile_over_time(0.9, x[5m])
 //! ```
 //!
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback)
@@ -36,6 +37,7 @@
 //! another.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesOrdering;
@@ -46,14 +48,17 @@ use promql::native::plan::{
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
 use promql_parser::parser::{
-    AtModifier, Call, EvalStmt, Expr as PromExpr, MatrixSelector, Offset, VectorSelector,
+    AtModifier, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral, Offset,
+    VectorSelector,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
 
 /// The shapes this compiler accepts, quoted in every rejection.
-const SUPPORTED: &str = "a bare selector or `<range function>(<selector>[<range>])`, for example \
-                         `x` or `rate(x[5m])`";
+const SUPPORTED: &str = "a bare selector, a range function over a selector — \
+                         `<range function>(<selector>[<range>])` — or a parameterised one, \
+                         `<range function>(<number>, <selector>[<range>])`, for example `x`, \
+                         `rate(x[5m])` or `quantile_over_time(0.9, x[5m])`";
 
 /// Compiles `stmt` into a tree that reads `input` and either selects from it or folds it with the
 /// statement's one window.
@@ -90,19 +95,31 @@ pub fn compile(
     let PromExpr::Call(Call { func, args }) = unparen(&stmt.expr) else {
         return Err(not_implemented(&format!("the expression `{}`", stmt.expr)));
     };
-    let Some(function) = range_function(func.name) else {
+    let Some(signature) = range_signature(func.name) else {
         return Err(not_implemented(&format!(
             "a call to `{}`, which has no native range kernel",
             func.name
         )));
     };
-    let [argument] = args.args.as_slice() else {
+    // The count is the signature's, so the rejection names what this function takes rather than
+    // what one argument happens to be.
+    let expected = signature.parameters() + 1;
+    if args.args.len() != expected {
         return Err(not_implemented(&format!(
-            "a call to `{}` with {} argument(s)",
+            "a call to `{}` with {} argument(s), where it takes {expected}: {}",
             func.name,
-            args.args.len()
+            args.args.len(),
+            signature.arguments()
         )));
+    }
+    // The parameters come first and the range selector is last, for both signatures: a function
+    // without parameters has no `parameters` to read.
+    let (parameters, selector) = args.args.split_at(signature.parameters());
+    let function = match signature {
+        RangeSignature::Selector(function) => function,
+        RangeSignature::Scalar(bind) => bind(scalar_parameter(func.name, &parameters[0])?),
     };
+    let argument = &selector[0];
     let PromExpr::MatrixSelector(MatrixSelector { vs, range }) = unparen(argument) else {
         return Err(not_implemented(&format!(
             "a call to `{}` whose argument is `{}`",
@@ -119,6 +136,22 @@ pub fn compile(
              series may not interleave",
         ));
     }
+    window_selection(stmt, function, vs, range, input, ordering)
+}
+
+/// Binds `function` over the range selector `vs[range]` into a window over the raw input.
+///
+/// Both shapes reach this: the range, the offset, the anchor, the grid and the output are the same
+/// whichever function reads them, so a parameterised function only decides *what* folds the window,
+/// never *which* window is folded.
+fn window_selection(
+    stmt: &EvalStmt,
+    function: RangeFunction,
+    vs: &VectorSelector,
+    range: &Duration,
+    input: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
+) -> Result<NativeTree> {
     // An `@` anchor is step-invariant: every step folds the same samples, which the window's
     // `anchor_ms` tells `RangeEvaluator` to replay over the grid.
     let range_ms = range_millis(range.as_millis())?;
@@ -311,6 +344,75 @@ fn millis(millis: u128) -> Option<i64> {
 
 fn grid_error(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::Plan(format!("the statement's grid is invalid: {error}"))
+}
+
+/// What a call to a range function has to be: the parameters it reads, and how to bind them.
+#[derive(Clone, Copy)]
+enum RangeSignature {
+    /// A function that reads only its range selector, as in `rate(x[5m])`.
+    Selector(RangeFunction),
+    /// A function that reads one number literal before its range selector, and the function that
+    /// number binds, as in `quantile_over_time(0.9, x[5m])`.
+    ///
+    /// The number is kept out of the variant name because only the call site knows it.
+    Scalar(fn(f64) -> RangeFunction),
+}
+
+impl RangeSignature {
+    /// How many scalar parameters the function reads before its range selector.
+    fn parameters(self) -> usize {
+        match self {
+            Self::Selector(_) => 0,
+            Self::Scalar(_) => 1,
+        }
+    }
+
+    /// What the call's arguments are, for the arity rejection to name them.
+    fn arguments(self) -> &'static str {
+        match self {
+            Self::Selector(_) => "its range selector",
+            Self::Scalar(_) => "a number and its range selector",
+        }
+    }
+}
+
+/// The signature the PromQL name calls, or `None` when this compiler has no kernel for it.
+///
+/// The map is explicit on purpose, as in [`range_function`]: a name that is not listed is rejected,
+/// so supporting one more function is a decision made in one place rather than a consequence of a
+/// name looking familiar. A parameterised function is named here rather than in the map, because
+/// its name alone cannot produce the variant the tree binds.
+fn range_signature(name: &str) -> Option<RangeSignature> {
+    match name {
+        "quantile_over_time" => Some(RangeSignature::Scalar(RangeFunction::QuantileOverTime)),
+        _ => range_function(name).map(RangeSignature::Selector),
+    }
+}
+
+/// The number a parameterised range function was given, as the literal it was written as.
+///
+/// A number literal is the only parameter this compiler binds. A parameter whose value is only
+/// known at run time, `time()` being the real case, would make the kernel's constant a query-time
+/// value, which the tree has no field for.
+///
+/// A parameter written as an expression the existing planner folds to a literal is refused here
+/// and is a gap this stage leaves open on purpose: `quantile_over_time(1 - 0.1, x[5m])` and
+/// `quantile_over_time(-(0.9), x[5m])` plan today through `try_build_literal_expr`, which folds
+/// `Paren`, `Unary` and literal-only `Binary`, and reach this function still unfolded. They are
+/// refused rather than answered from the wrong number, and folding them here would be the work
+/// to close the gap.
+///
+/// A quantile outside `[0, 1]` is not refused here: Prometheus binds it and the kernel reports
+/// `-Infinity` below zero and `+Infinity` above one, so refusing it would be this compiler
+/// inventing a rule the query engine does not have.
+fn scalar_parameter(name: &str, parameter: &PromExpr) -> Result<f64> {
+    match unparen(parameter) {
+        PromExpr::NumberLiteral(NumberLiteral { val }) => Ok(*val),
+        found => Err(not_implemented(&format!(
+            "a call to `{name}` whose first argument is `{found}`, where it has to be a number \
+             literal"
+        ))),
+    }
 }
 
 /// The range function a PromQL name denotes, or `None` when this compiler has no kernel for it.
