@@ -1936,6 +1936,11 @@ fn an_emptying_operation_hands_on_nothing_until_it_closes_the_series() {
     }
     out.extend(execution.finish().expect("the window closed its series"));
 
+    assert_eq!(
+        out.len(),
+        1,
+        "an emptying series handed on more than the one chunk that closes it"
+    );
     assert!(
         out.iter().all(|chunk| chunk.series.time.is_empty()),
         "the outer window produced a value for a series that held none"
