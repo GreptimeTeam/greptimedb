@@ -155,18 +155,11 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
     }
-    // Every math function this compiler binds is pointwise over its first argument and reads its
-    // constants after it, so a call with no argument at all is refused before a name is looked up:
-    // a kernel needs something to be pointwise over, and a rejection that says so is more use than
-    // one about a name the compiler would have compiled if it had been called differently.
-    let Some((vector, parameters)) = args.args.split_first() else {
-        return Err(not_implemented(&format!(
-            "a call to `{}` with no arguments, which this compiler cannot bind: a math function is \
-             pointwise over its vector, and a range function reads a range selector",
-            func.name
-        )));
-    };
-    let Some(op) = math_op(func.name, parameters)? else {
+    // The name is looked up before the call's arguments are read, so a name this compiler has no
+    // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
+    // vector to map, and the rejection names the name rather than describing a vector they never
+    // wrote.
+    let Some((op, vector)) = math_op(func.name, &args.args)? else {
         return Err(not_implemented(&format!(
             "a call to `{}`, which has no native kernel",
             func.name
@@ -223,8 +216,11 @@ fn window_call(
 ///
 /// The output is the input's own type: a pointwise function moves no value to another grid point
 /// and reports one value per field it was given, so the map's schema is the input's allocation
-/// rather than a copy that merely agrees with it. That is also what makes the map's output grid the
-/// window's grid by identity, which is what [`NativeTree::validate`] compares.
+/// rather than a copy that merely agrees with it. [`NativeTree::validate`] does not require that
+/// sharing: it compares the map's grid with its input's by [`EvalGrid::spec`] and its field count
+/// with its input's, so a map that allocated an equal grid of its own would validate the same way.
+/// The only comparison by identity is an input node's, whose output has to be the very binding it
+/// was bound to.
 fn map_call(context: &Context, name: &str, op: MathOp, vector: &PromExpr) -> Result<NativeNode> {
     // A math function is pointwise over a vector, so its first argument has to be one. The parser
     // checks the same thing and the tree's validation checks the compiled input's type again, but
@@ -590,27 +586,32 @@ fn math_signature(name: &str) -> Option<MathSignature> {
     }
 }
 
-/// The pointwise kernel `name` denotes with `parameters` bound, or `None` when this compiler has no
-/// math kernel for that name.
+/// The pointwise kernel `name` denotes over its vector, and that vector, or `None` when this
+/// compiler has no math kernel for that name.
 ///
 /// A name that is not in [`math_signature`] is not math: the caller reports that it has no kernel
-/// instead of compiling it into a kernel that would compute something else. The parameters are the
-/// call's constants, in the order they were written, and each is folded to the number it means by
-/// [`constant_value`], because the tree binds a kernel's constants and has no field for an
+/// instead of compiling it into a kernel that would compute something else. `arguments` is the
+/// call's whole argument list, because the vector is its first argument: the arity is the
+/// signature's and counts the vector in, so a call with no argument at all is refused as a call
+/// that wrote none rather than as a shape this compiler cannot bind. The arguments after the vector
+/// are the call's constants, in the order they were written, and each is folded to the number it
+/// means by [`constant_value`], because the tree binds a kernel's constants and has no field for an
 /// expression.
-fn math_op(name: &str, parameters: &[Box<PromExpr>]) -> Result<Option<MathOp>> {
+fn math_op<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(MathOp, &'a PromExpr)>> {
     let Some(signature) = math_signature(name) else {
         return Ok(None);
     };
-    // The count is the signature's, so the rejection names what this function takes rather than what
-    // one parameter happens to be. The vector is counted in: it is the function's first argument,
-    // and a reader counting the call's arguments should not have to add it themselves.
+    // The vector is the function's first argument, so a call that wrote no argument at all is
+    // refused by the same arity check as one that wrote too few constants.
+    let Some((vector, parameters)) = arguments.split_first() else {
+        return Err(arity_error(name, signature, 0));
+    };
     let given = parameters.len() + 1;
     if given < signature.required() + 1 || given > signature.parameters() + 1 {
-        return Err(not_implemented(&format!(
-            "a call to `{name}` with {given} argument(s), where it takes {}",
-            signature.arguments()
-        )));
+        return Err(arity_error(name, signature, given));
     }
     // The vector is the first argument, so the constants are read from the second onwards.
     let op = match signature {
@@ -625,7 +626,19 @@ fn math_op(name: &str, parameters: &[Box<PromExpr>]) -> Result<Option<MathOp>> {
             constant_argument(name, &parameters[1], 2)?,
         ),
     };
-    Ok(Some(op))
+    Ok(Some((op, vector)))
+}
+
+/// The rejection of a math call that wrote `given` arguments where `signature` takes another count.
+///
+/// The count is the signature's, so the message says what this function takes rather than what one
+/// argument happens to be. The vector is counted in: it is the function's first argument, and a
+/// reader counting the call's arguments should not have to add it themselves.
+fn arity_error(name: &str, signature: MathSignature, given: usize) -> DataFusionError {
+    not_implemented(&format!(
+        "a call to `{name}` with {given} argument(s), where it takes {}",
+        signature.arguments()
+    ))
 }
 
 /// The constant `argument` folds to, or a rejection naming the argument and where it was read.
@@ -649,11 +662,13 @@ fn constant_argument(name: &str, argument: &PromExpr, position: usize) -> Result
 }
 
 /// How a rejection names the argument a parameter was read from.
+///
+/// The three positions are the ones a signature can read: the vector, and the two constants behind
+/// it. Every caller passes the literal position its signature reads, so there is no fourth position
+/// to name and no default to invent one for.
 fn argument_position(position: usize) -> &'static str {
     const POSITIONS: [&str; 3] = ["first argument", "second argument", "third argument"];
-    // The positions this compiler reads are the three above; a fourth would be a new signature, and
-    // naming it as "an argument" is true until that signature exists.
-    POSITIONS.get(position).copied().unwrap_or("argument")
+    POSITIONS[position]
 }
 
 /// The number `expr` folds to, or `None` when its value is not the statement's to know.

@@ -419,6 +419,14 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
             "clamp",
             "where it takes its vector and two constants",
         ),
+        // A listed math name called with no argument at all: the vector is counted as the first
+        // argument, so a call that wrote none is one argument short of `abs` rather than a shape
+        // the compiler has no words for.
+        (
+            with_call_arguments("abs(x)", |args| args.clear()),
+            "abs",
+            "with 0 argument(s), where it takes its vector",
+        ),
     ];
 
     for (stmt, name, expected) in cases {
@@ -781,6 +789,10 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
             "absent(x)",
             "a call to `absent`, which has no native kernel",
         ),
+        // The two functions PromQL calls with no arguments at all: neither has a kernel, and the
+        // rejection names the name rather than describing a vector they were never given.
+        ("pi()", "a call to `pi`, which has no native kernel"),
+        ("time()", "a call to `time`, which has no native kernel"),
     ];
 
     for (query, named) in cases {
@@ -904,8 +916,9 @@ fn a_math_function_maps_over_the_node_its_argument_compiles_to() {
 ///
 /// The maps are separate nodes because the arguments nest, not because the compiler knows
 /// `clamp_min(abs(...))`: a compiler that bound the pair to one node would fail the tree assertions
-/// here. The grids are compared by allocation identity, since a pointwise function moves no value to
-/// another grid point and has no reason to allocate a second grid that merely agrees.
+/// here. The grids are compared by their spec, which is what [`NativeTree::validate`] compares: a
+/// map that allocated a second, equal grid would still be the window's layout, while one that
+/// reported a different grid or different fields would not.
 #[test]
 fn nested_math_functions_are_two_maps_over_one_window() {
     let tree = compile(
@@ -946,15 +959,21 @@ fn nested_math_functions_are_two_maps_over_one_window() {
         .expect("the window is evaluated");
     for (what, node) in [("the clamp_min", tree.root()), ("the abs", inner)] {
         let schema = evaluated(node);
-        assert!(
-            Arc::ptr_eq(
-                schema.eval_grid.as_ref().expect("the map is evaluated"),
-                window_grid
-            ),
+        assert_eq!(
+            schema
+                .eval_grid
+                .as_ref()
+                .expect("the map is evaluated")
+                .spec(),
+            window_grid.spec(),
             "`{what}` reports a grid the window does not"
         );
         assert!(
-            Arc::ptr_eq(&schema.fields, &window_schema.fields),
+            schema
+                .fields
+                .iter()
+                .map(|field| &field.name)
+                .eq(window_schema.fields.iter().map(|field| &field.name)),
             "`{what}` reports fields the window does not"
         );
     }
@@ -1011,9 +1030,12 @@ fn the_supported_math_functions_map_to_their_kernels() {
 }
 
 /// The constants a function folds are folded by the kernel's own arithmetic, not by a second copy of
-/// it: `%` keeps the sign of its left operand and `^` is a power. A fold that used a Euclidean modulo
-/// or treated `^` as multiplication would bind a different number and fail here, which is the point:
-/// the compiler must not disagree with the kernel about what an operator means.
+/// it: `%` keeps the sign of its left operand and `^` is `go_math`'s power. Both numbers below are
+/// ones a hand-written copy would get wrong: a Euclidean modulo folds `-7 % 3` to 2, `*` folds the
+/// power to about 9.8e8, and Rust's own `f64::powf` folds it to 3.623449445683154e291 where the
+/// kernel gives 3.6234491766672406e291, because `go_math::pow` accumulates error by repeated
+/// squaring as Go's `math.Pow` does. That is the point: the compiler must not disagree with the
+/// kernel about what an operator means.
 #[test]
 fn the_constant_fold_is_the_kernels_arithmetic() {
     // Go's `math.Mod` gives -1 for `-7 % 3`; a Euclidean modulo would give 2.
@@ -1031,21 +1053,29 @@ fn the_constant_fold_is_the_kernels_arithmetic() {
     };
     assert_eq!(min, -1.0, "`-7 % 3` did not fold with `math.Mod`'s sign");
 
-    // `2 ^ 10` is 1024 as a power; as multiplication it would be 20, and it is neither a comparison
-    // nor a set operator, which fold nothing at all.
+    // `1.0000006850274261 ^ 9.80019037e8` is a power over a base barely above one: as multiplication
+    // it would be about 9.8e8, and it is neither a comparison nor a set operator, which fold nothing
+    // at all. It is also the case `go_math` keeps its own `pow` for: Go's repeated squaring
+    // accumulates error the standard library's `pow` does not, so the two disagree well above the
+    // last bit and a fold that hand-wrote `powf` binds a different number here.
     let tree = compile(
-        &eval_stmt("round(x, 2 ^ 10)"),
+        &eval_stmt("round(x, 1.0000006850274261 ^ 9.80019037e8)"),
         raw_schema(),
         SeriesOrdering::KeyThenTime,
     )
-    .unwrap_or_else(|error| panic!("`round(x, 2 ^ 10)` was refused: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("`round(x, 1.0000006850274261 ^ 9.80019037e8)` was refused: {error}")
+    });
     let MathOp::Round { nearest } = map_op(tree.root()) else {
         panic!(
             "the root is not a round: {:?}",
             map_parts(tree.root()).1.ops
         );
     };
-    assert_eq!(nearest, 1024.0, "`2 ^ 10` did not fold as a power");
+    assert_eq!(
+        nearest, 3.6234491766672406e291,
+        "`1.0000006850274261 ^ 9.80019037e8` did not fold with `go_math`'s power"
+    );
 }
 
 /// A math function is pointwise over a vector, so an argument that is not one is refused and the
