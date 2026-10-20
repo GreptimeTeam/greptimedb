@@ -28,7 +28,8 @@ use datatypes::series::time::EvalGrid;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree,
+    NativeType,
 };
 use crate::range_eval::RangeFunction;
 use crate::vector_match::{BinaryOp, Cardinality, MatchingLabels};
@@ -102,11 +103,17 @@ fn describe(node: &NativeNode) -> String {
             ops.join(", ")
         }
         NativeExpr::Aggregate { op, .. } => format!(
-            "{} by [{}] {}",
+            "{} {} [{}] {}",
             match op.kind {
                 AggregateKind::Sum => "sum",
             },
-            label_list(&op.group),
+            match &op.group {
+                Grouping::By(_) => "by",
+                Grouping::Without(_) => "without",
+            },
+            label_list(match &op.group {
+                Grouping::By(labels) | Grouping::Without(labels) => labels,
+            }),
             match op.stage {
                 AggregateStage::Complete => "complete",
                 AggregateStage::Partial => "partial",
