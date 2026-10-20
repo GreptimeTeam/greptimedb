@@ -130,8 +130,9 @@ fn output_column_schemas_normalizes_dictionary_output_type() {
 fn flow_config_ignores_the_removed_num_workers_option() {
     // `flow.num_workers` belonged to the removed flow workers. Deployments still
     // carry it in their TOML, so parsing must keep ignoring it instead of failing
-    // the whole config. `FlowConfig` is `#[serde(default)]`, so the unknown key is
-    // skipped and the remaining fields come from the defaults.
+    // the whole config. The unknown key is ignored because `FlowConfig` does not
+    // set `deny_unknown_fields`; `#[serde(default)]` separately makes the fields
+    // absent from this TOML (such as `batching_mode`) come from the defaults.
     let config: super::FlowConfig = toml::from_str("num_workers = 4").unwrap();
     assert_eq!(config, super::FlowConfig::default());
 }

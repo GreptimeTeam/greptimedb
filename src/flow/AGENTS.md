@@ -86,5 +86,8 @@ plan-to-schema helper shared with batching.
   change; it is a reserved internal key and must stay out of `SHOW CREATE FLOW`
   rendering. Writing it is a deliberate keep, not an oversight: dropping it would
   change the persisted metadata and the `options` column users can query, for no
-  runtime benefit. Reading it must keep accepting `streaming` so legacy metadata
-  stays listable and droppable (`get_flow_type_from_options`).
+  runtime benefit. Options that already say `streaming` must stay readable: that
+  is what keeps such legacy metadata listable and droppable, and a test in
+  `common-meta`'s `key/flow.rs` covers it. Independently,
+  `get_flow_type_from_options` must keep recognizing `streaming` so the persisted
+  options and in-flight data of an old create procedure still deserialize.
