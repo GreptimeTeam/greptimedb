@@ -798,9 +798,10 @@ mod tests {
 mod test_split_record_batch {
     use std::sync::Arc;
 
+    use common_time::timestamp::Timestamp;
     use datafusion_common::ScalarValue;
-    use datatypes::arrow::array::{Int64Array, StringArray};
-    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::array::{Int64Array, StringArray, TimestampNanosecondArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datatypes::arrow::record_batch::RecordBatch;
     use rand::Rng;
 
@@ -854,6 +855,45 @@ mod test_split_record_batch {
                 "failed on region: {}",
                 region
             );
+        }
+    }
+
+    #[test]
+    fn test_split_record_batch_widened_time_index_unit() {
+        // https://github.com/GreptimeTeam/greptimedb/issues/9747
+        // The partition bounds keep the unit they were created with (millisecond)
+        // after the time index column is widened to nanosecond, so the batch
+        // schema and the bound values mix timestamp units.
+        let bound = Value::from(Timestamp::new_millisecond(1_000));
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["ts".to_string()],
+            vec![0, 1],
+            vec![col("ts").lt(bound.clone()), col("ts").gt_eq(bound)],
+            true,
+        )
+        .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampNanosecondArray::from(vec![
+                500_000_000,
+                2_000_000_000,
+            ]))],
+        )
+        .unwrap();
+
+        // 500_000_000ns < 1000ms and 2_000_000_000ns >= 1000ms: one row per region.
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        assert_eq!(expected.len(), 2);
+        let result = rule.split_record_batch(&batch).unwrap();
+        assert_eq!(result.len(), expected.len());
+        for (region, value) in &result {
+            assert_eq!(value.array(), expected.get(region).unwrap());
         }
     }
 

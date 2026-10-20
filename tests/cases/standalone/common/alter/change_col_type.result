@@ -341,6 +341,41 @@ SELECT * FROM ts_widen_part ORDER BY ts;
 | b    | 2.0 | 2024-01-02T00:00:00.000250 |
 +------+-----+----------------------------+
 
+-- force the rows into SSTs so scans read old-unit data through the widened
+-- schema of a time-index-partitioned table (https://github.com/GreptimeTeam/greptimedb/issues/9747)
+ADMIN FLUSH_TABLE('ts_widen_part');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('ts_widen_part') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+SELECT * FROM ts_widen_part ORDER BY ts;
+
++------+-----+----------------------------+
+| host | val | ts                         |
++------+-----+----------------------------+
+| a    | 1.0 | 2024-01-01T23:59:59.500    |
+| b    | 2.0 | 2024-01-02T00:00:00.000250 |
++------+-----+----------------------------+
+
+SELECT * FROM ts_widen_part WHERE ts >= '2024-01-02 00:00:00' ORDER BY ts;
+
++------+-----+----------------------------+
+| host | val | ts                         |
++------+-----+----------------------------+
+| b    | 2.0 | 2024-01-02T00:00:00.000250 |
++------+-----+----------------------------+
+
+SELECT * FROM ts_widen_part WHERE ts < '2024-01-02 00:00:00' ORDER BY ts;
+
++------+-----+-------------------------+
+| host | val | ts                      |
++------+-----+-------------------------+
+| a    | 1.0 | 2024-01-01T23:59:59.500 |
++------+-----+-------------------------+
+
 DROP TABLE ts_widen_part;
 
 Affected Rows: 0
