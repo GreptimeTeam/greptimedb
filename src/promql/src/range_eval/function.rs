@@ -216,7 +216,7 @@ fn variance(values: &[f64]) -> f64 {
 }
 
 /// Prometheus `quantile`, which sorts NaN before every number.
-fn quantile(q: f64, values: &[f64], sorted: &mut Vec<f64>) -> f64 {
+pub(crate) fn quantile(q: f64, values: &[f64], sorted: &mut Vec<f64>) -> f64 {
     if q.is_nan() {
         return f64::NAN;
     }

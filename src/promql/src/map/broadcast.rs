@@ -127,7 +127,10 @@ fn map_grid_scalar(
     builder.finish(metric)
 }
 
-fn validate_scalar<'a>(schema: &SeriesSchema, scalar: &'a Series) -> Result<&'a TimeAxis> {
+pub(crate) fn validate_scalar<'a>(
+    schema: &SeriesSchema,
+    scalar: &'a Series,
+) -> Result<&'a TimeAxis> {
     if scalar.metric.name().is_some() || !scalar.metric.tags().is_empty() {
         return Err(DataFusionError::Execution(
             "grid scalar must be unlabelled".into(),

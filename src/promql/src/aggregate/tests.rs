@@ -199,6 +199,42 @@ fn aggregates_match_prometheus() {
     }
 }
 
+/// `stddev`, `stdvar`, `quantile` and `count_values` evaluated by the Prometheus v3.15.0 engine;
+/// see the header of `stat_cases.txt`.
+#[test]
+fn stat_aggregates_match_prometheus() {
+    let mut matched = BTreeMap::<String, usize>::new();
+    for case in cases(include_str!("stat_cases.txt")) {
+        let h = &case.header;
+        let labels = h[3]
+            .split(',')
+            .filter(|label| *label != "-")
+            .collect::<Vec<_>>();
+        let grouping = grouping(h, &labels);
+        let output = match h[1].as_str() {
+            "stddev" => aggregate_float(&case.schema, &case.series, AggregateOp::Stddev, grouping),
+            "stdvar" => aggregate_float(&case.schema, &case.series, AggregateOp::Stdvar, grouping),
+            "quantile" => {
+                let q = case.scalar.as_ref().expect("quantile cases carry q");
+                aggregate_quantile(&case.schema, &case.series, q, grouping)
+            }
+            "count_values" => count_values(&case.schema, &case.series, &h[4], grouping),
+            other => panic!("unmapped aggregate {other}"),
+        };
+        assert_result(&case, output.unwrap());
+        *matched.entry(format!("{} {}", h[1], h[2])).or_default() += 1;
+    }
+    for op in ["stddev", "stdvar", "quantile", "count_values"] {
+        for grouping in ["none", "by", "without"] {
+            let count = matched
+                .get(&format!("{op} {grouping}"))
+                .copied()
+                .unwrap_or_default();
+            assert!(count >= 12, "{op} {grouping}: {count}");
+        }
+    }
+}
+
 #[test]
 fn compensated_sum_and_overflowing_avg_follow_prometheus() {
     let schema = schema(&["value"]);
@@ -351,18 +387,50 @@ fn fields_are_aggregated_independently() {
             })
             .collect()
     };
+    let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
+    let q_values: Vec<Option<f64>> = (0..grid_len)
+        .map(|i| Some([0.0, 0.25, 0.5, 0.9, 1.0][i % 5]))
+        .collect();
+    let q = input(
+        &schema(&["scalar"]),
+        MetricName::try_new(None, Vec::new()).unwrap(),
+        0,
+        &[q_values],
+    );
+    type Kernel<'a> = Box<dyn Fn(&Arc<SeriesSchema>, &[Series], Grouping<'_>) -> Vec<Series> + 'a>;
+    let mut kernels: Vec<(String, Kernel<'_>)> = OPS
+        .iter()
+        .chain(&[AggregateOp::Stddev, AggregateOp::Stdvar])
+        .map(|&op| -> (String, Kernel<'_>) {
+            (
+                format!("{op:?}"),
+                Box::new(move |schema, input, grouping| {
+                    aggregate_float(schema, input, op, grouping).unwrap()
+                }),
+            )
+        })
+        .collect();
+    kernels.push((
+        "quantile".into(),
+        Box::new(|schema, input, grouping| {
+            aggregate_quantile(schema, input, &q, grouping).unwrap()
+        }),
+    ));
+    kernels.push((
+        "count_values".into(),
+        Box::new(|schema, input, grouping| count_values(schema, input, "value", grouping).unwrap()),
+    ));
     for grouping in [
         Grouping::By(&[]),
         Grouping::By(&["host"]),
         Grouping::Without(&["i"]),
     ] {
-        for op in OPS {
-            let output = aggregate_float(&multi, &series, op, grouping).unwrap();
+        for (op, kernel) in &kernels {
+            let output = kernel(&multi, &series, grouping);
             for field in [0, 1] {
-                let expected = aggregate_float(&single, &project(field), op, grouping).unwrap();
+                let expected = kernel(&single, &project(field), grouping);
                 // The multi-field result is cut into pieces where its values are interrupted, so
                 // the comparison is over the dense values of each label set, not over pieces.
-                let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
                 let grouped = |pieces: &[Series], field: usize| {
                     let mut by_metric: BTreeMap<LabelKey, Positions> = BTreeMap::new();
                     for piece in pieces {
@@ -394,7 +462,7 @@ fn fields_are_aggregated_independently() {
                 };
                 let actual = grouped(&output, field);
                 let expected = grouped(&expected, 0);
-                assert_eq!(actual, expected, "{op:?} {grouping:?} field {field}");
+                assert_eq!(actual, expected, "{op} {grouping:?} field {field}");
             }
         }
     }
@@ -632,6 +700,16 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
         11,
         &[vec![Some(1.0)], vec![Some(2.0)]],
     );
+    // Prometheus rejects an empty `count_values` label name at evaluation.
+    assert!(matches!(
+        count_values(
+            &schema,
+            std::slice::from_ref(&source),
+            "",
+            Grouping::By(&[])
+        ),
+        Err(DataFusionError::Execution(_))
+    ));
     assert!(matches!(
         aggregate_float(
             &schema,
