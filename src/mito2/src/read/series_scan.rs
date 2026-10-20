@@ -494,7 +494,9 @@ impl SeriesScan {
             .sum();
 
         if !self.stream_ctx.input.compaction {
-            SCAN_MAX_CONCURRENT_FILES.observe(total_files as f64);
+            SCAN_MAX_CONCURRENT_FILES
+                .with_label_values(&["query"])
+                .observe(total_files as f64);
         }
         if self.stream_ctx.input.uses_scan_memory_limit() {
             return Ok(());

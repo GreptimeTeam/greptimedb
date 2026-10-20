@@ -138,6 +138,11 @@ impl SeqScan {
     pub(crate) async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
         assert!(self.stream_ctx.input.compaction);
 
+        // Compaction merges all input files together instead of scanning ranges sequentially.
+        SCAN_MAX_CONCURRENT_FILES
+            .with_label_values(&["compaction"])
+            .observe(self.stream_ctx.input.num_files() as f64);
+
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
         debug_assert_eq!(1, self.properties.partitions.len());
@@ -515,7 +520,9 @@ impl SeqScan {
             .sum();
 
         if !self.stream_ctx.input.compaction {
-            SCAN_MAX_CONCURRENT_FILES.observe(total_max_files as f64);
+            SCAN_MAX_CONCURRENT_FILES
+                .with_label_values(&["query"])
+                .observe(total_max_files as f64);
         }
         if self.stream_ctx.input.uses_scan_memory_limit() {
             return Ok(());

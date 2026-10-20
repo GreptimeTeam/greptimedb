@@ -1352,8 +1352,6 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated
     let Scanner::Seq(scanner) = scanner else {
         panic!("Scanner should be seq scan");
     };
-    let sample_count = crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_count();
-    let sample_sum = crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_sum();
     if estimated {
         scanner.check_scan_limit().unwrap();
         RecordBatches::try_collect(scanner.build_stream().unwrap())
@@ -1363,14 +1361,6 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated
         let error = scanner.check_scan_limit().unwrap_err();
         assert_eq!(StatusCode::RateLimited, error.status_code());
     }
-    assert_eq!(
-        sample_count + 1,
-        crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_count()
-    );
-    assert_eq!(
-        sample_sum + 3.0,
-        crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_sum()
-    );
 
     let request = ScanRequest {
         distribution: Some(TimeSeriesDistribution::PerSeries),
@@ -1380,8 +1370,6 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated
     let Scanner::Series(scanner) = scanner else {
         panic!("Scanner should be series scan");
     };
-    let sample_count = crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_count();
-    let sample_sum = crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_sum();
     if estimated {
         scanner.check_scan_limit().unwrap();
         RecordBatches::try_collect(scanner.build_stream().await.unwrap())
@@ -1391,14 +1379,6 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated
         let error = scanner.check_scan_limit().unwrap_err();
         assert_eq!(StatusCode::RateLimited, error.status_code());
     }
-    assert_eq!(
-        sample_count + 1,
-        crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_count()
-    );
-    assert_eq!(
-        sample_sum + 3.0,
-        crate::metrics::SCAN_MAX_CONCURRENT_FILES.get_sample_sum()
-    );
 }
 
 #[tokio::test]

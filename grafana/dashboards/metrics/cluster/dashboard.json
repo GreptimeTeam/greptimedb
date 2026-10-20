@@ -9117,7 +9117,7 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Estimated maximum concurrent files per region scan limit evaluation, including memtable sources counted by the file limit. Includes rejected scans and scans using memory budgeting; excludes compaction. A SQL query can produce multiple region scan evaluations. P95/P99 are histogram estimates, not exact per-query maxima or live open-file counts.",
+          "description": "Estimated maximum concurrent files by instance and type (query or compaction). Query samples are region scan limit evaluations, including memtable sources counted by the limit, rejected scans, and scans using memory budgeting. Compaction samples count all input files when building a compaction reader. A SQL query can produce multiple region scan evaluations. P95/P99 are histogram estimates, not exact per-query maxima or live open-file counts.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -9204,9 +9204,9 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by(instance, pod, le) (rate(greptime_mito_scan_max_concurrent_files_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by(instance, pod, type, le) (rate(greptime_mito_scan_max_concurrent_files_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-p95",
+              "legendFormat": "[{{instance}}]-[{{pod}}]-{{type}}-p95",
               "range": true,
               "refId": "A"
             },
@@ -9216,9 +9216,9 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_scan_max_concurrent_files_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by(instance, pod, type, le) (rate(greptime_mito_scan_max_concurrent_files_bucket{instance=~\"$datanode\"}[$__rate_interval])))",
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
+              "legendFormat": "[{{instance}}]-[{{pod}}]-{{type}}-p99",
               "range": true,
               "refId": "B"
             },
@@ -9228,9 +9228,9 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by(instance, pod) (rate(greptime_mito_scan_max_concurrent_files_sum{instance=~\"$datanode\"}[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_scan_max_concurrent_files_count{instance=~\"$datanode\"}[$__rate_interval]))",
+              "expr": "sum by(instance, pod, type) (rate(greptime_mito_scan_max_concurrent_files_sum{instance=~\"$datanode\"}[$__rate_interval])) / sum by(instance, pod, type) (rate(greptime_mito_scan_max_concurrent_files_count{instance=~\"$datanode\"}[$__rate_interval]))",
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-avg",
+              "legendFormat": "[{{instance}}]-[{{pod}}]-{{type}}-avg",
               "range": true,
               "refId": "C"
             }
