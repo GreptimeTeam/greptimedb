@@ -4150,7 +4150,7 @@ fn a_group_modifier_copies_the_one_side_label() {
 
     // The result is compared as label sets, so the two series are sorted by the labels they carry:
     // the value lists of `f64` have no total order, and none is needed here.
-    let mut results: Vec<(Vec<(String, String)>, Vec<Option<f64>>)> = run(&mut execution)
+    let mut results: Vec<_> = run(&mut execution)
         .iter()
         .map(|chunk| {
             let mut tags: Vec<(String, String)> = chunk
