@@ -35,7 +35,7 @@ use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
     ChargedAllocations, Emitted, History, NativeChunk, NativeExecutionState, NativeExecutor,
-    NodeBuffer, NodeRuntime, QueuedCharge, Run, label_bytes, map_chunk, raw_bytes,
+    NodeBuffer, NodeRuntime, QueuedCharge, Run, absorb_rebuilds, label_bytes, map_chunk, raw_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
@@ -2509,5 +2509,163 @@ fn a_history_entry_is_charged_once_for_its_header() {
                 * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>())
         ),
         "the table's capacity is where a label-set slot and one `History` per entry are charged",
+    );
+}
+
+/// A sparse series that only ever moves forward is appended to its history, not merged into it again
+/// chunk after chunk.
+///
+/// One legal series arrives as eight chunks of one position each, every position a hole apart from
+/// the last: no label set is reached twice, no position of a field is occupied twice, and this is
+/// what a scan produces as its positions advance. The stored runs still grow by one per chunk, so
+/// rebuilding the array after each chunk moves `K(K+1)/2` runs to hold `K` rows of real data, which
+/// is the cost this asserts away.
+///
+/// The chunks go through [`super::Emitted::occupy`], the helper the runtime records an output with,
+/// so what is checked is the history that helper keeps. Three shapes are pushed: chunks landing past
+/// every stored run, which have to be appended to; a chunk starting where the last stored run ends,
+/// which has to be joined to it rather than left beside it; and chunks landing before what is
+/// stored, which cannot be appended to and have to go through the full merge while still leaving the
+/// history sorted and disjoint.
+#[test]
+fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
+    let map_grid = grid(0, 60_000, 21);
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let path = NodePath::root();
+    let mut emitted = Emitted::default();
+
+    // One row at `position`, which is one run of one position: the same series every time, since a
+    // map dropping the name leaves them all one label set.
+    let push = |emitted: &mut Emitted, position: usize| {
+        let chunk = sparse_chunk(
+            &schema,
+            named_metric("a", "x"),
+            &[(position, 1)],
+            vec![-1.0],
+            false,
+        );
+        emitted
+            .occupy(&path, &chunk)
+            .unwrap_or_else(|error| panic!("position {position} was refused: {error}"));
+    };
+    // The runs stored under the one label set, which is what `absorb` keeps in position order.
+    let stored = |emitted: &Emitted| -> Vec<(usize, usize)> {
+        emitted
+            .sets
+            .values()
+            .next()
+            .expect("the chunk was recorded under one label set")
+            .fields
+            .first()
+            .expect("the series has one field")
+            .iter()
+            .map(|run| (run.start, run.end))
+            .collect()
+    };
+    let ordered = |runs: &[(usize, usize)]| {
+        runs.iter().all(|(start, end)| start < end)
+            && runs.windows(2).all(|pair| pair[0].1 < pair[1].0)
+    };
+
+    // Eight chunks, one position each, a hole between them.
+    let positions = [4, 6, 8, 10, 12, 14, 16, 18];
+    let before = absorb_rebuilds();
+    for position in positions {
+        push(&mut emitted, position);
+    }
+    assert_eq!(
+        stored(&emitted),
+        vec![
+            (4, 5),
+            (6, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 19),
+        ],
+        "a sparse series was not stored as the one run each of its chunks occupies"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        0,
+        "the {} chunks of a series moving forward rebuilt its history instead of appending to it",
+        positions.len()
+    );
+
+    // A chunk that starts where the last stored run ends touches it, and the two are one run: the
+    // fast path appends, and the boundary is the part it has to join.
+    let before = absorb_rebuilds();
+    push(&mut emitted, 19);
+    assert_eq!(
+        stored(&emitted),
+        vec![
+            (4, 5),
+            (6, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 20),
+        ],
+        "a chunk touching the last stored run was left beside it rather than joined to it"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        0,
+        "a chunk touching the last stored run was merged rather than appended to it"
+    );
+
+    // A chunk landing in a hole before the last stored run cannot be appended to: it joins the runs
+    // on both sides of it, so it goes through the full merge, which has to join them all the same.
+    let before = absorb_rebuilds();
+    push(&mut emitted, 5);
+    assert_eq!(
+        stored(&emitted),
+        vec![
+            (4, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 20),
+        ],
+        "a chunk in a hole did not join the runs on either side of it"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        1,
+        "a chunk landing before the last stored run was appended rather than merged"
+    );
+
+    // A chunk before every stored run is the other shape the fast path cannot take.
+    let before = absorb_rebuilds();
+    push(&mut emitted, 1);
+    let runs = stored(&emitted);
+    assert_eq!(
+        runs,
+        vec![
+            (1, 2),
+            (4, 7),
+            (8, 9),
+            (10, 11),
+            (12, 13),
+            (14, 15),
+            (16, 17),
+            (18, 20),
+        ],
+        "a chunk before every stored run did not land in front of them"
+    );
+    assert_eq!(
+        absorb_rebuilds() - before,
+        1,
+        "a chunk landing before every stored run was appended rather than merged"
+    );
+    assert!(
+        ordered(&runs),
+        "the merged history is not sorted, disjoint and joined: {runs:?}"
     );
 }
