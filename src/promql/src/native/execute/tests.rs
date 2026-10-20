@@ -193,6 +193,39 @@ fn window_over_fields(count: usize, output_grid: Arc<EvalGrid>) -> NativeNode {
     }
 }
 
+/// A bare selector over `inner`: the last sample at or before each grid point, read within
+/// `lookback_ms` and at `offset_ms`.
+///
+/// The selection reports one value per input field, so its layout is the input's, just as the
+/// compiler builds it.
+fn instant(
+    inner: NativeNode,
+    lookback_ms: i64,
+    offset_ms: i64,
+    output_grid: Arc<EvalGrid>,
+) -> NativeNode {
+    let fields = inner
+        .output
+        .samples()
+        .expect("a selection reads samples")
+        .fields
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(inner),
+            op: BoundInstant {
+                lookback_ms,
+                offset_ms,
+                output_grid: Arc::clone(&output_grid),
+            },
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields,
+            eval_grid: Some(output_grid),
+        })),
+    }
+}
+
 fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
     let output = inner.output.grid().expect("a map needs a grid").clone();
     NativeNode {
@@ -251,6 +284,34 @@ fn raw_chunk_repeated(
     let fields = SeriesFields::try_from_vec(
         (0..schema.fields.len())
             .map(|_| Samples::from_float(Float64Array::from(values.to_vec())))
+            .collect(),
+    )
+    .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        fields,
+        is_last,
+    )
+    .unwrap()
+}
+
+/// One raw chunk of `series-a` whose fields carry `columns`, one column per field.
+///
+/// A `None` is a position that field holds no sample at, which is what a partially filled field
+/// looks like at the source.
+fn raw_chunk_columns(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    columns: Vec<Vec<Option<f64>>>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let fields = SeriesFields::try_from_vec(
+        columns
+            .into_iter()
+            .map(|values| Samples::from_float(Float64Array::from(values)))
             .collect(),
     )
     .unwrap();
@@ -355,6 +416,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         ),
         queued: VecDeque::new(),
         queued_charge: QueuedCharge::default(),
+        instant: None,
         window: None,
         map: None,
         emitted: None,
@@ -458,11 +520,16 @@ fn run(executor: &mut NativeExecutor) -> Vec<EvaluatedChunk> {
 }
 
 fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
+    field_values(chunk, 0)
+}
+
+/// The values field `index` carries, one per row the chunk holds.
+fn field_values(chunk: &EvaluatedChunk, index: usize) -> Vec<Option<f64>> {
     let field = chunk
         .series
         .fields
-        .get(0)
-        .expect("these series have one field");
+        .get(index)
+        .unwrap_or_else(|| panic!("the chunk carries no field {index}"));
     field
         .iter()
         .map(|sample| match sample {
@@ -828,23 +895,6 @@ fn an_unimplemented_node_is_reported_not_panicked() {
     let statement = || grid(0, 120_000, 2);
 
     let scalar_tree = scalar(1.0, statement());
-    let instant_tree = {
-        let out = statement();
-        map(
-            NativeNode {
-                expr: NativeExpr::Instant {
-                    input: Box::new(input()),
-                    op: BoundInstant {
-                        lookback_ms: 300_000,
-                        offset_ms: 0,
-                        output_grid: Arc::clone(&out),
-                    },
-                },
-                output: NativeType::Samples(evaluated_schema(out)),
-            },
-            vec![MathOp::Abs],
-        )
-    };
     let aggregate_tree = {
         let out = statement();
         NativeNode {
@@ -878,7 +928,6 @@ fn an_unimplemented_node_is_reported_not_panicked() {
 
     let cases = [
         ("Scalar", "root", scalar_tree),
-        ("Instant", "root.input", instant_tree),
         ("Aggregate", "root", aggregate_tree),
         ("Binary", "root", binary_tree),
     ];
@@ -2747,5 +2796,462 @@ fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
     assert!(
         ordered(&runs),
         "the merged history is not sorted, disjoint and joined: {runs:?}"
+    );
+}
+
+/// A bare selector stamps the last sample at or before each grid point onto its own grid.
+///
+/// The chunk is addressed on the node's output grid, not on the source's timestamps; a grid point
+/// may select a row an earlier point already did (the point after the last sample repeats it); and
+/// the same samples delivered as one chunk and as three answer the same, because the selection reads
+/// a whole axis rather than a chunk.
+#[test]
+fn a_bare_selector_selects_instants_onto_its_own_grid() {
+    let out_grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(instant(input(), 120_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let whole = raw_chunk(
+        &schema,
+        &[0, 30_000, 90_000, 120_000, 200_000],
+        &[1.0, 2.0, 3.0, 4.0, 5.0],
+        true,
+    );
+    // The same series as three chunks, so nothing about it is decided by a chunk boundary.
+    let split = [
+        raw_chunk(&schema, &[0, 30_000], &[1.0, 2.0], false),
+        raw_chunk(&schema, &[90_000], &[3.0], false),
+        raw_chunk(&schema, &[120_000, 200_000], &[4.0, 5.0], true),
+    ];
+
+    let mut once = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    once.push_raw(whole).unwrap();
+    let out = run(&mut once);
+
+    let mut piecewise = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let mut in_pieces = Vec::new();
+    for chunk in split {
+        let closing = chunk.is_last;
+        piecewise.push_raw(chunk).unwrap();
+        // Until the series ends nothing is decided for it, so only the closing chunk reports.
+        let pulled = piecewise.next_chunk().unwrap();
+        assert_eq!(
+            pulled.is_some(),
+            closing,
+            "a series reported a chunk before its last one arrived"
+        );
+        in_pieces.extend(pulled);
+    }
+    in_pieces.extend(piecewise.finish().unwrap());
+
+    assert_eq!(out.len(), 1, "one series is one chunk, however it arrived");
+    let chunk = &out[0];
+    assert!(chunk.is_last, "the only chunk of a series closes it");
+    assert!(
+        Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &out_grid),
+        "the chunk is addressed on a grid that is not the selection's output grid"
+    );
+    // 0 -> 0, 60s -> 30s, 120s -> 120s, 180s -> 120s: the row at 90s is never the last one before a
+    // grid point, and the point past the last sample repeats the row before it.
+    assert_eq!(
+        decided(&out),
+        vec![
+            (0, Some(1.0)),
+            (1, Some(2.0)),
+            (2, Some(4.0)),
+            (3, Some(4.0)),
+        ]
+    );
+    // A selection keeps the labels it read, the metric name included: unlike a range function it
+    // does not rewrite what the selector named.
+    assert_eq!(chunk.series.metric, metric());
+    assert_eq!(
+        decided(&in_pieces),
+        decided(&out),
+        "the same series split into chunks answered differently"
+    );
+}
+
+/// The lookback edge is exclusive: a sample exactly `lookback_ms` before a grid point is not
+/// selected, one millisecond later is.
+///
+/// This pins what the selection kernel does rather than what Prometheus' documentation suggests: a
+/// sample at the point itself is always selected, and the window is `(point - lookback, point]`.
+#[test]
+fn a_sample_at_the_lookback_edge_is_not_selected() {
+    // The statement's grid is the single point 1000ms, and the lookback is 200ms.
+    let out_grid = grid(1000, 100, 1);
+    let schema = raw_schema();
+    let selected = |timestamp: i64| {
+        let tree = NativeTree::try_new(instant(input(), 200, 0, Arc::clone(&out_grid))).unwrap();
+        let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+        execution
+            .push_raw(raw_chunk(&schema, &[timestamp], &[1.0], true))
+            .unwrap();
+        run(&mut execution)
+    };
+
+    // 800 is exactly `1000 - 200`, so the edge itself selects nothing.
+    let edge = selected(800);
+    assert_eq!(edge.len(), 1, "the series still closes on one chunk");
+    assert!(edge[0].is_last);
+    assert!(
+        decided(&edge).is_empty(),
+        "a sample exactly at the lookback edge was selected: {:?}",
+        decided(&edge)
+    );
+    // One millisecond inside the window is selected; a sample after the grid point never is.
+    assert_eq!(decided(&selected(801)), vec![(0, Some(1.0))]);
+    assert!(decided(&selected(1001)).is_empty());
+}
+
+/// A positive offset reads earlier samples, and a negative one later samples.
+#[test]
+fn an_offset_reads_a_different_sample_at_each_grid_point() {
+    let out_grid = grid(0, 60_000, 2);
+    let schema = raw_schema();
+    let values = |offset_ms: i64| {
+        let tree = NativeTree::try_new(instant(input(), 600_000, offset_ms, Arc::clone(&out_grid)))
+            .unwrap();
+        let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+        execution
+            .push_raw(raw_chunk(
+                &schema,
+                &[-60_000, 0, 60_000],
+                &[1.0, 2.0, 3.0],
+                true,
+            ))
+            .unwrap();
+        decided(&run(&mut execution))
+    };
+
+    assert_eq!(
+        values(0),
+        vec![(0, Some(2.0)), (1, Some(3.0))],
+        "without an offset a point reads the sample at or before it"
+    );
+    assert_eq!(
+        values(60_000),
+        vec![(0, Some(1.0)), (1, Some(2.0))],
+        "a minute of offset did not read the samples a minute earlier"
+    );
+    // A negative offset reads samples the statement's own range does not reach: both points read
+    // the sample one minute after them.
+    assert_eq!(
+        values(-60_000),
+        vec![(0, Some(3.0)), (1, Some(3.0))],
+        "a negative offset did not read the samples a minute later"
+    );
+}
+
+/// A series that selects nothing still closes, exactly once, on a chunk that holds no row.
+#[test]
+fn a_series_with_no_selectable_sample_closes_once() {
+    // Every sample carries the stale marker, which suppresses the selection at every point.
+    let stale = f64::from_bits(common_query::prometheus::PROMETHEUS_STALE_NAN_BITS);
+    let out_grid = grid(0, 60_000, 3);
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, pool(), &set);
+    let schema = raw_schema();
+    execution
+        .push_raw(raw_chunk(&schema, &[0, 60_000], &[stale, stale], true))
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1, "the series has to close exactly once");
+    let chunk = &out[0];
+    assert!(chunk.is_last);
+    assert!(
+        chunk.series.time.is_empty(),
+        "the closing chunk of a series that selected nothing holds a row"
+    );
+    assert_eq!(
+        series_start(chunk),
+        0,
+        "the empty chunk is not addressed on the grid"
+    );
+    assert!(
+        Arc::ptr_eq(chunk.series.time.grid().expect("a grid chunk"), &out_grid),
+        "the empty chunk is addressed on a grid that is not the selection's output grid"
+    );
+    assert_eq!(
+        chunk.series.metric,
+        metric(),
+        "the series lost its identity"
+    );
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::COMPLETED_SERIES),
+        1,
+        "the series did not close exactly once"
+    );
+}
+
+/// A row one field fills and another misses stays one row, with a null where the field misses it.
+#[test]
+fn a_selected_row_keeps_the_fields_that_miss_it_null() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree =
+        NativeTree::try_new(instant(raw_input_of(2), 60_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema_of(field_count(2));
+    // Each field holds a value at one of the two rows and none at the other.
+    let chunk = raw_chunk_columns(
+        &schema,
+        &[0, 60_000],
+        vec![vec![Some(1.0), None], vec![None, Some(4.0)]],
+        true,
+    );
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution.push_raw(chunk).unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1);
+    let chunk = &out[0];
+    assert_eq!(
+        chunk.series.time.len(),
+        2,
+        "a row no field of which holds a value was written down"
+    );
+    assert_eq!(field_values(chunk, 0), vec![Some(1.0), None]);
+    assert_eq!(field_values(chunk, 1), vec![None, Some(4.0)]);
+    assert_eq!(
+        chunk
+            .series
+            .time
+            .positions()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+/// A grid position nobody fills is not a row, and a hole does not close the series early.
+///
+/// The samples lie at the first and the last point of the grid with nothing in between, and the
+/// lookback is too short to carry either one across: two rows, two runs, and no row per position
+/// between them.
+#[test]
+fn a_position_no_field_fills_is_not_a_row() {
+    let out_grid = grid(0, 60_000, 5);
+    let tree = NativeTree::try_new(instant(input(), 1_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_raw(raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    // The hole between the two samples decides nothing, and it does not end the series.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a hole in the grid closed the series"
+    );
+    assert!(
+        execution.state().reserved_bytes() > 0,
+        "the open series is not reserved for"
+    );
+    execution
+        .push_raw(raw_chunk(&schema, &[240_000], &[5.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1);
+    let chunk = &out[0];
+    assert!(chunk.is_last);
+    assert_eq!(
+        chunk
+            .series
+            .time
+            .positions()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>(),
+        vec![0, 4],
+        "the positions nobody fills were written down as rows"
+    );
+    assert_eq!(decided(&out), vec![(0, Some(1.0)), (4, Some(5.0))]);
+    assert!(
+        chunk.range().is_none(),
+        "a chunk of two runs of positions was addressed as one range"
+    );
+}
+
+/// Two series that differ only in an empty-valued label are two series, and both are answered.
+///
+/// The label set the runtime's occupancy table compares drops empty values, so a node that recorded
+/// what it handed out under one would refuse the second series. A selection keeps the labels it
+/// read, empty values included, so it keeps them apart and records nothing.
+#[test]
+fn two_series_differing_only_in_an_empty_label_are_both_answered() {
+    let out_grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    // `zone=""` against an absent `zone`: one label set to everything that drops empty values.
+    execution
+        .push_raw(raw_chunk_of(
+            &schema,
+            b"a",
+            host_metric(Some("")),
+            &[0],
+            &[1.0],
+            true,
+        ))
+        .unwrap();
+    execution
+        .push_raw(raw_chunk_of(
+            &schema,
+            b"b",
+            host_metric(None),
+            &[0],
+            &[2.0],
+            true,
+        ))
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 2, "one of the two series was not answered");
+    assert_eq!(out[0].series.metric, host_metric(Some("")));
+    assert_eq!(out[1].series.metric, host_metric(None));
+    assert_eq!(decided(&out[..1]), vec![(0, Some(1.0))]);
+    assert_eq!(decided(&out[1..]), vec![(0, Some(2.0))]);
+}
+
+/// What a selection reserves is the series it has buffered, folded chunk by chunk.
+///
+/// The node holds a whole series, so its reservation grows with the chunks that series arrived in
+/// and goes back when the series is answered. The figure is the one the queue of a source keeps: an
+/// allocation two chunks share is counted once, which is what one pass over the buffer counts.
+#[test]
+fn an_instant_selection_reserves_the_series_it_buffers() {
+    let out_grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let mut previous = 0;
+    for timestamps in [vec![0, 60_000], vec![120_000], vec![180_000]] {
+        let values = vec![1.0; timestamps.len()];
+        execution
+            .push_raw(raw_chunk(&schema, &timestamps, &values, false))
+            .unwrap();
+        assert!(
+            execution.next_chunk().unwrap().is_none(),
+            "a series was reported before its last chunk arrived"
+        );
+        let held = execution.state().reserved_bytes();
+        let (folded, walked) = execution.state().instant_charge_pair(&NodePath::root());
+        assert_eq!(
+            folded, walked,
+            "the reservation is not what one pass over the buffered series counts"
+        );
+        assert_eq!(
+            held, folded,
+            "the buffered series is not what is reserved for"
+        );
+        assert!(
+            held > previous,
+            "the chunk was not reserved for: {held} bytes held after {previous}"
+        );
+        previous = held;
+    }
+    execution
+        .push_raw(raw_chunk(&schema, &[240_000], &[2.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "the series that was answered is still reserved for"
+    );
+}
+
+/// The selection's own limits are reported as its error, and an error stops the execution.
+#[test]
+fn an_oversized_selection_is_reported_as_its_error() {
+    // One million and two grid points over two samples: more points than the kernel will decide.
+    let out_grid = grid(0, 1, 1_000_002);
+    let tree = NativeTree::try_new(instant(input(), 1_000_000, 0, out_grid)).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let schema = raw_schema();
+    execution
+        .push_raw(raw_chunk(&schema, &[0, 1_000_001], &[1.0, 2.0], true))
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        error.to_string().contains("exceed limit"),
+        "the selection's own limit was not the error reported: {error}"
+    );
+    // Nothing is dropped silently: the execution stops and gives its reservation back.
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(execution.state().nodes_holding_instants(), 0);
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// An input that ends inside a series is an error, not an empty answer.
+#[test]
+fn an_input_that_ends_inside_a_series_is_reported() {
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, grid(0, 60_000, 2))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let schema = raw_schema();
+    execution
+        .push_raw(raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        error.to_string().contains("ended before the last chunk"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(
+        execution.state().nodes_holding_instants(),
+        0,
+        "the stopped execution still holds the buffered series"
+    );
+}
+
+/// A selection combines one series into one axis, so a chunk of another series is refused.
+///
+/// The buffered chunks are read as one axis, so a chunk of a second series has nowhere to go: it
+/// would be selected as though its samples were the open series'.
+#[test]
+fn a_chunk_of_another_series_is_refused() {
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, grid(0, 60_000, 2))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_raw(raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    // The second chunk carries another series' key.
+    execution
+        .push_raw(raw_chunk_of(
+            &schema,
+            b"series-b",
+            metric(),
+            &[60_000],
+            &[2.0],
+            true,
+        ))
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a chunk of another series arrived"),
+        "{error}"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "the refused series is still reserved for"
     );
 }
