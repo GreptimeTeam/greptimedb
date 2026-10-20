@@ -1,0 +1,165 @@
+-- count(col) and count(DISTINCT col) on append-only tables must not be answered
+-- from row-count statistics, while count(*) still is.
+CREATE TABLE n1 (ts TIMESTAMP TIME INDEX, v BIGINT, s STRING) WITH (append_mode='true');
+
+Affected Rows: 0
+
+INSERT INTO n1 VALUES (1000, 1, 'a'), (2000, NULL, 'a'), (3000, NULL, NULL), (4000, 4, 'b');
+
+Affected Rows: 4
+
+SELECT count(*), count(v), count(s), count(DISTINCT s) FROM n1;
+
++----------+-------------+-------------+----------------------+
+| count(*) | count(n1.v) | count(n1.s) | count(DISTINCT n1.s) |
++----------+-------------+-------------+----------------------+
+| 4        | 2           | 3           | 2                    |
++----------+-------------+-------------+----------------------+
+
+SELECT count(v) FROM n1;
+
++-------------+
+| count(n1.v) |
++-------------+
+| 2           |
++-------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT count(*) FROM n1;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[4 as count(*)] REDACTED
+|_|_|_PlaceholderRowExec REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+ADMIN FLUSH_TABLE('n1');
+
++-------------------------+
+| ADMIN FLUSH_TABLE('n1') |
++-------------------------+
+| 0                       |
++-------------------------+
+
+SELECT count(*), count(v), count(s), count(DISTINCT s) FROM n1;
+
++----------+-------------+-------------+----------------------+
+| count(*) | count(n1.v) | count(n1.s) | count(DISTINCT n1.s) |
++----------+-------------+-------------+----------------------+
+| 4        | 2           | 3           | 2                    |
++----------+-------------+-------------+----------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT count(*) FROM n1;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[4 as count(*)] REDACTED
+|_|_|_PlaceholderRowExec REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+DROP TABLE n1;
+
+Affected Rows: 0
+
+CREATE TABLE n2 (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  v BIGINT,
+  s STRING,
+  PRIMARY KEY (host)
+)
+PARTITION ON COLUMNS (host) (
+  host < 'm',
+  host >= 'm'
+)
+WITH (append_mode='true');
+
+Affected Rows: 0
+
+INSERT INTO n2 VALUES
+  ('a', 1000, 1, 'a'),
+  ('b', 2000, NULL, 'a'),
+  ('x', 3000, NULL, NULL),
+  ('y', 4000, 4, 'b');
+
+Affected Rows: 4
+
+-- count is pushed down to each region as a state aggregate.
+SELECT count(v), count(s) FROM n2;
+
++-------------+-------------+
+| count(n2.v) | count(n2.s) |
++-------------+-------------+
+| 2           | 3           |
++-------------+-------------+
+
+ADMIN FLUSH_TABLE('n2');
+
++-------------------------+
+| ADMIN FLUSH_TABLE('n2') |
++-------------------------+
+| 0                       |
++-------------------------+
+
+SELECT count(v), count(s) FROM n2;
+
++-------------+-------------+
+| count(n2.v) | count(n2.s) |
++-------------+-------------+
+| 2           | 3           |
++-------------+-------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT count(*) FROM n2;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[count(Int64(1))@0 as count(*)] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[{count[count]:2} as __count_state(n2.ts)] REDACTED
+|_|_|_PlaceholderRowExec REDACTED
+|_|_|_|
+| 1_| 1_|_ProjectionExec: expr=[{count[count]:2} as __count_state(n2.ts)] REDACTED
+|_|_|_PlaceholderRowExec REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+DROP TABLE n2;
+
+Affected Rows: 0
+
