@@ -72,3 +72,4 @@ query.workspace = true
 session.workspace = true
 table.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
+toml.workspace = true

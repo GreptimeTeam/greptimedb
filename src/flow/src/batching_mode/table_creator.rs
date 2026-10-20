@@ -37,7 +37,8 @@ pub enum QueryType {
 
 // auto created table have a auto added column `update_at`, and optional have a `AUTO_CREATED_PLACEHOLDER_TS_COL` column for time index placeholder if no timestamp column is specified
 // `derived` carries source-key lineage for an opt-in row-local flow and overrides the first-timestamp fallback of `build_by_sql_schema`
-// TODO(discord9): for now no default value is set for auto added column for compatibility reason with streaming mode, but this might change in favor of simpler code?
+// TODO(discord9): the auto added column still has no default value, because sink tables
+// created by earlier versions were built that way and must stay comparable.
 pub(super) fn create_table_with_expr(
     plan: &LogicalPlan,
     sink_table_name: &[String; 3],
