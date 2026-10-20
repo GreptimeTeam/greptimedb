@@ -123,6 +123,56 @@ fn merge_treats_empty_label_values_as_absent() {
     );
 }
 
+/// Members whose rows never share a position merge without colliding, so the whole merge runs to
+/// completion for every row. Each member is located once per row while collecting; resolving it
+/// again per row inside the merge would be a search per row, which is what a wide fan-in of
+/// disjoint single-point members would pay.
+#[test]
+fn merge_keeps_every_row_of_many_disjoint_members() {
+    const MEMBERS: usize = 64;
+    let schema = grid_schema(1, (2 * MEMBERS) as u64);
+    // One value per member at an even position, so no two members share a position and the
+    // collision check never fires.
+    let series = (0..MEMBERS)
+        .map(|index| {
+            let labels = Labels::from([
+                ("job".to_string(), "x".to_string()),
+                ("instance".to_string(), index.to_string()),
+            ]);
+            series_of(
+                &schema,
+                &labels,
+                &Points::from([(2 * index, (index as f64 + 1.0).to_bits())]),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    // Dropping `instance` makes every member share one label set.
+    let stripped = series
+        .into_iter()
+        .map(|mut series| {
+            series.metric.remove_all(&["instance"]);
+            series
+        })
+        .collect::<Vec<_>>();
+
+    let merged = merge_same_labelset(&schema, stripped).unwrap();
+    assert_eq!(merged.len(), 1, "one label set, so one merged series");
+    let expected = (0..MEMBERS)
+        .map(|index| (2 * index, (index as f64 + 1.0).to_bits()))
+        .collect::<Points>();
+    assert_eq!(
+        points_of(&merged[0]),
+        expected,
+        "every member's row survives the merge with its own value"
+    );
+    assert_eq!(
+        merged[0].time.len(),
+        MEMBERS,
+        "the merged axis carries one row per member, not the span"
+    );
+}
+
 /// Series of one label set merge field by field: different fields at one point combine, and
 /// only one field present in both collides.
 #[test]

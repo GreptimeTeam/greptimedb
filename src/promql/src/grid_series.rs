@@ -331,7 +331,9 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
     let mut series: Vec<Option<Series>> = series.into_iter().map(Some).collect();
     let mut output = Vec::with_capacity(groups.len());
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    // `(absolute position, member, compact row)`, sorted by position before merging.
+    // `(absolute position, member slot, compact row)`, sorted by position before merging. The
+    // slot indexes `members`, so the merge below picks the member's cursor directly instead of
+    // searching for the member per row.
     let mut rows: Vec<(usize, usize, usize)> = Vec::new();
     let mut values = vec![None; schema.fields.len()];
     let mut merged = vec![None; schema.fields.len()];
@@ -342,7 +344,7 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
         }
         builder.begin_series();
         rows.clear();
-        for &member in &members {
+        for (member_slot, &member) in members.iter().enumerate() {
             let member_series = series[member]
                 .as_ref()
                 .expect("each series is in one group");
@@ -360,12 +362,12 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
                 .collect();
             for (point, row) in member_series.time.positions() {
                 if read_row(&mut cursors, row, &mut values)? {
-                    rows.push((point, member, row));
+                    rows.push((point, member_slot, row));
                 }
             }
         }
-        // By position, then by member: the merge below walks the rows of each member forward, so
-        // its cursors never go back.
+        // By position, then by member slot: the slots follow the order `members` was built in, so
+        // the merge below still walks each member's rows forward and its cursors never go back.
         rows.sort_unstable();
         // One forward cursor per member and field, so re-reading a row costs neither a chunk scan
         // nor an allocation.
@@ -388,12 +390,8 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
             let end = start + rows[start..].partition_point(|&(p, _, _)| p == point);
             // Rows of one point merge field by field; only a field present twice collides.
             merged.iter_mut().for_each(|value| *value = None);
-            for &(_, member, row) in &rows[start..end] {
-                let member_index = members
-                    .iter()
-                    .position(|candidate| *candidate == member)
-                    .expect("the row names one of the members");
-                read_row(&mut cursors[member_index], row, &mut values)?;
+            for &(_, member_slot, row) in &rows[start..end] {
+                read_row(&mut cursors[member_slot], row, &mut values)?;
                 for (slot, value) in merged.iter_mut().zip(&values) {
                     if value.is_some() {
                         if slot.is_some() {
