@@ -258,7 +258,7 @@ async fn histogram_fraction_binary_join_preserves_partitioned_rows() {
         .await;
 
         let expr = format!(
-            r#"histogram_fraction(-Inf,+Inf,abs(label_replace(({table} + on(host) group_left() (sum by(host)({table}))),"le","+Inf","missing_label",".*")))"#
+            r#"histogram_fraction(-Inf,+Inf,abs(label_replace(({table} and on(host) (sum by(host)({table}))),"le","+Inf","missing_label",".*")))"#
         );
         for parallelism in [1, 4] {
             let mut query_ctx = QueryContext::with_db_name(None);
