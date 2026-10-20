@@ -38,7 +38,8 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 
 ## Write path
 
-`MitoEngine::handle_request` (`engine.rs`) → worker loop
+`MitoEngine::handle_request` (`engine.rs`), or `handle_batch_put_requests` for the puts
+of one request to several regions (one message per worker) → worker loop
 (`worker/handle_write.rs`) → sequence + WAL assembly (`region_write_ctx.rs`) →
 `wal.rs` → memtable (`memtable/`) → when buffer pressure trips, `flush.rs`
 writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest
@@ -50,6 +51,10 @@ writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest
 immutable `Version` (`region/version.rs`) → scans memtables and Parquet SSTs
 (`sst/parquet.rs`) → merges (`read/`) and dedups by sequence → projected,
 filtered `RecordBatch` stream.
+
+Internal series merges use the query runtime pool forwarded through
+`QueryScanContext`; reader and output-batch accounting uses the separate scan
+memory tracker. Direct scanner callers default to an unbounded operator pool.
 
 ## Public surface
 

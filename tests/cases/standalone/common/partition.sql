@@ -210,3 +210,19 @@ INSERT INTO `molestiAe` VALUES
 SELECT * FROM `molestiAe`;
 
 DROP TABLE `molestiAe`;
+
+-- The minimum of a signed type is a valid bound.
+CREATE TABLE int_min_bound (
+  a INT PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+) PARTITION ON COLUMNS (a) (
+  a < -2147483648,
+  a >= -2147483648 AND a < 0,
+  a >= 0
+);
+
+INSERT INTO int_min_bound VALUES (-2147483648, 1), (NULL, 2), (0, 3);
+
+SELECT * FROM int_min_bound ORDER BY ts;
+
+DROP TABLE int_min_bound;

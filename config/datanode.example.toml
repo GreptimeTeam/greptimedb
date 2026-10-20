@@ -337,11 +337,12 @@ overwrite_entry_start_id = false
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
 
-## Memory pool size for query execution operators (aggregation, sorting, join).
+## Memory pool size for query execution operators (aggregation, sorting, join,
+## and internal series merges during table scans).
 ## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
-## NOTE: This does NOT limit memory used by table scans.
+## Projected Parquet row groups and streamed scan batches use scan_memory_limit separately.
 ## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
@@ -665,22 +666,33 @@ manifest_cache_size = "256MB"
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 
-## Maximum number of SST files to scan concurrently.
+## Maximum number of SST files to scan concurrently when the memory limit is disabled
+## or a scan includes extension sources not covered by row-group accounting.
 max_concurrent_scan_files = 384
 
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
-## Memory limit for table scans across all queries.
+## Memory limit for table scans across all queries and regions.
+## Defaults to 25% of cgroup memory, or host memory when no cgroup limit is available.
 ## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 or "unlimited" disables the limit.
-scan_memory_limit = "unlimited"
-## Controls what happens when a scan cannot get memory immediately.
-## "fail" (default) fails fast and is the recommended option for most users.
-## "wait" / "wait(<duration>)" waits for memory to become available. This is mainly
-## for advanced tuning in bursty workloads where temporary contention is common and
-## higher latency is acceptable.
-## "wait" means "wait(10s)", not unlimited waiting.
+## Setting it to 0 or "unlimited" disables the limit and restores file-count checks.
+scan_memory_limit = "25%"
+
+## Memory accounting mode: "basic" (default) counts projected Parquet columns'
+## uncompressed row-group sizes while decoding, including files from older versions.
+## "extended" also counts cumulative streamed batches until stream drop.
+## Limited reservations round up to KB; unlimited accounting is byte-exact.
+## Internal series merges use query.memory_pool_size in both modes, sharing capacity
+## with other query operators on the executing node. Neither budget measures total process memory.
+scan_memory_mode = "basic"
+
+## Scan memory exhaustion always fails immediately.
+## Legacy "wait" / "wait(<duration>)" settings are deprecated. They are accepted
+## for upgrade compatibility, but startup logs a warning and treats them as "fail".
+## Change existing wait settings to "fail"; scans no longer wait for quota to free up.
+## This policy applies only to scan reservations. Series merges use the query pool
+## and fail immediately when that pool is exhausted.
 scan_memory_on_exhausted = "fail"
 
 ## Minimum time interval between two compactions.
