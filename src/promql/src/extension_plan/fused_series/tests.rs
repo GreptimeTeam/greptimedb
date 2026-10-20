@@ -53,12 +53,13 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
 
-use super::{FusedSeries, FusedSeriesBinding};
+use super::{FusedSeries, FusedSeriesBinding, OutputColumn, series_to_record_batch};
+use crate::evaluated::EvaluatedChunk;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundWindow, Grouping, NativeExpr,
@@ -1084,5 +1085,71 @@ fn an_input_column_the_binding_does_not_map_is_rejected() {
     assert!(
         error.to_string().contains("column \"zone\""),
         "refused without naming the column: {error}"
+    );
+}
+
+/// A chunk of several runs becomes one batch of exactly the rows it carries.
+///
+/// A sparse chunk holds the positions it has a value at and skips the rest, so a converter that
+/// read the timestamps of the range between its first and last position would emit a row per
+/// skipped position -- rows no field has a value at -- and a chunk of several runs has no single
+/// range to read at all.
+#[test]
+fn a_sparse_chunk_converts_to_one_batch_of_its_own_rows() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 60_000, 8).unwrap()).unwrap());
+    let time = TimeAxis::from_grid_spans(
+        Arc::clone(&grid),
+        vec![GridSpan::new(0, 2), GridSpan::new(5, 2)],
+    )
+    .expect("two runs of one grid");
+    let series = Series {
+        metric: MetricName::try_new(Some(Arc::from("x")), vec![]).unwrap(),
+        time,
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+            1.0, 2.0, 3.0, 4.0,
+        ]))),
+    };
+    let chunk = EvaluatedChunk::try_new(series, true).unwrap();
+
+    let output_schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("value", DataType::Float64, true),
+    ]));
+    let batch = series_to_record_batch(
+        &[OutputColumn::Time, OutputColumn::Field(0)],
+        &[],
+        &output_schema,
+        &chunk,
+    )
+    .expect("a chunk of two runs converts");
+
+    assert_eq!(batch.num_rows(), 4, "the batch holds a row per carried row");
+    let times = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .expect("the time column is a timestamp column");
+    assert_eq!(
+        (0..times.len())
+            .map(|row| times.value(row))
+            .collect::<Vec<_>>(),
+        // The two runs' own timestamps: 0 s, 60 s and 300 s, 360 s. Never 120 s and 240 s, the
+        // positions the chunk skips.
+        vec![0, 60_000, 300_000, 360_000]
+    );
+    let values = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("the field column is a float column");
+    assert_eq!(
+        (0..values.len())
+            .map(|row| values.value(row))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0, 4.0]
     );
 }
