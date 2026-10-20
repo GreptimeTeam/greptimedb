@@ -1820,3 +1820,51 @@ async fn primary_key_codec_identity_survives_merge_then_label_materialization() 
     }
     assert!(output.is_last);
 }
+
+/// A merged stream's label binding survives the frame wire form: the packed schema declares the
+/// decode description derived from the merge binding, so a consumer holding only that schema can
+/// rebuild a decoder and decode the merged keys without a request-side label source.
+#[tokio::test]
+async fn merged_frame_declares_a_label_decode_description_that_decodes_its_keys() {
+    use common_query::series_frame::{label_decode_spec, pack_raw_series, unpack_raw_series};
+    use datatypes::series::frame::raw_series_frame_label_decode;
+    use mito_codec::labels::{LabelProjection, PrimaryKeyLabelDecoder};
+
+    let key = read_key("rack-a", "sensor-1");
+    let (left, _, _) = stream(
+        label_source(1),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key.clone(), &[10, 30], &[1.0, 3.0], true))],
+    );
+    let (right, _, _) = stream(
+        label_source(2),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key.clone(), &[20, 40], &[2.0, 4.0], true))],
+    );
+    let merged = merge_ordered_raw_series(vec![left, right]).unwrap();
+    let expected = label_decode_spec(merged.label_source()).unwrap();
+    let series_schema = merged.schema().clone();
+    let binding = merged.label_source().clone();
+    let ordering = merged.ordering();
+    let framed = pack_raw_series(merged).unwrap();
+    let declared = framed.schema();
+    assert_eq!(
+        raw_series_frame_label_decode(declared.as_ref()).unwrap(),
+        Some(expected.clone())
+    );
+
+    // The recovered description alone rebuilds an equivalent decoder; no metadata snapshot from
+    // the merge is consulted.
+    let mut from_schema =
+        PrimaryKeyLabelDecoder::from_decode_spec(&expected, LabelProjection::All).unwrap();
+    let mut from_binding = PrimaryKeyLabelDecoder::new(&binding, LabelProjection::All).unwrap();
+    assert_eq!(
+        from_schema.decode(&key).unwrap(),
+        from_binding.decode(&key).unwrap()
+    );
+
+    let mut decoded = unpack_raw_series(framed, series_schema, binding, ordering).unwrap();
+    let first = decoded.next().await.unwrap().unwrap();
+    assert_eq!(first.primary_key.as_slice(), key.as_slice());
+    assert!(first.metric.is_none(), "key labels stay undecoded");
+}

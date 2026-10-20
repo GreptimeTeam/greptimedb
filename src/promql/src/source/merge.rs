@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
+use common_query::series_frame::label_decode_spec;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
@@ -67,8 +68,18 @@ fn invalid(reason: &'static str) -> BoxedError {
     BoxedError::new(InvalidSeriesSnafu { reason }.build())
 }
 
+/// Requires the merged stream's binding to be expressible as a frame label decode description.
+///
+/// The merged stream advertises one binding for all inputs, so a downstream consumer holding only
+/// the frame schema must be able to decode it. Validating through the derived description keeps
+/// that guarantee tied to the self-describing wire form instead of to a local metadata snapshot.
 fn validate_binding(binding: &RawLabelSource) -> Result<(), BoxedError> {
-    PrimaryKeyLabelDecoder::new(binding, LabelProjection::All)
+    let Some(description) = label_decode_spec(binding) else {
+        return Err(invalid(
+            "raw merge requires a primary-key binding that frame metadata can describe",
+        ));
+    };
+    PrimaryKeyLabelDecoder::from_decode_spec(&description, LabelProjection::All)
         .map(|_| ())
         .map_err(BoxedError::new)
 }

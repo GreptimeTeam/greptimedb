@@ -3419,6 +3419,99 @@ mod tests {
         }
     }
 
+    /// The frame's label decode description is compared as an exact string, so two sides that
+    /// derive it from equal bindings must produce byte-identical text, and any textual difference
+    /// must be a mismatch rather than a silent re-decode under one side.
+    #[test]
+    fn merge_scan_compares_label_decode_metadata_as_exact_text() {
+        use common_query::series_frame::{
+            label_decode_spec, raw_series_frame_schema_with_ordering,
+        };
+        use datatypes::series::SeriesOrdering;
+        use datatypes::series::frame::raw_series_frame_label_decode;
+
+        let raw = raw_test_series_schema();
+        // Two bindings that are equal but not the same allocation: the expectation and the
+        // advertised schema are built independently, as on a frontend and a datanode.
+        let binding = || {
+            let mut builder =
+                store_api::metadata::RegionMetadataBuilder::new(RegionId::new(1024, 1));
+            builder
+                .push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "host",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: api::v1::SemanticType::Tag,
+                    column_id: 7,
+                })
+                .push_column_metadata(store_api::metadata::ColumnMetadata {
+                    column_schema: datatypes::schema::ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: api::v1::SemanticType::Timestamp,
+                    column_id: 8,
+                })
+                .primary_key(vec![7]);
+            store_api::region_engine::RawLabelSource::PrimaryKey {
+                metric_name: "cpu_usage".into(),
+                physical_metadata: Arc::new(builder.build().unwrap()),
+                logical_tags: Arc::from([store_api::region_engine::BoundTag {
+                    column_id: 7,
+                    name: "host".into(),
+                }]),
+            }
+        };
+        let expected_binding = binding();
+        let actual_binding = binding();
+        assert_eq!(
+            label_decode_spec(&expected_binding),
+            label_decode_spec(&actual_binding)
+        );
+        let expected = raw_series_frame_schema_with_ordering(
+            &raw,
+            &expected_binding,
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let actual = raw_series_frame_schema_with_ordering(
+            &raw,
+            &actual_binding,
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let key = "greptime.series.label_decode";
+        assert_eq!(expected.metadata().get(key), actual.metadata().get(key));
+        assert!(
+            expected.metadata()[key].contains("\"encoding\":\"dense\""),
+            "the description is plain compact JSON: {}",
+            expected.metadata()[key]
+        );
+        assert!(
+            validate_remote_schema(&expected, &actual, "test").is_ok(),
+            "equal bindings must compare equal"
+        );
+
+        // Semantically equal but textually different descriptions are rejected: the reserved
+        // metadata is compared as exact text, not parsed and compared structurally.
+        let mut spaced_metadata = expected.metadata().clone();
+        let spaced_text = spaced_metadata[key].replacen(':', ": ", 1);
+        assert_ne!(spaced_text, spaced_metadata[key]);
+        spaced_metadata.insert(key.to_string(), spaced_text);
+        let spaced = ArrowSchema::new_with_metadata(expected.fields().clone(), spaced_metadata);
+        assert_eq!(
+            raw_series_frame_label_decode(&spaced)
+                .unwrap()
+                .map(|decode| decode.version),
+            Some(1),
+            "the spaced text is still a valid description"
+        );
+        assert!(validate_remote_schema(&expected, &spaced, "test").is_err());
+    }
+
     fn raw_test_series_schema() -> SeriesSchema {
         SeriesSchema {
             fields: vec![

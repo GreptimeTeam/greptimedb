@@ -15,10 +15,12 @@
 //! Streaming boundary between finite raw-series chunks and DataFusion record batches.
 //!
 //! Schema fields identify the ordered logical payload fields and codec layout; additional
-//! application metadata is permitted when stable across the stream. The caller-provided
-//! [`RawLabelSource`] is the label binding, not authenticated by the frame schema or field
-//! provenance. This adapter preserves scan candidates only; it is not a residual filter,
-//! authorization check, remote transport, or compaction boundary. Only
+//! application metadata is permitted when stable across the stream. A key-encoded frame also
+//! declares its own label decode description, so a consumer can decode labels from the received
+//! schema; the caller-provided [`RawLabelSource`] is a scan-bound identity that must agree with
+//! that description, and neither is authenticated as field provenance. This adapter preserves
+//! scan candidates only; it is not a residual filter, authorization check, remote transport, or
+//! compaction boundary. Only
 //! [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] are accepted;
 //! `Interleaved` is rejected before any poll.
 
@@ -32,13 +34,15 @@ use datafusion_common::DataFusionError;
 use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::frame::{
+    LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeSpec, LabelDecodeTag,
     RawLabelMode, RawSeriesChunkCursor, RawSeriesFrameBuilder, RawSeriesFrameDecoder,
-    raw_series_frame_schema,
+    raw_series_frame_label_decode, raw_series_frame_schema_with_label_decode,
 };
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::{MetricName, SeriesOrdering};
 use futures_util::Stream;
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
 mod record_batches;
@@ -50,13 +54,16 @@ mod tests;
 
 const ORDERING_KEY: &str = "greptime.series.ordering";
 
-/// Builds the canonical raw frame schema with the producer's guaranteed ordering.
+/// Builds the canonical raw frame schema with the producer's label binding and ordering.
 ///
 /// Ordering records a producer guarantee; it is not inferred from frame contents. `Interleaved`
-/// has no v1 wire representation and is rejected before the schema is assembled.
+/// has no v1 wire representation and is rejected before the schema is assembled. The label binding
+/// determines both the label mode and, for a primary-key binding, the self-describing label decode
+/// description written into the schema, so a frame can never declare a label layout it does not
+/// describe.
 pub fn raw_series_frame_schema_with_ordering(
     schema: &SeriesSchema,
-    mode: RawLabelMode,
+    label_source: &RawLabelSource,
     ordering: SeriesOrdering,
 ) -> datafusion_common::Result<ArrowSchemaRef> {
     let ordering = match ordering {
@@ -68,13 +75,61 @@ pub fn raw_series_frame_schema_with_ordering(
             ));
         }
     };
-    let schema = raw_series_frame_schema(schema, mode).map_err(codec_error)?;
+    let decode = label_decode_spec(label_source);
+    let schema = raw_series_frame_schema_with_label_decode(
+        schema,
+        label_mode(label_source),
+        decode.as_ref(),
+    )
+    .map_err(codec_error)?;
     let mut metadata = schema.metadata().clone();
     metadata.insert(ORDERING_KEY.to_string(), ordering.to_string());
     Ok(Arc::new(ArrowSchema::new_with_metadata(
         schema.fields().clone(),
         metadata,
     )))
+}
+
+/// Derives the label decode description a frame must carry for this binding.
+///
+/// A primary-key binding reduces to exactly what decoding reads: the metric name, the primary-key
+/// encoding, the ordered key columns with their physical types, and the logical tags. Region
+/// metadata guarantees the key list holds every tag column and nothing else, so the description
+/// needs no per-column role. Explicit bindings already carry complete labels and declare no
+/// description. Derivation cannot fail; a description a reader cannot honour is rejected when it is
+/// read, and a decoder rejects the logical tags it cannot bind.
+pub fn label_decode_spec(source: &RawLabelSource) -> Option<LabelDecodeSpec> {
+    let RawLabelSource::PrimaryKey {
+        metric_name,
+        physical_metadata,
+        logical_tags,
+    } = source
+    else {
+        return None;
+    };
+    Some(LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: metric_name.to_string(),
+        encoding: match physical_metadata.primary_key_encoding {
+            PrimaryKeyEncoding::Dense => LabelDecodeEncoding::Dense,
+            PrimaryKeyEncoding::Sparse => LabelDecodeEncoding::Sparse,
+        },
+        primary_key: physical_metadata
+            .primary_key_columns()
+            .map(|column| LabelDecodeColumn {
+                column_id: column.column_id,
+                name: column.column_schema.name.clone(),
+                physical_type: column.column_schema.data_type.clone(),
+            })
+            .collect(),
+        logical_tags: logical_tags
+            .iter()
+            .map(|tag| LabelDecodeTag {
+                column_id: tag.column_id,
+                name: tag.name.to_string(),
+            })
+            .collect(),
+    })
 }
 
 /// Reads the declared producer ordering, conservatively treating legacy frames as contiguous.
@@ -107,9 +162,10 @@ pub fn pack_raw_series(
     let schema = source.schema().clone();
     let label_source = source.label_source().clone();
     let mode = label_mode(&label_source);
-    // The declared frame schema carries the producer ordering; the shared builder's schema
-    // intentionally omits it, so every ready batch is declared before it is yielded.
-    let frame_schema = raw_series_frame_schema_with_ordering(&schema, mode, ordering)?;
+    // The declared frame schema carries the producer ordering and the label decode description;
+    // the shared builder's schema intentionally omits both, so every ready batch is declared under
+    // this schema before it is yielded, including when no row is ever produced.
+    let frame_schema = raw_series_frame_schema_with_ordering(&schema, &label_source, ordering)?;
     let builder = RawSeriesFrameBuilder::try_new(
         &schema,
         mode,
@@ -129,7 +185,7 @@ pub fn pack_raw_series(
     }))
 }
 
-/// Unpacks DataFusion batches using the caller's explicit scan binding and ordering.
+/// Unpacks DataFusion batches declared by [`pack_raw_series`], checking them against the binding.
 ///
 /// Only [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] streams are
 /// accepted; an `Interleaved` declaration is rejected before the stream is returned, including
@@ -137,7 +193,11 @@ pub fn pack_raw_series(
 /// adjacent chunk conditions but does not certify nonadjacent recurrence for `Contiguous`
 /// ordering.
 ///
-/// The supplied binding is retained unchanged and is not validated as field provenance.
+/// Decoding no longer depends on this binding: the frame schema declares its own label decode
+/// description, and the supplied binding must agree with it exactly. A frame that omits the
+/// description for a key binding, or declares a different one, is rejected instead of decoding
+/// under either side silently. The binding stays on the returned stream as the scan-bound identity
+/// so callers can compare it before polling; it is not authenticated as field provenance.
 pub fn unpack_raw_series(
     source: DfSendableRecordBatchStream,
     expected: Arc<SeriesSchema>,
@@ -147,6 +207,12 @@ pub fn unpack_raw_series(
     ensure_supported_ordering(ordering)?;
     let mode = label_mode(&label_source);
     let frame_schema = source.schema();
+    let declared = raw_series_frame_label_decode(frame_schema.as_ref()).map_err(codec_error)?;
+    if declared != label_decode_spec(&label_source) {
+        return Err(invalid(
+            "raw frame label decode description does not match the supplied binding",
+        ));
+    }
     let decoder = RawSeriesFrameDecoder::try_new(&expected, mode).map_err(codec_error)?;
     // Validate even empty streams' declared schema and layout before returning the stream.
     let empty = DfRecordBatch::new_empty(frame_schema.clone());

@@ -45,7 +45,7 @@ use store_api::region_engine::{
     BoundTag, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
 
-use super::{pack_raw_series, raw_series_frame_ordering, unpack_raw_series};
+use super::{label_decode_spec, pack_raw_series, raw_series_frame_ordering, unpack_raw_series};
 
 fn schema() -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
@@ -2391,7 +2391,7 @@ async fn interleaved_ordering_is_rejected_before_any_poll() {
     assert!(
         super::raw_series_frame_schema_with_ordering(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            &RawLabelSource::Explicit,
             SeriesOrdering::Interleaved,
         )
         .is_err(),
@@ -2627,4 +2627,173 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
             }
         }
     }
+}
+
+/// A primary-key binding over a region whose only tag is `host`.
+fn key_binding(metric: &str) -> RawLabelSource {
+    use api::v1::SemanticType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "host",
+                datatypes::data_type::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 0,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        })
+        .primary_key(vec![0]);
+    let metadata = Arc::new(builder.build().unwrap());
+    RawLabelSource::PrimaryKey {
+        metric_name: Arc::from(metric),
+        physical_metadata: metadata,
+        logical_tags: Arc::from([BoundTag {
+            column_id: 0,
+            name: Arc::from("host"),
+        }]),
+    }
+}
+
+fn key_chunk() -> RawSeriesChunk {
+    chunk_with(b"encoded-complete-key", &[1], vec![Some(3.0)], None, true)
+}
+
+/// Every packed key frame declares the label decode description derived from its binding, so a
+/// consumer needs no scan-side label source. Explicit frames declare none.
+#[tokio::test]
+async fn pack_declares_the_label_decode_description_of_its_binding() {
+    let binding = key_binding("cpu");
+    let (input, _, _) = raw_custom(
+        vec![key_chunk()],
+        SeriesOrdering::Contiguous,
+        binding.clone(),
+    );
+    let mut packed = pack_raw_series(input).unwrap();
+    let declared = packed.schema();
+    let canonical = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    assert_eq!(
+        declared.metadata().len(),
+        canonical.metadata().len() + 2,
+        "a key frame adds the producer ordering and the label decode description"
+    );
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(&declared).unwrap(),
+        label_decode_spec(&binding),
+        "the declared description is derived from the binding, not from the first row"
+    );
+    let batch = packed.next().await.unwrap().unwrap();
+    assert_eq!(batch.schema(), declared);
+
+    let (input, _, _) = raw_custom(
+        vec![key_chunk()],
+        SeriesOrdering::Contiguous,
+        RawLabelSource::Explicit,
+    );
+    let packed = pack_raw_series(input).unwrap();
+    let declared = packed.schema();
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(&declared).unwrap(),
+        None,
+        "explicit labels are already complete"
+    );
+    assert_eq!(declared.metadata().len(), canonical.metadata().len() + 1);
+}
+
+/// An empty key stream still declares the whole description before the first poll, so a consumer
+/// that only sees the schema can decode labels even when no row ever arrives.
+#[tokio::test]
+async fn empty_key_stream_declares_the_label_decode_description_before_any_poll() {
+    let binding = key_binding("cpu");
+    let (input, polls, _) = raw_custom(vec![], SeriesOrdering::KeyThenTime, binding.clone());
+    let mut packed = pack_raw_series(input).unwrap();
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(&packed.schema()).unwrap(),
+        label_decode_spec(&binding)
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        0,
+        "the schema is declared first"
+    );
+    assert!(packed.next().await.is_none());
+}
+
+/// Unpacking compares the frame's own description with the supplied binding: a frame that omits
+/// it, or declares a different one, is rejected instead of decoding under either side silently.
+#[tokio::test]
+async fn unpack_rejects_missing_or_mismatched_label_decode_descriptions() {
+    let binding = key_binding("cpu");
+    let (input, _, _) = raw_custom(
+        vec![key_chunk()],
+        SeriesOrdering::Contiguous,
+        binding.clone(),
+    );
+    let mut packed = pack_raw_series(input).unwrap();
+    let declared = packed.schema();
+    let batch = packed.next().await.unwrap().unwrap();
+
+    // The frame and the binding agree, so the round trip decodes.
+    let (source, _, _) = df_source(vec![batch.clone()], declared.clone());
+    let mut decoded = unpack_raw_series(
+        source,
+        schema(),
+        binding.clone(),
+        SeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let chunk = decoded.next().await.unwrap().unwrap();
+    assert_eq!(chunk.primary_key.as_slice(), b"encoded-complete-key");
+
+    // A frame that omits the description is not decodable from the schema alone.
+    let canonical = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    let mut metadata = canonical.metadata().clone();
+    metadata.insert(
+        "greptime.series.ordering".to_string(),
+        "contiguous".to_string(),
+    );
+    let stripped = Arc::new(datatypes::arrow::datatypes::Schema::new_with_metadata(
+        declared.fields().clone(),
+        metadata,
+    ));
+    let stripped_batch = RecordBatch::try_new(stripped.clone(), batch.columns().to_vec()).unwrap();
+    let (source, _, _) = df_source(vec![stripped_batch], stripped);
+    let error = match unpack_raw_series(
+        source,
+        schema(),
+        binding.clone(),
+        SeriesOrdering::Contiguous,
+    ) {
+        Ok(_) => panic!("a key frame without a description must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        StatusCode::InvalidArguments
+    );
+
+    // A binding that disagrees with the declared description is rejected as well.
+    let (source, _, _) = df_source(vec![batch], declared);
+    assert!(
+        unpack_raw_series(
+            source,
+            schema(),
+            key_binding("other_metric"),
+            SeriesOrdering::Contiguous
+        )
+        .is_err(),
+        "the description and the supplied binding must agree"
+    );
 }

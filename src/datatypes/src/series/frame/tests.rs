@@ -3058,3 +3058,346 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     assert!(explicit_decoder.decode(&first).is_err());
     assert!(key_decoder.decode(&nameless).is_err());
 }
+
+/// A dense description carrying the ordered key columns and the logical tags the decoder reads.
+fn dense_description() -> LabelDecodeSpec {
+    LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: "cpu_usage".to_string(),
+        encoding: LabelDecodeEncoding::Dense,
+        primary_key: vec![
+            LabelDecodeColumn {
+                column_id: 1,
+                name: "host".to_string(),
+                physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+            },
+            LabelDecodeColumn {
+                column_id: 2,
+                name: "region".to_string(),
+                physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+            },
+        ],
+        logical_tags: vec![LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        }],
+    }
+}
+
+#[test]
+fn label_decode_description_roundtrips_through_schema_metadata() {
+    let description = dense_description();
+    let key = raw_series_frame_schema_with_label_decode(
+        &test_schema(&["value"]),
+        RawLabelMode::Key,
+        Some(&description),
+    )
+    .unwrap();
+    assert_eq!(
+        raw_series_frame_label_decode(&key).unwrap(),
+        Some(description.clone())
+    );
+    // The description is metadata-only: the column contract is untouched.
+    assert_eq!(
+        key.fields(),
+        raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key)
+            .unwrap()
+            .fields()
+    );
+    assert_eq!(key.metadata().get(LABELS).map(String::as_str), Some("key"));
+}
+
+#[test]
+fn explicit_frames_declare_no_label_decode_description() {
+    let schema = test_schema(&["value"]);
+    let explicit =
+        raw_series_frame_schema_with_label_decode(&schema, RawLabelMode::Explicit, None).unwrap();
+    assert!(explicit.metadata().get(LABEL_DECODE).is_none());
+    assert_eq!(raw_series_frame_label_decode(&explicit).unwrap(), None);
+    // A key frame without a description, or an explicit frame with one, is rejected instead of
+    // being written as a frame the consumer cannot decode.
+    assert!(
+        raw_series_frame_schema_with_label_decode(&schema, RawLabelMode::Key, None).is_err(),
+        "key-encoded frames must describe their labels"
+    );
+    assert!(
+        raw_series_frame_schema_with_label_decode(
+            &schema,
+            RawLabelMode::Explicit,
+            Some(&dense_description())
+        )
+        .is_err(),
+        "explicit frames carry complete labels"
+    );
+}
+
+/// The raw frame's own columns with exactly the supplied metadata map.
+fn schema_with_metadata(metadata: Vec<(String, String)>) -> Schema {
+    let layout = raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key).unwrap();
+    Schema::new_with_metadata(layout.fields().clone(), metadata.into_iter().collect())
+}
+
+/// The four metadata entries every raw frame declares, with the given label mode.
+fn base_metadata(labels: &str) -> Vec<(String, String)> {
+    [
+        ("greptime.series.layout", "v1"),
+        ("greptime.series.content", "raw"),
+        ("greptime.series.labels", labels),
+        ("greptime.series.time", "timestamps"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect()
+}
+
+#[test]
+fn label_decode_description_rejects_inconsistent_bindings() {
+    let schema = test_schema(&["value"]);
+    let mut cases = Vec::new();
+
+    let mut duplicate_column = dense_description();
+    duplicate_column.primary_key[1].column_id = 1;
+    cases.push(("duplicate primary-key column", duplicate_column));
+
+    let mut unbound_tag = dense_description();
+    unbound_tag.logical_tags[0].column_id = 3;
+    cases.push(("logical tag outside the primary key", unbound_tag));
+
+    let mut duplicate_tag = dense_description();
+    let tag = duplicate_tag.logical_tags[0].clone();
+    duplicate_tag.logical_tags.push(tag);
+    cases.push(("duplicate logical tag", duplicate_tag));
+
+    for (label, description) in cases {
+        // Writing is faithful: the description records what the producer declares. Reading is
+        // where a description this revision cannot honour is rejected, so a producer cannot turn a
+        // bad binding into a frame a consumer would decode under silently.
+        let frame = raw_series_frame_schema_with_label_decode(
+            &schema,
+            RawLabelMode::Key,
+            Some(&description),
+        )
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(
+            frame.metadata().get(LABEL_DECODE).map(String::as_str),
+            Some(serde_json::to_string(&description).unwrap().as_str()),
+            "{label}: the written text is the encoder's own output"
+        );
+        assert!(
+            raw_series_frame_label_decode(&frame).is_err(),
+            "{label}: an inconsistent description is rejected when read"
+        );
+        // The same text in a hand-authored frame is rejected identically.
+        let mut metadata = base_metadata("key");
+        metadata.push((
+            LABEL_DECODE.to_string(),
+            serde_json::to_string(&description).unwrap(),
+        ));
+        assert!(
+            raw_series_frame_label_decode(&schema_with_metadata(metadata)).is_err(),
+            "{label}: an inconsistent description is rejected when read"
+        );
+    }
+}
+
+#[test]
+fn label_decode_description_rejects_malformed_metadata() {
+    let description = dense_description();
+    let encoded = serde_json::to_string(&description).unwrap();
+    let with = |labels: &str, payload: &str| {
+        let mut metadata = base_metadata(labels);
+        metadata.push((LABEL_DECODE.to_string(), payload.to_string()));
+        schema_with_metadata(metadata)
+    };
+
+    assert_eq!(
+        raw_series_frame_label_decode(&with("key", &encoded)).unwrap(),
+        Some(description.clone()),
+        "the well-formed description decodes"
+    );
+
+    for (label, payload) in [
+        (
+            "unknown version",
+            encoded.replace("\"version\":1", "\"version\":2"),
+        ),
+        (
+            "missing field",
+            encoded.replace("\"metric_name\":\"cpu_usage\",", ""),
+        ),
+        (
+            "unknown field",
+            encoded.replace("\"version\":1", "\"version\":1,\"extra\":0"),
+        ),
+        (
+            "wrong type",
+            encoded.replace("\"version\":1", "\"version\":\"1\""),
+        ),
+        ("not json", "greptime".to_string()),
+    ] {
+        assert!(
+            raw_series_frame_label_decode(&with("key", &payload)).is_err(),
+            "{label}: a description this revision cannot honour is an error"
+        );
+    }
+
+    // The label mode and the description must agree in both directions.
+    assert!(
+        raw_series_frame_label_decode(&with("explicit", &encoded)).is_err(),
+        "explicit frames carry complete labels"
+    );
+    assert!(
+        raw_series_frame_label_decode(&schema_with_metadata(base_metadata("key"))).is_err(),
+        "a key-encoded frame without a description is not decodable"
+    );
+    let without_mode = base_metadata("key")
+        .into_iter()
+        .filter(|(key, _)| key != LABELS)
+        .collect();
+    assert!(
+        raw_series_frame_label_decode(&schema_with_metadata(without_mode)).is_err(),
+        "a frame without a label mode has no label layout to describe"
+    );
+}
+
+#[test]
+fn raw_series_label_decode_metadata_fixture() {
+    use std::collections::HashMap;
+
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        metadata: HashMap<String, String>,
+        /// The encoding a decoding consumer expects, or `null` when the fixture must be rejected.
+        encoding: Option<String>,
+    }
+
+    // The exact text `serde_json::to_string` writes for this revision's writer, recorded from the
+    // encoder. A reader that regenerated the text differently breaks every remote comparison.
+    let dense_encoding = concat!(
+        "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",",
+        "\"primary_key\":[",
+        "{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},",
+        "{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}",
+        "],",
+        "\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+    );
+
+    let cases: Vec<Case> = serde_json::from_str(include_str!(
+        "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_metadata.json"
+    ))
+    .unwrap();
+    for case in cases {
+        let layout = raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key).unwrap();
+        let metadata = case
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let frame_schema = Schema::new_with_metadata(layout.fields().clone(), metadata);
+        match case.encoding.as_deref() {
+            None => assert!(
+                raw_series_frame_label_decode(&frame_schema).is_err(),
+                "{}: must be rejected",
+                case.name
+            ),
+            Some(expected) => {
+                let decode = raw_series_frame_label_decode(&frame_schema)
+                    .unwrap_or_else(|error| panic!("{}: {error}", case.name))
+                    .unwrap_or_else(|| panic!("{}: no description", case.name));
+                let encoding = match decode.encoding {
+                    LabelDecodeEncoding::Dense => "dense",
+                    LabelDecodeEncoding::Sparse => "sparse",
+                };
+                assert_eq!(encoding, expected, "{}", case.name);
+                assert_eq!(decode.version, LABEL_DECODE_VERSION, "{}", case.name);
+                assert_eq!(decode.metric_name, "cpu_usage", "{}", case.name);
+                assert_eq!(
+                    decode.primary_key,
+                    vec![
+                        LabelDecodeColumn {
+                            column_id: 1,
+                            name: "host".to_string(),
+                            physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+                        },
+                        LabelDecodeColumn {
+                            column_id: 2,
+                            name: "shard".to_string(),
+                            physical_type: crate::data_type::ConcreteDataType::uint32_datatype(),
+                        },
+                    ],
+                    "{}: the ordered key columns are decoded in place",
+                    case.name
+                );
+                assert_eq!(
+                    decode.logical_tags,
+                    vec![
+                        LabelDecodeTag {
+                            column_id: 1,
+                            name: "host".to_string(),
+                        },
+                        LabelDecodeTag {
+                            column_id: 2,
+                            name: "shard".to_string(),
+                        },
+                    ],
+                    "{}",
+                    case.name
+                );
+                if expected == "dense" {
+                    // The fixture text is the encoder's own output, byte for byte.
+                    assert_eq!(
+                        case.metadata.get(LABEL_DECODE).map(String::as_str),
+                        Some(dense_encoding),
+                        "{}: the frozen text is what the writer produces",
+                        case.name
+                    );
+                    let roundtrip = raw_series_frame_schema_with_label_decode(
+                        &test_schema(&["value"]),
+                        RawLabelMode::Key,
+                        Some(&decode),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        roundtrip.metadata().get(LABEL_DECODE),
+                        case.metadata.get(LABEL_DECODE),
+                        "{}: re-encoding reproduces the fixture text",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A tag column typed as a timestamp is described like any other key column: the description
+/// carries its physical type, and the text is exactly what the encoder wrote.
+#[test]
+fn label_decode_description_carries_a_timestamp_typed_tag_column() {
+    let mut description = dense_description();
+    description.primary_key[1].name = "observed".to_string();
+    description.primary_key[1].physical_type =
+        crate::data_type::ConcreteDataType::timestamp_millisecond_datatype();
+    description.logical_tags.push(LabelDecodeTag {
+        column_id: 2,
+        name: "observed".to_string(),
+    });
+    let frame = raw_series_frame_schema_with_label_decode(
+        &test_schema(&["value"]),
+        RawLabelMode::Key,
+        Some(&description),
+    )
+    .unwrap();
+    let text = frame.metadata().get(LABEL_DECODE).unwrap();
+    // The expected text is the encoder's real output for a timestamp-typed tag column.
+    assert!(
+        text.contains("\"physical_type\":{\"Timestamp\":{\"Millisecond\":null}}"),
+        "the encoder wrote a timestamp type: {text}"
+    );
+    let recovered = raw_series_frame_label_decode(&frame).unwrap().unwrap();
+    assert_eq!(recovered, description);
+    assert_eq!(
+        recovered.primary_key[1].physical_type,
+        crate::data_type::ConcreteDataType::timestamp_millisecond_datatype()
+    );
+}

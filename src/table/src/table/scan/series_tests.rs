@@ -36,6 +36,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::RawLabelMode;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
 use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
@@ -723,7 +724,7 @@ async fn supported_empty_stream_remains_native_with_declared_frame_schema() {
         plan.schema(),
         raw_series_frame_schema_with_ordering(
             plan.series_schema(),
-            RawLabelMode::Explicit,
+            &RawLabelSource::Explicit,
             SeriesOrdering::KeyThenTime
         )
         .unwrap()

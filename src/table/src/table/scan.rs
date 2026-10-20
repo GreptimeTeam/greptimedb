@@ -57,7 +57,6 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::RawLabelMode;
 use datatypes::series::samples::SeriesSchema;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -593,11 +592,7 @@ impl RegionScanExec {
             return Ok(None);
         };
         let ordering = scanner.raw_series_ordering();
-        let arrow_schema = raw_series_frame_schema_with_ordering(
-            &schema,
-            raw_label_mode(&label_source),
-            ordering,
-        )?;
+        let arrow_schema = raw_series_frame_schema_with_ordering(&schema, &label_source, ordering)?;
         let partition_count = scanner.properties().num_partitions().max(1);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
@@ -664,13 +659,6 @@ impl SeriesScanExec {
 
     pub fn query_stat_counters(&self) -> Option<RegionQueryStatCounters> {
         self.scan.query_stat_counters()
-    }
-}
-
-fn raw_label_mode(source: &RawLabelSource) -> RawLabelMode {
-    match source {
-        RawLabelSource::PrimaryKey { .. } => RawLabelMode::Key,
-        RawLabelSource::Explicit => RawLabelMode::Explicit,
     }
 }
 
@@ -785,11 +773,8 @@ impl ExecutionPlan for SeriesScanExec {
                 DataFusionError::Execution("raw series capability changed after planning".into())
             })?;
         let current_ordering = scanner.raw_series_ordering();
-        let current_frame = raw_series_frame_schema_with_ordering(
-            &current,
-            raw_label_mode(&self.label_source),
-            current_ordering,
-        )?;
+        let current_frame =
+            raw_series_frame_schema_with_ordering(&current, &self.label_source, current_ordering)?;
         if current_frame != self.arrow_schema
             || scanner.properties().num_partitions().max(1) != partitions
         {
@@ -825,6 +810,13 @@ impl ExecutionPlan for SeriesScanExec {
             ));
         }
         let packed = pack_raw_series(raw)?;
+        // The packed stream declares its own label decode description and ordering; it must match
+        // the schema this leaf advertised at planning time, since consumers decode from it.
+        if packed.schema() != self.arrow_schema {
+            return Err(DataFusionError::Execution(
+                "raw series stream schema does not match its planned schema".into(),
+            ));
+        }
         let stream = RecordBatchStreamAdapter::try_new(packed)
             .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
         let stream: SendableRecordBatchStream = Box::pin(stream);
