@@ -50,7 +50,7 @@ pub use batching_mode::task::{
 pub use batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 pub use batching_mode::utils::{
     IncrementalAggregateAnalysis, IncrementalAggregateMergeColumn, IncrementalAggregateMergeOp,
-    analyze_incremental_aggregate_plan, sql_to_df_plan,
+    analyze_incremental_aggregate_plan, df_plan_to_sql, sql_to_df_plan,
 };
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
