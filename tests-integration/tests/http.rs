@@ -81,11 +81,11 @@ use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
-    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
+    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_custom_options,
+    setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
-    setup_test_http_app_with_frontend_and_custom_options,
     setup_test_prom_app_with_frontend_and_memory_limiter,
+    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -1709,6 +1709,7 @@ pub async fn test_influxdb_write_decoded_body_charged(store_type: StorageType) {
         None,
         Some(http_opts),
         Some(memory_limiter),
+        false,
     )
     .await;
     let client = TestClient::new(app).await;

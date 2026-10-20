@@ -265,7 +265,8 @@ async fn remote_write_v2(
         experimental_enable_prometheus_native_histogram,
         &memory_limiter,
     )
-    .await {
+    .await
+    {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };

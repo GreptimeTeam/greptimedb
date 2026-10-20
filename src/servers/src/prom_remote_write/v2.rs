@@ -972,7 +972,9 @@ mod tests {
         assert_eq!(decoded.timeseries[0].samples[0].value, 42.0);
         assert_eq!(decoded.timeseries[0].metadata.as_ref().unwrap().r#type, 1);
         assert_eq!(
-            decode_v2_on_test_runtime(true, body, true).unwrap().sample_count,
+            decode_v2_on_test_runtime(true, body, true)
+                .unwrap()
+                .sample_count,
             1
         );
     }
