@@ -268,3 +268,26 @@ pub(crate) fn make_stream(
         inner: Box::pin(stream),
     })
 }
+
+/// Keeps complete identities when a format's numeric ID lookup yields a superset.
+pub(crate) fn filter_identities(
+    mut input: SendableRawSeriesStream,
+    keys: std::collections::HashSet<Vec<u8>>,
+) -> SendableRawSeriesStream {
+    let schema = input.schema().clone();
+    let label_source = input.label_source().clone();
+    let inner = Box::pin(async_stream::stream! {
+        while let Some(item) = input.next().await {
+            match item {
+                Ok(chunk) if keys.contains(chunk.primary_key.as_slice()) => yield Ok(chunk),
+                Ok(_) => {},
+                Err(error) => { yield Err(error); return; }
+            }
+        }
+    });
+    Box::pin(RawStream {
+        schema,
+        label_source,
+        inner,
+    })
+}

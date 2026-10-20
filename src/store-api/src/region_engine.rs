@@ -34,7 +34,7 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
-use futures::future::join_all;
+use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
@@ -656,7 +656,9 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         todo!()
     }
 
-    /// Prepares a finite, stable set of series for independent ordinal-range reads.
+    /// Asynchronously reads identity metadata (never sample payloads) and prepares a finite,
+    /// stable set of series for independent ordinal-range reads. The caller supplies the same
+    /// scan-bound label binding used by the raw-series entrypoint.
     ///
     /// `None` means unsupported before consumption, so callers may use the legacy record-batch
     /// scan. `Some`, including a source with zero series, selects this path; errors propagate
@@ -668,8 +670,9 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
-    ) -> Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError> {
-        Ok(None)
+        _label_source: &RawLabelSource,
+    ) -> BoxFuture<'static, Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError>> {
+        Box::pin(async { Ok(None) })
     }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
@@ -979,7 +982,8 @@ mod tests {
         );
         assert!(
             scanner
-                .prepare_series_partition(&ctx, &metrics, 0)
+                .prepare_series_partition(&ctx, &metrics, 0, &RawLabelSource::Explicit)
+                .await
                 .unwrap()
                 .is_none()
         );
