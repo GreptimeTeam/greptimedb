@@ -12,8 +12,11 @@ CREATE TABLE sink (
 
 Affected Rows: 0
 
+-- A projection/filter flow has no time window, so it runs as an explicit
+-- full-query flow on the batching scheduler and needs a schedule.
 CREATE FLOW filter_out
 SINK TO sink
+EVAL INTERVAL '1h'
 AS
 SELECT desc_str, ts FROM base
 WHERE desc_str IN ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j');
@@ -22,11 +25,11 @@ Affected Rows: 0
 
 SELECT options FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'filter_out';
 
-+---------------------------+
-| options                   |
-+---------------------------+
-| {"flow_type":"streaming"} |
-+---------------------------+
++--------------------------+
+| options                  |
++--------------------------+
+| {"flow_type":"batching"} |
++--------------------------+
 
 INSERT INTO base VALUES
 ('a', '2023-01-01 00:00:00'),
@@ -83,6 +86,7 @@ Affected Rows: 0
 
 CREATE FLOW filter_out
 SINK TO sink
+EVAL INTERVAL '1h'
 AS
 SELECT desc_str, ts FROM base
 WHERE desc_str NOT IN ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j');
@@ -91,11 +95,11 @@ Affected Rows: 0
 
 SELECT options FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'filter_out';
 
-+---------------------------+
-| options                   |
-+---------------------------+
-| {"flow_type":"streaming"} |
-+---------------------------+
++--------------------------+
+| options                  |
++--------------------------+
+| {"flow_type":"batching"} |
++--------------------------+
 
 INSERT INTO base VALUES
 ('a', '2023-01-01 00:00:00'),

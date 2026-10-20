@@ -275,16 +275,12 @@ fn determine_flow_type_for_source_state(
     flow_options: &HashMap<String, String>,
     has_missing_source_table: bool,
     has_instant_ttl_source_table: bool,
-    force_batching: bool,
 ) -> Result<Option<FlowType>> {
-    if has_instant_ttl_source_table && force_batching {
-        // The batching scheduler cannot read instant-TTL source tables, so
-        // reject this combination even when another source table is missing.
+    if has_instant_ttl_source_table {
+        // The batching scheduler cannot read instant-TTL source tables, and it is the
+        // only scheduler left, so reject the flow even when another source is missing.
         return InvalidSqlSnafu {
-            err_msg: format!(
-                "flow '{}' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode; use a TTL longer than the flush interval",
-                flow_name
-            ),
+            err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
         }
         .fail();
     }
@@ -312,29 +308,9 @@ fn determine_flow_type_for_source_state(
     Ok(None)
 }
 
-/// The stateless streaming runtime accepts only a single source scan wrapped by
-/// projections and filters. Keep this check local to the operator: the flow
-/// validator is intentionally private to the flow crate.
-fn is_stateless_flow_plan(plan: &LogicalPlan) -> bool {
-    let mut scans = 0;
-    let mut supported_nodes = true;
-    let result = plan.apply_with_subqueries(|node| {
-        match node {
-            LogicalPlan::TableScan(_) => scans += 1,
-            LogicalPlan::Projection(_) | LogicalPlan::Filter(_) => {}
-            LogicalPlan::Distinct(Distinct::All(_)) => {}
-            _ => supported_nodes = false,
-        }
-        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
-    });
+const INSTANT_TTL_FLOW_QUERY_ERROR: &str = "instant-TTL source tables are no longer supported as flow sources; create the flow over a persisted source table with a TTL longer than the flush interval";
 
-    result.is_ok() && supported_nodes && scans == 1
-}
-
-const INSTANT_TTL_FLOW_QUERY_ERROR: &str = "instant-TTL flow sources support only stateless projection/filter queries over one source; non-stateless queries require a persisted source";
-
-const STATELESS_FLOW_QUERY_ERROR: &str =
-    "flow streaming supports only stateless projection/filter queries over one source";
+const DISTINCT_ON_FLOW_QUERY_ERROR: &str = "DISTINCT ON is not supported in flow queries";
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -958,18 +934,17 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)
     }
 
-    /// Determines the flow type from source-table state, schedule requirements,
-    /// and SQL shape.
+    /// Validates a flow definition against its source tables.
     ///
-    /// Aggregates and persisted-source DISTINCT use batching. Plain DISTINCT is request-local only
-    /// for instant-TTL sources, where it retains the legacy streaming compatibility behavior.
+    /// The batching scheduler is the only execution profile, so this no longer selects a mode.
+    /// It keeps the source-table checks that must happen before the DDL procedure runs
+    /// (missing source opt-in, instant-TTL rejection, `DISTINCT ON` rejection) and always
+    /// reports [`FlowType::Batching`].
     async fn determine_flow_type(
         &self,
         expr: &CreateFlowExpr,
         query_ctx: QueryContextRef,
     ) -> Result<FlowType> {
-        let has_eval_interval = expr.eval_interval.is_some();
-
         let mut has_missing_source_table = false;
         let mut has_instant_ttl_source_table = false;
 
@@ -993,18 +968,13 @@ impl StatementExecutor {
 
             if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
                 warn!(
-                    "Source table `{}` for flow `{}`'s ttl=instant, {}",
+                    "Source table `{}` for flow `{}`'s ttl=instant, rejecting flow because instant-TTL sources are not supported as flow sources",
                     format_full_table_name(
                         &src_table_name.catalog_name,
                         &src_table_name.schema_name,
                         &src_table_name.table_name
                     ),
                     expr.flow_name,
-                    if has_eval_interval {
-                        "rejecting flow because EVAL INTERVAL requires the batching scheduler which does not support instant TTL"
-                    } else {
-                        "fallback to streaming mode"
-                    }
                 );
                 has_instant_ttl_source_table = true;
             }
@@ -1015,17 +985,14 @@ impl StatementExecutor {
             &expr.flow_options,
             has_missing_source_table,
             has_instant_ttl_source_table,
-            has_eval_interval,
         )? {
             return Ok(flow_type);
         }
 
-        // A flow with `EVAL INTERVAL` (and therefore possibly `EVAL OFFSET`)
-        // always uses the batching scheduler: the fixed epoch-phase schedule is
-        // only honored by the batching scheduler, regardless of the SQL shape.
-        // Non-aggregate SQL is supported as an explicit full-query flow (the
-        // batching engine requires a time-window expression or EVAL INTERVAL).
-        if has_eval_interval {
+        // A flow with `EVAL INTERVAL` (and therefore possibly `EVAL OFFSET`) already runs as an
+        // explicit full-query batching flow, whatever its SQL shape, so there is no schedule-less
+        // request-local shape left to reject here.
+        if expr.eval_interval.is_some() {
             return Ok(FlowType::Batching);
         }
 
@@ -1050,27 +1017,11 @@ impl StatementExecutor {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
         if is_tql_query {
-            if has_instant_ttl_source_table {
-                return InvalidSqlSnafu {
-                    err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
-                }
-                .fail();
-            }
             return Ok(FlowType::Batching);
         }
 
-        // Plan before selecting a mode. In particular, instant-TTL sources
-        // must not bypass validation of the stateless streaming subset.
         let plan = match stmt {
-            Statement::Tql(_) => {
-                if has_instant_ttl_source_table {
-                    return InvalidSqlSnafu {
-                        err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
-                    }
-                    .fail();
-                }
-                return Ok(FlowType::Batching);
-            }
+            Statement::Tql(_) => return Ok(FlowType::Batching),
             _ => engine
                 .planner()
                 .plan(&QueryStatement::Sql(stmt.clone()), query_ctx)
@@ -1079,74 +1030,39 @@ impl StatementExecutor {
                 .context(ExternalSnafu)?,
         };
 
-        /// Visitor to classify aggregation and DISTINCT separately. Plain DISTINCT is request
-        /// local only for instant-TTL sources; persisted-source DISTINCT keeps batching semantics.
-        struct FindQueryShape {
-            is_aggr: bool,
-            is_distinct: bool,
+        /// Visitor that only detects `DISTINCT ON`, which has no batching implementation.
+        struct FindDistinctOn {
             has_distinct_on: bool,
         }
 
-        impl TreeNodeVisitor<'_> for FindQueryShape {
+        impl TreeNodeVisitor<'_> for FindDistinctOn {
             type Node = LogicalPlan;
             fn f_down(
                 &mut self,
                 node: &Self::Node,
             ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion>
             {
-                match node {
-                    LogicalPlan::Aggregate(_) => self.is_aggr = true,
-                    LogicalPlan::Distinct(Distinct::All(_)) => self.is_distinct = true,
-                    LogicalPlan::Distinct(Distinct::On(_)) => self.has_distinct_on = true,
-                    _ => (),
+                if matches!(node, LogicalPlan::Distinct(Distinct::On(_))) {
+                    self.has_distinct_on = true;
                 }
                 Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
             }
         }
 
-        let mut query_shape = FindQueryShape {
-            is_aggr: false,
-            is_distinct: false,
+        let mut query_shape = FindDistinctOn {
             has_distinct_on: false,
         };
 
         plan.visit_with_subqueries(&mut query_shape)
             .context(BuildDfLogicalPlanSnafu)?;
-        if query_shape.has_distinct_on {
-            return InvalidSqlSnafu {
-                err_msg: if has_instant_ttl_source_table {
-                    INSTANT_TTL_FLOW_QUERY_ERROR.to_string()
-                } else {
-                    STATELESS_FLOW_QUERY_ERROR.to_string()
-                },
-            }
-            .fail();
-        }
-        if query_shape.is_aggr {
-            return if has_instant_ttl_source_table {
-                InvalidSqlSnafu {
-                    err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
-                }
-                .fail()
-            } else {
-                Ok(FlowType::Batching)
-            };
-        }
-        if query_shape.is_distinct && !has_instant_ttl_source_table {
-            return Ok(FlowType::Batching);
-        }
-
         ensure!(
-            is_stateless_flow_plan(&plan),
+            !query_shape.has_distinct_on,
             InvalidSqlSnafu {
-                err_msg: if has_instant_ttl_source_table {
-                    INSTANT_TTL_FLOW_QUERY_ERROR.to_string()
-                } else {
-                    STATELESS_FLOW_QUERY_ERROR.to_string()
-                },
+                err_msg: DISTINCT_ON_FLOW_QUERY_ERROR.to_string(),
             }
         );
-        Ok(FlowType::Streaming)
+
+        Ok(FlowType::Batching)
     }
 
     #[tracing::instrument(skip_all)]
@@ -3021,7 +2937,6 @@ mod test {
 
     #[cfg(feature = "enterprise")]
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
-    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
     #[cfg(feature = "enterprise")]
     use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef};
     #[cfg(feature = "enterprise")]
@@ -3044,9 +2959,6 @@ mod test {
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
-    use datafusion::functions_aggregate::expr_fn::count;
-    use datafusion::logical_expr::builder::LogicalTableSource;
-    use datafusion::logical_expr::{LogicalPlanBuilder, col};
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -3447,77 +3359,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         );
     }
 
-    fn stateless_test_scan(name: &str) -> LogicalPlan {
-        let schema = arrow::datatypes::Schema::new(vec![ArrowField::new(
-            "value",
-            ArrowDataType::Int32,
-            true,
-        )]);
-        LogicalPlanBuilder::scan(
-            name,
-            Arc::new(LogicalTableSource::new(Arc::new(schema))),
-            None,
-        )
-        .unwrap()
-        .build()
-        .unwrap()
-    }
-
-    #[test]
-    fn test_is_stateless_flow_plan_accepts_scan_projection_and_filter() {
-        let scan = stateless_test_scan("source");
-        assert!(is_stateless_flow_plan(&scan));
-
-        let projection = LogicalPlanBuilder::from(scan.clone())
-            .project(vec![col("value")])
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(is_stateless_flow_plan(&projection));
-
-        let filter = LogicalPlanBuilder::from(projection)
-            .filter(col("value").gt(datafusion_expr::lit(0)))
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(is_stateless_flow_plan(&filter));
-    }
-
-    #[test]
-    fn test_is_stateless_flow_plan_rejects_aggregate_and_multiple_scans() {
-        let scan = stateless_test_scan("source");
-        let aggregate = LogicalPlanBuilder::from(scan.clone())
-            .aggregate(
-                Vec::<datafusion_expr::Expr>::new(),
-                vec![count(col("value"))],
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(!is_stateless_flow_plan(&aggregate));
-
-        let distinct = LogicalPlanBuilder::from(scan.clone())
-            .distinct()
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(is_stateless_flow_plan(&distinct));
-
-        let distinct_on_aggregate = LogicalPlanBuilder::from(aggregate)
-            .distinct()
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(!is_stateless_flow_plan(&distinct_on_aggregate));
-
-        let multiple_scans = LogicalPlanBuilder::from(stateless_test_scan("left"))
-            .cross_join(stateless_test_scan("right"))
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(!is_stateless_flow_plan(&multiple_scans));
-    }
-
     // --- Schedule option tests ---
 
     #[test]
@@ -3614,9 +3455,8 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
     #[test]
     fn test_determine_flow_type_for_source_state_missing_sources_require_opt_in() {
-        let err =
-            determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false, false)
-                .unwrap_err();
+        let err = determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false)
+            .unwrap_err();
 
         assert!(err.to_string().contains(
             "missing source tables for flow 'my_flow'; use WITH (defer_on_missing_source = true) to create a pending flow"
@@ -3629,39 +3469,32 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string())]);
 
         assert_eq!(
-            determine_flow_type_for_source_state("my_flow", &flow_options, true, true, false)
-                .unwrap(),
+            determine_flow_type_for_source_state("my_flow", &flow_options, true, false).unwrap(),
             Some(FlowType::Batching)
         );
-        let err = determine_flow_type_for_source_state("my_flow", &flow_options, true, true, true)
-            .unwrap_err();
-        assert!(err.to_string().contains(
-            "flow 'my_flow' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode"
-        ));
+        // An instant-TTL source is rejected even when another source is missing.
+        let err =
+            determine_flow_type_for_source_state("my_flow", &flow_options, true, true).unwrap_err();
+        assert!(err.to_string().contains(INSTANT_TTL_FLOW_QUERY_ERROR));
     }
 
     #[test]
     fn test_determine_flow_type_for_source_state_existing_sources_require_plan() {
         assert_eq!(
-            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true, false)
-                .unwrap(),
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, false).unwrap(),
             None
         );
     }
 
     #[test]
-    fn test_determine_flow_type_for_source_state_instant_ttl_with_eval_interval_is_rejected() {
-        // A flow with `EVAL INTERVAL` is forced onto the batching scheduler,
-        // which cannot read instant-TTL source tables: reject instead of
-        // silently falling back to streaming (where the schedule/offset would
-        // be ignored).
-        let err =
-            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true, true)
-                .unwrap_err();
+    fn test_determine_flow_type_for_source_state_instant_ttl_is_rejected() {
+        // The batching scheduler is the only execution profile left and it
+        // cannot read instant-TTL source tables, so reject them for every flow
+        // instead of silently degrading.
+        let err = determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true)
+            .unwrap_err();
         assert!(
-            err.to_string().contains(
-                "flow 'my_flow' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode"
-            ),
+            err.to_string().contains(INSTANT_TTL_FLOW_QUERY_ERROR),
             "unexpected error: {err}"
         );
     }

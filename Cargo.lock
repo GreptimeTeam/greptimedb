@@ -5442,7 +5442,6 @@ dependencies = [
  "datafusion-physical-expr",
  "datatypes",
  "futures",
- "get-size2",
  "greptime-proto",
  "hostname 0.4.1",
  "humantime-serde",
@@ -5979,12 +5978,6 @@ dependencies = [
  "geo-types",
  "libm",
 ]
-
-[[package]]
-name = "get-size2"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b5034f0cabe33ffe2b0c193e283568fb0ebe93fe93f05b424ed1b751d2cf42b"
 
 [[package]]
 name = "getopts"

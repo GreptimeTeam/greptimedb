@@ -149,7 +149,7 @@ CREATE TABLE out_nullable_pk (
     PRIMARY KEY (pid, client)
 );
 
-CREATE FLOW calc_nullable_pk SINK TO out_nullable_pk AS
+CREATE FLOW calc_nullable_pk SINK TO out_nullable_pk EVAL INTERVAL '1h' AS
 SELECT
     pid,
     client,
