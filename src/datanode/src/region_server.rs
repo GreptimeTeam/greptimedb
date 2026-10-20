@@ -2992,8 +2992,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        let status = mock_region_server.inner.region_map.get(&region_id);
-        assert!(status.is_none());
+        assert!(!mock_region_server.inner.region_map.contains_key(&region_id));
 
         mock_region_server
             .inner
@@ -3012,8 +3011,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        let status = mock_region_server.inner.region_map.get(&region_id);
-        assert!(status.is_some());
+        assert!(mock_region_server.inner.region_map.contains_key(&region_id));
 
         let insert = api::v1::region::InsertRequest {
             region_id: region_id.as_u64(),
