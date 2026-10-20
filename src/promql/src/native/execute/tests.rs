@@ -1349,9 +1349,13 @@ fn a_merge_across_a_closed_series_is_not_implemented() {
 /// Two open chunks that share a label set are accepted where no position of a field collides.
 ///
 /// `a{job="x"}` and `b{job="x"}` are two series to the input and one label set to `abs`, which
-/// drops the name. The source is interleaved, so the second one is pushed while the first is still
-/// open, and neither says it is the last chunk of its series. The two occupy disjoint positions of
-/// field 0 — a value at 0 and a value at 3 — so the label-set check hands both on.
+/// drops the name. Neither piece says it is the last chunk of its series, so the second one arrives
+/// while the first is still open. The two occupy disjoint positions of field 0 — a value at 0 and a
+/// value at 3 — so the label-set check hands both on.
+///
+/// The ordering is contiguous because that is the only ordering this runtime executes: the stream
+/// below is not one a scan produces, since it never closes `a`, and what is checked here is the
+/// occupancy the check reads rather than a delivery order.
 ///
 /// This is acceptance by that check, and it is not a merge: this layer passes every chunk through
 /// as it arrives and keeps no sample state that would combine two series. Merging two series under
@@ -1361,10 +1365,10 @@ fn a_merge_across_a_closed_series_is_not_implemented() {
 fn two_open_series_that_share_a_label_set_are_accepted_when_no_position_collides() {
     let map_grid = grid(0, 60_000, 4);
     let tree = NativeTree::try_new(map(
-        evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Interleaved),
+        evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Contiguous),
         vec![MathOp::Abs],
     ))
-    .expect("a map-only tree is legal over an interleaved input");
+    .expect("a map-only tree is legal over a contiguous input");
     let schema = evaluated_schema(Arc::clone(&map_grid));
 
     let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
@@ -1645,6 +1649,12 @@ fn a_chunk_with_no_output_keeps_charging_the_emitted_table() {
 }
 
 /// A window cannot run over an interleaved input, and the runtime says so before reading a chunk.
+///
+/// The binding refuses a window whose own input declares the ordering, and the runtime refuses the
+/// ordering itself -- which is what catches a window over a map over the source, where the binding
+/// only sees the map. A tree with no window above the source is refused by the same check, since
+/// every node here reads one series at a time; [`an_interleaved_input_is_refused_without_a_window`]
+/// is that case on its own.
 #[test]
 fn a_window_over_an_interleaved_input_is_rejected() {
     let inner_grid = grid(0, 60_000, 2);
@@ -1688,44 +1698,37 @@ fn a_window_over_an_interleaved_input_is_rejected() {
     );
     let message = error.to_string();
     assert!(message.contains("Interleaved"), "{message}");
-    assert!(message.contains("at root "), "{message}");
     assert!(message.contains("root.input"), "{message}");
+}
 
-    // A map needs no ordering: it holds one chunk at a time, so the series of an interleaved stream
-    // never have to be contiguous. `A1, B1, A2, B2` runs here as it arrives.
-    let map_grid = grid(0, 60_000, 4);
+/// An interleaved input is refused with no window above it to notice it.
+///
+/// A map over an input has no evaluator, so nothing in the tree reads one series to its `is_last`.
+/// The sequence the input node cannot tell from a whole one is `a{job="x"}` open, `b{job="y"}`
+/// closed, and the end of the input: the flag that reports a series left open would say the last
+/// chunk closed its series and `finish` would accept an input whose first series never closed. The
+/// runtime therefore refuses the ordering when the state is built, before a chunk is read, instead
+/// of reporting a truncation it cannot see.
+#[test]
+fn an_interleaved_input_is_refused_without_a_window() {
+    let map_grid = grid(0, 60_000, 2);
     let tree = NativeTree::try_new(map(
         evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Interleaved),
         vec![MathOp::Abs],
     ))
-    .expect("a map-only tree is legal over an interleaved input");
-    let schema = evaluated_schema(Arc::clone(&map_grid));
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
-    for (name, job, start, values, is_last) in [
-        ("a", "x", 0, vec![Some(-1.0), Some(-2.0)], false),
-        ("b", "y", 0, vec![Some(-3.0), Some(-4.0)], false),
-        ("a", "x", 2, vec![Some(-5.0), Some(-6.0)], true),
-        ("b", "y", 2, vec![Some(-7.0), Some(-8.0)], true),
-    ] {
-        execution
-            .push_evaluated(evaluated_chunk_of(
-                &schema,
-                named_metric(name, job),
-                start,
-                values,
-                is_last,
-            ))
-            .unwrap();
-    }
-    assert_eq!(
-        addressed(&run(&mut execution)),
-        vec![
-            (0, vec![Some(1.0), Some(2.0)]),
-            (0, vec![Some(3.0), Some(4.0)]),
-            (2, vec![Some(5.0), Some(6.0)]),
-            (2, vec![Some(7.0), Some(8.0)]),
-        ]
+    .expect("the binding accepts a map over an interleaved input");
+    let error =
+        match NativeExecutionState::try_new(&tree, pool(), &ExecutionPlanMetricsSet::new(), 0) {
+            Ok(_) => panic!("the runtime accepted an interleaved input with no window above it"),
+            Err(error) => error,
+        };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
     );
+    let message = error.to_string();
+    assert!(message.contains("Interleaved"), "{message}");
+    assert!(message.contains("root.input"), "{message}");
 }
 
 /// The charge for the label sets a node has handed out does not depend on how it is read.
@@ -1781,6 +1784,11 @@ fn the_emitted_charge_is_the_same_folded_in_as_walked() {
 /// This is the other order of [`two_series_with_no_result_do_not_collide`], and the one that used to
 /// fail: by the time the empty series arrives the label set is already closed, and refusing it
 /// failed an execution whose answer was never in doubt.
+///
+/// The set is closed here, which is what makes the empty series a later one that also answers
+/// empty. Its mirror image -- an empty closing chunk that arrives while the set is still open -- is
+/// [`an_empty_closing_chunk_of_another_series_does_not_close_a_label_set`], where the same series
+/// is not a harmless extra but would take the close away from the series that filled the set.
 #[test]
 fn a_series_with_no_result_after_a_closed_one_is_passed_over() {
     let map_grid = grid(0, 60_000, 1);
@@ -1820,6 +1828,68 @@ fn a_series_with_no_result_after_a_closed_one_is_passed_over() {
             .flatten()
             .any(|(_, value)| *value == Some(7.0)),
         "the first series' value is missing: {handed:?}"
+    );
+}
+
+/// An empty closing chunk of one series does not close a label set another series is still filling.
+///
+/// `abs` drops the metric name, so `a{job="x"}` and `b{job="x"}` are one label set to the map. `b`
+/// holds no row at all: its closing chunk closes a series that contributed nothing, so it must not
+/// close the set `a` opened, or `a`'s continuation would be refused for a label set that `a` itself
+/// never closed. Two series back to back are what contiguous input hands over, so this is a stream
+/// the runtime executes rather than an ordering it refuses.
+#[test]
+fn an_empty_closing_chunk_of_another_series_does_not_close_a_label_set() {
+    let map_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&map_grid)),
+        vec![MathOp::Abs],
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+
+    // `a` opens the label set and has not closed it when `b` closes an empty series onto it, and the
+    // chunk that closes `a` itself comes last.
+    let chunks = [
+        evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(-1.0)], false),
+        evaluated_chunk_of(&schema, named_metric("b", "x"), 0, vec![], true),
+        evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(-2.0)], true),
+    ];
+    let steps = chunks.len();
+    let mut handed = Vec::new();
+    for (step, chunk) in chunks.into_iter().enumerate() {
+        execution.push_evaluated(chunk).unwrap();
+        while let Some(chunk) = execution
+            .next_chunk()
+            .unwrap_or_else(|error| panic!("step {step} was refused: {error}"))
+        {
+            handed.push(chunk);
+        }
+    }
+    assert_eq!(
+        handed.len(),
+        steps,
+        "the map did not consume all {steps} chunks it was given: {:?}",
+        decided(&handed)
+    );
+    let last = handed.last().expect("the map handed nothing on");
+    assert!(last.is_last, "the final output does not close its series");
+    // `abs` drops the metric name, so the label set the output closes is `{job="x"}`.
+    let mut mapped = named_metric("a", "x");
+    mapped.remove("__name__");
+    assert_eq!(
+        last.series.metric, mapped,
+        "the final output closes a label set other than the one `abs` leaves of `a{{job=\"x\"}}`"
+    );
+    assert_eq!(
+        (series_start(last), sample_values(last)),
+        (1, vec![Some(2.0)]),
+        "the value `a` held at position 1 did not survive"
+    );
+    assert!(
+        execution.finish().unwrap().is_empty(),
+        "the map still held a chunk when the input ended"
     );
 }
 
@@ -1958,10 +2028,10 @@ fn a_sparse_chunk_is_read_at_the_positions_it_holds_through_window_map_window() 
 fn a_sparse_chunk_occupies_only_the_positions_it_holds() {
     let map_grid = grid(0, 60_000, 8);
     let tree = NativeTree::try_new(map(
-        evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Interleaved),
+        evaluated_input(Arc::clone(&map_grid)),
         vec![MathOp::Abs],
     ))
-    .expect("a map-only tree is legal over an interleaved input");
+    .unwrap();
     let schema = evaluated_schema(Arc::clone(&map_grid));
 
     let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
@@ -2527,7 +2597,7 @@ fn a_series_whose_axis_and_fields_disagree_is_rejected() {
 
     let mut emitted = Emitted::default();
     let error = emitted
-        .occupy(&NodePath::root(), &chunk)
+        .occupy(&NodePath::root(), Some(&chunk.series.metric), &chunk)
         .expect_err("a field with fewer samples than the axis places rows was accepted");
     let message = error.to_string();
     assert!(
@@ -2543,8 +2613,8 @@ fn a_series_whose_axis_and_fields_disagree_is_rejected() {
 /// The `History` of a label set lives in the map's slot, so a `size_of::<History>()` term in the
 /// entry's own figure billed one header twice: once here and once in the capacity term beside it.
 /// The two assertions below are the definition of the whole figure -- the labels, the vectors and
-/// their runs, and one label-set slot plus one history slot per entry -- so either header counted
-/// in the wrong place fails them.
+/// their runs, the owner's name and tags, and one label-set slot plus one history slot per entry --
+/// so either header counted in the wrong place fails them.
 #[test]
 fn a_history_entry_is_charged_once_for_its_header() {
     let grid = grid(0, 10_000, 2);
@@ -2553,15 +2623,32 @@ fn a_history_entry_is_charged_once_for_its_header() {
     let labels = label_set(&metric);
     // Not the closing chunk: a closed label set drops its runs, and the runs are what the entry's
     // own figure is.
-    let chunk = evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], false);
+    let chunk = evaluated_chunk_of(
+        &schema,
+        metric.clone(),
+        0,
+        vec![Some(1.0), Some(2.0)],
+        false,
+    );
 
     let mut emitted = Emitted::default();
-    emitted.occupy(&NodePath::root(), &chunk).unwrap();
+    emitted
+        .occupy(&NodePath::root(), Some(&metric), &chunk)
+        .unwrap();
 
     let history = emitted
         .sets
         .get(&labels)
         .expect("the chunk recorded its label set");
+    // The owner the entry keeps is the series that filled it, so its name and each tag cost the
+    // same bytes the label set of the chunk did.
+    let owner = metric.name().map_or(0, |name| name.len())
+        + std::mem::size_of_val(metric.tags())
+        + metric
+            .tags()
+            .iter()
+            .map(|tag| tag.name.len() + tag.value.len())
+            .sum::<usize>();
     let entry = label_bytes(&labels)
         .saturating_add(history.fields.capacity() * std::mem::size_of::<Vec<Run>>())
         .saturating_add(
@@ -2570,7 +2657,13 @@ fn a_history_entry_is_charged_once_for_its_header() {
                 .iter()
                 .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
                 .sum::<usize>(),
-        );
+        )
+        .saturating_add(owner);
+    assert_eq!(
+        history.owner.as_ref(),
+        Some(&metric),
+        "the entry does not name the series that filled it"
+    );
     assert!(
         history.fields.iter().any(|runs| !runs.is_empty()),
         "the entry kept no run, so it has no heap of its own to charge for"
@@ -2578,8 +2671,8 @@ fn a_history_entry_is_charged_once_for_its_header() {
     assert_eq!(
         emitted.entries,
         entry,
-        "the entry's own bytes are not its labels and runs alone: a `History` header in the figure \
-         would add the {} bytes its slot already charges",
+        "the entry's own bytes are not its labels, its runs and its owner: a `History` header in \
+         the figure would add the {} bytes its slot already charges",
         std::mem::size_of::<History>(),
     );
     assert_eq!(
@@ -2625,7 +2718,7 @@ fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
             false,
         );
         emitted
-            .occupy(&path, &chunk)
+            .occupy(&path, Some(&chunk.series.metric), &chunk)
             .unwrap_or_else(|error| panic!("position {position} was refused: {error}"));
     };
     // The runs stored under the one label set, which is what `absorb` keeps in position order.

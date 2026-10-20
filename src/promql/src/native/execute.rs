@@ -51,13 +51,13 @@ use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReser
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::{Array, Float64Array};
 use datatypes::arrow::buffer::Buffer;
-use datatypes::series::SeriesOrdering;
 use datatypes::series::histogram::HistogramBatch;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{
     DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{GridRange, TimeAxis};
+use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::grid_series::{LabelSet, label_set};
 use crate::map::{MathOp, drop_metric_name, map_math};
@@ -96,6 +96,17 @@ impl NativeChunk {
         match self {
             Self::Raw(chunk) => chunk.is_last,
             Self::Evaluated(chunk) => chunk.is_last,
+        }
+    }
+
+    /// The identity of the series this chunk belongs to, when the chunk names it.
+    ///
+    /// A raw chunk in bound-label mode carries its identity in its key and no metric name, so there
+    /// is nothing to compare; an evaluated chunk always names the series it holds.
+    fn metric(&self) -> Option<&MetricName> {
+        match self {
+            Self::Raw(chunk) => chunk.metric.as_ref(),
+            Self::Evaluated(chunk) => Some(&chunk.series.metric),
         }
     }
 
@@ -528,11 +539,35 @@ struct Emitted {
 struct History {
     /// The occupied runs of each field, in position order and disjoint.
     fields: Vec<Vec<Run>>,
+    /// The source series that filled this label set, when the chunk that did named it.
+    ///
+    /// A chunk holding no value is handed over to close a series, never to fill a label set, so it
+    /// closes this one only when it belongs to the series that filled it: a second series that
+    /// produced nothing here is a series this label set never saw, and closing on its `is_last`
+    /// would leave the series that did produce the values unable to finish. `None` is a set filled
+    /// by chunks that named no series, where there is nothing to compare a closing chunk against.
+    owner: Option<MetricName>,
     /// Whether the series on this label set closed. A second series cannot close it again.
     closed: bool,
-    /// The heap this entry owns: the runs its per-field vectors hold, kept current by
-    /// [`Emitted::occupy`]. The header and the slot it sits in are charged by the table's capacity.
+    /// The heap this entry owns: the runs its per-field vectors hold and the owner's name and tags,
+    /// kept current by [`Emitted::occupy`]. The header and the slot it sits in are charged by the
+    /// table's capacity.
     bytes: usize,
+}
+
+impl History {
+    /// Whether a chunk of `source` holding no value is the one that closes this label set.
+    ///
+    /// Only the series that filled it can: a series that produced nothing here is one this label
+    /// set never saw, so closing on its `is_last` would take the close away from the series that
+    /// did fill it. A chunk naming no series is compared with nothing and closes the set, which is
+    /// what every chunk did before the owner was kept.
+    fn closed_by(&self, source: Option<&MetricName>) -> bool {
+        match (self.owner.as_ref(), source) {
+            (Some(owner), Some(source)) => owner == source,
+            _ => true,
+        }
+    }
 }
 
 /// The bytes a label set holds: each label's name and value with the pair that refers to them.
@@ -543,7 +578,23 @@ fn label_bytes(labels: &LabelSet) -> usize {
         .sum()
 }
 
-/// The bytes a history holds: the per-field vectors and the runs in them.
+/// The bytes a metric name holds: its name and each tag's name and value, with the tags that refer
+/// to them.
+///
+/// This is the convention [`label_bytes`] keeps: the payload of the shared strings and one row per
+/// label. The `Option<MetricName>` a [`History`] keeps its owner in is not counted here, being part
+/// of the header that entry's slot is charged for.
+fn metric_bytes(metric: &MetricName) -> usize {
+    metric.name().map_or(0, |name| name.len())
+        + std::mem::size_of_val(metric.tags())
+        + metric
+            .tags()
+            .iter()
+            .map(|tag| tag.name.len() + tag.value.len())
+            .sum::<usize>()
+}
+
+/// The bytes a history holds: the per-field vectors, the runs in them and its owner.
 ///
 /// This is what the entry itself allocates, not the slot it is filed under: the `History` lives in
 /// the map's slot, and that slot is what [`Emitted::bytes`] charges with the table's capacity. A
@@ -556,10 +607,15 @@ fn history_bytes(history: &History) -> usize {
             .iter()
             .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
             .sum::<usize>()
+        + history.owner.as_ref().map_or(0, metric_bytes)
 }
 
 impl Emitted {
     /// Records what `chunk` occupies, rejecting it against what this node already handed out.
+    ///
+    /// `source` is the identity of the input series `chunk` came from, when the chunk names one: a
+    /// label set is filled by the series that contributes its values, and it is that series whose
+    /// closing chunk closes it (see [`History::owner`]).
     ///
     /// A label set that has closed cannot be reached by a second series: the node would hand on two
     /// chunks that its consumer cannot tell apart, and the merge the caller wants spans the first
@@ -568,7 +624,12 @@ impl Emitted {
     /// refused instead of being answered wrongly (see [`closed_label_set`]). A chunk of a set still
     /// open is refused only where it holds a value at a position that same field already holds one
     /// at, which is the case no merge can resolve.
-    fn occupy(&mut self, path: &NodePath, chunk: &EvaluatedChunk) -> Result<()> {
+    fn occupy(
+        &mut self,
+        path: &NodePath,
+        source: Option<&MetricName>,
+        chunk: &EvaluatedChunk,
+    ) -> Result<()> {
         let labels = label_set(&chunk.series.metric);
         let occupied: Vec<Vec<Run>> = chunk
             .series
@@ -577,18 +638,18 @@ impl Emitted {
             .enumerate()
             .map(|(index, field)| occupied_runs(path, index, field, &chunk.series.time))
             .collect::<Result<_>>()?;
-        // A chunk holding no value records nothing. If the label set is unknown or already closed,
-        // the series this chunk belongs to contributed no sample at all -- either it is the first
-        // such series, or a later one that also answers empty -- so there is nothing to report,
-        // nothing to merge and nothing to refuse. A label set still open is the other case: the
-        // chunk closes the series that *did* produce the values, so it falls through to close it.
         let empty = occupied.iter().all(Vec::is_empty);
-        if empty && self.sets.get(&labels).is_none_or(|history| history.closed) {
-            return Ok(());
-        }
-        if let Some(history) = self.sets.get(&labels) {
+        let recorded = self.sets.get(&labels);
+        if let Some(history) = recorded {
             if history.closed {
-                return Err(closed_label_set(path, &labels));
+                // A series that produced nothing under a closed label set contributes no sample, so
+                // there is nothing to report, nothing to merge and nothing to refuse. One that did
+                // produce values is the second series this set cannot take.
+                return if empty {
+                    Ok(())
+                } else {
+                    Err(closed_label_set(path, &labels))
+                };
             }
             for (index, runs) in occupied.iter().enumerate() {
                 let stored = history.fields.get(index).map_or(&[][..], Vec::as_slice);
@@ -604,6 +665,17 @@ impl Emitted {
                     }
                 }
             }
+            // A chunk holding no value records nothing. Past a closed set the same series is the
+            // one that answered empty, and on an open set it is the close of the series that filled
+            // it -- but only of that series: a different one closes a label set it never wrote to,
+            // which would leave the series that did write to it unable to finish.
+            if empty && !(chunk.is_last && history.closed_by(source)) {
+                return Ok(());
+            }
+        } else if empty {
+            // The first chunk onto a label set holds no value: a series that answered empty, with
+            // nothing to record, nothing to close and nothing to merge.
+            return Ok(());
         }
         let fields = chunk.series.fields.len();
         // The change is folded in here rather than recomputed when the figure is read: a node
@@ -617,6 +689,14 @@ impl Emitted {
             }
         };
         let before = history.bytes;
+        // The series that contributes the values is the one that owns the label set, so a chunk of
+        // another one cannot close it later on.
+        if !empty
+            && let Some(source) = source
+            && history.owner.as_ref() != Some(source)
+        {
+            history.owner = Some(source.clone());
+        }
         if history.fields.len() < fields {
             history.fields.resize_with(fields, Vec::new);
         }
@@ -638,10 +718,11 @@ impl Emitted {
     /// An estimate of the bytes this table holds, which the node reserves for.
     ///
     /// It counts each label's name and value bytes with a tuple per label, the runs a history keeps
-    /// in its per-field vectors, and the table's capacity at one label-set slot plus one history
-    /// slot per entry -- which is where a `History` header itself is charged, once, for the entry
-    /// that lives in it. It leaves out the map's buckets and the `Arc` headers of the strings it
-    /// shares, so it is a lower bound rather than a measurement.
+    /// in its per-field vectors, the owner each entry keeps with its name and tags, and the table's
+    /// capacity at one label-set slot plus one history slot per entry -- which is where a `History`
+    /// header itself is charged, once, for the entry that lives in it. It leaves out the map's
+    /// buckets and the `Arc` headers of the strings it shares, so it is a lower bound rather than a
+    /// measurement.
     ///
     /// The per-entry part is a running total, so reading this after every output does not walk the
     /// table: only the entry that changed and the table's own capacity are read here.
@@ -950,12 +1031,10 @@ struct NodeRuntime {
     /// consumer saw did not close its series, and no chunk came after it. Nothing else writes it, so
     /// it cannot report a truncation that did not happen.
     ///
-    /// One flag is enough under the `Contiguous` and `KeyThenTime` orderings, which keep the chunks
-    /// of a series together: only the series last handed over can be open, and one that closed
-    /// cannot resume. An `Interleaved` input does reach a tree with no window above it -- that
-    /// ordering is refused only where a window reads a series at a time -- and there an earlier
-    /// series left open behind another one's chunk is not reported. The flag under-reports such a
-    /// stream; it never over-reports one.
+    /// "The series of the last chunk handed over" is the whole answer because no more than one
+    /// series can be open here: [`NativeExecutionState::try_new`] refuses an input declaring
+    /// `SeriesOrdering::Interleaved`, so the chunks of a series arrive together and the series last
+    /// handed over is the only one that could still be open.
     open_source_series: bool,
 }
 
@@ -1060,8 +1139,10 @@ impl NodeRuntime {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            // What it handed out is what the label sets of this node now hold.
-            self.track(path, output)?;
+            // What it handed out is what the label sets of this node now hold. The identity is the
+            // input's: `map_chunk` has already rewritten the output's label set, and a series is
+            // the one that arrived.
+            self.track(path, Some(&chunk.series.metric), output)?;
         }
         let bytes = self.emitted_bytes();
         self.buffer.hold_exactly(bytes)?;
@@ -1075,6 +1156,12 @@ impl NodeRuntime {
             chunk.positions(),
             chunk.is_last(),
         );
+        // Which series this chunk came from, for the label-set table below. A window consumes one
+        // series to its `is_last` before the next, so the chunk that closes an output label set is
+        // the one of the series that produced its values, which is what lets the table accept a
+        // closing chunk of a series that wrote to it. A raw chunk in bound-label mode names no
+        // series, so there is nothing to pass on.
+        let source = chunk.metric();
         // The chunk is held for as long as the evaluator consumes it.
         self.buffer.hold(bytes)?;
         let metrics = Arc::clone(&self.buffer.metrics);
@@ -1098,8 +1185,9 @@ impl NodeRuntime {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            // What it handed out is what the label sets of this node now hold.
-            self.track(path, output)?;
+            // What it handed out is what the label sets of this node now hold, and the series that
+            // filled one is the series its chunks came from.
+            self.track(path, source, output)?;
         }
         // The chunk has been consumed: what this node still holds is what the evaluator kept of it
         // and the label sets it has already handed out. Between pushes the charge for both is the
@@ -1131,13 +1219,20 @@ impl NodeRuntime {
 
     /// Records what this node hands out under its output label set.
     ///
-    /// A node that rewrites labels is where two input series become indistinguishable, so this is
-    /// where the second one is refused: the node above reads what this one hands over, and a window
-    /// above would evaluate the two as two series and report both. Checking at the root would be
-    /// too late for that — the answer would already have been computed.
-    fn track(&mut self, path: &NodePath, output: &EvaluatedChunk) -> Result<()> {
+    /// `source` is the identity of the input series the chunk came from, when there is one: a node
+    /// that rewrites labels is where two input series become indistinguishable, so this is where
+    /// the second one is refused, and it is also the only place that knows which series filled the
+    /// label set a chunk closes. A node above reads what this one hands over, and a window above
+    /// would evaluate the two as two series and report both. Checking at the root would be too late
+    /// for that — the answer would already have been computed.
+    fn track(
+        &mut self,
+        path: &NodePath,
+        source: Option<&MetricName>,
+        output: &EvaluatedChunk,
+    ) -> Result<()> {
         match self.emitted.as_mut() {
-            Some(emitted) => emitted.occupy(path, output),
+            Some(emitted) => emitted.occupy(path, source, output),
             // A node that keeps its input's labels cannot make two series one.
             None => Ok(()),
         }
@@ -1209,23 +1304,23 @@ impl NativeExecutionState {
         // cannot be shown at one position and registered at another.
         let mut pending: Vec<PendingNode> = Vec::new();
         let mut unsupported: Option<DataFusionError> = None;
-        // The order the source streams its series in, and where it says so: a window evaluates one
-        // series at a time, so it is only executable over an input that keeps each series
-        // contiguous.
-        let mut ordering: Option<(SeriesOrdering, NodePath)> = None;
-        let mut first_window: Option<NodePath> = None;
+        // The first input whose declared order this runtime cannot execute, and where it says so.
+        // Every node here reads one series at a time, so an input that interleaves them is one this
+        // runtime cannot execute. Recorded per input rather than kept from the first one seen: a
+        // tree with two inputs would otherwise have its second declaration read and dropped.
+        let mut unsupported_ordering_found: Option<(SeriesOrdering, NodePath)> = None;
         metrics::walk(tree.root(), &mut |node, path| {
             let handles = Arc::new(NodeMetrics::default());
             handles.register(path, metrics_set, partition);
             let plan = match &node.expr {
                 NativeExpr::Input(bound) => {
-                    ordering.get_or_insert_with(|| (bound.ordering, path.clone()));
+                    if bound.ordering == SeriesOrdering::Interleaved {
+                        unsupported_ordering_found
+                            .get_or_insert_with(|| (bound.ordering, path.clone()));
+                    }
                     Some((NodeTag::Input, Seed::Input))
                 }
-                NativeExpr::Window { op, .. } => {
-                    first_window.get_or_insert_with(|| path.clone());
-                    Some((NodeTag::Window, Seed::Window(op.clone())))
-                }
+                NativeExpr::Window { op, .. } => Some((NodeTag::Window, Seed::Window(op.clone()))),
                 NativeExpr::Map { op, .. } => Some((NodeTag::Map, Seed::Map(Arc::clone(&op.ops)))),
                 // The kinds below are legal in a bound tree, and `validate` stays the authority on
                 // that; this runtime simply does not execute them yet.
@@ -1262,19 +1357,16 @@ impl NativeExecutionState {
             return Err(error);
         }
 
-        // A window feeds one series at a time to its evaluator, so it can only run over an input
-        // that keeps each series contiguous. The tree stays free to say `Interleaved` -- the
-        // compiler's job is not narrowed here -- but this runtime says so up front instead of
-        // failing on the second series of a chunk stream it advertised a chunk at a time.
-        if let Some(window) = &first_window
-            && let Some((ordering, source)) = &ordering
-        {
-            match ordering {
-                SeriesOrdering::Contiguous | SeriesOrdering::KeyThenTime => {}
-                SeriesOrdering::Interleaved => {
-                    return Err(unsupported_ordering(*ordering, window, source));
-                }
-            }
+        // Every node here reads one series at a time and assumes its chunks arrive together: a
+        // window feeds a series to its evaluator up to the chunk carrying `is_last`, and an input
+        // node keeps one flag for the series it handed over, which is what reports one that never
+        // closed. An input that declares `Interleaved` can leave a series open across another
+        // series' chunks, which either of those would misread, so the tree is refused here rather
+        // than run. That is a precondition of the runtime, not a limitation to document: the tree
+        // stays free to declare the ordering -- the compiler's job is not narrowed here -- and no
+        // tree this runtime executes declares it.
+        if let Some((ordering, source)) = &unsupported_ordering_found {
+            return Err(unsupported_ordering(*ordering, source));
         }
 
         // A node's input is the node at the same position extended by the step the traversal took,
@@ -1804,19 +1896,15 @@ fn closed(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!("the window at {path} is already closed"))
 }
 
-/// The rejection of an input ordering this runtime cannot execute under a window.
+/// The rejection of an input ordering this runtime cannot execute.
 ///
-/// It names the window that needs contiguity, the input that does not keep it, and the ordering
-/// that was found, so a reader can tell a tree this runtime cannot run from one it cannot run
-/// correctly.
-fn unsupported_ordering(
-    ordering: SeriesOrdering,
-    window: &NodePath,
-    input: &NodePath,
-) -> DataFusionError {
+/// It names the input that declares the ordering and the ordering found, so a reader can tell a
+/// tree this runtime cannot run from one it cannot run correctly.
+fn unsupported_ordering(ordering: SeriesOrdering, input: &NodePath) -> DataFusionError {
     DataFusionError::NotImplemented(format!(
-        "the native runtime does not execute windows over {ordering:?} input yet: the window at \
-         {window} reads one series at a time, but the input at {input} is {ordering:?}"
+        "the native runtime does not execute {ordering:?} input yet: the nodes here read one series \
+         at a time, and the input at {input} is {ordering:?}, so the chunks of two of them can \
+         arrive interleaved"
     ))
 }
 
