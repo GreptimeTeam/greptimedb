@@ -279,7 +279,7 @@ impl Instance {
         stmt: &Statement,
         schema_name: String,
     ) -> Option<SlowQueryTimer> {
-        if !stmt.is_readonly() || !self.slow_query_options.enable {
+        if !should_track_statement_process(stmt) || !self.slow_query_options.enable {
             return None;
         }
 
@@ -905,24 +905,19 @@ impl Instance {
             .map(|s| s.to_string())
             .unwrap_or_else(|| plan.display_indent().to_string());
 
-        let plan_is_readonly = is_readonly_plan(&plan);
         let result = if should_track_plan_process(stmt.as_ref(), &plan) {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
-            let slow_query_timer = if plan_is_readonly {
-                self.slow_query_options.enable.then(|| {
-                    SlowQueryTimer::new(
-                        CatalogQueryStatement::Plan(query.clone()),
-                        schema_name.clone(),
-                        self.slow_query_options.threshold,
-                        self.slow_query_options.sample_ratio,
-                        self.slow_query_options.record_type,
-                        self.slow_query_recorder.clone(),
-                    )
-                })
-            } else {
-                None
-            };
+            let slow_query_timer = self.slow_query_options.enable.then(|| {
+                SlowQueryTimer::new(
+                    CatalogQueryStatement::Plan(query.clone()),
+                    schema_name.clone(),
+                    self.slow_query_options.threshold,
+                    self.slow_query_options.sample_ratio,
+                    self.slow_query_options.record_type,
+                    self.slow_query_recorder.clone(),
+                )
+            });
 
             let timeout_recorder = stmt
                 .as_ref()
@@ -1908,6 +1903,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct RecordingSlowQueryEventRecorder {
+        queries: std::sync::Mutex<Vec<String>>,
         payloads: std::sync::Mutex<Vec<serde_json::Value>>,
     }
 
@@ -1917,6 +1913,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<SlowQueryEvent>()
                 .expect("expected a slow query event");
+            self.queries.lock().unwrap().push(event.query.clone());
             self.payloads.lock().unwrap().push(event.payload.clone());
         }
 
@@ -3821,6 +3818,52 @@ mod tests {
             &insert_dml_plan()
         ));
         assert!(!should_track_plan_process(None, &insert_dml_plan()));
+    }
+
+    #[tokio::test]
+    async fn test_insert_select_slow_query() -> TestResult<()> {
+        let mut instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        let recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+        instance.slow_query_recorder = recorder.clone();
+        let sql = "INSERT INTO target SELECT * FROM source";
+
+        for prepared in [false, true] {
+            for (enabled, threshold, should_record) in [
+                (true, Duration::ZERO, true),
+                (false, Duration::ZERO, false),
+                (true, Duration::from_secs(3600), false),
+            ] {
+                instance.slow_query_options.enable = enabled;
+                instance.slow_query_options.threshold = threshold;
+                let query_ctx = test_query_ctx(42);
+                let output = if prepared {
+                    let stmt = parse_one_sql(sql);
+                    let described = instance
+                        .do_describe_inner(stmt.clone(), query_ctx.clone())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    instance
+                        .do_exec_plan_inner(described.logical_plan, Some(stmt), query_ctx)
+                        .await
+                        .unwrap()
+                } else {
+                    execute_one_sql(&instance, sql, query_ctx).await?
+                };
+                assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+                let queries = std::mem::take(&mut *recorder.queries.lock().unwrap());
+                let expected = if should_record { vec![sql] } else { vec![] };
+                assert_eq!(
+                    queries, expected,
+                    "prepared={prepared}, enabled={enabled}, threshold={threshold:?}"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
