@@ -580,9 +580,16 @@ pub struct RowCursor<'a> {
 impl<'a> RowCursor<'a> {
     /// Reads the sample at compact `row`, which must not be behind the previous read.
     ///
-    /// Returns `None` when the row is behind the cursor's position or past the field's end.
+    /// Returns `None` when the row is behind the cursor's position or at or past the field's end.
+    /// Such a call leaves the cursor where it was, so one out-of-range row does not consume the
+    /// rows after it.
     pub fn at(&mut self, row: usize) -> Option<SampleRef<'a>> {
         if row < self.row {
+            return None;
+        }
+        // Bound-check before advancing: the iterator is exact-size, so draining it would make it
+        // answer `None` for every later row as well.
+        if row - self.row >= self.iter.len() {
             return None;
         }
         let sample = self.iter.nth(row - self.row)?;

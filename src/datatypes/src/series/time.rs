@@ -181,7 +181,8 @@ pub struct GridSpan {
 impl GridSpan {
     /// Creates a span of `len` positions starting at absolute grid index `start`.
     ///
-    /// [`GridRanges::try_new`] validates it against its grid; this constructor only records it.
+    /// [`TimeAxis::from_grid_spans`] validates it against its grid; this constructor only records
+    /// it.
     pub fn new(start: usize, len: usize) -> Self {
         Self { start, len }
     }
@@ -224,7 +225,11 @@ impl GridRanges {
     ///
     /// Rejects an empty span, a span past the end of the grid, spans that are out of order or
     /// overlap, and any length or index that overflows `usize`.
-    pub fn try_new(grid: Arc<EvalGrid>, spans: Vec<GridSpan>) -> Result<Self> {
+    ///
+    /// Not public: a list of one span is not normalized into the single run a [`TimeAxis`] fast
+    /// path expects, so callers outside this crate build axes through
+    /// [`TimeAxis::from_grid_spans`], which keeps [`TimeAxis::Grid`] for a single span.
+    pub(crate) fn try_new(grid: Arc<EvalGrid>, spans: Vec<GridSpan>) -> Result<Self> {
         let grid_len = grid.timestamps().len();
         let mut rows = Vec::new();
         rows.try_reserve_exact(spans.len())
@@ -814,7 +819,21 @@ impl TimeAxis {
     /// envelope `first_position()..last_position()`, which would visit -- and densify -- the holes,
     /// and it never re-derives the row of a position by subtracting starts, which is wrong as soon
     /// as either side skips a row.
+    ///
+    /// Both axes must be addressed on the same [`GridSpec`]: the positions it yields are indices
+    /// into one shared [`EvalGrid`], so two different grids line up only by coincidence. An
+    /// explicit axis carries no grid and must not be passed at all -- its rows are not absolute
+    /// positions on any shared grid, so the pairs would be silent nonsense. Debug builds assert
+    /// the precondition and therefore panic on a violation; release builds trust the caller.
     pub fn intersect_runs<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = GridRunPair> + 'a {
+        debug_assert!(
+            matches!(
+                (self.grid(), other.grid()),
+                (Some(lhs), Some(rhs)) if lhs.spec() == rhs.spec()
+            ),
+            "intersect_runs requires two axes on one grid, \
+             but an explicit axis carries none and two grids only meet by coincidence",
+        );
         let mut lhs = self.runs().peekable();
         let mut rhs = other.runs().peekable();
         std::iter::from_fn(move || {
@@ -913,7 +932,29 @@ impl Iterator for GridRuns<'_> {
 /// visited twice. This is how an operator covering several axes (a histogram's bucket series, an
 /// aggregate over an input set) visits the positions that hold something, instead of scanning the
 /// envelope from the earliest to the latest position and densifying every hole in between.
+///
+/// Every axis must be addressed on the same [`GridSpec`]: a position names a point of one shared
+/// [`EvalGrid`], so merging axes of two different grids would interleave unrelated positions. An
+/// explicit axis carries no grid and must not be passed at all -- its rows are not absolute
+/// positions on any shared grid. Debug builds assert the precondition and therefore panic on a
+/// violation; release builds trust the caller.
 pub fn union_positions<'a>(axes: impl IntoIterator<Item = &'a TimeAxis>) -> UnionPositions<'a> {
+    // Materialized once so that the debug assert above can see every axis' grid before the first
+    // cursor is built; the cursors below borrow these references, not the list.
+    let axes: Vec<&'a TimeAxis> = axes.into_iter().collect();
+    debug_assert!(
+        {
+            let mut specs = axes.iter().map(|axis| axis.grid().map(|grid| grid.spec()));
+            match specs.next() {
+                // No axis at all: the merge yields nothing and reads no grid.
+                None => true,
+                Some(None) => false,
+                Some(Some(first)) => specs.all(|spec| spec == Some(first)),
+            }
+        },
+        "union_positions requires every axis on one grid, \
+         but an explicit axis carries none and two grids only meet by coincidence",
+    );
     let cursors: Vec<Positions<'a>> = axes.into_iter().map(TimeAxis::positions).collect();
     let pending = vec![None; cursors.len()];
     UnionPositions { cursors, pending }

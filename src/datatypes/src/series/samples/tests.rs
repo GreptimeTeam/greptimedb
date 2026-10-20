@@ -1421,3 +1421,16 @@ fn row_cursor_reads_a_chunked_field_forward_only() {
     // Going backwards is not a scan: it is refused.
     assert!(cursor.at(1).is_none());
 }
+
+#[test]
+fn row_cursor_keeps_its_place_after_a_row_past_the_end() {
+    let samples = Samples::from_float(Float64Array::from(vec![1.0, 2.0, 3.0]));
+    let mut cursor = samples.cursor();
+    // A row at and past the end is refused without draining the field.
+    assert!(cursor.at(3).is_none());
+    assert!(cursor.at(usize::MAX / 2).is_none());
+    // The cursor still sits at row 0, so the valid rows that follow are still readable.
+    assert!(matches!(cursor.at(1), Some(SampleRef::Float(2.0))));
+    assert!(matches!(cursor.at(2), Some(SampleRef::Float(3.0))));
+    assert!(cursor.at(3).is_none());
+}
