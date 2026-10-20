@@ -233,11 +233,21 @@ fn a_window_over_raw_samples_is_valid() {
 fn adding_a_map_only_changes_the_tree() {
     let bare = window_over(input(), None);
     let mapped = map_over(window_over(input(), None));
-    assert_eq!(bare.validate().is_ok(), mapped.validate().is_ok());
+    // Both trees are legal, so the comparison below is about the shape and not about both failing.
+    assert!(bare.validate().is_ok(), "{}", bare.validate().unwrap_err());
+    assert!(
+        mapped.validate().is_ok(),
+        "{}",
+        mapped.validate().unwrap_err()
+    );
     // The mapped tree has one more node, and it is the same window below it.
     let mut depth = 0;
     super::super::metrics::walk(&mapped, &mut |_, _| depth += 1);
     assert_eq!(depth, 3);
+    let NativeExpr::Map { input, .. } = &mapped.expr else {
+        unreachable!("the mapped tree's root is a map")
+    };
+    assert!(matches!(input.expr, NativeExpr::Window { .. }));
 }
 
 /// A map is point-wise over values, so raw samples are not something it can consume.
@@ -442,6 +452,57 @@ fn a_window_checks_its_declared_input_grid() {
     );
 }
 
+/// A range evaluator reads one raw series to its last chunk before it starts the next, so raw
+/// chunks of different series may not interleave.
+#[test]
+fn a_window_cannot_read_interleaved_input() {
+    let output = raw();
+    let interleaved = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            ordering: SeriesOrdering::Interleaved,
+        }),
+        output,
+    };
+    let error = window_over(interleaved, None).validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("interleaved chunks cannot be fed to it"),
+        "{error}"
+    );
+}
+
+/// A window whose range is empty or negative reads nothing at every grid point.
+#[test]
+fn a_window_reads_a_non_empty_range() {
+    let mut node = window_over(input(), None);
+    let NativeExpr::Window { op, .. } = &mut node.expr else {
+        unreachable!("a window tree has a window root")
+    };
+    op.window.range_ms = 0;
+    let error = node.validate().unwrap_err();
+    assert!(error.to_string().contains("empty range"), "{error}");
+}
+
+/// A node that declares an output grid its output does not carry would be addressed on one grid
+/// and hand out positions on another.
+#[test]
+fn a_window_checks_its_output_grid() {
+    let mut node = window_over(input(), None);
+    let NativeExpr::Window { op, .. } = &mut node.expr else {
+        unreachable!("a window tree has a window root")
+    };
+    op.output_grid = grid(0, 30_000, 8);
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("declares a grid its output does not carry"),
+        "{error}"
+    );
+}
+
 /// A window consumes samples: state holds accumulators, not a sample stream to range over.
 #[test]
 fn a_window_cannot_consume_state() {
@@ -561,6 +622,29 @@ fn a_binary_operation_broadcasts_a_scalar() {
     assert!(node.validate().is_ok());
 }
 
+/// A scalar has no fields of its own, so a broadcast that declares a different count than the
+/// vector side would report a layout the kernel does not produce.
+#[test]
+fn a_scalar_broadcast_cannot_change_the_field_count() {
+    let shared = grid(0, 60_000, 4);
+    // The vector side has two fields; the broadcast declares one.
+    let node = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(window_fields(input_with_fields(2), Arc::clone(&shared), 2)),
+            right: Box::new(scalar_on(1.0, Arc::clone(&shared))),
+            matching: add(),
+        },
+        output: evaluated(fields(1), shared),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not produce the vector side's fields"),
+        "{error}"
+    );
+}
+
 /// Two vectors pair their fields by position, so the match reports the shorter side's count
 /// (`vector_match::binary_output_schema` takes `min(lhs, rhs)`); a tree declaring anything else is
 /// rejected instead of failing at run time.
@@ -609,6 +693,63 @@ fn two_scalars_make_a_scalar() {
         output: NativeType::Scalar(Arc::clone(&shared)),
     };
     assert!(node.validate().is_ok());
+}
+
+/// Two scalars have nothing to attach labels or fields to, so they cannot produce a vector.
+#[test]
+fn two_scalars_cannot_produce_a_vector() {
+    let shared = grid(0, 60_000, 4);
+    let node = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(scalar_on(1.0, Arc::clone(&shared))),
+            right: Box::new(scalar_on(2.0, Arc::clone(&shared))),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), shared),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("two scalars do not produce a scalar"),
+        "{error}"
+    );
+}
+
+/// A binary operation is point-wise on a grid, so a side of raw samples has no positions to line
+/// up with the other side.
+#[test]
+fn a_binary_operation_cannot_consume_raw_samples() {
+    let shared = grid(0, 60_000, 4);
+    let vector = || window_on(input(), None, Arc::clone(&shared));
+
+    let left_raw = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(input()),
+            right: Box::new(vector()),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let error = left_raw.validate().unwrap_err();
+    assert!(
+        error.to_string().contains("not raw samples on its left"),
+        "{error}"
+    );
+
+    let right_raw = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(vector()),
+            right: Box::new(input()),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), shared),
+    };
+    let error = right_raw.validate().unwrap_err();
+    assert!(
+        error.to_string().contains("not raw samples on its right"),
+        "{error}"
+    );
 }
 
 /// State is not a value, so neither side of a binary operation may be state.
@@ -718,15 +859,6 @@ fn an_aggregate_stage_must_agree_with_its_type() {
     );
 }
 
-/// A `Partial` aggregate turns a vector into state: the output is the state type, indexed on the
-/// vector's grid.
-#[test]
-fn a_partial_aggregate_produces_state() {
-    let state = partial_aggregate(window_over(input(), None));
-    assert!(state.validate().is_ok());
-    assert!(matches!(state.output, NativeType::AggregateState(_)));
-}
-
 /// A `Partial` aggregate keeps one accumulator per input field (`aggregate_float` lays its state
 /// out in `schema.fields.len()`-sized points), so state declaring another count is rejected.
 #[test]
@@ -753,6 +885,66 @@ fn a_partial_aggregate_cannot_change_the_accumulator_count() {
         error
             .to_string()
             .contains("a partial aggregate declares 1 field(s) but its input provides 2"),
+        "{error}"
+    );
+}
+
+/// A `Partial` aggregate's state is grouped by the binding's group labels, so state declaring
+/// other labels is not the state this aggregate produces.
+#[test]
+fn a_partial_aggregate_groups_its_state_like_its_binding() {
+    let mut node = partial_aggregate(window_over(input(), None));
+    let NativeExpr::Aggregate { op, .. } = &mut node.expr else {
+        unreachable!("a partial aggregate tree has an aggregate root")
+    };
+    op.group = Arc::new(["instance".into()]);
+    let error = node.validate().unwrap_err();
+    assert!(
+        error.to_string().contains("groups differ from the binding"),
+        "{error}"
+    );
+}
+
+/// A `Partial` aggregate indexes its state on the grid its input produces, so state on another
+/// grid is addressed with positions the input never wrote.
+#[test]
+fn a_partial_aggregate_indexes_its_state_on_the_inputs_grid() {
+    let node = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(window_over(input(), None)),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Arc::new(["job".into()]),
+                stage: AggregateStage::Partial,
+            },
+        },
+        output: NativeType::AggregateState(Arc::new(super::AggregateStateSchema {
+            group: Arc::new(["job".into()]),
+            accumulators: Arc::new([]),
+            grid: grid(0, 30_000, 8),
+        })),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("indexed on a grid the input does not produce"),
+        "{error}"
+    );
+}
+
+/// A `Final` aggregate merges into the binding's group labels, so the state it reads has to be
+/// grouped the same way.
+#[test]
+fn a_final_aggregate_groups_its_state_like_its_binding() {
+    let mut node = final_aggregate(partial_aggregate(window_over(input(), None)));
+    let NativeExpr::Aggregate { op, .. } = &mut node.expr else {
+        unreachable!("a final aggregate tree has an aggregate root")
+    };
+    op.group = Arc::new(["instance".into()]);
+    let error = node.validate().unwrap_err();
+    assert!(
+        error.to_string().contains("groups differ from the binding"),
         "{error}"
     );
 }

@@ -22,6 +22,11 @@
 //! The tree is also the unit of legality. [`NativeNode::validate`] checks the contract every
 //! operation states about its input, which is what lets a new combination of supported operations
 //! be an ordinary tree instead of another hand-written shape.
+//!
+//! What the tree cannot express yet is deliberate for this stage: [`NativeExpr::Binary`] holds an
+//! arithmetic or comparison operation, so `and`, `or` and `unless` have no node, and
+//! [`NativeExpr::Scalar`] holds a constant, so `time()` and `scalar(v)` have no node either. The
+//! legality below is therefore about the operations that exist, not about PromQL's whole surface.
 
 use std::sync::Arc;
 
@@ -117,8 +122,8 @@ pub struct AggregateStateSchema {
 /// A scan or exchange boundary bound as a node input.
 ///
 /// The binding records what the input was created for: the output a consumer type-checks against,
-/// and the ordering it guarantees. No consumer reads the ordering today; it is recorded so a
-/// consumer that needs one can check it instead of assuming it.
+/// and the ordering it guarantees. A window reads the ordering, rejecting an interleaved input; no
+/// other consumer reads it yet.
 #[derive(Clone, Debug)]
 pub struct BoundInput {
     /// What the input produces: raw samples from a scan, or state from an exchange boundary.
@@ -314,6 +319,8 @@ impl NativeNode {
                 // field.
                 ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
+                // `select_instants` reads one series at a time and holds no cross-series state, so
+                // an interleaved input is enough for it: no ordering check here.
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;
@@ -325,8 +332,29 @@ impl NativeNode {
                         input.output.describe()
                     )));
                 };
-                // The declared input grid has to be the grid the input actually produces, or the
-                // window would read positions the input never wrote.
+                // A range that is not positive reads nothing at every grid point.
+                if op.window.range_ms <= 0 {
+                    return Err(invalid(
+                        "a window reads an empty range: its range must be positive",
+                    ));
+                }
+                // A range evaluator consumes one series to its last chunk before it starts the
+                // next, so interleaved chunks of different series cannot be fed to it. Only an
+                // input node carries an ordering, so only there is there one to check.
+                if let NativeExpr::Input(binding) = &input.expr
+                    && binding.ordering == SeriesOrdering::Interleaved
+                {
+                    return Err(invalid(
+                        "a window reads one series to its last chunk before the next, so \
+                         interleaved chunks cannot be fed to it",
+                    ));
+                }
+                // What is checked here and just below is that the declared input grid equals the
+                // input's grid, and that the output grid matches the declared one. The grid is
+                // not checked to cover the window's read range
+                // `(out.start - offset - range, out.end - offset]`: only a subquery feeds an
+                // evaluated input to a window, and this compiler does not accept subqueries yet,
+                // so that coverage check waits for it.
                 match (op.input_grid.as_ref(), schema.eval_grid.as_ref()) {
                     (None, None) => {}
                     (Some(bound), Some(actual)) if bound.spec() == actual.spec() => {}
@@ -495,11 +523,14 @@ impl NativeNode {
                         )?;
                         ensure_grid(&self.output, left_grid, "a binary operation")?;
                     }
-                    // Both sides carry a grid, so this is state, which the checks above reject.
-                    // Kept as an error rather than a panic so a future type cannot slip through.
-                    _ => {
+                    // State has no grid, so the grid checks above return for either side before
+                    // this match and these two arms cannot be reached at run time. They are
+                    // spelled out because `NativeType` names `AggregateState` and the match has to
+                    // cover the pair; the message says so rather than pretending a value arrived.
+                    (NativeType::AggregateState(_), _) | (_, NativeType::AggregateState(_)) => {
                         return Err(invalid(
-                            "a binary operation consumes aggregate state, not a value",
+                            "a binary operation reached aggregate state, which has no grid: the \
+                             grid check above should have rejected it",
                         ));
                     }
                 }

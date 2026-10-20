@@ -16,9 +16,7 @@
 //!
 //! A node is identified by its structural position — `root`, `.input`, `.left`, `.right` — rather
 //! than by an id it carries. The position is not stored on the node: it is derived while walking
-//! the tree, which is the one traversal rule run-time construction uses. A tree description
-//! rendered from the same walk — intended for `EXPLAIN` and `ANALYZE`, neither of which renders a
-//! native tree today — would show the positions that were registered.
+//! the tree. [`walk`] is the one traversal rule, and [`register_tree`] is its caller.
 //!
 //! The position stays in the metric name because the collector aggregates by name first: two
 //! `rate` nodes sharing a bare name would be merged into one number. Positions are only an
@@ -92,9 +90,8 @@ impl std::fmt::Display for NodePath {
 
 /// Visits every node of `root` with its position, outermost first.
 ///
-/// This is the one traversal rule: [`register_tree`] calls it when the run-time state is created,
-/// and a tree description is intended to render from it, so a node cannot be shown at one position
-/// and registered at another.
+/// This is the one traversal rule: [`register_tree`] is its caller, so a node's metric is always
+/// named after the position this walk gives it.
 pub fn walk(root: &NativeNode, visit: &mut dyn FnMut(&NativeNode, &NodePath)) {
     fn go(node: &NativeNode, path: &NodePath, visit: &mut dyn FnMut(&NativeNode, &NodePath)) {
         visit(node, path);
@@ -526,24 +523,31 @@ mod tests {
     }
 
     /// Registration covers every node, so no node is executed without a way to observe it.
+    ///
+    /// The set is read back rather than named again from the tree, so this checks what
+    /// registration actually did.
     #[test]
     fn registration_covers_every_node() {
         let root = map(window(input()));
         let set = datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new();
         let registered = register_tree(&root, &set, 2);
         assert_eq!(registered.len(), 3);
-        let names: Vec<String> = registered
-            .iter()
-            .map(|(path, _)| path.metric_name(NodeMetric::OUTPUT_VALUES))
-            .collect();
-        assert_eq!(
-            names,
-            vec![
-                "native.root.output_values",
-                "native.root.input.output_values",
-                "native.root.input.input.output_values",
-            ]
-        );
+
+        // Read the names back from the set registration wrote to, so the check is against what
+        // registration did rather than against the names built a second time here.
+        let set = set.clone_inner();
+        let names: Vec<&str> = set.iter().map(|metric| metric.value().name()).collect();
+        // One entry per node per declared metric, and every node's position among them: no node
+        // is executed without a way to observe it.
+        assert_eq!(names.len(), registered.len() * NodeMetric::ALL.len());
+        for (path, _) in &registered {
+            // The peak is named per partition, so a plain name stands for the node here.
+            let name = path.metric_name(NodeMetric::OUTPUT_VALUES);
+            assert!(
+                names.contains(&name.as_str()),
+                "{path} registered nothing under its own position"
+            );
+        }
     }
 
     /// Every metric a node reports is listed in one place, so registration cannot drift from the
