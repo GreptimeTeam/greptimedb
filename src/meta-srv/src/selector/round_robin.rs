@@ -22,6 +22,7 @@ use crate::error::{
     self, ListActiveDatanodesSnafu, ListActiveFlownodesSnafu, NoEnoughAvailableNodeSnafu, Result,
 };
 use crate::metasrv::{SelectTarget, SelectorContext};
+use crate::selector::common::is_schedulable_datanode;
 use crate::selector::{Selector, SelectorOptions};
 
 /// Round-robin selector that returns the next peer in the list in sequence.
@@ -65,6 +66,7 @@ impl RoundRobinSelector {
                 .await
                 .context(ListActiveDatanodesSnafu)?
                 .into_iter()
+                .filter(is_schedulable_datanode)
                 .filter(|node| {
                     opts.affinity
                         .is_none_or(|requirements| ctx.affinity.matches(requirements, node))

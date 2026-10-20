@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 
+use common_meta::cluster::{NodeInfo, NodeStatus};
 use common_meta::peer::Peer;
 use snafu::ensure;
 
@@ -22,6 +23,11 @@ use crate::error::Result;
 use crate::metasrv::SelectTarget;
 use crate::selector::SelectorOptions;
 use crate::selector::weighted_choose::{WeightedChoose, WeightedItem};
+
+/// Whether a datanode can receive new regions.
+pub(crate) fn is_schedulable_datanode(node: &NodeInfo) -> bool {
+    matches!(&node.status, NodeStatus::Datanode(status) if status.schedulable)
+}
 
 /// Filter out the excluded peers from the `weight_array`.
 pub fn filter_out_excluded_peers(
@@ -107,6 +113,7 @@ mod tests {
     };
 
     use crate::cluster::MetaPeerClientBuilder;
+    use crate::datanode_state::DatanodeStateManager;
     use crate::discovery::utils::accept_ingest_workload;
     use crate::metasrv::{SelectTarget, SelectorContext, SelectorRef};
     use crate::selector::common::{choose_items, filter_out_excluded_peers};
@@ -116,6 +123,7 @@ mod tests {
     use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
     use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
     use crate::selector::{Selector, SelectorOptions};
+    use crate::test_util::{create_meta_peer_client, put_datanodes};
 
     #[test]
     fn test_choose_peers() {
@@ -269,6 +277,104 @@ mod tests {
             env_vars: pool
                 .map(|pool| HashMap::from([("pool".into(), pool.into())]))
                 .unwrap_or_default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_selectors_filter_datanode_scheduling_state() {
+        let client = create_meta_peer_client();
+        let manager = Arc::new(DatanodeStateManager::new(Arc::new(MemoryKvBackend::new())));
+        client.set_datanode_state_manager(manager.clone()).await;
+        put_datanodes(&client, (1..=3).map(Peer::empty).collect()).await;
+
+        for id in 1..=3 {
+            let value = DatanodeStatValue {
+                stats: vec![Stat {
+                    id,
+                    addr: format!("node-{id}"),
+                    region_num: id,
+                    ..Default::default()
+                }],
+            };
+            client
+                .memory_backend()
+                .put(
+                    PutRequest::new()
+                        .with_key(Vec::<u8>::from(DatanodeStatKey { node_id: id }))
+                        .with_value(Vec::<u8>::try_from(value).unwrap()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let selectors: Vec<SelectorRef> = vec![
+            Arc::new(LeaseBasedSelector),
+            Arc::new(RoundRobinSelector::new(SelectTarget::Datanode)),
+            Arc::new(LoadBasedSelector::new(
+                RegionNumsBasedWeightCompute,
+                client.clone(),
+            )),
+        ];
+        let ctx = SelectorContext {
+            peer_discovery: client,
+            affinity: Arc::new(NoopAffinity),
+            affinity_fallback: AffinityFallback::Error,
+        };
+
+        assert!(manager.set_schedulable(2, false).await.unwrap());
+        for selector in &selectors {
+            let peers = selector
+                .select(
+                    &ctx,
+                    SelectorOptions {
+                        min_required_items: 2,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                peers
+                    .into_iter()
+                    .map(|peer| peer.id)
+                    .collect::<HashSet<_>>(),
+                HashSet::from([1, 3])
+            );
+        }
+
+        assert!(manager.set_schedulable(2, true).await.unwrap());
+        for selector in &selectors {
+            let peers = selector
+                .select(
+                    &ctx,
+                    SelectorOptions {
+                        min_required_items: 3,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                peers
+                    .into_iter()
+                    .map(|peer| peer.id)
+                    .collect::<HashSet<_>>(),
+                HashSet::from([1, 2, 3])
+            );
+        }
+
+        for id in 1..=3 {
+            assert!(manager.set_schedulable(id, false).await.unwrap());
+        }
+        for selector in &selectors {
+            let error = selector
+                .select(&ctx, SelectorOptions::default())
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::error::Error::NoEnoughAvailableNode { available: 0, .. }
+            ));
         }
     }
 
