@@ -16,6 +16,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
+use datatypes::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
+};
 use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
@@ -385,6 +388,75 @@ fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
 
 /// `histogram_quantile` drops all metadata labels; the single-histogram functions drop only
 /// `__name__`, as Prometheus does.
+/// The start timestamp is payload of a histogram that was read, and not of one that was computed.
+///
+/// It is read off a sample ([`FloatHistogram::try_from_view`]) and written back
+/// ([`FloatHistogram::push_to`]), which is what a selection needs to hand a sample on unchanged;
+/// every operation that derives a value from its input leaves it `None`, as Go's `FloatHistogram`,
+/// which has no such field, does. Nothing else depends on the field: the type derives `Debug` and
+/// `Clone` only, so it has no equality, hash or serialized form that could compare it, and
+/// [`FloatHistogram::equals`] is Go `Equals` on counts and bucket layout.
+#[test]
+fn a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one() {
+    let offsets = [0];
+    let lengths = [2];
+    let buckets = [1.0, 2.0];
+    let view = HistogramView {
+        schema: 0,
+        zero_threshold: 0.0,
+        zero_count: 0.0,
+        count: 3.0,
+        sum: 3.0,
+        reset_hint: CounterResetHint::Unknown,
+        start_timestamp: Some(1500),
+        custom_values: &[],
+        positive: BucketSideView {
+            span_offsets: &offsets,
+            span_lengths: &lengths,
+            buckets: &buckets,
+        },
+        negative: BucketSideView {
+            span_offsets: &[],
+            span_lengths: &[],
+            buckets: &[],
+        },
+    };
+    let histogram = FloatHistogram::try_from_view(&view).unwrap();
+    assert_eq!(histogram.start_timestamp, Some(1500));
+
+    // Writing it back keeps it, which is what makes a selected sample a sample.
+    let mut builder = HistogramBatchBuilder::new();
+    histogram.push_to(&mut builder).unwrap();
+    let table = builder.finish().unwrap();
+    assert_eq!(
+        table.view(0).unwrap().start_timestamp,
+        Some(1500),
+        "the histogram was written back without the start timestamp it was read with"
+    );
+
+    // A value derived from it carries none, whichever operation derived it.
+    let mut added = histogram.clone();
+    added.add(&histogram).unwrap();
+    assert_eq!(added.start_timestamp, None);
+    let mut summed = histogram.clone();
+    let (compensation, _) = summed.kahan_add(&histogram, None).unwrap();
+    assert_eq!(summed.start_timestamp, None);
+    assert_eq!(compensation.start_timestamp, None);
+    let mut multiplied = histogram.clone();
+    multiplied.mul(2.0);
+    assert_eq!(multiplied.start_timestamp, None);
+    let mut divided = histogram.clone();
+    divided.div(2.0);
+    assert_eq!(divided.start_timestamp, None);
+    let mut compacted = histogram.clone();
+    compacted.compact();
+    assert_eq!(compacted.start_timestamp, None);
+    assert_eq!(histogram.copy_to_schema(0).unwrap().start_timestamp, None);
+    assert_eq!(histogram.empty_like().start_timestamp, None);
+    // The one it was read into is still the sample it was read from.
+    assert_eq!(histogram.start_timestamp, Some(1500));
+}
+
 #[test]
 fn histogram_functions_drop_metadata_labels() {
     let grid = Arc::new(

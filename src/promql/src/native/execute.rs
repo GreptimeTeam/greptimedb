@@ -57,7 +57,7 @@ use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReser
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::{Array, Float64Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
-use datatypes::series::histogram::HistogramBatch;
+use datatypes::series::histogram::{HistogramBatch, HistogramView};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
@@ -1080,6 +1080,101 @@ impl InstantRuntime {
         self.held.bytes
     }
 
+    /// The bytes gathering the series `closing` ends is about to allocate beside its chunks.
+    ///
+    /// An upper bound derived from what the selection has in hand rather than a measurement: the
+    /// rows the series holds once `closing` has joined it, the fields it carries, the points its
+    /// bound grid decides, and, per field, the largest histogram a row of it can carry. Each term
+    /// is one thing the gather allocates:
+    ///
+    /// - The concatenated axis ([`buffered_time`]): one `i64` per row, reserved by the row count.
+    /// - The descriptors that read it ([`buffered_fields`]): one [`Samples`] per (chunk, field) for
+    ///   the per-field vectors, three per segment for the vector [`Samples::try_from_chunks`]
+    ///   flattens them into -- the segment it came from, the vector it is flattened into and the
+    ///   `Arc<[Samples]>` the result is copied into -- and one `Vec<Samples>` header per field.
+    /// - The two arrays [`select_instants`] returns: a `u64` source row index and an `i64`
+    ///   evaluation timestamp per point, reserved by the count they can reach at most.
+    /// - The rows [`GridSeriesBuilder`] keeps: one `usize` grid index, one `f64` per field and a
+    ///   validity byte per (row, field). A field of native histograms adds one `Option<u32>` index
+    ///   per row and the payload of the histogram that index names, charged at the largest one the
+    ///   field holds and per *point* rather than per row: one source row can be selected by every
+    ///   point of the grid, so the point count is what that payload is multiplied by.
+    /// - The row the selection fills, one [`GridSample`] slot per field, and one [`RowCursor`] per
+    ///   field to read the axis with.
+    /// - Doubling: every column the builder keeps is a `Vec` that grows by doubling, so each is
+    ///   charged twice what it ends up holding, which bounds its capacity rather than its length.
+    ///
+    /// Left out, deliberately: the headers and Arrow buffers behind the buffered chunks (the
+    /// node's own reservation already holds them, allocation by allocation), the `Vec` headers the
+    /// gather drops before it returns, `Series`' own header and the runs [`GridSeriesBuilder`]
+    /// hands the output over with, which the output chunk is charged for by whoever reads it, and
+    /// the temporaries [`FloatHistogram::push_to`] builds for one row. None of those is
+    /// proportional to the points the grid decides, which is the amplification the pool has to be
+    /// asked for, and all of them are constant per gather or already counted row by row.
+    ///
+    /// The estimate applies to every gather: nothing refuses one before it allocates, so the points
+    /// a grid decides are reserved for whatever their number is.
+    fn gather_bytes(&self, closing: &RawSeriesChunk) -> usize {
+        // The bound grid validated that its length fits a `usize`.
+        let points = usize::try_from(self.selection.output_grid.spec().len).unwrap_or(usize::MAX);
+        let chunks = self.chunks.len().saturating_add(1);
+        let rows = self
+            .chunks
+            .iter()
+            .chain(std::iter::once(closing))
+            .map(|chunk| chunk.time.len())
+            .fold(0usize, usize::saturating_add);
+        let fields = self.schema.fields.len();
+        let descriptor = std::mem::size_of::<Samples>();
+        let segments = self
+            .chunks
+            .iter()
+            .chain(std::iter::once(closing))
+            .flat_map(|chunk| chunk.fields.as_slice())
+            .map(|field| field.segments().len())
+            .fold(0usize, usize::saturating_add);
+        let axis = rows.saturating_mul(std::mem::size_of::<i64>());
+        let layout = chunks
+            .saturating_mul(fields)
+            .saturating_mul(descriptor)
+            .saturating_add(segments.saturating_mul(3).saturating_mul(descriptor))
+            .saturating_add(fields.saturating_mul(std::mem::size_of::<Vec<Samples>>()));
+        let selection =
+            points.saturating_mul(std::mem::size_of::<u64>() + std::mem::size_of::<i64>());
+        let mut rows_of_points = points.saturating_mul(
+            std::mem::size_of::<usize>() + fields.saturating_mul(std::mem::size_of::<f64>() + 1),
+        );
+        for largest in self.largest_histograms(closing).iter().flatten() {
+            rows_of_points = rows_of_points.saturating_add(
+                points.saturating_mul(std::mem::size_of::<Option<u32>>().saturating_add(*largest)),
+            );
+        }
+        let row = fields.saturating_mul(
+            std::mem::size_of::<Option<GridSample>>() + std::mem::size_of::<RowCursor<'_>>(),
+        );
+        axis.saturating_add(layout)
+            .saturating_add(selection)
+            .saturating_add(row)
+            .saturating_add(rows_of_points.saturating_mul(2))
+    }
+
+    /// The largest histogram a row of each field can carry, `None` for a field of floats.
+    ///
+    /// A row of native histograms is copied into the builder once per grid point that selects it,
+    /// so what such a field costs is one histogram per point: the largest row is the one to charge,
+    /// because any row can be the one every point of the grid picks.
+    fn largest_histograms(&self, closing: &RawSeriesChunk) -> Vec<Option<usize>> {
+        let mut largest = vec![None; self.schema.fields.len()];
+        for chunk in self.chunks.iter().chain(std::iter::once(closing)) {
+            for (slot, field) in largest.iter_mut().zip(chunk.fields.as_slice()) {
+                if let Some(bytes) = histogram_row_bytes(field) {
+                    *slot = Some(slot.unwrap_or(0).max(bytes));
+                }
+            }
+        }
+        largest
+    }
+
     /// Buffers one chunk of the series being selected, and gathers that series when it ends.
     ///
     /// `None` means the series is still open: the selection reads one whole axis, so nothing is
@@ -1207,6 +1302,67 @@ fn buffered_fields(chunks: &[RawSeriesChunk], fields: usize) -> Result<SeriesFie
         .map(|chunks| Samples::try_from_chunks(chunks).map_err(series_error))
         .collect::<Result<Vec<_>>>()?;
     SeriesFields::try_from_vec(fields).map_err(series_error)
+}
+
+/// The bytes the builder's table holds for one row of the field, `None` for a field of floats.
+///
+/// The largest row of the field rather than its total: every grid point that selects one source row
+/// copies that row, so the widest histogram the field holds is what a point can cost.
+fn histogram_row_bytes(field: &Samples) -> Option<usize> {
+    let holds_histograms = field.segments().iter().any(|segment| {
+        matches!(
+            segment.dense(),
+            Some(DenseSamplesRef::Histogram(_) | DenseSamplesRef::Mixed(_))
+        )
+    });
+    if !holds_histograms {
+        return None;
+    }
+    Some(
+        field
+            .iter()
+            .filter_map(|sample| match sample {
+                SampleRef::Histogram(view) => Some(histogram_bytes(&view)),
+                _ => None,
+            })
+            .fold(0, usize::max),
+    )
+}
+
+/// The bytes the histogram table holds for one row of `view`.
+///
+/// The row `HistogramBatchBuilder::push` writes: its scalar columns, the offset each of the seven
+/// bucket lists pays for it, and the values those lists hold -- the custom bounds, and each side's
+/// bucket counts with the span offsets and lengths that place them. The spans are the view's own,
+/// because a histogram handed on unchanged keeps its layout through [`FloatHistogram::push_to`].
+fn histogram_bytes(view: &HistogramView<'_>) -> usize {
+    // Schema, zero threshold, sum, count, zero count, reset hint and start timestamp, the narrow
+    // columns counted at the width of the widest.
+    let scalars = 7 * std::mem::size_of::<i64>();
+    // One offset per list column: custom bounds, two span columns and one bucket column per side.
+    let list_offsets = 7 * std::mem::size_of::<u32>();
+    let custom = view
+        .custom_values
+        .len()
+        .saturating_mul(std::mem::size_of::<f64>());
+    let sides = [view.positive, view.negative]
+        .iter()
+        .map(|side| {
+            side.span_offsets
+                .len()
+                .saturating_mul(2)
+                .saturating_mul(std::mem::size_of::<i32>())
+                .saturating_add(
+                    side.buckets
+                        .len()
+                        .saturating_mul(std::mem::size_of::<f64>()),
+                )
+        })
+        .fold(0usize, usize::saturating_add);
+    scalars
+        .saturating_add(list_offsets)
+        .saturating_add(custom)
+        .saturating_add(sides)
 }
 
 /// The last timestamp of `spec`, which is inclusive: its `len` points step from its start.
@@ -1497,6 +1653,22 @@ impl NodeRuntime {
         );
         // The chunk is held for as long as it enters the buffer.
         self.buffer.hold(bytes)?;
+        // The chunk that closes the series gathers it in one go, and the gather allocates a
+        // workspace of its own beside the buffered chunks: the axis it concatenates, the descriptors
+        // that read it, the two arrays the selection returns and the rows the builder keeps. That
+        // workspace is reserved here, before it exists, so a pool too small for it refuses the
+        // gather instead of learning about it afterwards. Without this the reservation would fall
+        // back to the buffered chunks alone -- nothing at all, on the chunk that ends the series --
+        // and a selection over a million grid points would take its tens of megabytes without
+        // asking. [`InstantRuntime::gather_bytes`] derives the figure, because the chunks it counts
+        // are that node's.
+        if let (NativeChunk::Raw(raw), true) = (&chunk, closing) {
+            let scratch = self
+                .instant
+                .as_ref()
+                .map_or(0, |instant| instant.gather_bytes(raw));
+            self.buffer.hold(scratch)?;
+        }
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -1520,21 +1692,41 @@ impl NodeRuntime {
             // the whole series on it, so it is counted here rather than on the chunk handed out.
             metrics.record_completed_series(1);
         }
-        // An error leaves the reservation to the driver, which releases every node when it stops.
-        let output = outcome?;
+        // A failed gather gives its workspace back here rather than leaving it to the driver: the
+        // driver releases every node when the execution stops, but the workspace is this call's and
+        // not something the node keeps, so holding the pool's budget for it until the stopped
+        // executor is dropped would charge the pool for memory nothing reads any more. What stays
+        // reserved is the buffered series the node still holds, which is what `hold_buffered`
+        // counts. Shrinking asks the pool for nothing, so it cannot fail for want of capacity.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.hold_buffered()?;
+                return Err(error);
+            }
+        };
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
         }
         // What this node still holds is the chunks of the series it is selecting: a whole series is
         // held until it ends, so the reservation is what those chunks hold rather than a figure
-        // that grows with the chunk count of anything already answered.
+        // that grows with the chunk count of anything already answered. The chunk just consumed and
+        // the workspace of the gather it closed are both gone, so this is what gives them back.
+        self.hold_buffered()?;
+        Ok(output)
+    }
+
+    /// Sets this node's reservation to the chunks of the series it is still gathering.
+    ///
+    /// The chunk the node just consumed and the workspace of a gather it closed are not part of it:
+    /// the first has left the buffer and the second has been handed to the output.
+    fn hold_buffered(&mut self) -> Result<()> {
         let buffered = self
             .instant
             .as_ref()
             .map_or(0, InstantRuntime::buffered_bytes);
-        self.buffer.hold_exactly(buffered)?;
-        Ok(output)
+        self.buffer.hold_exactly(buffered)
     }
 
     /// Records what this node hands out under its output label set.

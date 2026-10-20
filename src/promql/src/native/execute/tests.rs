@@ -93,11 +93,16 @@ fn metric() -> MetricName {
 
 /// The raw source every supported tree starts from.
 fn input() -> NativeNode {
+    raw_input_with_ordering(SeriesOrdering::KeyThenTime)
+}
+
+/// The same raw source, declaring `ordering`.
+fn raw_input_with_ordering(ordering: SeriesOrdering) -> NativeNode {
     let output = NativeType::Samples(raw_schema());
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
-            ordering: SeriesOrdering::KeyThenTime,
+            ordering,
         }),
         output,
     }
@@ -381,6 +386,59 @@ fn raw_histogram_chunk(
     .unwrap()
 }
 
+/// One raw chunk of `series-a` whose one field holds a four-bucket native histogram at each of
+/// `timestamps`, each carrying `start_timestamp` as the payload it was read from reports it.
+fn raw_histogram_chunk_with_start(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    start_timestamp: Option<i64>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let mut builder = HistogramBatchBuilder::new();
+    let offsets = [0];
+    let lengths = [4];
+    let counts = vec![1.0; 4];
+    let indices: UInt32Array = timestamps
+        .iter()
+        .map(|_| {
+            Some(
+                builder
+                    .push(HistogramView {
+                        schema: 0,
+                        zero_threshold: 0.0,
+                        zero_count: 0.0,
+                        count: 4.0,
+                        sum: 4.0,
+                        reset_hint: CounterResetHint::Unknown,
+                        start_timestamp,
+                        custom_values: &[],
+                        positive: BucketSideView {
+                            span_offsets: &offsets,
+                            span_lengths: &lengths,
+                            buckets: &counts,
+                        },
+                        negative: BucketSideView {
+                            span_offsets: &[],
+                            span_lengths: &[],
+                            buckets: &[],
+                        },
+                    })
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let samples = Samples::try_from_histogram(indices, builder.finish().unwrap()).unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        SeriesFields::one(samples),
+        is_last,
+    )
+    .unwrap()
+}
+
 /// One raw chunk of `series-a` whose one field holds the histogram at `index` of `table`.
 ///
 /// Two chunks built this way share one `Arc<HistogramBatch>`, which is what makes the allocation
@@ -536,6 +594,25 @@ fn field_values(chunk: &EvaluatedChunk, index: usize) -> Vec<Option<f64>> {
             SampleRef::Float(value) => Some(value),
             _ => None,
         })
+        .collect()
+}
+
+/// The start timestamp of the histogram at every position of a chunk, in grid order.
+///
+/// It is read off the output's own histogram views rather than off a converted value, because the
+/// figure under test is the one a later reader sees.
+fn histogram_starts(chunk: &EvaluatedChunk) -> Vec<Option<i64>> {
+    let mut cursor = chunk.series.fields.as_slice()[0].cursor();
+    chunk
+        .series
+        .time
+        .positions()
+        .filter_map(
+            |(_, row)| match cursor.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Histogram(view) => Some(view.start_timestamp),
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -1778,6 +1855,74 @@ fn an_interleaved_input_is_refused_without_a_window() {
     let message = error.to_string();
     assert!(message.contains("Interleaved"), "{message}");
     assert!(message.contains("root.input"), "{message}");
+}
+
+/// A selection over an interleaved input is refused when the execution is built, not run.
+///
+/// The binding accepts this tree: the plan's `Instant` arm has no ordering check yet -- #9785 adds
+/// one to `validate`, so that half of the refusal arrives in a separate change. The tree can
+/// therefore be *built* here and cannot be *executed*, which is exactly the split this runtime
+/// keeps: an instant selection reads one series to its `is_last` and holds no cross-series state,
+/// but the input node's flag -- and every node above it -- assumes the chunks of a series arrive
+/// together, so an input declaring `Interleaved` is refused before a chunk is read. The shape with
+/// a map between the input and the selection is
+/// [`an_interleaved_input_is_refused_under_a_map_over_a_selection`].
+#[test]
+fn an_interleaved_input_is_refused_under_a_selection() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(instant(
+        raw_input_with_ordering(SeriesOrdering::Interleaved),
+        60_000,
+        0,
+        Arc::clone(&out_grid),
+    ))
+    .expect("the binding accepts a selection over an interleaved input");
+    let error =
+        match NativeExecutionState::try_new(&tree, pool(), &ExecutionPlanMetricsSet::new(), 0) {
+            Ok(_) => panic!("the runtime accepted an interleaved input under a selection"),
+            Err(error) => error,
+        };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("Interleaved"), "{message}");
+    assert!(message.contains("root.input"), "{message}");
+}
+
+/// The same refusal with a map between the input and the selection.
+///
+/// A map passes chunks through in the order they arrive, so the selection still reads an
+/// interleaved stream even though the node below it is a map: the ordering is a property of the
+/// input, and the runtime records it there rather than at the node that reads it.
+#[test]
+fn an_interleaved_input_is_refused_under_a_map_over_a_selection() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(map(
+        instant(
+            raw_input_with_ordering(SeriesOrdering::Interleaved),
+            60_000,
+            0,
+            Arc::clone(&out_grid),
+        ),
+        vec![MathOp::Abs],
+    ))
+    .expect("the binding accepts a map over a selection over an interleaved input");
+    let error =
+        match NativeExecutionState::try_new(&tree, pool(), &ExecutionPlanMetricsSet::new(), 0) {
+            Ok(_) => {
+                panic!("the runtime accepted an interleaved input under a map and a selection")
+            }
+            Err(error) => error,
+        };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("Interleaved"), "{message}");
+    assert!(message.contains("root.input.input"), "{message}");
 }
 
 /// The charge for the label sets a node has handed out does not depend on how it is read.
@@ -3165,6 +3310,41 @@ fn a_position_no_field_fills_is_not_a_row() {
     );
 }
 
+/// An instant selection selects: the histogram it picks keeps its start timestamp.
+///
+/// The sample is read, converted into the histogram type the builder writes back, and written out
+/// again, and that type used to have no start timestamp to write: a sample carrying
+/// `start_timestamp = Some(1500)` at 2000ms came out `None`. It matters downstream -- a reader
+/// detects a counter reset from a start timestamp that falls inside the range it reads -- and it is
+/// the difference between selecting a sample and computing a value.
+///
+/// One source sample is selected by three grid points here, which is the case a per-row conversion
+/// can get wrong twice: applied once and forgotten on the second use, or applied to a value that no
+/// longer carries the timestamp.
+#[test]
+fn a_selected_histogram_keeps_its_start_timestamp() {
+    let out_grid = grid(2000, 1, 3);
+    let tree = NativeTree::try_new(instant(input(), 60_000, 0, Arc::clone(&out_grid))).unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_raw(raw_histogram_chunk_with_start(
+            &schema,
+            &[2000],
+            Some(1500),
+            true,
+        ))
+        .unwrap();
+    let out = run(&mut execution);
+
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        histogram_starts(&out[0]),
+        vec![Some(1500), Some(1500), Some(1500)],
+        "the selected sample lost the start timestamp it was read with"
+    );
+}
+
 /// Two series that differ only in an empty-valued label are two series, and both are answered.
 ///
 /// The label set the runtime's occupancy table compares drops empty values, so a node that recorded
@@ -3211,6 +3391,11 @@ fn two_series_differing_only_in_an_empty_label_are_both_answered() {
 /// The node holds a whole series, so its reservation grows with the chunks that series arrived in
 /// and goes back when the series is answered. The figure is the one the queue of a source keeps: an
 /// allocation two chunks share is counted once, which is what one pass over the buffer counts.
+///
+/// What this checks is the buffer alone. The workspace the gather of that buffer allocates -- the
+/// axis, the selection's two arrays and the rows the builder keeps -- is reserved for while it is
+/// live and is not part of this figure, so this test cannot see it, however many bytes it is:
+/// [`an_instant_selection_reserves_the_workspace_it_gathers`] is the one that does.
 #[test]
 fn an_instant_selection_reserves_the_series_it_buffers() {
     let out_grid = grid(0, 60_000, 4);
@@ -3255,13 +3440,72 @@ fn an_instant_selection_reserves_the_series_it_buffers() {
     );
 }
 
-/// The selection's own limits are reported as its error, and an error stops the execution.
+/// The workspace the gather allocates is reserved for before it exists.
+///
+/// A selection decides its whole grid at once, so its workspace is proportional to the points of
+/// the grid rather than to the samples of the series: the axis it concatenates, the source row and
+/// evaluation timestamp it reports per point, and the rows the builder keeps. One sample selected
+/// by a million points is the review's case: the two selection arrays alone are 16 MB and the built
+/// rows are more, while the series the node holds is one sample of a few hundred bytes.
+///
+/// The pool here holds 8 KiB, which is enough for the buffered chunk and nothing near the
+/// workspace, so the gather is refused instead of being performed. Nothing else refuses a million
+/// points, so this is the reservation and not a point limit answering: without it the gather simply
+/// runs.
 #[test]
-fn an_oversized_selection_is_reported_as_its_error() {
-    // One million and two grid points over two samples: more points than the kernel will decide.
+fn an_instant_selection_reserves_the_workspace_it_gathers() {
+    let out_grid = grid(0, 1, 1_000_000);
+    let tree = NativeTree::try_new(instant(input(), 1_000_000, 0, out_grid)).unwrap();
+    let pool = bounded_pool(8 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let schema = raw_schema();
+    execution
+        .push_raw(raw_chunk(&schema, &[0], &[1.0], true))
+        .unwrap();
+
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "the gather's workspace was taken without asking the pool: {error}"
+    );
+    assert!(
+        !error.to_string().contains("exceed limit"),
+        "a point limit answered in the pool's place: {error}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the stopped execution still holds bytes"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "the workspace of the refused gather is still reserved for"
+    );
+    assert_eq!(
+        execution.state().nodes_holding_instants(),
+        0,
+        "the stopped execution still holds the buffered series"
+    );
+    // A refused gather stops the execution rather than leaving it to be resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// A grid past the removed point limit is refused by the pool, not by a count of its own.
+///
+/// `gather_bytes` used to return zero for a grid this long, so that the kernel's own point limit
+/// stayed the error reported. The kernel has no limit now, so the estimate applies to every gather
+/// and what refuses this one is the pool, exactly as it refuses a grid under the limit.
+#[test]
+fn an_oversized_selection_is_refused_by_the_pool() {
+    // One million and two points over two samples: more points than the removed limit allowed.
     let out_grid = grid(0, 1, 1_000_002);
     let tree = NativeTree::try_new(instant(input(), 1_000_000, 0, out_grid)).unwrap();
-    let pool = pool();
+    let pool = bounded_pool(8 * 1024);
     let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
     let schema = raw_schema();
     execution
@@ -3270,8 +3514,12 @@ fn an_oversized_selection_is_reported_as_its_error() {
 
     let error = execution.next_chunk().unwrap_err();
     assert!(
-        error.to_string().contains("exceed limit"),
-        "the selection's own limit was not the error reported: {error}"
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "the gather's workspace was taken without asking the pool: {error}"
+    );
+    assert!(
+        !error.to_string().contains("exceed limit"),
+        "a point limit answered in the pool's place: {error}"
     );
     // Nothing is dropped silently: the execution stops and gives its reservation back.
     assert_eq!(pool.reserved(), 0);
