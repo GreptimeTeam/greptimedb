@@ -165,7 +165,12 @@ fn bench_preflight(c: &mut Criterion) {
         group.bench_function(fixture.name, |b| {
             let mut requests = prepared.requests.clone();
             let result = runtime
-                .block_on(inserter.preflight_otlp_metrics(&mut requests, &ctx, true, "physical"))
+                .block_on(inserter.validate_and_normalize_otlp_metrics(
+                    &mut requests,
+                    &ctx,
+                    true,
+                    "physical",
+                ))
                 .unwrap();
             assert_eq!(result.rejections.len(), requests.len());
             assert_eq!(
@@ -181,9 +186,9 @@ fn bench_preflight(c: &mut Criterion) {
                 |requests| {
                     black_box(
                         runtime
-                            .block_on(
-                                inserter.preflight_otlp_metrics(requests, &ctx, true, "physical"),
-                            )
+                            .block_on(inserter.validate_and_normalize_otlp_metrics(
+                                requests, &ctx, true, "physical",
+                            ))
                             .unwrap(),
                     )
                 },

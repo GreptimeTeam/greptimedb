@@ -139,7 +139,7 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let preflight = self
             .inserter
-            .preflight_otlp_metrics(
+            .validate_and_normalize_otlp_metrics(
                 &mut prepared.requests,
                 &ctx,
                 metric_ctx.with_metric_engine,

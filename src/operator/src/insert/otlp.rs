@@ -63,9 +63,9 @@ impl PhysicalColumns {
 }
 
 impl Inserter {
-    /// Validate each point independently against a single catalog snapshot.
+    /// Validate and normalize each point independently against a single catalog snapshot.
     /// Fresh cross-point conflicts are resolved by the converter after this pass.
-    pub async fn preflight_otlp_metrics(
+    pub async fn validate_and_normalize_otlp_metrics(
         &self,
         points: &mut [RowInsertRequests],
         ctx: &QueryContextRef,
