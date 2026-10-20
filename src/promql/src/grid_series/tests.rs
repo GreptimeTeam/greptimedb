@@ -335,3 +335,41 @@ fn one_builder_serves_several_series() {
     assert!(second.iter().all(|piece| piece.metric == metric(1)));
     assert!(!builder.has_pending());
 }
+
+/// Mixing `take_run` with more pushes and then `finish` keeps every piece: `finish` hands out what
+/// the earlier `take_run` left behind before cutting the rows pushed since.
+#[test]
+fn finish_keeps_the_pieces_an_earlier_take_left_behind() {
+    let mut builder = GridSeriesBuilder::try_new(grid_schema(1, 20)).unwrap();
+    builder.push(0, &[Some(1.0)]).unwrap();
+    builder.push(5, &[Some(2.0)]).unwrap();
+    builder.push(9, &[Some(3.0)]).unwrap();
+
+    let taken = builder.take_run(metric(0)).unwrap().expect("a piece");
+    assert_eq!(piece_ranges(&[taken]), vec![(0, 1)]);
+
+    // More rows after a piece was taken: they finalize into their own buffers, so the pieces still
+    // queued from the first batch must not be dropped on the way.
+    builder.push(15, &[Some(4.0)]).unwrap();
+    let rest = builder.finish(metric(0)).unwrap();
+    assert_eq!(
+        piece_ranges(&rest),
+        vec![(5, 1), (9, 1), (15, 1)],
+        "finish dropped the pieces an earlier take_run left pending"
+    );
+    // The values, not only the ranges: each piece is cut from the buffer its own rows went into,
+    // so a piece cut from the wrong batch would carry another position's value.
+    let values: Vec<f64> = rest
+        .iter()
+        .map(|piece| match piece.fields.as_slice()[0].dense() {
+            Some(DenseSamplesRef::Float(values)) => values.value(0),
+            _ => panic!("expected float samples"),
+        })
+        .collect();
+    assert_eq!(
+        values,
+        vec![2.0, 3.0, 4.0],
+        "a piece carries the wrong batch's value"
+    );
+    assert!(!builder.has_pending());
+}

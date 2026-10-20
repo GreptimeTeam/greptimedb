@@ -2930,3 +2930,27 @@ fn evaluated_histograms_drop_counter_reset_hints() {
         SampleRef::Float(resets) if resets == 0.0
     ));
 }
+
+/// A run holding no position is refused rather than panicking: it carries no sample and decides
+/// nothing, so it is not input to a window.
+#[test]
+fn an_empty_run_is_refused_not_indexed() {
+    // A closing chunk of a series that produced nothing: a grid range of no positions.
+    let time = GridRange::try_new(grid(0, 1, 4), 0, 0).unwrap();
+    let fields = SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(Vec::<
+        f64,
+    >::new(
+    )))])
+    .unwrap();
+    let empty = Series::try_new(
+        &SeriesSchema {
+            fields: raw_schema(1).fields.clone(),
+            eval_grid: Some(grid(0, 1, 4)),
+        },
+        metric(0),
+        TimeAxis::Grid(time),
+        fields,
+    )
+    .unwrap();
+    execution_error(probe_evaluator(1, grid(0, 10, 4), one_ms()).push_series(&empty, true));
+}

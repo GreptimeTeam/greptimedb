@@ -60,8 +60,11 @@ pub struct GridSeriesBuilder {
     indices: Vec<usize>,
     /// One row per retained row, per field; empty when nothing is buffered.
     fields: Vec<FieldBuilder>,
-    /// The buffered rows finalized into shared buffers, with the runs still to hand out.
-    finished: Option<Finished>,
+    /// Batches of finalized rows still to hand out, oldest first.
+    ///
+    /// A batch keeps its own buffers because a run's offset indexes the buffers it was finalized
+    /// with: merging two batches' runs under one `fields` would cut them at the wrong place.
+    finished: VecDeque<Finished>,
 }
 
 /// Retained rows turned into field buffers a run can be sliced out of.
@@ -113,7 +116,7 @@ impl GridSeriesBuilder {
             next: 0,
             indices: Vec::new(),
             fields: Vec::new(),
-            finished: None,
+            finished: VecDeque::new(),
         })
     }
 
@@ -190,8 +193,8 @@ impl GridSeriesBuilder {
         !self.indices.is_empty()
             || self
                 .finished
-                .as_ref()
-                .is_some_and(|finished| !finished.runs.is_empty())
+                .iter()
+                .any(|finished| !finished.runs.is_empty())
     }
 
     /// Starts the series the following pushes belong to.
@@ -211,7 +214,7 @@ impl GridSeriesBuilder {
         self.next = 0;
         self.indices.clear();
         self.fields.clear();
-        self.finished = None;
+        self.finished.clear();
     }
 
     /// Hands out the next run of positions holding a value, or `None` when none is left.
@@ -223,18 +226,23 @@ impl GridSeriesBuilder {
     pub fn take_run(&mut self, metric: MetricName) -> Result<Option<Series>> {
         let exhausted = self
             .finished
-            .as_ref()
+            .front()
             .is_none_or(|finished| finished.runs.is_empty());
         if exhausted && !self.indices.is_empty() {
             self.finalize()?;
         }
-        let Some(finished) = self.finished.as_mut() else {
+        // The oldest batch is the one whose runs come first on the grid.
+        let Some(finished) = self.finished.front_mut() else {
             return Ok(None);
         };
         let Some(run) = finished.runs.pop_front() else {
             return Ok(None);
         };
-        Self::cut(&self.schema, &self.grid, &metric, &finished.fields, &run).map(Some)
+        let cut = Self::cut(&self.schema, &self.grid, &metric, &finished.fields, &run)?;
+        if self.finished.front().is_some_and(|f| f.runs.is_empty()) {
+            self.finished.pop_front();
+        }
+        Ok(Some(cut))
     }
 
     /// Returns every piece the pushed rows make up and resets the builder for the next series.
@@ -242,22 +250,25 @@ impl GridSeriesBuilder {
     /// One piece per maximal run of consecutive positions holding a value; an empty vector when
     /// no pushed row held one.
     pub fn finish(&mut self, metric: MetricName) -> Result<Vec<Series>> {
+        // Rows pushed since the last finalization become one more batch; every batch is cut
+        // against its own buffers, so the pieces an earlier `take_run` left behind reach the
+        // caller too.
         if !self.indices.is_empty() {
             self.finalize()?;
         }
         self.next = 0;
-        let Some(finished) = self.finished.take() else {
-            return Ok(Vec::new());
-        };
-        let mut pieces = Vec::with_capacity(finished.runs.len());
-        for run in finished.runs {
-            pieces.push(Self::cut(
-                &self.schema,
-                &self.grid,
-                &metric,
-                &finished.fields,
-                &run,
-            )?);
+        let mut pieces = Vec::new();
+        // Batches in the order they were pushed, each cut against its own buffers.
+        for finished in std::mem::take(&mut self.finished) {
+            for run in finished.runs {
+                pieces.push(Self::cut(
+                    &self.schema,
+                    &self.grid,
+                    &metric,
+                    &finished.fields,
+                    &run,
+                )?);
+            }
         }
         Ok(pieces)
     }
@@ -282,7 +293,7 @@ impl GridSeriesBuilder {
         let fields = SeriesFields::try_from_vec(samples).map_err(external)?;
         let runs = runs_of(&self.indices);
         self.indices.clear();
-        self.finished = Some(Finished { fields, runs });
+        self.finished.push_back(Finished { fields, runs });
         Ok(())
     }
 

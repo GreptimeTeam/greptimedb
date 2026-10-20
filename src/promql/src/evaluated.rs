@@ -52,12 +52,12 @@ impl EvaluatedChunk {
         Ok(Self { series, is_last })
     }
 
-    /// The absolute grid range this chunk decided.
+    /// The absolute grid range this chunk holds rows for.
     ///
-    /// Ranges of one series never go backwards and never overlap; together with
+    /// Ranges of one series never go backwards and never overlap, and they need not be adjacent:
+    /// the positions between two chunks hold no value. Together with
     /// [`EvaluatedChunk::is_last`] they say how far the series has been evaluated. An empty range is
-    /// meaningful: it reports that the chunk closed the series without deciding anything past what
-    /// was already handed out.
+    /// meaningful: it reports that the chunk closed the series without holding a row of its own.
     pub fn range(&self) -> &GridRange {
         match &self.series.time {
             TimeAxis::Grid(range) => range,

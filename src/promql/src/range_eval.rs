@@ -592,6 +592,14 @@ impl RangeEvaluator {
                 "evaluated series does not match the input schema".into(),
             ));
         }
+        // A run of no positions carries no sample and decides nothing, so it is not input: the
+        // closing chunk of a series that produced nothing travels as an `EvaluatedChunk` to the
+        // operators, not as a run pushed here. Reading its last timestamp would panic.
+        if range.is_empty() {
+            return Err(DataFusionError::Execution(
+                "evaluated range input holds no position".into(),
+            ));
+        }
         let last_ts = range.timestamps()[range.len() - 1];
         match &mut self.series {
             None => {
