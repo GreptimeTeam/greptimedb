@@ -311,6 +311,13 @@ impl NativeInstantStream {
                 n.checked_add(field_count.checked_mul(std::mem::size_of::<Vec<Samples>>())?)
             })
             .and_then(|n| {
+                // Per point of the clipped grid, the most `select_instants` and the mapping of its
+                // selection can allocate: 24 bytes per output column, the labels of the row, and
+                // 48 for the two vectors the selection returns and the time column it is mapped
+                // into -- a `u64` source row index, an `i64` evaluation timestamp and the `i64`
+                // of the output column, at 8 bytes each. The point count is what stands in for
+                // the point limit `estimated_points` used to carry, so the selection arrays are
+                // reserved for here rather than refused there.
                 points
                     .checked_mul(
                         self.schema
