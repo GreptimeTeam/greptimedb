@@ -1703,9 +1703,14 @@ impl ScanInput {
         );
     }
 
-    /// Whether physical source row counts equal the rows visible to this region,
-    /// before applying query predicates.
+    /// Whether physical source row counts are known and equal the rows visible
+    /// to this region, before applying query predicates.
     pub(crate) fn total_rows_is_exact(&self) -> bool {
+        // Legacy SST metadata uses zero for unknown row counts.
+        if self.files.iter().any(|file| file.num_rows() == 0) {
+            return false;
+        }
+
         if self.region_partition_expr.is_none() {
             return true;
         }
@@ -2443,6 +2448,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_total_rows_is_exact_with_legacy_file() {
+        let file_meta = FileMeta {
+            num_rows: 10,
+            ..Default::default()
+        };
+        let mut json = serde_json::to_value(&file_meta).unwrap();
+        json.as_object_mut().unwrap().remove("num_rows");
+        let legacy_meta = serde_json::from_value::<FileMeta>(json).unwrap();
+        assert_eq!(legacy_meta.num_rows, 0);
+
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        for (file_metas, expected_rows, exact) in [
+            (vec![file_meta.clone()], 10, true),
+            (vec![legacy_meta.clone()], 0, false),
+            (vec![file_meta, legacy_meta], 10, false),
+        ] {
+            let files = file_metas
+                .into_iter()
+                .map(|meta| {
+                    FileHandle::new(meta, Arc::new(crate::sst::file_purger::NoopFilePurger))
+                })
+                .collect();
+            let input = new_scan_input(metadata.clone(), vec![])
+                .await
+                .with_append_mode(true)
+                .with_files(files)
+                .build();
+            assert_eq!(input.total_rows(), expected_rows);
+            assert_eq!(input.total_rows_is_exact(), exact);
+        }
+    }
+
+    #[tokio::test]
     async fn test_total_rows_is_exact_after_partition_filter() {
         let expr = partition_col("k0").gt_eq(Value::String("foo".into()));
         let other = partition_col("k0").gt_eq(Value::String("bar".into()));
@@ -2464,6 +2502,7 @@ mod tests {
                 .map(|partition_expr| {
                     FileHandle::new(
                         FileMeta {
+                            num_rows: 1,
                             partition_expr,
                             ..Default::default()
                         },
