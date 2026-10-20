@@ -133,6 +133,7 @@ dashmap = "6.1"
 datafusion = "=55.1.0"
 datafusion-common = "=55.1.0"
 datafusion-datasource = "=55.1.0"
+datafusion-execution = "=55.1.0"
 datafusion-expr = "=55.1.0"
 datafusion-expr-common = "=55.1.0"
 datafusion-functions = "=55.1.0"
@@ -368,6 +369,7 @@ substrait = { git = "https://github.com/GreptimeTeam/substrait-rs.git", rev = "9
 datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
+datafusion-execution = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }

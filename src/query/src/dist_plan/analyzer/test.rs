@@ -530,6 +530,72 @@ fn dictionary_literals_in_values_keep_their_schema() {
     );
 }
 
+#[test]
+fn like_filters_are_pushed_down() {
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider as _)
+        .unwrap();
+
+    let like = |negated, pattern: &str, escape_char, case_insensitive| {
+        Expr::Like(datafusion_expr::expr::Like::new(
+            negated,
+            Box::new(col("t.pk1")),
+            Box::new(lit(pattern.to_string())),
+            escape_char,
+            case_insensitive,
+        ))
+    };
+    // Substrait has no negated LIKE, so `NOT LIKE` comes back as `NOT (.. LIKE ..)`.
+    for (predicate, decoded) in [
+        (
+            like(false, "% timeout %", None, false),
+            like(false, "% timeout %", None, false),
+        ),
+        (
+            like(true, "% timeout %", None, false),
+            Expr::Not(Box::new(like(false, "% timeout %", None, false))),
+        ),
+        (
+            like(false, "% timeout %", None, true),
+            like(false, "% timeout %", None, true),
+        ),
+        (
+            like(false, "100!% done", Some('!'), false),
+            like(false, "100!% done", Some('!'), false),
+        ),
+    ] {
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .filter(predicate.clone())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = DistPlannerAnalyzer {}
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let remote_input = find_merge_scan(&result).unwrap().input();
+        assert!(
+            has_filter_above_table_scan(remote_input, "t", &predicate),
+            "{result}"
+        );
+
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(remote_input, DefaultSerializer)
+            .unwrap();
+        let decoded_plan =
+            futures::executor::block_on(DFLogicalSubstraitConvertor.decode(bytes, ctx.state()))
+                .unwrap();
+        assert!(
+            has_filter_above_table_scan(&decoded_plan, "t", &decoded),
+            "{decoded_plan}"
+        );
+    }
+}
+
 fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
     let sub_plan_bytes = substrait::DFLogicalSubstraitConvertor
         .encode(plan, crate::query_engine::DefaultSerializer)

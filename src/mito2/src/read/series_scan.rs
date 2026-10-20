@@ -25,6 +25,7 @@ use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::warn;
+use datafusion::execution::memory_pool::MemoryPool;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
@@ -266,12 +267,9 @@ impl SeriesScan {
                 metrics_set,
                 ctx.explain_verbose,
             ),
-            SeriesScanMode::TwoPhase => self.scan_two_phase_batch_in_partition(
-                partition,
-                part_metrics,
-                metrics_set,
-                ctx.explain_verbose,
-            ),
+            SeriesScanMode::TwoPhase => {
+                self.scan_two_phase_batch_in_partition(ctx, partition, part_metrics, metrics_set)
+            }
         }
     }
 
@@ -311,12 +309,12 @@ impl SeriesScan {
 
     fn scan_two_phase_batch_in_partition(
         &self,
+        ctx: &QueryScanContext,
         partition: usize,
         part_metrics: PartitionMetrics,
         metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
     ) -> Result<ScanBatchStream> {
-        self.maybe_start_candidate_distributor(metrics_set, explain_verbose);
+        self.maybe_start_candidate_distributor(ctx, metrics_set);
         // Safety: `scan_batch_in_partition` validates the index, and the receiver
         // list always contains one entry for each output partition.
         let mut receiver = self.candidate_receivers.lock().unwrap()[partition]
@@ -406,8 +404,8 @@ impl SeriesScan {
 
     fn maybe_start_candidate_distributor(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
-        explain_verbose: bool,
     ) {
         let mut rx_list = self.candidate_receivers.lock().unwrap();
         if !rx_list.is_empty() {
@@ -416,7 +414,10 @@ impl SeriesScan {
 
         let (senders, receivers, active_receivers) =
             new_candidate_channel_list(self.properties.num_partitions());
+        // Capture the first partition's runtime pool once for the shared distributor.
+        // reset_state clears the receivers so the next execution captures a fresh pool.
         let mut distributor = SeriesCandidateDistributor {
+            memory_pool: ctx.memory_pool.clone(),
             stream_ctx: self.stream_ctx.clone(),
             range_semaphore: Arc::new(Semaphore::new(self.properties.num_partitions())),
             partitions: self.properties.partitions.clone(),
@@ -425,7 +426,7 @@ impl SeriesScan {
             active_receivers,
             metrics_set: metrics_set.clone(),
             metrics_list: self.metrics_list.clone(),
-            explain_verbose,
+            explain_verbose: ctx.explain_verbose,
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::candidate_distributor", region_id = %region_id);
@@ -447,8 +448,9 @@ impl SeriesScan {
     pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let part_num = self.properties.num_partitions();
         let metrics_set = ExecutionPlanMetricsSet::default();
+        let ctx = QueryScanContext::default();
         let streams = (0..part_num)
-            .map(|i| self.scan_partition(&QueryScanContext::default(), &metrics_set, i))
+            .map(|i| self.scan_partition(&ctx, &metrics_set, i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
         let chained_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
         Ok(Box::pin(chained_stream))
@@ -458,6 +460,7 @@ impl SeriesScan {
     pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
         let metrics_set = ExecutionPlanMetricsSet::new();
 
+        let ctx = QueryScanContext::default();
         let streams = (0..self.properties.partitions.len())
             .map(|partition| {
                 let metrics = new_partition_metrics(
@@ -468,12 +471,7 @@ impl SeriesScan {
                     &self.metrics_list,
                 );
 
-                self.scan_batch_in_partition(
-                    &QueryScanContext::default(),
-                    partition,
-                    metrics,
-                    &metrics_set,
-                )
+                self.scan_batch_in_partition(&ctx, partition, metrics, &metrics_set)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -482,6 +480,9 @@ impl SeriesScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
         // Sum the total number of files across all partitions
         let total_files: usize = self
             .properties
@@ -842,6 +843,7 @@ impl SeriesDistributor {
 
 /// Discovers metric series and sends one reader assignment to each partition.
 struct SeriesCandidateDistributor {
+    memory_pool: Arc<dyn MemoryPool>,
     stream_ctx: Arc<StreamContext>,
     range_semaphore: Arc<Semaphore>,
     partitions: Vec<Vec<PartitionRange>>,
@@ -875,7 +877,7 @@ impl SeriesCandidateDistributor {
             self.partitions.clone(),
             self.pruner.clone(),
             self.range_semaphore.clone(),
-            self.stream_ctx.input.scan_memory_pool.clone(),
+            self.memory_pool.clone(),
             self.metrics_set.clone(),
             part_metrics.clone(),
         )?;

@@ -56,6 +56,7 @@ ORDER BY
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time_utc AS collect_time,
   peak_current,
@@ -73,7 +74,7 @@ ORDER BY
 | 1_| 0_|_SortPreservingMergeExec: [collect_time@0 ASC NULLS LAST] REDACTED
 |_|_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time, peak_current@1 as peak_current] REDACTED
 |_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["collect_time_utc", "peak_current"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
 +-+-+-+
@@ -105,6 +106,7 @@ ORDER BY
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time_utc AS collect_time_0,
   peak_current,
@@ -122,7 +124,7 @@ ORDER BY
 | 1_| 0_|_SortPreservingMergeExec: [collect_time_0@0 ASC NULLS LAST] REDACTED
 |_|_|_ProjectionExec: expr=[collect_time_utc@0 as collect_time_0, peak_current@1 as peak_current] REDACTED
 |_|_|_SortExec: expr=[collect_time_utc@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["collect_time_utc", "peak_current"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
 +-+-+-+
@@ -156,6 +158,7 @@ ORDER BY
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time AS true_collect_time,
   collect_time_utc AS collect_time,
@@ -175,7 +178,7 @@ ORDER BY
 |_|_|_ProjectionExec: expr=[collect_time@0 as true_collect_time, collect_time_utc@1 as collect_time, peak_current@2 as peak_current] REDACTED
 |_|_|_WindowedSortExec: expr=collect_time@0 DESC num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=collect_time@0 DESC num_ranges=REDACTED REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["collect_time", "collect_time_utc", "peak_current"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
 +-+-+-+
@@ -209,6 +212,7 @@ ORDER BY
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time_utc AS collect_time,
   collect_time AS true_collect_time,
@@ -228,7 +232,7 @@ ORDER BY
 |_|_|_ProjectionExec: expr=[collect_time_utc@1 as collect_time, collect_time@0 as true_collect_time, peak_current@2 as peak_current] REDACTED
 |_|_|_WindowedSortExec: expr=collect_time@0 DESC num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=collect_time@0 DESC num_ranges=REDACTED REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["collect_time", "collect_time_utc", "peak_current"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 8_|
 +-+-+-+
@@ -274,6 +278,7 @@ TQL EVAL('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMEST
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMESTAMP, '1s') sum(instance_job_metrics);
 
 +-+-+-+
@@ -290,7 +295,7 @@ TQL ANALYZE('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIM
 |_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, greptime_value@1 as greptime_value] REDACTED
 |_|_|_PromInstantManipulateExec: range=[1696118400000..1696118405000], lookback=[300000], interval=[1000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["instance", "job"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["greptime_timestamp", "greptime_value", "instance", "job"], "filters": ["greptime_timestamp >= TimestampMillisecond(1696118100001, None)", "greptime_timestamp <= TimestampMillisecond(1696118405000, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
