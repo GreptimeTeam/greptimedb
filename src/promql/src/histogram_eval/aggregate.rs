@@ -21,12 +21,14 @@ use datafusion::arrow::array::UInt32Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::histogram::HistogramBatchBuilder;
-use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
-use datatypes::series::time::{GridRange, TimeAxis};
+use datatypes::series::samples::{
+    RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{GridSpan, TimeAxis, union_positions};
 
 use crate::grid_series::external;
 use crate::histogram_eval::float_histogram::FloatHistogram;
-use crate::histogram_eval::grid_range;
+use crate::histogram_eval::grid_axis;
 
 /// A native histogram aggregation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,42 +50,62 @@ pub fn aggregate_histograms(
     let grid = schema.eval_grid.clone().ok_or_else(|| {
         DataFusionError::Execution("histogram aggregation requires an evaluation grid".into())
     })?;
-    let ranges = group.iter().map(grid_range).collect::<Result<Vec<_>>>()?;
-    let start = ranges.iter().map(|range| range.0).min().unwrap_or(0);
-    let end = ranges.iter().map(|range| range.1).max().unwrap_or(0);
+    for series in group {
+        grid_axis(series)?;
+    }
 
     let fields = schema.fields.len();
-    // Written from the first point with a result, so a sparse group allocates no full span.
+    // Only the positions some member carries can hold a result, and the union visits each of
+    // them once: a hole between two members is never scanned, so nothing densifies here.
     let mut builders: Vec<HistogramBatchBuilder> =
         (0..fields).map(|_| HistogramBatchBuilder::new()).collect();
     let mut indices: Vec<Vec<Option<u32>>> = vec![Vec::new(); fields];
-    let mut first = None;
+    // The maximal runs of positions that carried a result; one row is written per run row, so a
+    // result over few scattered positions costs few rows.
+    let mut spans: Vec<GridSpan> = Vec::new();
     let mut row: Vec<Option<FloatHistogram>> = (0..fields).map(|_| None).collect();
-    for point in start..end {
+    // One forward cursor per member and field: the merged positions only increase, so a member's
+    // rows do too, and reading them costs one pass over the field instead of a chunk scan per row.
+    // A member that skips a position is asked for nothing, so its cursor stays where it was.
+    let mut cursors: Vec<Vec<RowCursor<'_>>> = group
+        .iter()
+        .map(|series| series.fields.iter().map(|field| field.cursor()).collect())
+        .collect();
+    let mut rows: Vec<Option<usize>> = vec![None; group.len()];
+    for point in union_positions(group.iter().map(|series| &series.time)) {
+        for (member, series) in group.iter().enumerate() {
+            rows[member] = series.time.row_of(point);
+        }
         for (field, value) in row.iter_mut().enumerate() {
-            let samples = group
-                .iter()
-                .zip(&ranges)
-                .filter(|(_, (from, to))| (*from..*to).contains(&point))
-                .map(|(series, &(from, _))| series.fields.as_slice()[field].sample(point - from));
+            let samples = group.iter().enumerate().filter_map(|(member, _)| {
+                rows[member].map(|row| {
+                    cursors[member][field]
+                        .at(row)
+                        .expect("a row never goes back")
+                })
+            });
             *value = aggregate_point(op, samples)?;
         }
         if row.iter().all(Option::is_none) {
             continue;
         }
-        let first = *first.get_or_insert(point);
+        // A gap in the results ends a run, and a row always belongs to the run it opens.
+        match spans.last_mut() {
+            Some(span) if span.start() + span.len() == point => {
+                *span = GridSpan::new(span.start(), span.len() + 1);
+            }
+            _ => spans.push(GridSpan::new(point, 1)),
+        }
         for ((value, builder), indices) in row.iter().zip(&mut builders).zip(&mut indices) {
-            indices.resize(point - first, None);
             indices.push(match value {
                 Some(h) => Some(h.push_to(builder)?),
                 None => None,
             });
         }
     }
-    let Some(first) = first else {
+    if spans.is_empty() {
         return Ok(None);
-    };
-    let len = indices[0].len();
+    }
     let mut samples = Vec::with_capacity(fields);
     for (builder, indices) in builders.into_iter().zip(indices) {
         let batch = builder.finish().map_err(external)?;
@@ -91,11 +113,14 @@ pub fn aggregate_histograms(
             Samples::try_from_histogram(UInt32Array::from(indices), batch).map_err(external)?,
         );
     }
-    let range = GridRange::try_new(grid, first, len).map_err(external)?;
+    // The result is addressed by the runs that carry a histogram, not by the span between the
+    // first and the last one: the nulls padding them stay inside a run, never between two.
+    let time = TimeAxis::from_grid_spans(grid, spans).map_err(external)?;
+    debug_assert_eq!(time.len(), samples[0].len());
     Series::try_new(
         schema,
         metric,
-        TimeAxis::Grid(range),
+        time,
         SeriesFields::try_from_vec(samples).map_err(external)?,
     )
     .map(Some)

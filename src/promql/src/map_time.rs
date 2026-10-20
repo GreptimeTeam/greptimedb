@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::Float64Array;
+use datafusion::arrow::array::{Array, Float64Array};
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::samples::{
@@ -59,6 +59,9 @@ pub fn date_of_eval_time(function: DateFunction, schema: &SeriesSchema) -> Resul
 /// date component, and the metric name is dropped. Missing values stay missing; histogram
 /// samples are dropped, so the result is `None` when no float remains.
 ///
+/// A missing value is a hole like any other, but a hole only skips a position: the result is one
+/// series over the runs of consecutive positions that hold a value.
+///
 /// Series that share a label set once their names are dropped must then go through
 /// [`merge_same_labelset`](crate::grid_series::merge_same_labelset).
 pub fn map_date(
@@ -66,20 +69,22 @@ pub fn map_date(
     schema: &Arc<SeriesSchema>,
     series: &Series,
 ) -> Result<Option<Series>> {
-    let TimeAxis::Grid(range) = &series.time else {
+    if series.time.grid().is_none() {
         return Err(DataFusionError::Execution(
             "date functions require an evaluated series".into(),
         ));
-    };
+    }
     let mut metric = series.metric.clone();
     metric.remove_all(&METADATA_LABELS);
     let map = |seconds: f64| function.apply(go_int64(seconds));
 
+    // The fast path maps every float in place, so it needs each field to be entirely present: it
+    // keeps the input axis as it is. A hole means the mapped rows are fewer than the axis rows,
+    // so it falls through to the builder, which rebuilds the axis from the rows that survive.
     let all_floats = series.fields.iter().all(|samples| {
-        samples
-            .segments()
-            .iter()
-            .all(|segment| matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
+        samples.segments().iter().all(|segment| {
+            matches!(segment.dense(), Some(DenseSamplesRef::Float(floats)) if floats.null_count() == 0)
+        })
     });
     if all_floats {
         let fields = series
@@ -100,22 +105,32 @@ pub fn map_date(
             })
             .collect::<Result<Vec<_>>>()?;
         let fields = SeriesFields::try_from_vec(fields).map_err(external)?;
-        return Series::try_new(schema, metric, series.time.clone(), fields)
-            .map(Some)
-            .map_err(external);
+        let series =
+            Series::try_new(schema, metric, series.time.clone(), fields).map_err(external)?;
+        return Ok(Some(series));
     }
 
-    // Histogram samples leave holes, which may move the ends of the series.
+    // Holes in any field drop rows, so the builder names the positions that survive.
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut values = vec![None; series.fields.len()];
-    for row in 0..range.len() {
-        for (value, samples) in values.iter_mut().zip(series.fields.iter()) {
-            *value = match samples.sample(row) {
+    // The axis names the positions to evaluate and a cursor per field reads them in order, so an
+    // axis of several runs costs its rows and not a scan per row.
+    let mut cursors = series
+        .fields
+        .iter()
+        .map(|samples| samples.cursor())
+        .collect::<Vec<_>>();
+    for (position, row) in series.time.positions() {
+        for (value, samples) in values.iter_mut().zip(&mut cursors) {
+            *value = match samples
+                .at(row)
+                .expect("the axis and the fields are aligned")
+            {
                 SampleRef::Float(seconds) => Some(map(seconds)),
                 SampleRef::Missing | SampleRef::Histogram(_) => None,
             };
         }
-        builder.push(range.start() + row, &values)?;
+        builder.push(position, &values)?;
     }
     builder.finish(metric)
 }

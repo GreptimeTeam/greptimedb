@@ -25,7 +25,6 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::TimeAxis;
 
 use crate::grid_series::GridSeriesBuilder;
 use crate::map::{drop_empty_labels, validate_float_series};
@@ -84,6 +83,8 @@ pub fn aggregate_float(
     let mut output = Vec::with_capacity(groups.len());
     let mut row = Vec::with_capacity(schema.fields.len());
     for group in groups {
+        // One builder serves every group, so each result series starts explicitly.
+        builder.begin_series();
         for (&block, states) in &group.blocks {
             // The last block can extend past the grid; only points with a sample are pushed.
             for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
@@ -170,17 +171,15 @@ struct Group {
 
 impl Group {
     fn accumulate(&mut self, series: &Series, op: AggregateOp) -> Result<()> {
-        let TimeAxis::Grid(range) = &series.time else {
-            return Err(DataFusionError::Execution(
-                "Aggregate requires an evaluated grid".into(),
-            ));
-        };
         let width = series.fields.len();
         let mut pending = Vec::with_capacity(BLOCK_POINTS);
         for (field_index, field) in series.fields.iter().enumerate() {
-            let mut block = range.start() / BLOCK_POINTS;
-            for (offset, sample) in field.iter().enumerate() {
-                let index = range.start() + offset;
+            // The axis says which absolute positions the field holds and the field iterator
+            // supplies them in order, so a sparse axis never turns into its envelope here.
+            // `usize::MAX` is the "no block yet" marker; flushing it is a no-op, since it only
+            // touches a block once a sample was buffered.
+            let mut block = usize::MAX;
+            for ((index, _), sample) in series.time.positions().zip(field.iter()) {
                 if index / BLOCK_POINTS != block {
                     self.update_block(block, width, field_index, op, &mut pending);
                     block = index / BLOCK_POINTS;

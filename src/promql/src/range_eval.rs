@@ -113,9 +113,10 @@ const EVALUATION_BATCH: usize = 512;
 /// become final.
 ///
 /// Each series is pushed as its chunks in order. A push evaluates the grid points whose windows
-/// the pushed samples complete, and hands them out as an [`EvaluatedChunk`], so a consumer can
-/// stream a long series instead of waiting for its last chunk. The series closes on a chunk marked
-/// `is_last`, which is handed out even when it holds no position.
+/// the pushed samples complete, and hands them out as one [`EvaluatedChunk`], so a consumer can
+/// stream a long series instead of waiting for its last chunk. One chunk may hold several runs of
+/// positions, separated by stretches holding no value, and the axis names them. The series closes
+/// on a chunk marked `is_last`, which is handed out even when it holds no position.
 ///
 /// Fields are evaluated independently over their own valid samples; a row holding a stale
 /// marker in any field is dropped, as the ordinary range selector does. Only the samples later
@@ -263,13 +264,14 @@ struct SeriesState {
     /// `None` for evaluated input, which arrives as one complete series.
     primary_key: Option<Buffer>,
     metric: MetricName,
-    last_ts: i64,
+    /// Largest source timestamp retained so far, or `None` while the series holds no sample: a
+    /// closing chunk of a series that never produced a value carries no position to read.
+    last_ts: Option<i64>,
     /// Next grid index to evaluate.
     cursor: usize,
-    /// Grid index after the last position the evaluator has decided, whether it holds a value or
-    /// not. This is what a consumer needs in order to advance, so it is reported as the chunk
-    /// span even where no value was produced.
-    completed: usize,
+    /// Whether the input, or the evaluated series, has ended. The state stays until the buffered
+    /// rows have been handed out: the closing chunk still needs its metric.
+    closing: bool,
     /// Grid index after the last position handed out to the consumer.
     emitted_end: usize,
 }
@@ -539,15 +541,13 @@ impl RangeEvaluator {
 
     /// Consumes the next chunk of the current series, or starts a new series.
     ///
-    /// Returns the grid points this chunk decided, as one chunk whose range is absolute on the
-    /// evaluation grid; `None` when it decided no new point. A decided point whose window has no
-    /// result is a missing value inside the range, as it is in a whole series; the range is what
-    /// tells a consumer that the point is settled rather than still waiting for input.
+    /// Returns every position this chunk decided, in one chunk addressed absolutely on the
+    /// evaluation grid; `None` when it decided no position holding a value. A decided position
+    /// without a result is a row of no chunk, so the positions between two runs of one chunk hold
+    /// no value and cost nothing. One push hands out at most one chunk.
     ///
-    /// The last chunk of a series is always returned, empty when it decided nothing new, because
-    /// that chunk is what closes the series for the consumer.
-    ///
-    /// The evaluator must not be reused after an error.
+    /// A series always closes exactly once: on the chunk holding its last rows, or on an empty
+    /// chunk after it when nothing is left. The evaluator must not be reused after an error.
     pub fn push(&mut self, chunk: &RawSeriesChunk) -> Result<Option<EvaluatedChunk>> {
         if self.input_grid.is_some() {
             return Err(DataFusionError::Execution(
@@ -562,98 +562,174 @@ impl RangeEvaluator {
             self.evaluate(Some(
                 i128::from(last_ts) + i128::from(self.window.offset_ms),
             ))?;
-            return self.emit(false);
+            return self.emit();
         }
         self.close_series()
     }
 
-    /// Evaluates one complete evaluated series, such as the inner result of a subquery: the
+    /// Evaluates one run of an evaluated series, such as the inner result of a subquery: the
     /// value at each grid point is a sample at that time. Stale markers are kept as values,
     /// since the input is computed.
     ///
-    /// The input arrives complete, so its result is one closing chunk.
-    pub fn push_series(&mut self, series: &Series) -> Result<Option<EvaluatedChunk>> {
-        let TimeAxis::Grid(range) = &series.time else {
+    /// `last` says whether this delivery closes its series. A stream hands over the same logical
+    /// series more than once -- a prefix now, its closing chunk later -- and the windows of a later
+    /// delivery read the samples of the earlier ones, so the state a series retains lives on across
+    /// them: only the `last` call ends it. Handing the deliveries over without saying which is last
+    /// would close the series early and lose exactly the samples a window across the boundary
+    /// needs.
+    ///
+    /// One delivery may hold several runs of positions, separated by stretches holding no value;
+    /// they all reach the caller in one chunk, addressed by the axis. A delivery that holds no
+    /// position at all is a legal close when it is `last`, and an error otherwise.
+    pub fn push_series(&mut self, series: &Series, last: bool) -> Result<Option<EvaluatedChunk>> {
+        let time = &series.time;
+        let Some(grid) = time.grid() else {
             return Err(DataFusionError::Execution(
                 "evaluated range input must be a grid series".into(),
             ));
         };
-        if self.input_grid != Some(range.grid().spec())
+        if self.input_grid != Some(grid.spec())
             || series.fields.len() != self.fields.len()
-            || series.fields.iter().any(|field| field.len() != range.len())
+            || series.fields.iter().any(|field| field.len() != time.len())
         {
             return Err(DataFusionError::Execution(
                 "evaluated series does not match the input schema".into(),
             ));
         }
-        if self.series.is_some() {
+        // The input may skip positions: it is ingested by the positions it carries, and the points
+        // it skips hold no sample, which is exactly what a hole means.
+        let timestamps = time.timestamps();
+        let last_ts = timestamps.last().copied();
+        if !last && last_ts.is_none() {
+            // An empty delivery inside a series decides nothing: it is indistinguishable from a
+            // stall, so only the closing `is_last` one is a legal close.
             return Err(DataFusionError::Execution(
-                "evaluated series pushed inside a raw series".into(),
+                "evaluated range input holds no position before its last run".into(),
             ));
         }
-        self.series = Some(SeriesState {
-            primary_key: None,
-            metric: series.metric.clone(),
-            last_ts: 0,
-            cursor: 0,
-            completed: 0,
-            emitted_end: 0,
-        });
-        self.ingest(&range.timestamps(), &series.fields, false)?;
+        match &mut self.series {
+            None => {
+                self.output.begin_series();
+                self.series = Some(SeriesState {
+                    primary_key: None,
+                    metric: series.metric.clone(),
+                    last_ts,
+                    cursor: 0,
+                    closing: false,
+                    emitted_end: 0,
+                });
+            }
+            Some(state) => {
+                // A run continues its series; the earlier runs' samples stay retained for it.
+                if state.primary_key.is_some() {
+                    return Err(DataFusionError::Execution(
+                        "evaluated series pushed inside a raw series".into(),
+                    ));
+                }
+                if state.closing {
+                    return Err(DataFusionError::Execution(
+                        "evaluated series pushed after it closed".into(),
+                    ));
+                }
+                if state.metric != series.metric {
+                    return Err(DataFusionError::Execution(
+                        "evaluated series changed identity before its last run".into(),
+                    ));
+                }
+                if let Some(last_ts) = last_ts {
+                    if let Some(previous) = state.last_ts
+                        && timestamps[0] <= previous
+                    {
+                        return Err(DataFusionError::Execution(format!(
+                            "evaluated series runs are not increasing: {} after {previous}",
+                            timestamps[0]
+                        )));
+                    }
+                    state.last_ts = Some(last_ts);
+                }
+            }
+        }
+        if let Some(last_ts) = last_ts {
+            self.ingest(&timestamps, &series.fields, false)?;
+            if last {
+                return self.close_series();
+            }
+            // Later runs only hold samples after `last_ts`, so every point up to it is decided.
+            // The samples are shifted onto the evaluation timeline by the selector offset, so the
+            // ready point is on that timeline too.
+            self.evaluate(Some(
+                i128::from(last_ts) + i128::from(self.window.offset_ms),
+            ))?;
+            return self.emit();
+        }
+        // A closing chunk holding no position: there is nothing to ingest, but the samples the
+        // earlier deliveries left retained still decide the windows that follow them, so the close
+        // finishes them rather than ending the series on the spot.
+        debug_assert!(last, "an empty chunk that is not last is rejected above");
         self.close_series()
     }
 
     /// Evaluates the rest of the series of the last input chunk and closes it.
+    ///
+    /// The rows still buffered are handed out here as one chunk, and the chunk that sees nothing
+    /// behind it carries `is_last`.
     fn close_series(&mut self) -> Result<Option<EvaluatedChunk>> {
         self.evaluate(None)?;
-        let chunk = self.emit(true)?;
-        self.series = None;
-        Ok(chunk)
+        self.series
+            .as_mut()
+            .expect("every path that closes a series started one")
+            .closing = true;
+        self.emit()
     }
 
-    /// Hands out the positions decided since the last chunk, if any.
+    /// Hands out the rows buffered so far as one chunk, and closes the series when nothing is left.
     ///
-    /// The span covers everything decided, so a position decided to hold no value travels with
-    /// the chunk that decided it: a consumer needs that progress to advance, and to tell a
-    /// finished position from one still waiting for input. `is_last` closes the series, and then a
-    /// chunk is always handed out, empty when there is nothing left to report.
-    fn emit(&mut self, is_last: bool) -> Result<Option<EvaluatedChunk>> {
+    /// The chunk holds every row decided since the last hand-out, in one go and in one [`Series`]:
+    /// several runs of positions may sit inside it, separated by stretches holding no value, and
+    /// the axis names them. A position decided to hold none costs no row, so it lies between the
+    /// runs rather than inside one. `is_last` closes the series, and a series always closes exactly
+    /// once: on the chunk that carries its last rows, or on an empty chunk after it when no row is
+    /// left.
+    fn emit(&mut self) -> Result<Option<EvaluatedChunk>> {
         let Some(state) = self.series.as_ref() else {
             return Ok(None);
         };
-        let (start, end) = (state.emitted_end, state.completed);
-        // `evaluate` opens the builder's span at the first not-yet-handed-out position even when
-        // this push completed nothing, so finishing here would produce a zero-length chunk that
-        // claims progress the push did not make. Only the last chunk is handed out regardless.
-        if end == start && !is_last {
-            return Ok(None);
-        }
+        let closing = state.closing;
+        let emitted_end = state.emitted_end;
         let mut metric = state.metric.clone();
         if self.drops_metric_name {
             metric.remove_all(&METADATA_LABELS);
         }
-        if end > start {
-            // Every decided position joins the span, including the ones without a value.
-            self.output.cover_from(start)?;
-            self.output.cover_through(end)?;
-        }
-        let Some(series) = self.output.finish(metric)? else {
-            debug_assert_eq!(end, start, "a decided position widens the span");
-            return if is_last {
-                self.empty_chunk(start)
+        let Some(series) = self.output.take_buffered(metric)? else {
+            return if closing {
+                self.empty_chunk(emitted_end)
             } else {
                 Ok(None)
             };
         };
-        self.series
-            .as_mut()
-            .expect("checked at the entry of emit")
-            .emitted_end = end;
-        EvaluatedChunk::try_new(series, is_last).map(Some)
+        // The builder addresses every position it hands out, so the chunk's bounds come from the
+        // axis itself: `first_position` is where it starts, and `last_position` where it ends.
+        let start = series
+            .time
+            .first_position()
+            .expect("the builder addresses every row on the grid");
+        let end = series.time.last_position().map_or(start, |last| last + 1);
+        debug_assert!(start >= emitted_end, "a chunk never goes back");
+        if closing {
+            // The buffer was drained into this chunk, so nothing of the series is left behind it.
+            self.series = None;
+            EvaluatedChunk::try_new(series, true).map(Some)
+        } else {
+            self.series
+                .as_mut()
+                .expect("checked at the entry of emit")
+                .emitted_end = end;
+            EvaluatedChunk::try_new(series, false).map(Some)
+        }
     }
 
     /// A closing chunk without values, addressed after the last position handed out.
-    fn empty_chunk(&self, at: usize) -> Result<Option<EvaluatedChunk>> {
+    fn empty_chunk(&mut self, at: usize) -> Result<Option<EvaluatedChunk>> {
         let state = self.series.as_ref().expect("checked by the caller");
         let mut metric = state.metric.clone();
         if self.drops_metric_name {
@@ -665,10 +741,11 @@ impl RangeEvaluator {
         let time = GridRange::try_new(self.grid.clone(), at, 0).map_err(external)?;
         let series = Series::try_new(&self.output_schema, metric, TimeAxis::Grid(time), fields)
             .map_err(external)?;
+        self.series = None;
         EvaluatedChunk::try_new(series, true).map(Some)
     }
 
-    /// Checks that the input did not end inside a series.
+    /// Checks that the input did not end inside a series, with rows nobody took.
     pub fn finish(self) -> Result<()> {
         if self.series.is_some() {
             return Err(DataFusionError::Execution(
@@ -699,12 +776,13 @@ impl RangeEvaluator {
                         "range evaluation requires materialized series labels".into(),
                     )
                 })?;
+                self.output.begin_series();
                 self.series = Some(SeriesState {
                     primary_key: Some(chunk.primary_key.clone()),
                     metric,
-                    last_ts: time[time.len() - 1],
+                    last_ts: Some(time[time.len() - 1]),
                     cursor: 0,
-                    completed: 0,
+                    closing: false,
                     emitted_end: 0,
                 });
             }
@@ -716,13 +794,15 @@ impl RangeEvaluator {
                         "raw series identity changed before its last chunk".into(),
                     ));
                 }
-                if time[0] <= state.last_ts {
+                if let Some(last_ts) = state.last_ts
+                    && time[0] <= last_ts
+                {
                     return Err(DataFusionError::Execution(format!(
-                        "raw series timestamps are not increasing across chunks: {} after {}",
-                        time[0], state.last_ts
+                        "raw series timestamps are not increasing across chunks: {} after {last_ts}",
+                        time[0]
                     )));
                 }
-                state.last_ts = time[time.len() - 1];
+                state.last_ts = Some(time[time.len() - 1]);
             }
         }
         Ok(())
@@ -844,14 +924,6 @@ impl RangeEvaluator {
     /// Evaluates grid points up to `ready` on the evaluation timeline, or all remaining points
     /// when `ready` is `None`.
     fn evaluate(&mut self, ready: Option<i128>) -> Result<()> {
-        // Positions handed out so far stay behind the builder's span, so a chunk never repeats or
-        // reorders them.
-        let emitted = self
-            .series
-            .as_ref()
-            .expect("checked by check_chunk")
-            .emitted_end;
-        self.output.cover_from(emitted)?;
         let points_read = self.points_read();
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
@@ -985,44 +1057,22 @@ impl RangeEvaluator {
                 &mut self.batch_calls,
             )?;
         }
-        // How far the series is decided. A point is decided once it has been evaluated, once its
-        // window can no longer gain a sample, or -- at the end of the series or of what the input
-        // has reached -- once no retained sample reaches it. The last case matters: the loop stops
-        // at the first such point instead of walking the rest of the grid, so the points behind it
-        // still have to be reported as decided, or a consumer waits for input that decided them.
-        let completed = if empty_tail {
-            match self.replay {
-                Replay::PerPoint => {
-                    let mut decided = state.cursor;
-                    if let Some(ready) = ready {
-                        while decided < points_read && i128::from(grid[decided]) <= ready {
-                            decided += 1;
-                        }
-                    } else {
-                        decided = points_read;
-                    }
-                    // Later rounds start evaluating from here, and none of these points can gain
-                    // a value, so the cursor may skip them.
-                    state.cursor = decided;
-                    decided
+        // A point is decided once it has been evaluated, once its window can no longer gain a
+        // sample, or -- at the end of the series or of what the input has reached -- once no
+        // retained sample reaches it. The last case is what keeps a long empty stretch cheap: the
+        // loop stops at the first such point instead of walking the rest of the grid, and none of
+        // the points behind it can gain a value, so the cursor skips them.
+        if empty_tail && matches!(self.replay, Replay::PerPoint) {
+            let mut decided = state.cursor;
+            if let Some(ready) = ready {
+                while decided < points_read && i128::from(grid[decided]) <= ready {
+                    decided += 1;
                 }
-                // An anchored selector broadcasts its one window over the whole grid, so deciding
-                // that window decides every point. Its window ends at the grid's start rather than
-                // at each point, so it is decided once the input has ended or has passed that end.
-                Replay::Once | Replay::EveryPoint => match ready {
-                    None => grid.len(),
-                    Some(ready) if ready >= i128::from(spec.start_ms) => grid.len(),
-                    Some(_) => state.completed,
-                },
+            } else {
+                decided = points_read;
             }
-        } else if matches!(self.replay, Replay::PerPoint) {
-            state.cursor
-        } else if state.cursor > 0 {
-            grid.len()
-        } else {
-            0
-        };
-        state.completed = state.completed.max(completed);
+            state.cursor = decided;
+        }
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
             // histogram checks do not depend on how the series is chunked, but none are kept.

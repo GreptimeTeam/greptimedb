@@ -362,15 +362,19 @@ fn series_error(error: datatypes::error::Error) -> DataFusionError {
 }
 
 /// Checks an evaluated float series up front, so no segment of another type yields a result.
+///
+/// Returns the validated axis: it is addressed on a grid, so the caller reads the rows it carries
+/// with the axis traversal rather than assuming a contiguous range.
 pub(crate) fn validate_float_series<'a>(
     schema: &SeriesSchema,
     series: &'a Series,
-) -> Result<&'a GridRange> {
-    let TimeAxis::Grid(range) = &series.time else {
+) -> Result<&'a TimeAxis> {
+    let time = &series.time;
+    if time.grid().is_none() {
         return Err(DataFusionError::Execution(
             "Series operators require an evaluated grid time axis".into(),
         ));
-    };
+    }
     Series::try_new(
         schema,
         series.metric.clone(),
@@ -390,7 +394,7 @@ pub(crate) fn validate_float_series<'a>(
             ));
         }
     }
-    Ok(range)
+    Ok(time)
 }
 
 /// A sample of a series accepted by [`validate_float_series`].

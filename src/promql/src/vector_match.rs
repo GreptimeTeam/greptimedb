@@ -24,12 +24,11 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use datafusion::arrow::array::Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::histogram::{CounterResetHint, HistogramView};
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, TimeAxis};
+use datatypes::series::samples::{RowCursor, SampleRef, Series, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridRunPair, TimeAxis};
 
 use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS};
 use crate::histogram_eval::float_histogram::FloatHistogram;
@@ -219,33 +218,52 @@ fn binary_field(
                 include,
                 drop_name,
             )?;
-            let (start, end) = one.overlap_range(many, one_index, many_index);
-            for point in start..end {
-                if !(many.present(many_index, point) && one.present(one_index, point)) {
-                    continue;
+            // Only the positions both operands carry are evaluated, and each keeps its own row:
+            // the intersection is a merge of the two axes, never an envelope with offsets.
+            // One cursor per side serves this whole pairing: `intersect_runs` walks both axes'
+            // run lists forward, and each `GridRunPair` carries the row of each side, so the rows
+            // asked for only increase from one shared run to the next -- the order a `RowCursor`
+            // requires. A cursor per run would restart at row 0 and re-walk every row before it.
+            let (mut many_cursor, mut one_cursor) =
+                (many.cursor(many_index), one.cursor(one_index));
+            for pair in many.shared_runs(many_index, one, one_index) {
+                for offset in 0..pair.len {
+                    let point = pair.position + offset;
+                    let (many_value, one_value) = (
+                        many_cursor
+                            .at(pair.row + offset)
+                            .expect("a row never goes back"),
+                        one_cursor
+                            .at(pair.other_row + offset)
+                            .expect("a row never goes back"),
+                    );
+                    if matches!(many_value, SampleRef::Missing)
+                        || matches!(one_value, SampleRef::Missing)
+                    {
+                        continue;
+                    }
+                    let (lhs_value, rhs_value) = if one_is_left {
+                        (one_value, many_value)
+                    } else {
+                        (many_value, one_value)
+                    };
+                    let Some((result, keep)) = elem_binop(matching.op, lhs_value, rhs_value)?
+                    else {
+                        continue;
+                    };
+                    if matching.cardinality == Cardinality::OneToOne
+                        && !matched.insert((group_id, point))
+                        && implicit_many_to_one.is_none_or(|(first, _)| point < first)
+                    {
+                        implicit_many_to_one = Some((point, group_keys[group_id]));
+                    }
+                    let value = if matching.return_bool {
+                        Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
+                    } else {
+                        keep.then_some(result)
+                    };
+                    results.insert(&metric, group_id, point, value);
                 }
-                let (many_value, one_value) =
-                    (many.value(many_index, point), one.value(one_index, point));
-                let (lhs_value, rhs_value) = if one_is_left {
-                    (one_value, many_value)
-                } else {
-                    (many_value, one_value)
-                };
-                let Some((result, keep)) = elem_binop(matching.op, lhs_value, rhs_value)? else {
-                    continue;
-                };
-                if matching.cardinality == Cardinality::OneToOne
-                    && !matched.insert((group_id, point))
-                    && implicit_many_to_one.is_none_or(|(first, _)| point < first)
-                {
-                    implicit_many_to_one = Some((point, group_keys[group_id]));
-                }
-                let value = if matching.return_bool {
-                    Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
-                } else {
-                    keep.then_some(result)
-                };
-                results.insert(&metric, group_id, point, value);
             }
         }
     }
@@ -362,8 +380,9 @@ fn set_field(
     let mut results = Results::default();
     if op == SetOp::Or {
         for index in 0..lhs.series.len() {
-            for point in lhs.range(index) {
-                if let Some(value) = owned(lhs.value(index, point))? {
+            let mut cursor = lhs.cursor(index);
+            for (point, row) in lhs.positions(index) {
+                if let Some(value) = owned(cursor.at(row).expect("a row never goes back"))? {
                     results.insert(&lhs.series[index].metric, 0, point, Some(value));
                 }
             }
@@ -371,19 +390,30 @@ fn set_field(
     }
     for (index, series) in kept.series.iter().enumerate() {
         let candidates = filter_groups.get(&group_key(&series.metric, labels));
-        for point in kept.range(index) {
-            if !kept.present(index, point) {
+        let candidate_indices: &[usize] = candidates.map_or(&[], Vec::as_slice);
+        // One forward cursor per candidate: `kept`'s positions only increase, so the row a
+        // candidate is read at only increases as well.
+        let mut candidate_cursors: Vec<RowCursor<'_>> = candidate_indices
+            .iter()
+            .map(|&candidate| filter.cursor(candidate))
+            .collect();
+        let mut cursor = kept.cursor(index);
+        for (point, row) in kept.positions(index) {
+            let sample = cursor.at(row).expect("a row never goes back");
+            if matches!(sample, SampleRef::Missing) {
                 continue;
             }
             let mut matched = false;
-            for &candidate in candidates.into_iter().flatten() {
-                if filter.covers(candidate, point) && filter.present(candidate, point) {
+            for (&candidate, candidate_cursor) in
+                candidate_indices.iter().zip(&mut candidate_cursors)
+            {
+                if filter.present(candidate, point, candidate_cursor) {
                     matched = true;
                     break;
                 }
             }
             if matched == keep_matched {
-                results.insert(&series.metric, 0, point, owned(kept.value(index, point))?);
+                results.insert(&series.metric, 0, point, owned(sample)?);
             }
         }
     }
@@ -412,6 +442,8 @@ fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<S
     let mut row: Vec<Option<GridSample>> = Vec::with_capacity(width);
     let mut output = Vec::with_capacity(merged.len());
     for (metric, mut samples) in merged.into_values() {
+        // One builder serves every label set, so each result series starts explicitly.
+        builder.begin_series();
         samples.sort_unstable_by_key(|(point, field, _)| (*point, *field));
         let mut samples = samples.into_iter().peekable();
         while let Some((point, field, value)) = samples.next() {
@@ -423,9 +455,7 @@ fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<S
             }
             builder.push_samples(point, &row)?;
         }
-        if let Some(series) = builder.finish(metric)? {
-            output.push(series);
-        }
+        output.extend(builder.finish(metric)?);
     }
     Ok(output)
 }
@@ -504,8 +534,12 @@ fn overlap(
     // Sorting the present points keeps the cost proportional to them, not to the span.
     let mut points = Vec::new();
     for &member in members {
-        for point in operand.range(member) {
-            if operand.present(member, point) {
+        let mut cursor = operand.cursor(member);
+        for (point, row) in operand.positions(member) {
+            if !matches!(
+                cursor.at(row).expect("a row never goes back"),
+                SampleRef::Missing
+            ) {
                 points.push(point);
             }
         }
@@ -551,85 +585,100 @@ fn result_metric(
     Ok(metric)
 }
 
-/// One field of one side's series, with checked grid ranges.
+/// One field of one side's series, with verified grid axes.
+///
+/// An operand's series are addressed on the evaluation grid, and each may skip positions. Every
+/// accessor therefore reads the axis: a point lookup asks the axis for the row of a position
+/// (`row_of`, a binary search), and a traversal walks the rows the axis carries
+/// (`positions`). Nothing here assumes a series covers one contiguous range, so a sparse operand
+/// never reads a hole as a row.
 struct Operand<'a> {
     series: &'a [Series],
-    starts: Vec<usize>,
     field: usize,
 }
 
 impl<'a> Operand<'a> {
     fn try_new(schema: &SeriesSchema, series: &'a [Series], field: usize) -> Result<Self> {
         let grid = schema.eval_grid.as_ref().map(|grid| grid.spec());
-        let mut starts = Vec::with_capacity(series.len());
         for item in series {
-            let TimeAxis::Grid(range) = &item.time else {
+            // Both grid axes address the grid; the explicit ones cannot be indexed by position.
+            let Some(item_grid) = item.time.grid() else {
                 return Err(DataFusionError::Execution(
                     "vector operand series must be on the evaluation grid".into(),
                 ));
             };
-            if Some(range.grid().spec()) != grid
+            if Some(item_grid.spec()) != grid
                 || item.fields.len() != schema.fields.len()
-                || item.fields.iter().any(|field| field.len() != range.len())
+                || item
+                    .fields
+                    .iter()
+                    .any(|field| field.len() != item.time.len())
             {
                 return Err(DataFusionError::Execution(
                     "vector operand series does not match its schema".into(),
                 ));
             }
-            starts.push(range.start());
         }
-        Ok(Self {
-            series,
-            starts,
-            field,
+        Ok(Self { series, field })
+    }
+
+    fn axis(&self, index: usize) -> &'a TimeAxis {
+        &self.series[index].time
+    }
+
+    /// Every absolute position this series carries, with its compact row, in order.
+    fn positions(&self, index: usize) -> datatypes::series::time::Positions<'a> {
+        self.series[index].time.positions()
+    }
+
+    /// A forward reader of `series[index]`'s field, for a walk in axis order.
+    ///
+    /// The rows of one walk only increase, so a cursor reads the field once; reading each row
+    /// with [`Samples::sample`](datatypes::series::samples::Samples::sample) would rescan the
+    /// chunk descriptors per row.
+    fn cursor(&self, index: usize) -> RowCursor<'a> {
+        self.series[index].fields.as_slice()[self.field].cursor()
+    }
+
+    /// Whether `series[index]` holds a value at absolute grid `point`, read through `cursor`.
+    ///
+    /// The points one walk asks about only increase, so its cursor never goes back: a candidate
+    /// read per point through [`Samples::sample`](datatypes::series::samples::Samples::sample)
+    /// would rescan the chunk descriptors from the start every time.
+    fn present(&self, index: usize, point: usize, cursor: &mut RowCursor<'a>) -> bool {
+        self.axis(index).row_of(point).is_some_and(|row| {
+            !matches!(
+                cursor.at(row).expect("a row never goes back"),
+                SampleRef::Missing
+            )
         })
     }
 
-    fn start(&self, index: usize) -> usize {
-        self.starts[index]
-    }
-
-    fn end(&self, index: usize) -> usize {
-        self.starts[index] + self.series[index].time.len()
-    }
-
-    fn range(&self, index: usize) -> std::ops::Range<usize> {
-        self.start(index)..self.end(index)
-    }
-
-    fn covers(&self, index: usize, point: usize) -> bool {
-        self.range(index).contains(&point)
-    }
-
-    /// The shared points of `self[own]` and `other[theirs]`.
-    fn overlap_range(&self, other: &Operand<'_>, own: usize, theirs: usize) -> (usize, usize) {
-        let start = self.start(own).max(other.start(theirs));
-        let end = self.end(own).min(other.end(theirs));
-        (start, end.max(start))
-    }
-
-    fn value(&self, index: usize, point: usize) -> SampleRef<'a> {
-        let samples = &self.series[index].fields.as_slice()[self.field];
-        let row = point - self.starts[index];
-        if let Some(DenseSamplesRef::Float(values)) = samples.dense() {
-            return match values.is_valid(row) {
-                true => SampleRef::Float(values.value(row)),
-                false => SampleRef::Missing,
-            };
-        }
-        samples.sample(row)
-    }
-
-    fn present(&self, index: usize, point: usize) -> bool {
-        !matches!(self.value(index, point), SampleRef::Missing)
+    /// The positions both series carry, as shared runs with a compact row on each side.
+    ///
+    /// A merge over the two axes' runs, so the cost is the runs and not the positions between
+    /// them, and neither side's row is derived by subtracting a start.
+    fn shared_runs(
+        &self,
+        own: usize,
+        other: &Operand<'a>,
+        theirs: usize,
+    ) -> impl Iterator<Item = GridRunPair> + 'a {
+        self.axis(own).intersect_runs(other.axis(theirs))
     }
 
     /// Whether any series is present at each grid point.
     fn presence(&self, points: usize) -> Vec<bool> {
         let mut presence = vec![false; points];
         for index in 0..self.series.len() {
-            for point in self.range(index) {
-                if !presence[point] && self.present(index, point) {
+            let mut cursor = self.cursor(index);
+            for (point, row) in self.positions(index) {
+                if !presence[point]
+                    && !matches!(
+                        cursor.at(row).expect("a row never goes back"),
+                        SampleRef::Missing
+                    )
+                {
                     presence[point] = true;
                 }
             }

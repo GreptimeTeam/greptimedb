@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
-use datatypes::series::time::TimeAxis;
+use datatypes::series::samples::{RowCursor, SampleRef, Series, SeriesSchema};
+use datatypes::series::time::union_positions;
 use datatypes::series::{Label, MetricName};
 
 use crate::go_sort;
@@ -70,7 +70,9 @@ pub fn topk(
     series: &[Series],
 ) -> Result<Vec<Series>> {
     single_field(schema, "topk/bottomk")?;
-    let points = grid_points(schema, series)?;
+    // Validates the series against the schema and its grid; the walk below visits the carried
+    // positions, not the whole grid.
+    grid_points(schema, series)?;
     // Prometheus returns nothing for k below 1, rejects NaN and values out of int64, then
     // truncates k and caps it at the number of input series.
     if k < 1.0 {
@@ -97,20 +99,30 @@ pub fn topk(
             .push(index);
     }
 
-    let mut selected: Vec<Vec<usize>> = vec![Vec::new(); series.len()];
-    let mut candidates: Vec<(usize, f64)> = Vec::new();
+    let mut selected: Vec<Vec<(usize, usize)>> = vec![Vec::new(); series.len()];
+    let mut candidates: Vec<(usize, usize, f64)> = Vec::new();
     for members in groups.values() {
-        for point in 0..points {
+        // A point no member carries holds no candidate, so only the union of the members'
+        // positions is visited: a hole in the grid never reaches the ranking. Each member reads
+        // through one forward cursor, whose rows only increase as the union walk advances.
+        let mut cursors: Vec<RowCursor<'_>> = members
+            .iter()
+            .map(|&member| series[member].fields.as_slice()[0].cursor())
+            .collect();
+        for point in union_positions(members.iter().map(|&member| &series[member].time)) {
             candidates.clear();
-            for &member in members {
-                if let Some(value) = value_at(&series[member], point)? {
-                    candidates.push((member, value));
+            for (slot, &member) in members.iter().enumerate() {
+                let Some(row) = series[member].time.row_of(point) else {
+                    continue;
+                };
+                if let Some(value) = cursor_value(&mut cursors[slot], row)? {
+                    candidates.push((member, row, value));
                 }
             }
             // Members are in label order, so a stable sort hands ties to the earlier label set.
-            candidates.sort_by(|a, b| rank(a.1, b.1, top));
-            for &(member, _) in candidates.iter().take(k) {
-                selected[member].push(point);
+            candidates.sort_by(|a, b| rank(a.2, b.2, top));
+            for &(member, row, _) in candidates.iter().take(k) {
+                selected[member].push((point, row));
             }
         }
     }
@@ -124,12 +136,15 @@ pub fn topk(
         }
         let mut sorted = points;
         sorted.sort_unstable();
-        for point in sorted {
-            builder.push(point, &[value_at(&series[index], point)?])?;
+        // One builder serves every result series, so each one starts explicitly: only
+        // `begin_series` resets the positions it accepts.
+        builder.begin_series();
+        // The selected positions of one series only increase, so one cursor reads their rows.
+        let mut cursor = series[index].fields.as_slice()[0].cursor();
+        for (point, row) in sorted {
+            builder.push(point, &[cursor_value(&mut cursor, row)?])?;
         }
-        if let Some(built) = builder.finish(series[index].metric.clone())? {
-            result.push(built);
-        }
+        result.extend(builder.finish(series[index].metric.clone())?);
     }
     Ok(result)
 }
@@ -141,11 +156,11 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
     let mut values: Vec<Option<f64>> = vec![None; points];
     let mut counts = vec![0u8; points];
     for item in series {
-        let TimeAxis::Grid(range) = &item.time else {
-            unreachable!("checked by grid_points");
-        };
-        for point in range.start()..range.start() + range.len() {
-            if let Some(value) = value_at(item, point)? {
+        // Walk the rows this series carries: a sparse axis must not be read as its envelope, and
+        // a forward cursor keeps the read proportional to them.
+        let mut field = item.fields.as_slice()[0].cursor();
+        for (point, row) in item.time.positions() {
+            if let Some(value) = cursor_value(&mut field, row)? {
                 counts[point] = counts[point].saturating_add(1);
                 values[point] = Some(value);
             }
@@ -157,9 +172,18 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
         builder.push(point, &[value])?;
     }
     let empty = MetricName::try_new(None, Vec::new()).map_err(external)?;
-    Ok(builder
+    // Every grid point is written above, with a value or a NaN, so the result is one run over the
+    // grid and never empty. A different shape would mean this invariant broke, and returning it
+    // silently would hide it.
+    let series = builder
         .finish(empty)?
-        .expect("every point of a scalar has a value"))
+        .ok_or_else(|| DataFusionError::Execution("scalar holds no point of the grid".into()))?;
+    if !series.time.is_contiguous() {
+        return Err(DataFusionError::Execution(
+            "scalar produced several runs, expected exactly one over the grid".into(),
+        ));
+    }
+    Ok(series)
 }
 
 /// `absent(v)`: 1 with `labels` at every point where no series is present.
@@ -167,6 +191,11 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
 /// `absent_over_time(v[r])` is this over the result of `present_over_time(v[r])`. When `v[r]` is
 /// a range selector, `labels` come from its matchers as for `absent(v)`; for a subquery
 /// Prometheus derives no labels.
+///
+/// All of it is one label set, so the result is one series. A point where one field is present and
+/// another is absent keeps its row, with a null in the field that is present; a point where every
+/// field is present contributes no row, and the axis names the runs of points that do. `None` means
+/// no point is absent in any field, so no row survives.
 pub fn absent(
     schema: &SeriesSchema,
     series: &[Series],
@@ -177,13 +206,15 @@ pub fn absent(
     // Each field is absent on its own.
     let mut present = vec![false; points * fields];
     for item in series {
-        let TimeAxis::Grid(range) = &item.time else {
-            unreachable!("checked by grid_points");
-        };
         for (field, samples) in item.fields.iter().enumerate() {
-            for row in 0..range.len() {
-                if !matches!(samples.sample(row), SampleRef::Missing) {
-                    present[(range.start() + row) * fields + field] = true;
+            // One cursor per field, driven by the positions the axis carries.
+            let mut cursor = samples.cursor();
+            for (point, row) in item.time.positions() {
+                if !matches!(
+                    cursor.at(row).expect("the axis and the fields are aligned"),
+                    SampleRef::Missing
+                ) {
+                    present[point * fields + field] = true;
                 }
             }
         }
@@ -422,33 +453,49 @@ fn grid_points(schema: &SeriesSchema, series: &[Series]) -> Result<usize> {
         DataFusionError::Execution("select operators need an evaluation grid".into())
     })?;
     for item in series {
-        match &item.time {
-            TimeAxis::Grid(range)
-                if range.grid().spec() == grid.spec()
-                    && item.fields.len() == schema.fields.len() => {}
-            _ => {
-                return Err(DataFusionError::Execution(
-                    "series does not match the select operator schema".into(),
-                ));
+        // Both grid axes are addressed on a grid; what matters is that it is this schema's.
+        let matches = match item.time.grid() {
+            Some(item_grid) => {
+                item_grid.spec() == grid.spec() && item.fields.len() == schema.fields.len()
             }
+            None => false,
+        };
+        if !matches {
+            return Err(DataFusionError::Execution(
+                "series does not match the select operator schema".into(),
+            ));
         }
     }
     Ok(grid.timestamps().len())
 }
 
-/// The first field's value of `series` at grid `point`.
+/// The first field's value of `series` at grid `point`, looked up by position.
+///
+/// A point read: its only caller, `sort_instant`, reads one point of each instant series, so there
+/// is no walk for a cursor to follow. The row of a position is searched for, not counted from the
+/// first one, and a position the axis does not carry answers `None` rather than a row read from
+/// another offset.
 fn value_at(series: &Series, point: usize) -> Result<Option<f64>> {
-    let TimeAxis::Grid(range) = &series.time else {
-        unreachable!("checked by grid_points");
-    };
-    if !(range.start()..range.start() + range.len()).contains(&point) {
+    let Some(row) = series.time.row_of(point) else {
         return Ok(None);
-    }
-    match series.fields.as_slice()[0].sample(point - range.start()) {
+    };
+    // `Samples::sample` walks the chunk descriptors, not the rows, which is what a random read
+    // costs; a cursor would have to replay every row before this one.
+    into_value(series.fields.as_slice()[0].sample(row))
+}
+
+/// A sample as a value, rejecting histograms as the select operators do.
+fn into_value(sample: SampleRef<'_>) -> Result<Option<f64>> {
+    match sample {
         SampleRef::Missing => Ok(None),
         SampleRef::Float(value) => Ok(Some(value)),
         SampleRef::Histogram(_) => Err(DataFusionError::NotImplemented(
             "select operators over histogram samples".into(),
         )),
     }
+}
+
+/// The value a forward cursor reads at compact `row`; the rows asked for only increase.
+fn cursor_value(cursor: &mut RowCursor<'_>, row: usize) -> Result<Option<f64>> {
+    into_value(cursor.at(row).expect("the axis and the fields are aligned"))
 }

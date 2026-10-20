@@ -19,13 +19,16 @@ use datafusion::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
-use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 
 use super::{DateFunction, date_of_eval_time, map_date, time};
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
-    Labels, canonical_bits, golden_cases, labels_of, metric_of, points_of, series_of,
+    Labels, Points, canonical_bits, golden_cases, labels_of, metric_of, points_by_labels,
+    points_of, run_ranges, series_of, sparse_series,
 };
 
 fn schema(grid: Arc<EvalGrid>) -> Arc<SeriesSchema> {
@@ -61,12 +64,17 @@ fn time_functions_match_prometheus() {
         let actual: Vec<Series> = match (case.spec[0].as_str(), case.spec[1].as_str()) {
             ("eval_time", "time") => vec![time(&schema).unwrap()],
             ("eval_time", name) => vec![date_of_eval_time(function(name), &schema).unwrap()],
-            ("date", name) => case
-                .inputs
-                .iter()
-                .filter_map(|(labels, points)| series_of(&schema, labels, points))
-                .filter_map(|series| map_date(function(name), &schema, &series).unwrap())
-                .collect::<Vec<_>>(),
+            ("date", name) => {
+                let mut actual = Vec::new();
+                for series in case
+                    .inputs
+                    .iter()
+                    .filter_map(|(labels, points)| series_of(&schema, labels, points))
+                {
+                    actual.extend(map_date(function(name), &schema, &series).unwrap());
+                }
+                actual
+            }
             (kind, _) => panic!("unknown case {kind}"),
         };
         // Dropping `__name__` can give two series one label set.
@@ -79,10 +87,9 @@ fn time_functions_match_prometheus() {
             (actual, expected) => panic!("case {:?}: {actual:?} is not {expected:?}", case.spec),
         };
         let (actual, expected) = actual;
-        let actual: BTreeMap<_, _> = actual
-            .iter()
-            .map(|series| (labels_of(&series.metric), points_of(series)))
-            .collect();
+        // A date function keeps the values of its input but drops histograms and names, so its
+        // result is one piece per run of valued positions; the fixture pins dense points.
+        let actual: BTreeMap<_, _> = points_by_labels(actual);
         let expected: BTreeMap<_, _> = expected
             .into_iter()
             .map(|(labels, points)| {
@@ -150,7 +157,7 @@ fn map_date_drops_histograms_and_maps_chunks() {
     let mixed = Samples::try_from_chunks(vec![histogram, floats(&[3600.0, 7200.0])]).unwrap();
     let hours = map_date(DateFunction::Hour, &schema, &series(mixed))
         .unwrap()
-        .unwrap();
+        .expect("a mixed series with one float");
     assert_eq!(
         points_of(&hours),
         BTreeMap::from([(2, 1f64.to_bits()), (3, 2f64.to_bits())])
@@ -163,13 +170,122 @@ fn map_date_drops_histograms_and_maps_chunks() {
     let chunked = Samples::try_from_chunks(vec![floats(&[60.0]), floats(&[120.0, 180.0])]).unwrap();
     let minutes = map_date(DateFunction::Minute, &schema, &series(chunked))
         .unwrap()
-        .unwrap();
+        .expect("a chunked float series");
     assert_eq!(
         points_of(&minutes),
         BTreeMap::from([
             (1, 1f64.to_bits()),
             (2, 2f64.to_bits()),
             (3, 3f64.to_bits())
+        ])
+    );
+}
+
+/// `map_date` reads a series of several runs by the positions its axis carries.
+///
+/// A sparse input cannot be mapped through the in-place fast path when a field holds a hole, so
+/// the piece-cutting path runs: the result must report the right positions, not an offset from
+/// the first one.
+#[test]
+fn map_date_reads_a_sparse_axis_by_its_positions() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1000, 8).unwrap()).unwrap());
+    let schema = schema(grid.clone());
+    // Positions 1, 2 and 6 hold seconds; the axis skips 3, 4 and 5.
+    let mut points = Points::new();
+    for (position, seconds) in [(1, 1000), (2, 2000), (6, 6000)] {
+        points.insert(position, f64::to_bits(seconds as f64));
+    }
+    let input = sparse_series(
+        &schema,
+        &Labels::from([("__name__".to_string(), "m".to_string())]),
+        &points,
+    )
+    .unwrap();
+    assert_eq!(input.time.len(), 3);
+    assert_eq!(input.time.first_position(), Some(1));
+    assert_eq!(input.time.last_position(), Some(6));
+
+    let output = map_date(DateFunction::Minute, &schema, &input)
+        .unwrap()
+        .expect("three rows");
+    // No field holds a hole, so the fast path keeps the axis as it is: one series, three rows.
+    assert_eq!(output.time.len(), 3);
+    assert_eq!(output.metric.name(), None);
+    let mut cursor = output.fields.as_slice()[0].cursor();
+    let read = output
+        .time
+        .positions()
+        .map(|(position, row)| {
+            let sample = cursor.at(row).expect("the axis and the fields are aligned");
+            match sample {
+                SampleRef::Float(value) => (position, value),
+                SampleRef::Missing => panic!("position {position} holds no value"),
+                SampleRef::Histogram(_) => panic!("position {position} holds a histogram"),
+            }
+        })
+        .collect::<Vec<_>>();
+    // `minute()` of Unix seconds 1000, 2000 and 6000.
+    assert_eq!(read, vec![(1, 16.0), (2, 33.0), (6, 40.0)]);
+
+    // A hole in the field keeps the fast path from applying, so the axis is rebuilt from the rows
+    // that survive: still one series, now over the runs of consecutive valued positions.
+    let mut holed = Points::new();
+    for (position, seconds) in [(2, 120), (3, 180), (4, 240), (6, 360), (7, 420)] {
+        holed.insert(position, f64::to_bits(seconds as f64));
+    }
+    let input = series_of(
+        &schema,
+        &Labels::from([("__name__".to_string(), "m".to_string())]),
+        &holed,
+    )
+    .unwrap();
+    let output = map_date(DateFunction::Minute, &schema, &input)
+        .unwrap()
+        .expect("five rows");
+    assert_eq!(run_ranges(&output), vec![(2, 3), (6, 2)]);
+    assert_eq!(
+        points_of(&output),
+        BTreeMap::from([
+            (2, 2f64.to_bits()),
+            (3, 3f64.to_bits()),
+            (4, 4f64.to_bits()),
+            (6, 6f64.to_bits()),
+            (7, 7f64.to_bits()),
+        ])
+    );
+
+    // A sparse axis *and* a hole in the field, with the samples split over two chunks: the fast
+    // path cannot apply, so the piece-cutting path must walk the axis' positions and rebuild the
+    // axis from the rows that survive. Positions 0, 1, 3, 4 and 5 hold rows and position 3 is the
+    // hole, so a walk that counted rows from the first position would map the wrong seconds.
+    let time =
+        TimeAxis::from_grid_spans(grid, vec![GridSpan::new(0, 2), GridSpan::new(3, 3)]).unwrap();
+    let chunked = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![60.0, 120.0])),
+        Samples::from_float(Float64Array::from(vec![None, Some(240.0), Some(300.0)])),
+    ])
+    .unwrap();
+    let input = Series::try_new(
+        &schema,
+        metric_of(&Labels::from([("__name__".to_string(), "m".to_string())])),
+        time,
+        SeriesFields::one(chunked),
+    )
+    .unwrap();
+    assert_eq!(input.time.len(), 5);
+    let output = map_date(DateFunction::Minute, &schema, &input)
+        .unwrap()
+        .expect("four rows");
+    assert_eq!(output.time.len(), 4);
+    assert_eq!(run_ranges(&output), vec![(0, 2), (4, 2)]);
+    // `minute()` of Unix seconds 60, 120, 240 and 300.
+    assert_eq!(
+        points_of(&output),
+        BTreeMap::from([
+            (0, 1f64.to_bits()),
+            (1, 2f64.to_bits()),
+            (4, 4f64.to_bits()),
+            (5, 5f64.to_bits()),
         ])
     );
 }
