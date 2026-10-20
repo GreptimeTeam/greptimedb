@@ -23,7 +23,9 @@ use std::task::{Context, Poll, Waker};
 use api::v1::SemanticType;
 use common_error::ext::{BoxedError, ErrorExt, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::series_frame::label_decode_spec;
+use common_query::series_frame::{
+    label_decode_spec, pack_raw_series, raw_series_frame_ordering, unpack_raw_series,
+};
 use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::data_type::ConcreteDataType;
@@ -440,6 +442,66 @@ async fn merges_full_encoded_keys_and_interleaved_chunks_with_global_finality() 
     assert_eq!(series[2].0, rack_b_sensor_1);
     assert_eq!(series[2].1, [5, 25]);
     assert!(series[2].3.last().unwrap());
+}
+
+/// Two inputs that each went through the frame codec merge like plain streams: unpacking keeps
+/// the declared ordering, and the merge restores global key order and per-key finality across
+/// the unpacked frames.
+#[tokio::test]
+async fn merges_two_unpacked_frames_through_the_frame_codec() {
+    let rack_a_sensor_1 = read_key("rack-a", "sensor-1");
+    let rack_b_sensor_1 = read_key("rack-b", "sensor-1");
+    let framed = |labels: RawLabelSource, chunks: Vec<RawSeriesChunk>| {
+        let (stream, _, _) = stream(
+            labels,
+            SeriesOrdering::KeyThenTime,
+            chunks.into_iter().map(ready),
+        );
+        let schema = Arc::clone(stream.schema());
+        let packed = pack_raw_series(stream).unwrap();
+        let ordering = raw_series_frame_ordering(packed.schema().as_ref()).unwrap();
+        assert_eq!(SeriesOrdering::KeyThenTime, ordering);
+        unpack_raw_series(packed, Some(schema)).unwrap()
+    };
+    let left = framed(
+        label_source(1),
+        vec![
+            chunk(rack_a_sensor_1.clone(), &[10, 30], &[1.0, 3.0], true),
+            chunk(rack_b_sensor_1.clone(), &[5], &[5.0], true),
+        ],
+    );
+    let right = framed(
+        label_source(2),
+        vec![chunk(rack_a_sensor_1.clone(), &[20, 40], &[2.0, 4.0], true)],
+    );
+
+    let mut merged = merge_ordered_raw_series(vec![left, right]).unwrap();
+    assert_eq!(SeriesOrdering::KeyThenTime, merged.ordering());
+    let mut series = Vec::<(Buffer, Vec<i64>, Vec<bool>)>::new();
+    while let Some(item) = merged.next().await {
+        let item = item.unwrap();
+        if series
+            .last()
+            .is_none_or(|current| current.0 != item.primary_key)
+        {
+            series.push((item.primary_key.clone(), Vec::new(), Vec::new()));
+        }
+        let current = series.last_mut().unwrap();
+        current.1.extend(item.time.as_buffer().to_vec());
+        current.2.push(item.is_last);
+    }
+    assert_eq!(2, series.len());
+    assert_eq!(rack_a_sensor_1, series[0].0);
+    assert_eq!(vec![10, 20, 30, 40], series[0].1);
+    assert!(*series[0].2.last().unwrap());
+    assert!(
+        series[0].2[..series[0].2.len() - 1]
+            .iter()
+            .all(|last| !last)
+    );
+    assert_eq!(rack_b_sensor_1, series[1].0);
+    assert_eq!(vec![5], series[1].1);
+    assert!(*series[1].2.last().unwrap());
 }
 
 #[tokio::test]
