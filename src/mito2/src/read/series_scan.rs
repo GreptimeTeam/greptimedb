@@ -81,6 +81,49 @@ const SEND_TIMEOUT: Duration = Duration::from_micros(100);
 /// Maximum number of candidate series retained before distributing assignments.
 const CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD: usize = 1_000_000;
 
+/// Test-only override of [`CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD`], where `0` means "use the
+/// production constant".
+///
+/// The production build compiles this static, the setter below and the private accessor out, so
+/// the shipped threshold is always the constant above.
+#[cfg(test)]
+static CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only number of candidate assignment rounds sent since the override was last set.
+///
+/// A round is one `send_assignments` call, so a partition that received more than one assignment
+/// sees `>= 2` rounds here. Increments are compiled out of production builds.
+#[cfg(test)]
+static CANDIDATE_ASSIGNMENT_ROUNDS: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns the candidate-series assignment threshold, honouring the test-only override.
+fn candidate_series_assignment_threshold() -> usize {
+    #[cfg(test)]
+    {
+        let threshold = CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.load(Ordering::Relaxed);
+        if threshold > 0 {
+            return threshold;
+        }
+    }
+    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD
+}
+
+/// Test-only: overrides the candidate-series assignment threshold and resets the round counter.
+///
+/// Pass `0` to restore the production threshold. Tests must reset the override before they
+/// return; a scope guard in `engine::scan_test` does that even on panic.
+#[cfg(test)]
+pub(crate) fn set_candidate_series_assignment_threshold(threshold: usize) {
+    CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD_OVERRIDE.store(threshold, Ordering::Relaxed);
+    CANDIDATE_ASSIGNMENT_ROUNDS.store(0, Ordering::Relaxed);
+}
+
+/// Test-only: returns the number of assignment rounds sent since the override was last set.
+#[cfg(test)]
+pub(crate) fn candidate_assignment_rounds() -> usize {
+    CANDIDATE_ASSIGNMENT_ROUNDS.load(Ordering::Relaxed)
+}
+
 /// Legacy data receivers for output partitions.
 type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
 
@@ -1143,7 +1186,7 @@ impl SeriesCandidateDistributor {
                 return Ok(());
             }
             collector.push(batch);
-            if collector.len() >= CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD {
+            if collector.len() >= candidate_series_assignment_threshold() {
                 chunked = true;
                 self.send_assignments(collector.finish(false), &partition_pruner);
                 if !self.should_fetch_candidates() {
@@ -1167,6 +1210,9 @@ impl SeriesCandidateDistributor {
         assignments: Vec<AssignedSeriesBatch>,
         partition_pruner: &Arc<PartitionPruner>,
     ) {
+        // One round of candidate collection; a partition that receives two assignments sees two.
+        #[cfg(test)]
+        CANDIDATE_ASSIGNMENT_ROUNDS.fetch_add(1, Ordering::Relaxed);
         for (partition, assigned_series) in assignments.into_iter().enumerate() {
             if assigned_series.series().is_empty() {
                 continue;

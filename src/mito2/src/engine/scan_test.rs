@@ -5932,7 +5932,7 @@ async fn test_two_phase_raw_partition_out_of_range_keeps_scanner_usable() {
 }
 
 #[tokio::test]
-async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
+async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_assignments() {
     use common_query::series_frame::{pack_raw_series, unpack_raw_series};
     use datatypes::series::SeriesOrdering;
     use datatypes::series::raw::RawSeriesChunk;
@@ -5943,6 +5943,10 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
     let engine = env
         .create_engine(MitoConfig {
             experimental_series_scan_v2: true,
+            // Automatic compaction could merge the two flushed SSTs before the scan pins its
+            // input and make the source-composition assertions below racy.
+            schedule_compaction_after_edit: false,
+            min_compaction_interval: Duration::from_secs(60 * 60),
             ..Default::default()
         })
         .await;
@@ -5963,9 +5967,11 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
         .map(|(tag, tsid)| new_sparse_primary_key(&[tag, "x"], &metadata, 10, *tsid))
         .collect::<Vec<_>>();
 
-    // Three write rounds put every series into two SST ranges plus one memtable range, and the
-    // large rounds make a series span more than one read batch, so one series is emitted as
-    // multiple chunks instead of exactly one.
+    // Three write rounds put every series into two SST sources (the first two rounds are flushed)
+    // plus one memtable source (the last round stays in memory), and the large rounds make a
+    // series span more than one read batch, so one series is emitted as multiple chunks instead
+    // of exactly one. The scan input assertions below check that composition instead of only
+    // checking that something was read.
     const LARGE: i64 = 20_000;
     const SMALL: i64 = 3;
     let rounds: [&[(usize, i64, i64)]; 3] = [
@@ -5992,6 +5998,7 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
                 .extend(first..first + count);
         }
     }
+    let mut round_rows = Vec::with_capacity(rounds.len());
     for (round, spec) in rounds.iter().enumerate() {
         let rows = spec
             .iter()
@@ -6003,6 +6010,7 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
                 })
             })
             .collect::<Vec<_>>();
+        round_rows.push(rows.len());
         put_sparse_rows(&engine, region_id, &row_schema, rows).await;
         if round + 1 < rounds.len() {
             test_util::flush_region(&engine, region_id, None).await;
@@ -6014,8 +6022,50 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
         preserve_pk_dictionary_encoding: true,
         ..Default::default()
     };
-    let mut scanner = engine.handle_query(region_id, request).await.unwrap();
+    let selected = engine.scanner(region_id, request).await.unwrap();
+    let Scanner::Series(mut scanner) = selected else {
+        panic!("sparse PerSeries request must use SeriesScan");
+    };
+    assert_eq!("two_phase", scanner.mode());
     assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    // Composition of the pinned scan input: the two flushes pin two SST sources and the third
+    // write round stays in one memtable source. Each source reports the rows its write round
+    // wrote, so this asserts the layout instead of only asserting that something was read.
+    {
+        let input = scanner.input();
+        let mut file_rows = input
+            .files
+            .iter()
+            .map(|file| file.num_rows())
+            .collect::<Vec<_>>();
+        file_rows.sort_unstable();
+        let mut expected_file_rows = round_rows[..2].to_vec();
+        expected_file_rows.sort_unstable();
+        assert_eq!(
+            expected_file_rows, file_rows,
+            "each flushed write round must be one SST source"
+        );
+        assert_eq!(2, input.num_files());
+        assert_eq!(
+            1,
+            input.num_memtables(),
+            "the last round is one memtable range"
+        );
+        assert_eq!(
+            round_rows[2],
+            input
+                .memtables
+                .iter()
+                .map(|memtable| memtable.stats().num_rows)
+                .sum::<usize>(),
+            "the unflushed round must be the memtable's contribution"
+        );
+        assert_eq!(
+            round_rows.iter().sum::<usize>(),
+            input.total_rows(),
+            "the sources must add up to every written row"
+        );
+    }
     let source = primary_key_label_source(&scanner.metadata());
     let ranges = scanner
         .properties()
@@ -6083,8 +6133,9 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
         per_partition.push(chunks);
     }
 
-    // The complete raw series stream of the multi-assignment scan: every assignment's chunks in
-    // partition order.
+    // The complete raw series stream of the two-partition scan: each partition's one assignment,
+    // concatenated in partition order. `test_two_phase_raw_same_partition_multi_round_assignment_
+    // stays_contiguous` covers two assignments handed to the same partition.
     let complete = per_partition
         .into_iter()
         .flatten()
@@ -6136,7 +6187,7 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
         if runs.last() != Some(&key) {
             assert!(
                 !runs.contains(&key),
-                "a series' chunks must stay contiguous across assignments"
+                "a series' chunks must stay contiguous across the concatenated assignments"
             );
             runs.push(key);
         }
@@ -6174,6 +6225,308 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_assignments() {
             assert_eq!((*time + 1) as f64, value);
         }
     }
+}
+
+/// Lowers the candidate-series assignment threshold and restores it when dropped.
+///
+/// The override is process-global, so it is restored from `Drop` to keep a failing assertion or a
+/// panic from leaking a weakened threshold into later tests of the same binary. `cargo nextest`
+/// (the documented runner for this crate) additionally runs every test in its own process.
+struct AssignmentThresholdScope;
+
+impl AssignmentThresholdScope {
+    fn lower_to(threshold: usize) -> Self {
+        crate::read::series_scan::set_candidate_series_assignment_threshold(threshold);
+        Self
+    }
+}
+
+impl Drop for AssignmentThresholdScope {
+    fn drop(&mut self) {
+        crate::read::series_scan::set_candidate_series_assignment_threshold(0);
+    }
+}
+
+/// One partition receiving two candidate assignments must still emit one contiguous stream.
+///
+/// Without the threshold override a second assignment reaches the same partition only when a
+/// single collection round holds `CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD` (1,000,000) candidate
+/// series, so this test lowers the threshold instead of writing a million series.
+#[tokio::test]
+async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguous() {
+    use common_query::series_frame::{pack_raw_series, unpack_raw_series};
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::SampleRef;
+    use store_api::region_engine::QueryScanContext;
+
+    // The candidate distributor starts a new assignment as soon as the collected series reach the
+    // threshold, and the candidate stream hands series over in globally sorted batches of at most
+    // `METRIC_SERIES_ID_BATCH_SIZE` (500) entries, yielding a trailing batch for the remainder.
+    // With the threshold lowered to 1 every one of those batches becomes one assignment round, so
+    // 501 series produce exactly two non-empty rounds: the first 500 sorted series, then the last
+    // one. Both rounds are addressed to the single output partition, i.e. to one receiver.
+    const CANDIDATE_BATCH: usize = 500;
+    const SERIES: usize = CANDIDATE_BATCH + 1;
+    let _scope = AssignmentThresholdScope::lower_to(1);
+
+    let mut env = TestEnv::with_prefix("test_two_phase_raw_same_partition_multi_round").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2: true,
+            // The source-composition assertions below pin the flushed SST until the scan opens.
+            schedule_compaction_after_edit: false,
+            min_compaction_interval: Duration::from_secs(60 * 60),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
+
+    let tags = (0..SERIES)
+        .map(|index| format!("s{index}"))
+        .collect::<Vec<_>>();
+    let keys = tags
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| {
+            new_sparse_primary_key(&[tag.as_str(), "x"], &metadata, 10, index as u64)
+        })
+        .collect::<Vec<_>>();
+    // The round split below relies on the candidate stream ordering series by primary key, which
+    // is the ascending TSID order for this fixture.
+    let mut sorted_keys = keys.clone();
+    sorted_keys.sort();
+    assert_eq!(keys, sorted_keys, "primary keys must sort in TSID order");
+
+    // One flushed SST source plus one memtable source. The wide series spans more than one read
+    // batch, so a series is emitted as several chunks and the round boundary sits next to chunks
+    // that must stay grouped.
+    const WIDE: i64 = 20_000;
+    const SMALL: i64 = 3;
+    const SECOND_ROUND_FIRST: i64 = 100_000;
+    let mut expected_times = HashMap::<Vec<u8>, Vec<i64>>::new();
+    expected_times.insert(
+        keys[0].clone(),
+        (0..WIDE)
+            .chain(SECOND_ROUND_FIRST..SECOND_ROUND_FIRST + 3)
+            .collect(),
+    );
+    for key in &keys[1..] {
+        expected_times.insert(
+            key.clone(),
+            (0..SMALL)
+                .chain(SECOND_ROUND_FIRST..SECOND_ROUND_FIRST + 3)
+                .collect(),
+        );
+    }
+
+    let first_round = std::iter::once((keys[0].clone(), 0_i64, WIDE))
+        .chain(keys[1..].iter().map(|key| (key.clone(), 0_i64, SMALL)))
+        .flat_map(|(key, first, count)| {
+            (0..count).map(move |offset| {
+                let time = first + offset;
+                (key.clone(), time, (time + 1) as u64)
+            })
+        })
+        .collect::<Vec<_>>();
+    let second_round = keys
+        .iter()
+        .flat_map(|key| {
+            (0..SMALL).map(move |offset| {
+                let time = SECOND_ROUND_FIRST + offset;
+                (key.clone(), time, (time + 1) as u64)
+            })
+        })
+        .collect::<Vec<_>>();
+    let (sst_rows, memtable_rows) = (first_round.len(), second_round.len());
+    put_sparse_rows(&engine, region_id, &row_schema, first_round).await;
+    test_util::flush_region(&engine, region_id, None).await;
+    put_sparse_rows(&engine, region_id, &row_schema, second_round).await;
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let selected = engine.scanner(region_id, request).await.unwrap();
+    let Scanner::Series(mut scanner) = selected else {
+        panic!("sparse PerSeries request must use SeriesScan");
+    };
+    assert_eq!("two_phase", scanner.mode());
+    assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    // The fixture must really be one SST source plus one memtable source, or the two rounds below
+    // would be explained by something else.
+    {
+        let input = scanner.input();
+        assert_eq!(1, input.num_files());
+        assert_eq!(
+            vec![sst_rows],
+            input
+                .files
+                .iter()
+                .map(|file| file.num_rows())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(1, input.num_memtables());
+        assert_eq!(
+            memtable_rows,
+            input
+                .memtables
+                .iter()
+                .map(|memtable| memtable.stats().num_rows)
+                .sum::<usize>()
+        );
+    }
+
+    let source = primary_key_label_source(&scanner.metadata());
+    let ranges = scanner
+        .properties()
+        .partitions
+        .clone()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(!ranges.is_empty(), "region scan needs an input range");
+    // One output partition means every series the distributor assigns belongs to this receiver,
+    // so both rounds are delivered to partition 0.
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(vec![ranges]),
+            target_partitions: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(1, scanner.properties().num_partitions());
+
+    let metrics = ExecutionPlanMetricsSet::default();
+    let ctx = QueryScanContext::default();
+    let stream = scanner
+        .scan_series_partition(&ctx, &metrics, 0, &source)
+        .unwrap()
+        .expect("two-phase raw scan is supported");
+    assert_eq!(SeriesOrdering::Contiguous, stream.ordering());
+    let schema = Arc::clone(stream.schema());
+    let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+    // Two collection rounds really happened; the fixture never reaches the production threshold.
+    let rounds = crate::read::series_scan::candidate_assignment_rounds();
+    assert!(
+        rounds >= 2,
+        "the partition must consume more than one assignment round, got {rounds}"
+    );
+    assert!(
+        !chunks.is_empty(),
+        "partition 0 must own reader assignments"
+    );
+
+    // Partition 0's single stream carries every series exactly once, in ascending key order, so
+    // the stream crosses the round boundary: series 0..500 come from the first assignment and
+    // series 500 (the last of the globally sorted candidate stream) from the second one.
+    let mut runs = Vec::<Vec<u8>>::new();
+    let mut chunks_per_series = HashMap::<Vec<u8>, usize>::new();
+    for chunk in &chunks {
+        let key = chunk.primary_key.to_vec();
+        *chunks_per_series.entry(key.clone()).or_default() += 1;
+        if runs.last() != Some(&key) {
+            assert!(
+                !runs.contains(&key),
+                "a series must not resume after another series across a round boundary"
+            );
+            runs.push(key);
+        }
+    }
+    assert_eq!(keys, runs, "every series appears exactly once in key order");
+    assert!(
+        chunks_per_series.values().copied().max().unwrap() > 1,
+        "the fixture must emit multiple chunks for one series, got {chunks_per_series:?}"
+    );
+    // The round boundary: the first run belongs to the first assignment, the last run to the
+    // second assignment, and both are chunks of the same partition stream.
+    assert_eq!(
+        &keys[0],
+        runs.first().unwrap(),
+        "first round data is streamed"
+    );
+    assert_eq!(
+        &keys[SERIES - 1],
+        runs.last().unwrap(),
+        "second round data is streamed"
+    );
+    let last_round_chunks = chunks
+        .iter()
+        .filter(|chunk| chunk.primary_key.as_slice() == keys[SERIES - 1].as_slice())
+        .count();
+    assert!(
+        last_round_chunks > 0,
+        "the series of the second assignment must be streamed"
+    );
+
+    let stream_rows = chunks.iter().map(|chunk| chunk.time.len()).sum::<usize>();
+    assert_eq!(
+        expected_times.values().map(Vec::len).sum::<usize>(),
+        stream_rows,
+        "the stream must carry every written row of both rounds"
+    );
+    for (key, times) in &expected_times {
+        let observed = chunks
+            .iter()
+            .filter(|chunk| chunk.primary_key.as_slice() == key.as_slice())
+            .flat_map(|chunk| chunk.time.as_buffer().iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(times, &observed, "timestamps must increase per series");
+        assert!(
+            observed.windows(2).all(|window| window[0] < window[1]),
+            "timestamps must strictly increase within a key"
+        );
+    }
+    for (index, chunk) in chunks.iter().enumerate() {
+        let next_is_same_series = chunks
+            .get(index + 1)
+            .is_some_and(|next| next.primary_key.as_slice() == chunk.primary_key.as_slice());
+        assert_eq!(
+            !next_is_same_series, chunk.is_last,
+            "is_last must mark the final chunk of a series, including at the round boundary"
+        );
+        let times = chunk.time.as_buffer();
+        for (sample, time) in times.iter().enumerate() {
+            let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(sample) else {
+                panic!("raw fields are converted to float samples");
+            };
+            assert_eq!((*time + 1) as f64, value);
+        }
+    }
+
+    // Route the same partition stream through the frame codec so its `SequenceValidator` checks
+    // the chunks this reader produced, including the chunks the second assignment added.
+    let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
+        Arc::clone(&schema),
+        source.clone(),
+        SeriesOrdering::Contiguous,
+        chunks.clone(),
+    )))
+    .unwrap();
+    let unpacked = unpack_raw_series(
+        packed,
+        Arc::clone(&schema),
+        source,
+        SeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let validated = unpacked.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(
+        stream_rows,
+        validated
+            .iter()
+            .map(|chunk| chunk.time.len())
+            .sum::<usize>(),
+        "packing and unpacking must preserve the multi-round stream"
+    );
+    let mut schema_fields = schema
+        .fields
+        .iter()
+        .map(|field| field.name.as_ref())
+        .collect::<Vec<_>>();
+    schema_fields.dedup();
+    assert_eq!(vec!["field_0"], schema_fields);
 }
 
 /// Creates the sparse-encoded flat region shared by the two-phase raw scan tests.
