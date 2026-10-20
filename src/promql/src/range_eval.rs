@@ -92,10 +92,8 @@ impl FloatWindows<'_> {
     /// The resets inside window `index`.
     ///
     /// `windows` index the retained arrays as they stand in this batch, not absolutely: each
-    /// span is relative to `timestamps` and `values` as they were when it was recorded, so it is
-    /// only valid until the next `advance` drains those arrays, and a batch must be flushed
-    /// before any `advance`. Nothing has advanced since these spans were recorded, which is why
-    /// `base` plus a span start is the absolute position of the sample the span starts at.
+    /// span is relative to `timestamps` and `values`, which is why `base` plus a span start is
+    /// the absolute position of the sample the span starts at.
     pub(crate) fn resets_of(&self, index: usize) -> &[CounterReset] {
         let span = &self.windows[index];
         resets_between(
@@ -210,9 +208,6 @@ impl PendingBatch {
 
 /// Records one point for the next batch call: its evaluation timestamp and, per field, the range
 /// of retained samples its window covers.
-///
-/// The ranges are relative to the retained samples, so samples dropped before the batch flushes
-/// would shift them; [`flush_batch`] therefore runs before any `advance`.
 fn accumulate(pending: &mut PendingBatch, index: usize, eval_ts: i64, fields: &[FieldSamples]) {
     debug_assert_eq!(pending.spans.len(), fields.len());
     pending.indices.push(index);
@@ -244,9 +239,6 @@ fn flush_batch(
         *batch_calls += 1;
     }
     for (index, field) in fields.iter().enumerate() {
-        // `pending.spans` are meaningful only because nothing has advanced since they were
-        // recorded: `evaluate` flushes before `advance`, so the retained arrays still start where
-        // they did and each span still covers the samples it named.
         let batch = FloatWindows {
             timestamps: &field.timestamps,
             values: &field.values,
@@ -1052,8 +1044,7 @@ impl RangeEvaluator {
             }
             state.cursor += 1;
         }
-        // The accumulated spans index the retained arrays, which `advance` below rewrites, so the
-        // batch has to flush first.
+        // Flushes what the sample loop left pending, so the assert below finds it empty.
         if let Some(kernel) = self.batch.as_mut() {
             flush_batch(
                 kernel,
@@ -1082,13 +1073,10 @@ impl RangeEvaluator {
             }
             state.cursor = decided;
         }
-        // Pending is meaningful only with a kernel, and no accumulated point may survive the
-        // drain: a span indexes the retained arrays `advance` rewrites just below, so a point
-        // still pending here would be flushed against shifted samples.
         debug_assert!(
-            self.batch.is_none() || self.pending.is_empty(),
-            "pending spans index the retained arrays `advance` rewrites below, so the batch \
-             must flush before the drain"
+            self.pending.is_empty(),
+            "`evaluate` flushes the batch before `advance` rewrites the retained arrays a \
+             pending span indexes"
         );
         for field in &mut self.fields {
             // After the last window, samples are still ingested so that the overflow and
