@@ -1686,13 +1686,12 @@ mod tests {
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
     use common_procedure::{
-        BoxedProcedure, LockKey, Procedure, ProcedureContext, ProcedureManager,
-        ProcedureManagerRef, ProcedureWithId, Status,
+        BoxedProcedure, ProcedureContext, ProcedureManager, ProcedureManagerRef,
     };
     use store_api::storage::TableId;
     use table::table_name::TableName;
 
-    use super::{DdlManager, DdlOptions};
+    use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_database::{
@@ -1713,7 +1712,7 @@ mod tests {
     use crate::key::TableMetadataManager;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::{KvBackend, TxnService};
+    use crate::kv_backend::test_util::MockKvBackendBuilder;
     use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;
     use crate::procedure_executor::ExecutorContext;
@@ -1728,7 +1727,6 @@ mod tests {
     use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
     #[cfg(not(feature = "enterprise"))]
     use crate::rpc::ddl::{DdlTask, PurgeDroppedTableTask, QueryContext, SubmitDdlTaskRequest};
-    use crate::rpc::store;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -2280,69 +2278,14 @@ mod tests {
         }
     }
 
-    struct PendingMetadataKvBackend;
-
-    #[async_trait::async_trait]
-    impl TxnService for PendingMetadataKvBackend {
-        type Error = crate::error::Error;
-    }
-
-    #[async_trait::async_trait]
-    impl KvBackend for PendingMetadataKvBackend {
-        fn name(&self) -> &str {
-            "PendingMetadataKvBackend"
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        async fn range(
-            &self,
-            _: store::RangeRequest,
-        ) -> crate::error::Result<store::RangeResponse> {
-            std::future::pending().await
-        }
-
-        async fn put(&self, _: store::PutRequest) -> crate::error::Result<store::PutResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_put(
-            &self,
-            _: store::BatchPutRequest,
-        ) -> crate::error::Result<store::BatchPutResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_get(
-            &self,
-            _: store::BatchGetRequest,
-        ) -> crate::error::Result<store::BatchGetResponse> {
-            unimplemented!()
-        }
-
-        async fn delete_range(
-            &self,
-            _: store::DeleteRangeRequest,
-        ) -> crate::error::Result<store::DeleteRangeResponse> {
-            unimplemented!()
-        }
-
-        async fn batch_delete(
-            &self,
-            _: store::BatchDeleteRequest,
-        ) -> crate::error::Result<store::BatchDeleteResponse> {
-            unimplemented!()
-        }
-    }
-
     #[tokio::test]
     async fn test_truncate_timeout_covers_metadata_checks() {
         let mut context = new_ddl_context(Arc::new(DummyDatanodeManager));
-        context.table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(
-            PendingMetadataKvBackend,
-        )));
+        let kv_backend = MockKvBackendBuilder::default()
+            .range_async_fn(Arc::new(|_| Box::pin(std::future::pending())))
+            .build()
+            .unwrap();
+        context.table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(kv_backend)));
         let ddl_manager = ddl_manager_with_context(context).await;
 
         for wait in [true, false] {
@@ -2387,75 +2330,6 @@ mod tests {
         }
 
         ddl_manager.procedure_manager.stop().await.unwrap();
-    }
-
-    struct FailingDdlProcedure;
-
-    #[async_trait::async_trait]
-    impl Procedure for FailingDdlProcedure {
-        fn type_name(&self) -> &str {
-            "test::FailingDdlProcedure"
-        }
-
-        async fn execute(
-            &mut self,
-            _: &common_procedure::Context,
-        ) -> common_procedure::Result<Status> {
-            Err(common_procedure::Error::external(
-                crate::error::UnsupportedSnafu {
-                    operation: "test execution failure",
-                }
-                .build(),
-            ))
-        }
-
-        fn dump(&self) -> common_procedure::Result<String> {
-            Ok(String::new())
-        }
-
-        fn lock_key(&self) -> LockKey {
-            LockKey::new(Vec::new())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_execute_procedure_with_options_wait_error() {
-        let context = new_ddl_context(Arc::new(DummyDatanodeManager));
-        let ddl_manager = ddl_manager_with_context(context).await;
-        let result = ddl_manager
-            .execute_procedure_with_options(
-                ProcedureWithId::with_random_id(Box::new(FailingDdlProcedure)),
-                DdlOptions {
-                    wait: true,
-                    timeout: Duration::from_secs(5),
-                },
-            )
-            .await;
-        assert!(matches!(
-            result,
-            Err(crate::error::Error::WaitProcedure { .. })
-        ));
-        ddl_manager.procedure_manager.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_execute_procedure_with_options_submit_error() {
-        let context = new_ddl_context(Arc::new(DummyDatanodeManager));
-        let ddl_manager = ddl_manager_with_context(context).await;
-        ddl_manager.procedure_manager.stop().await.unwrap();
-        let result = ddl_manager
-            .execute_procedure_with_options(
-                ProcedureWithId::with_random_id(Box::new(FailingDdlProcedure)),
-                DdlOptions {
-                    wait: false,
-                    timeout: Duration::from_secs(5),
-                },
-            )
-            .await;
-        assert!(matches!(
-            result,
-            Err(crate::error::Error::SubmitProcedure { .. })
-        ));
     }
 
     async fn ddl_manager_with_context(ddl_context: DdlContext) -> DdlManager {

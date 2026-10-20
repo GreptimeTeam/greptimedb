@@ -427,34 +427,30 @@ pub fn convert_month_day_nano_to_duration(
 
 /// Parses submission options, accepting only scalar `wait` and `timeout` values.
 pub(crate) fn parse_ddl_options(parser: &mut Parser) -> Result<OptionMap> {
-    let options = parser
-        .parse_options(Keyword::WITH)
-        .context(SyntaxSnafu)?
-        .into_iter()
-        .map(parse_option_string)
-        .map(|option| {
-            let (key, value) = option?;
-            ensure!(
-                VALID_DDL_OPTION_KEYS.contains(&key.as_str()) && value.as_string().is_some(),
-                InvalidSqlSnafu {
-                    msg: format!("invalid DDL option '{key}': '{value}'")
-                }
-            );
-            Ok((key, value))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(OptionMap::new(options))
+    parse_with_options_inner(parser, true)
 }
 
 pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {
+    parse_with_options_inner(parser, false)
+}
+
+fn parse_with_options_inner(parser: &mut Parser, ddl_only: bool) -> Result<OptionMap> {
     let options = parser
         .parse_options(Keyword::WITH)
         .context(SyntaxSnafu)?
         .into_iter()
         .map(parse_option_string)
         .collect::<Result<HashMap<String, OptionValue>>>()?;
+    // Validate before OptionMap can discard non-scalar secret options.
     for (key, value) in &options {
-        if key.starts_with(SEMANTIC_PREFIX) {
+        if ddl_only {
+            ensure!(
+                VALID_DDL_OPTION_KEYS.contains(&key.as_str()) && value.as_string().is_some(),
+                InvalidSqlSnafu {
+                    msg: format!("invalid DDL option '{key}': '{value}'")
+                }
+            );
+        } else if key.starts_with(SEMANTIC_PREFIX) {
             // Semantic keys are whitelisted and value-checked against their domain,
             // so a user cannot set an unknown key or an out-of-range value.
             let value = value.as_string().unwrap_or_default();

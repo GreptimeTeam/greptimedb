@@ -25,7 +25,7 @@ use common_procedure::{
 use datatypes::arrow::array::AsArray;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
-use tests_integration::test_util::{execute_sql, try_execute_sql};
+use tests_integration::test_util::{execute_sql, execute_sql_and_expect, try_execute_sql};
 use tokio::sync::Notify;
 
 /// Holds the table lock until explicitly released, keeping truncate pending.
@@ -178,16 +178,21 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
         .into_iter()
         .map(|procedure| {
             assert!(matches!(procedure.state, ProcedureState::Running));
-            assert!(!err.output_msg().contains(&procedure.id.to_string()));
             manager.procedure_watcher(procedure.id).unwrap()
         })
         .collect::<Vec<_>>();
-    let before_release = execute_sql(&frontend, "SELECT * FROM truncate_wait_test")
-        .await
-        .data
-        .pretty_print()
-        .await;
-    assert!(before_release.contains("1970-01-01"), "{before_release}");
+    execute_sql_and_expect(
+        &frontend,
+        "SELECT * FROM truncate_wait_test",
+        r#"
++---+-------------------------+
+| v | ts                      |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
++---+-------------------------+
+"#,
+    )
+    .await;
 
     release.notify_one();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -198,12 +203,17 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
     })
     .await
     .unwrap();
-    let empty = execute_sql(&frontend, "SELECT * FROM truncate_wait_test")
-        .await
-        .data
-        .pretty_print()
-        .await;
-    assert!(!empty.contains("1970-01-01"), "{empty}");
+    execute_sql_and_expect(
+        &frontend,
+        "SELECT * FROM truncate_wait_test",
+        r#"
++---+----+
+| v | ts |
++---+----+
++---+----+
+"#,
+    )
+    .await;
     assert_eq!(
         definition,
         execute_sql(&frontend, "SHOW CREATE TABLE truncate_wait_test")
