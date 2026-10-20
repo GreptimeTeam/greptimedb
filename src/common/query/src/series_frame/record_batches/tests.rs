@@ -1130,13 +1130,7 @@ async fn exact_int64_filter_sort_adapter_frame_pipeline() {
         .into(),
         eval_grid: None,
     });
-    let mut decoded = super::super::unpack_raw_series(
-        frames,
-        expected,
-        store_api::region_engine::RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut decoded = super::super::unpack_raw_series(frames, Some(expected)).unwrap();
     let chunk = decoded.next().await.unwrap().unwrap();
     assert!(chunk.is_last);
     assert_eq!(chunk.time.as_buffer().as_ref(), &[1, 2]);

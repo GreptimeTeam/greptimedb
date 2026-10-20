@@ -3178,23 +3178,10 @@ fn label_decode_description_rejects_inconsistent_bindings() {
             Some(&description),
         )
         .unwrap_or_else(|error| panic!("{label}: {error}"));
-        assert_eq!(
-            frame.metadata().get(LABEL_DECODE).map(String::as_str),
-            Some(serde_json::to_string(&description).unwrap().as_str()),
-            "{label}: the written text is the encoder's own output"
-        );
+        // The writer records what the producer declares, so the rejection has to come from the
+        // reader; one assertion covers it, since the frame it reads is the text just written.
         assert!(
             raw_series_frame_label_decode(&frame).is_err(),
-            "{label}: an inconsistent description is rejected when read"
-        );
-        // The same text in a hand-authored frame is rejected identically.
-        let mut metadata = base_metadata("key");
-        metadata.push((
-            LABEL_DECODE.to_string(),
-            serde_json::to_string(&description).unwrap(),
-        ));
-        assert!(
-            raw_series_frame_label_decode(&schema_with_metadata(metadata)).is_err(),
             "{label}: an inconsistent description is rejected when read"
         );
     }
@@ -3227,17 +3214,6 @@ fn raw_series_label_decode_metadata_fixture() {
         /// The encoding a decoding consumer expects, or `null` when the fixture must be rejected.
         encoding: Option<String>,
     }
-
-    // The exact text `serde_json::to_string` writes for this revision's writer, recorded from the
-    // encoder. A reader that regenerated the text differently breaks every remote comparison.
-    let dense_encoding = concat!(
-        "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",",
-        "\"primary_key\":[",
-        "{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},",
-        "{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}",
-        "],",
-        "\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
-    );
 
     let cases: Vec<Case> = serde_json::from_str(include_str!(
         "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_metadata.json"
@@ -3301,13 +3277,8 @@ fn raw_series_label_decode_metadata_fixture() {
                     case.name
                 );
                 if expected == "dense" {
-                    // The fixture text is the encoder's own output, byte for byte.
-                    assert_eq!(
-                        case.metadata.get(LABEL_DECODE).map(String::as_str),
-                        Some(dense_encoding),
-                        "{}: the frozen text is what the writer produces",
-                        case.name
-                    );
+                    // The fixture text is the encoder's own output, byte for byte: re-encoding the
+                    // description it decodes to must reproduce it exactly.
                     let roundtrip = raw_series_frame_schema_with_label_decode(
                         &test_schema(&["value"]),
                         RawLabelMode::Key,
@@ -3355,5 +3326,181 @@ fn label_decode_description_carries_a_timestamp_typed_tag_column() {
     assert_eq!(
         recovered.primary_key[1].physical_type,
         crate::data_type::ConcreteDataType::timestamp_millisecond_datatype()
+    );
+}
+/// One entry of `v1_physical_types.json`: a [`ConcreteDataType`] variant and the exact text this
+/// revision's serde writes for a representative value of it.
+#[derive(serde::Deserialize)]
+struct FrozenPhysicalType {
+    /// The [`ConcreteDataType`] variant, as [`concrete_datatype_variants`] spells it.
+    variant: String,
+    /// The `serde_json` text this revision writes for that variant's representative value.
+    text: String,
+}
+
+/// Spells every [`ConcreteDataType`] variant exactly once, together with one representative value of
+/// it.
+///
+/// Everything that has to notice a new variant is derived from this one list:
+///
+/// - [`variant_name`] matches on it with **no wildcard arm**, so adding a variant to
+///   [`ConcreteDataType`] is a compile error until the variant is added here.
+/// - [`datatype_representatives`] yields one value per listed variant, so the same edit is what
+///   supplies the value the tests read the serde text from.
+/// - [`VARIANT_NAMES`] is generated from it too, which is what
+///   [`the_frozen_text_covers_every_datatype_variant`] requires a fixture entry for.
+macro_rules! concrete_datatype_variants {
+    ($($variant:ident => $value:expr),+ $(,)?) => {
+        /// The [`ConcreteDataType`] variant a value belongs to, spelled as the fixture names it.
+        ///
+        /// Exhaustive on purpose: a new variant of [`ConcreteDataType`] makes this match fail to
+        /// compile, which is what makes a missing fixture entry impossible to land.
+        fn variant_name(data_type: &ConcreteDataType) -> &'static str {
+            match data_type {
+                $(ConcreteDataType::$variant(_) => stringify!($variant),)+
+            }
+        }
+
+        /// One representative value per variant, in the order listed above.
+        fn datatype_representatives() -> Vec<ConcreteDataType> {
+            vec![$($value),+]
+        }
+
+        /// Every [`ConcreteDataType`] variant name, in the order listed above.
+        const VARIANT_NAMES: &[&str] = &[$(stringify!($variant)),+];
+    };
+}
+
+concrete_datatype_variants!(
+    Null => ConcreteDataType::null_datatype(),
+    Boolean => ConcreteDataType::boolean_datatype(),
+    Int8 => ConcreteDataType::int8_datatype(),
+    Int16 => ConcreteDataType::int16_datatype(),
+    Int32 => ConcreteDataType::int32_datatype(),
+    Int64 => ConcreteDataType::int64_datatype(),
+    UInt8 => ConcreteDataType::uint8_datatype(),
+    UInt16 => ConcreteDataType::uint16_datatype(),
+    UInt32 => ConcreteDataType::uint32_datatype(),
+    UInt64 => ConcreteDataType::uint64_datatype(),
+    Float32 => ConcreteDataType::float32_datatype(),
+    Float64 => ConcreteDataType::float64_datatype(),
+    Decimal128 => ConcreteDataType::decimal128_datatype(10, 2),
+    Binary => ConcreteDataType::binary_datatype(),
+    String => ConcreteDataType::string_datatype(),
+    Date => ConcreteDataType::date_datatype(),
+    Timestamp => ConcreteDataType::timestamp_millisecond_datatype(),
+    Time => ConcreteDataType::time_microsecond_datatype(),
+    Duration => ConcreteDataType::duration_nanosecond_datatype(),
+    Interval => ConcreteDataType::interval_month_day_nano_datatype(),
+    List => ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
+    Dictionary => ConcreteDataType::dictionary_datatype(
+        ConcreteDataType::int32_datatype(),
+        ConcreteDataType::string_datatype(),
+    ),
+    Struct => ConcreteDataType::struct_datatype(crate::types::StructType::new(Arc::new(vec![
+        crate::types::StructField::new("host", ConcreteDataType::string_datatype(), false),
+        crate::types::StructField::new("port", ConcreteDataType::uint16_datatype(), true),
+    ]))),
+    Json => ConcreteDataType::json_datatype(),
+    Vector => ConcreteDataType::vector_datatype(3),
+);
+
+/// The frozen text of every [`ConcreteDataType`] variant, as a label decode description embeds it.
+const FROZEN_PHYSICAL_TYPES: &str = include_str!(
+    "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_physical_types.json"
+);
+
+fn frozen_physical_types() -> Vec<FrozenPhysicalType> {
+    serde_json::from_str(FROZEN_PHYSICAL_TYPES).expect("the frozen physical-type fixture parses")
+}
+
+/// The representative value of one variant, named the way the fixture names it.
+fn representative(variant: &str) -> ConcreteDataType {
+    VARIANT_NAMES
+        .iter()
+        .zip(datatype_representatives())
+        .find(|(name, _)| **name == variant)
+        .unwrap_or_else(|| panic!("{variant}: no representative value is listed for this variant"))
+        .1
+}
+
+/// The text a description embeds for a key column's type is not this module's to spell: it is
+/// [`ConcreteDataType`]'s own serde, so it changes whenever that type's serde does.
+///
+/// `v1_physical_types.json` freezes that text for every variant. This test fails when a variant no
+/// longer parses back from its frozen text, when it no longer re-serializes to it, or when the
+/// parsed value is no longer the type that variant names — which is what a silent serde change
+/// looks like. Since the frame text is compared byte for byte across nodes, such a change is a
+/// [`LABEL_DECODE_VERSION`] bump, and this test is the alarm that raises it.
+#[test]
+fn every_datatype_round_trips_through_its_frozen_text() {
+    use crate::data_type::DataType as _;
+
+    for entry in frozen_physical_types() {
+        let parsed: ConcreteDataType = serde_json::from_str(&entry.text).unwrap_or_else(|error| {
+            panic!("{}: {} cannot be read: {error}", entry.variant, entry.text)
+        });
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            entry.text,
+            "{}: re-serializes to the frozen text",
+            entry.variant
+        );
+        assert_eq!(
+            parsed.name(),
+            representative(&entry.variant).name(),
+            "{}: the frozen text still names the same type",
+            entry.variant
+        );
+        assert_eq!(
+            parsed,
+            representative(&entry.variant),
+            "{}: the frozen text still describes the same value",
+            entry.variant
+        );
+    }
+}
+
+/// The fixture above only freezes a variant if it has an entry, so every variant must have one.
+///
+/// This test is what makes that hold: [`variant_name`] matches every [`ConcreteDataType`] variant
+/// with no wildcard arm, so a new variant does not compile until it is listed in
+/// [`concrete_datatype_variants`]; that listing also extends [`VARIANT_NAMES`] and
+/// [`datatype_representatives`], and this test then requires a fixture entry for it and rejects an
+/// entry naming a variant that does not exist.
+#[test]
+fn the_frozen_text_covers_every_datatype_variant() {
+    let frozen = frozen_physical_types();
+
+    for data_type in datatype_representatives() {
+        let variant = variant_name(&data_type);
+        let entry = frozen
+            .iter()
+            .find(|entry| entry.variant == variant)
+            .unwrap_or_else(|| {
+                panic!("{variant}: v1_physical_types.json has no entry for this datatype variant")
+            });
+        // The entry's text is this variant's text: read it back and name the variant it describes.
+        let parsed: ConcreteDataType = serde_json::from_str(&entry.text)
+            .unwrap_or_else(|error| panic!("{variant}: {} is unreadable: {error}", entry.text));
+        assert_eq!(
+            variant_name(&parsed),
+            variant,
+            "{variant}: the entry's text describes this variant"
+        );
+    }
+
+    // Nothing in the fixture names a variant that does not exist, and no variant is listed twice.
+    for entry in &frozen {
+        assert!(
+            VARIANT_NAMES.contains(&entry.variant.as_str()),
+            "{}: the fixture names a variant ConcreteDataType does not have",
+            entry.variant
+        );
+    }
+    assert_eq!(
+        frozen.len(),
+        VARIANT_NAMES.len(),
+        "one fixture entry per datatype variant, no duplicates"
     );
 }

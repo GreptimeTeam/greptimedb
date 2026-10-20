@@ -18,7 +18,10 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
-use common_query::series_frame::{pack_raw_series, unpack_raw_series};
+use common_query::series_frame::{
+    ensure_frame_matches_label_source, pack_raw_series, raw_series_frame_ordering,
+    unpack_raw_series,
+};
 use datatypes::arrow::array::{Array, Float64Array, ListArray, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::SeriesOrdering;
@@ -246,7 +249,20 @@ async fn merges_typed_multifield_payload_through_frame_and_label_roundtrip() {
     let frame_binding = merged.label_source().clone();
     let frame_ordering = merged.ordering();
     let framed = pack_raw_series(merged).unwrap();
-    let raw = unpack_raw_series(framed, frame_schema, frame_binding, frame_ordering).unwrap();
+    // The producer's identity is an expectation a caller compares against the declaration, not a
+    // decode input; the frame states the layout the decoder uses.
+    ensure_frame_matches_label_source(framed.schema().as_ref(), &frame_binding).unwrap();
+    assert_eq!(
+        raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
+        frame_ordering,
+        "the packed frame declares the merge's ordering"
+    );
+    let raw = unpack_raw_series(framed, Some(frame_schema)).unwrap();
+    assert_eq!(
+        raw.ordering(),
+        frame_ordering,
+        "unpacking derives the ordering from the frame"
+    );
     let rows = materialize_raw_labels(raw)
         .unwrap()
         .try_collect::<Vec<_>>()
