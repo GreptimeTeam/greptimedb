@@ -16,8 +16,8 @@
 //!
 //! The position a node is shown at is derived by [`metrics::walk`], the same traversal that names
 //! the node's metrics, so a node cannot be shown at one place and measured at another. The
-//! display is an observation of a compiled tree: it runs nothing, and a node whose operation has
-//! no executor says so instead of reading like an operation that will happen.
+//! display is an observation of a compiled tree: it runs nothing, and every line reads as the node
+//! it is, making no claim about whether that node could run.
 
 use std::fmt::{self, Write};
 use std::sync::Arc;
@@ -35,9 +35,6 @@ use crate::vector_match::{BinaryOp, Cardinality, MatchingLabels};
 
 /// The header line of every tree.
 const HEADER: &str = "NativeTree";
-
-/// What a node without an executor is marked with, so its line does not read like a run.
-const NO_EXECUTOR: &str = " (no executor)";
 
 /// How deep `path` is: the root is at depth zero, its input at one.
 fn depth(path: &NodePath) -> usize {
@@ -247,27 +244,9 @@ fn kind(expr: &NativeExpr) -> &'static str {
     }
 }
 
-/// Whether the node's operation has an executor, so its line may read like something that runs.
-fn has_executor(expr: &NativeExpr) -> bool {
-    matches!(
-        expr,
-        NativeExpr::Input(_) | NativeExpr::Window { .. } | NativeExpr::Map { .. }
-    )
-}
-
 /// The line a node is shown as, without its indentation.
 fn line(node: &NativeNode, path: &NodePath) -> String {
-    format!(
-        "{} {} {}{}",
-        name(path),
-        kind(&node.expr),
-        describe(node),
-        if has_executor(&node.expr) {
-            ""
-        } else {
-            NO_EXECUTOR
-        }
-    )
+    format!("{} {} {}", name(path), kind(&node.expr), describe(node))
 }
 
 impl fmt::Display for NativeTree {

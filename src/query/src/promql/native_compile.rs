@@ -50,9 +50,26 @@ const SUPPORTED: &str = "`<range function>(<selector>[<range>])`, for example `r
 
 /// Compiles `stmt` into a tree that reads `input` and folds it with the statement's one window.
 ///
-/// `input` is the raw series schema the caller bound from the table: the AST alone cannot produce
-/// it, because it says which series the query reads but not which fields they carry. `ordering` is
-/// what the caller's scan guarantees, and the tree records it rather than assuming one.
+/// `input` is the raw series schema the caller bound from the table, and the caller has to apply the
+/// selector's matchers before binding it: `__field__`, `__schema__` and `__database__` select rows
+/// and fields the same way they do in the existing planner, and the AST cannot restate that
+/// afterwards. `input.fields` is therefore the post-`__field__` field set, not the table's; a caller
+/// that binds every field of the table instead compiles a different, wrong window, because
+/// `rate(x{__field__="a"}[5m])` over fields `[a, b]` would fold two fields where the planner folds
+/// one.
+///
+/// `ordering` is what the caller's scan guarantees, and the tree records it rather than assuming
+/// one. Only `Contiguous` and `KeyThenTime` are accepted: a native range window consumes one series
+/// to its last chunk before the next, so chunks of different series may not interleave, and an
+/// `Interleaved` declaration is refused here — which is where the refusal belongs, since a tree that
+/// declares it under a window cannot be built by this compiler at all. [`NativeTree::validate`]'s
+/// window branch checks the same thing, so if both land this refusal comes first and the tree check
+/// is a backstop for a tree built some other way.
+///
+/// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
+/// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
+/// is fine while a tree has one selector; a tree with two inputs will need each `Input` to name its
+/// selector.
 pub fn compile(
     stmt: &EvalStmt,
     input: Arc<SeriesSchema>,
@@ -80,14 +97,23 @@ pub fn compile(
             func.name, argument
         )));
     };
-    // An `@`-anchored selector is step-invariant: every step folds the same samples, which the
-    // native model would have to replay over the grid. That replay is not part of this subset, so
-    // the anchor is refused rather than dropped.
+    // A native range window reads one series to its last chunk before it reads the next, so raw
+    // samples whose chunks of different series interleave cannot be folded by it. The declaration
+    // is refused here rather than recorded onto an input the tree is built over and fails on.
+    if ordering == SeriesOrdering::Interleaved {
+        return Err(not_implemented(
+            "raw samples whose series interleave, which this compiler cannot consume: its range \
+             window reads one series to its last chunk before the next, so chunks of different \
+             series may not interleave",
+        ));
+    }
+    // An `@`-anchored selector fixes its window instead of following the evaluation grid, which the
+    // native model binds as an absolute millisecond anchor. Resolving `@` into that value is not
+    // part of this subset, so the anchor is refused rather than dropped.
     if vs.at.is_some() {
         return Err(not_implemented(&format!(
-            "a call to `{}` over an `@`-anchored selector, whose window is fixed rather than \
-             following the evaluation grid and would need the step-invariant replay the native \
-             compiler does not implement yet",
+            "a call to `{}` over an `@`-anchored selector, whose anchor is not resolved into an \
+             absolute millisecond value yet and so cannot be bound",
             func.name
         )));
     }
