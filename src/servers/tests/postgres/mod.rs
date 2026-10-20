@@ -97,6 +97,7 @@ const MIXED_AUTH_SCRAM_USER: &str = "scram_user";
 const MIXED_AUTH_SCRAM_PASSWORD: &[u8] = b"scram-password";
 const MIXED_AUTH_CLEARTEXT_USER: &str = "clear_user";
 const MIXED_AUTH_CLEARTEXT_PASSWORD: &str = "clear-password";
+const MIXED_AUTH_DENIED_USER: &str = "denied_user";
 
 /// Selects SCRAM-SHA-256 for [`MIXED_AUTH_SCRAM_USER`] and cleartext for
 /// everyone else, so one endpoint serves both mechanisms.
@@ -148,10 +149,18 @@ impl UserProvider for MixedAuthProvider {
 
     async fn authorize(
         &self,
-        _catalog: &str,
-        _schema: &str,
-        _user_info: &UserInfoRef,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
     ) -> auth::error::Result<()> {
+        if user_info.username() == MIXED_AUTH_DENIED_USER {
+            return auth::error::AccessDeniedSnafu {
+                catalog: catalog.to_string(),
+                schema: schema.to_string(),
+                username: user_info.username().to_string(),
+            }
+            .fail();
+        }
         Ok(())
     }
 
@@ -161,7 +170,7 @@ impl UserProvider for MixedAuthProvider {
         _catalog: &str,
     ) -> auth::error::Result<PgAuthInfo> {
         let Identity::UserId(username, _) = id;
-        let method = if username == MIXED_AUTH_SCRAM_USER {
+        let method = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
             "scram"
         } else {
             "cleartext"
@@ -423,9 +432,22 @@ async fn test_pg_mixed_auth_scram_and_cleartext() -> Result<()> {
             .is_err()
     );
 
+    // SCRAM-selected user denied by authorization: rejected at proof
+    // verification like a wrong password, before AuthenticationOk
+    assert!(
+        create_plain_connection_with_credentials(
+            server_port,
+            MIXED_AUTH_DENIED_USER,
+            "scram-password",
+        )
+        .await
+        .is_err()
+    );
+
     // both mechanisms were served by the same endpoint
     let selections = provider.selections.lock().unwrap().clone();
     assert_eq!(Some(&"scram"), selections.get(MIXED_AUTH_SCRAM_USER));
+    assert_eq!(Some(&"scram"), selections.get(MIXED_AUTH_DENIED_USER));
     assert_eq!(
         Some(&"cleartext"),
         selections.get(MIXED_AUTH_CLEARTEXT_USER)

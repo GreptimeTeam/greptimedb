@@ -29,6 +29,7 @@ pub(crate) const METADATA_SCHEMA: &str = "schema";
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use ::auth::{UserInfoRef, UserProviderRef};
 use derive_builder::Builder;
@@ -39,7 +40,7 @@ pub use server::PostgresServer;
 use session::Session;
 use session::context::Channel;
 
-use self::auth_handler::ZeroPidSecretKeyGenerator;
+use self::auth_handler::{PgUserProviderSource, ZeroPidSecretKeyGenerator};
 use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -76,9 +77,11 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 
 pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
-    user_provider: Option<UserProviderRef>,
+    auth_source: Option<Arc<PgUserProviderSource>>,
     force_tls: bool,
     auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>, UserInfoRef>,
+    /// SCRAM selected; failures get the uniform metric label.
+    is_scram_auth: AtomicBool,
 
     batching_enabled: bool,
     session: Arc<Session>,
@@ -129,10 +132,14 @@ impl MakePostgresServerHandler {
         ));
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
-            user_provider: self.user_provider.clone(),
+            auth_source: self
+                .user_provider
+                .clone()
+                .map(|p| Arc::new(PgUserProviderSource::new(p))),
             force_tls: self.force_tls,
             auth_driver: AuthDriver::new(self.param_provider.clone())
                 .with_pid_secret_key_generator(Arc::new(ZeroPidSecretKeyGenerator)),
+            is_scram_auth: AtomicBool::new(false),
 
             batching_enabled,
             session: session.clone(),

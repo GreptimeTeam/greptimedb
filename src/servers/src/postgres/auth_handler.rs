@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use ::auth::{
     BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
@@ -56,119 +57,151 @@ impl PidSecretKeyGenerator for ZeroPidSecretKeyGenerator {
     }
 }
 
-struct LoginInfo {
-    user: Option<String>,
-    catalog: Option<String>,
-    schema: Option<String>,
-}
-
-impl LoginInfo {
-    pub fn from_client_info<C>(client: &C) -> LoginInfo
-    where
-        C: ClientInfo,
-    {
-        LoginInfo {
-            user: client.metadata().get(super::METADATA_USER).map(Into::into),
-            catalog: client
-                .metadata()
-                .get(super::METADATA_CATALOG)
-                .map(Into::into),
-            schema: client
-                .metadata()
-                .get(super::METADATA_SCHEMA)
-                .map(Into::into),
-        }
-    }
-}
-
 fn record_auth_failure(status_code: StatusCode) {
     METRIC_AUTH_FAILURE
         .with_label_values(&[status_code.as_ref()])
         .inc();
 }
 
-/// Verifies a cleartext password or bearer token; the provider verifies the
-/// password itself, so pgwire's built-in cleartext mechanism can't be used.
-async fn authenticate_password(
-    user_provider: &UserProviderRef,
-    login: &LoginInfo,
-    password: &str,
-) -> PgWireResult<UserInfoRef> {
-    let (user, catalog, schema) = match (
-        login.user.as_deref(),
-        login.catalog.as_deref(),
-        login.schema.as_deref(),
-    ) {
-        (Some(user), Some(catalog), Some(schema)) => (user, catalog, schema),
-        // Unreachable: catalog/schema are resolved before mechanism
-        // selection; fail closed without a metric.
-        _ => return Err(PgWireError::UserNameRequired),
-    };
+/// The [`AuthSource`] shared by pgwire's cleartext and SCRAM mechanisms.
+/// Stateless by design: it only holds the user provider, everything about
+/// the current login arrives with each call, and the verified
+/// [`UserInfoRef`] travels back to the startup handler as the source
+/// identity, reported by [`AuthOutcome::Completed`].
+pub(crate) struct PgUserProviderSource {
+    user_provider: UserProviderRef,
+}
 
-    let result = if user == BEARER_TOKEN_USER {
-        user_provider
-            .auth_bearer_token(password, catalog, schema)
-            .await
-    } else {
-        user_provider
-            .auth(
-                Identity::UserId(user, None),
-                Password::PlainText(password.to_string().into()),
-                catalog,
-                schema,
-            )
-            .await
-    };
-    match result {
-        Err(e) => {
-            record_auth_failure(e.status_code());
-            Err(PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
-        }
-        Ok(user_info) => Ok(user_info),
+impl Debug for PgUserProviderSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgUserProviderSource")
+            .finish_non_exhaustive()
     }
 }
 
-async fn postgres_auth_info(
-    user_provider: &UserProviderRef,
-    login: &LoginInfo,
-) -> Result<PgAuthInfo> {
-    let Some(user) = login.user.as_deref() else {
-        return Ok(PgAuthInfo::Cleartext);
-    };
-    let Some(catalog) = login.catalog.as_deref() else {
-        return Ok(PgAuthInfo::Cleartext);
-    };
+impl PgUserProviderSource {
+    pub(crate) fn new(user_provider: UserProviderRef) -> Self {
+        Self { user_provider }
+    }
 
-    match user_provider
-        .postgres_auth_info(Identity::UserId(user, None), catalog)
-        .await
-    {
-        Err(e) => {
-            record_auth_failure(e.status_code());
-            Err(AuthSnafu.into_error(e))
+    /// (user, catalog, schema) of this login. Catalog/schema are parsed from
+    /// the `database` startup parameter, which was validated at connection
+    /// start.
+    fn resolve(login: &WireLoginInfo<'_>) -> Option<(String, String, String)> {
+        let user = login.user()?.to_string();
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(login.database()?);
+        Some((user, catalog, schema))
+    }
+
+    /// Which mechanism to use for this login. Called once at connection
+    /// start; the SCRAM machinery resolves the verifier itself at
+    /// client-first time.
+    async fn postgres_auth_info(&self, login: &WireLoginInfo<'_>) -> Result<PgAuthInfo> {
+        let Some((user, catalog, _)) = Self::resolve(login) else {
+            return Ok(PgAuthInfo::Cleartext);
+        };
+
+        match self
+            .user_provider
+            .postgres_auth_info(Identity::UserId(&user, None), &catalog)
+            .await
+        {
+            Err(e) => {
+                record_auth_failure(e.status_code());
+                Err(AuthSnafu.into_error(e))
+            }
+            Ok(auth_info) => Ok(auth_info),
         }
-        Ok(auth_info) => Ok(auth_info),
+    }
+
+    /// The real verifier with its identity, for known users passing the
+    /// authorization check.
+    async fn authorized_scram_secret(
+        &self,
+        login: &WireLoginInfo<'_>,
+    ) -> Option<(ScramSecret, UserInfoRef)> {
+        let (_, catalog, schema) = Self::resolve(login)?;
+        let PgAuthInfo::ScramSha256 {
+            verifier,
+            user_info: Some(user_info),
+        } = self.postgres_auth_info(login).await.ok()?
+        else {
+            return None;
+        };
+        self.user_provider
+            .authorize(&catalog, &schema, &user_info)
+            .await
+            .ok()?;
+        Some((to_scram_secret(&verifier), user_info))
     }
 }
 
-async fn authorize(
-    user_provider: &UserProviderRef,
-    login: &LoginInfo,
-    user_info: &UserInfoRef,
-) -> PgWireResult<()> {
-    let (catalog, schema) = match (login.catalog.as_deref(), login.schema.as_deref()) {
-        (Some(catalog), Some(schema)) => (catalog, schema),
-        _ => return Err(PgWireError::UserNameRequired),
-    };
+#[async_trait]
+impl AuthSource<UserInfoRef> for PgUserProviderSource {
+    async fn get_password(
+        &self,
+        _login: &WireLoginInfo,
+    ) -> PgWireResult<pgwire::api::auth::Password> {
+        Err(PgWireError::ApiError(
+            "no cleartext password available from the user provider".into(),
+        ))
+    }
 
-    match user_provider.authorize(catalog, schema, user_info).await {
-        Err(e) => {
-            // Records with the provider's status code; callers must not
-            // record it again under a uniform label.
-            record_auth_failure(e.status_code());
-            Err(PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
+    /// Cleartext and bearer-token verification. The provider verifies the
+    /// password and authorizes the login itself (`auth()` combines
+    /// authenticate and authorize), so both mismatches fail the handshake
+    /// before `AuthenticationOk`.
+    async fn verify_password(
+        &self,
+        login: &WireLoginInfo,
+        presented_password: &[u8],
+    ) -> PgWireResult<Option<UserInfoRef>> {
+        let Some((user, catalog, schema)) = Self::resolve(login) else {
+            return Err(PgWireError::UserNameRequired);
+        };
+        let password = String::from_utf8_lossy(presented_password).into_owned();
+
+        let result = if user == BEARER_TOKEN_USER {
+            self.user_provider
+                .auth_bearer_token(&password, &catalog, &schema)
+                .await
+        } else {
+            self.user_provider
+                .auth(
+                    Identity::UserId(&user, None),
+                    Password::PlainText(password.into()),
+                    &catalog,
+                    &schema,
+                )
+                .await
+        };
+        match result {
+            Err(e) => {
+                record_auth_failure(e.status_code());
+                Err(PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
+            }
+            Ok(user_info) => Ok(Some(user_info)),
         }
-        Ok(()) => Ok(()),
+    }
+
+    async fn get_scram_secret(
+        &self,
+        login: &WireLoginInfo,
+    ) -> PgWireResult<(ScramSecret, Option<UserInfoRef>)> {
+        if let Some((secret, identity)) = self.authorized_scram_secret(login).await {
+            return Ok((secret, Some(identity)));
+        }
+        // Unknown or unauthorized users get a mock verifier, so the
+        // handshake fails at proof verification exactly like a wrong
+        // password: same stage, same error, same metric label, and no
+        // user-existence leak.
+        let user = login.user().unwrap_or_default();
+        Ok((
+            to_scram_secret(&PgScramSha256Verifier::mock_for_unknown_user(
+                user.as_bytes(),
+            )),
+            None,
+        ))
     }
 }
 
@@ -181,162 +214,20 @@ fn to_scram_secret(verifier: &PgScramSha256Verifier) -> ScramSecret {
     }
 }
 
-/// Hands pgwire's SCRAM machinery the verifier and identity resolved at
-/// connection start.
-#[derive(Debug)]
-struct FixedScramSecretSource {
-    secret: Mutex<Option<(ScramSecret, Option<UserInfoRef>)>>,
-}
-
-impl FixedScramSecretSource {
-    fn new(secret: ScramSecret, user_info: Option<UserInfoRef>) -> Self {
-        Self {
-            secret: Mutex::new(Some((secret, user_info))),
-        }
-    }
-}
-
-#[async_trait]
-impl AuthSource<UserInfoRef> for FixedScramSecretSource {
-    async fn get_password(
-        &self,
-        _login: &WireLoginInfo,
-    ) -> PgWireResult<pgwire::api::auth::Password> {
-        Err(PgWireError::ApiError(
-            "no cleartext password available for a SCRAM verifier".into(),
-        ))
-    }
-
-    async fn get_scram_secret(
-        &self,
-        _login: &WireLoginInfo,
-    ) -> PgWireResult<(ScramSecret, Option<UserInfoRef>)> {
-        self.secret
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| PgWireError::InvalidSASLState)
-    }
-}
-
-/// Backs pgwire's cleartext mechanism: the user provider verifies the
-/// password (or bearer token) itself and resolves the identity, so the
-/// built-in cleartext mechanism can be used directly.
-struct GreptimePasswordSource {
-    user_provider: UserProviderRef,
-    login: LoginInfo,
-}
-
-impl Debug for GreptimePasswordSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GreptimePasswordSource")
-            .field("user", &self.login.user)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl AuthSource<UserInfoRef> for GreptimePasswordSource {
-    async fn get_password(
-        &self,
-        _login: &WireLoginInfo,
-    ) -> PgWireResult<pgwire::api::auth::Password> {
-        Err(PgWireError::ApiError(
-            "passwords are verified by the user provider, never served".into(),
-        ))
-    }
-
-    async fn verify_password(
-        &self,
-        _login: &WireLoginInfo,
-        presented_password: &[u8],
-    ) -> PgWireResult<Option<UserInfoRef>> {
-        let password = str::from_utf8(presented_password).map_err(|e| {
-            PgWireError::ApiError(format!("password is not valid UTF-8: {e}").into())
-        })?;
-        // Metrics are recorded inside `authenticate_password`.
-        let user_info = authenticate_password(&self.user_provider, &self.login, password).await?;
-        Ok(Some(user_info))
-    }
-}
-
-/// pgwire's SCRAM mechanism plus the GreptimeDB authorization check, run
-/// after the client proof is verified so a rejection still precedes
-/// `AuthenticationOk`.
-struct PgScramMechanism {
-    inner: Box<dyn AuthMechanism<UserInfoRef>>,
-    user_provider: UserProviderRef,
-    login: LoginInfo,
-}
-
-impl PgScramMechanism {
-    /// The label is intentionally uniform (never `UserNotFound`), so the
-    /// counter cannot distinguish a wrong password from an unknown user.
-    fn record_scram_failure<T>(result: T) -> T {
-        METRIC_AUTH_FAILURE
-            .with_label_values(&[StatusCode::UserPasswordMismatch.as_ref()])
-            .inc();
-        result
-    }
-}
-
-#[async_trait]
-impl AuthMechanism<UserInfoRef> for PgScramMechanism {
-    async fn begin(
-        &mut self,
-        client: &(dyn ClientInfo + Send + Sync),
-    ) -> PgWireResult<AuthState<UserInfoRef>> {
-        self.inner.begin(client).await
-    }
-
-    async fn next(
-        &mut self,
-        client: &(dyn ClientInfo + Send + Sync),
-        message: PasswordMessageFamily,
-    ) -> PgWireResult<AuthState<UserInfoRef>> {
-        match self.inner.next(client, message).await {
-            // Proof verified: authorize before the handshake completes.
-            Ok(AuthState::Ok {
-                final_message,
-                identity,
-            }) => {
-                let Some(user_info) = identity else {
-                    // Unknown user, whose mock verifier can never be
-                    // satisfied; fail closed with the uniform label.
-                    return Ok(Self::record_scram_failure(AuthState::Failed(
-                        PgWireError::InvalidPassword(self.login.user.clone().unwrap_or_default()),
-                    )));
-                };
-                if let Err(e) = authorize(&self.user_provider, &self.login, &user_info).await {
-                    // Already recorded by `authorize`; don't double-count.
-                    return Ok(AuthState::Failed(e));
-                }
-                Ok(AuthState::Ok {
-                    final_message,
-                    identity: Some(user_info),
-                })
-            }
-            Ok(state @ AuthState::InProgress(_)) => Ok(state),
-            Ok(AuthState::Failed(e)) => Ok(Self::record_scram_failure(AuthState::Failed(e))),
-            Err(e) => Err(Self::record_scram_failure(e)),
-        }
-    }
-}
-
-/// For connections without a configured user provider: reports success
-/// immediately so the driver completes the startup protocol without
-/// authentication.
+/// Completes the handshake without authentication (no user provider
+/// configured), reporting the name-derived user info as identity.
 struct NoAuthMechanism;
 
 #[async_trait]
 impl AuthMechanism<UserInfoRef> for NoAuthMechanism {
     async fn begin(
         &mut self,
-        _client: &(dyn ClientInfo + Send + Sync),
+        client: &(dyn ClientInfo + Send + Sync),
     ) -> PgWireResult<AuthState<UserInfoRef>> {
+        let user_info = userinfo_by_name(client.metadata().get(super::METADATA_USER).cloned());
         Ok(AuthState::Ok {
             final_message: None,
-            identity: None,
+            identity: Some(user_info),
         })
     }
 
@@ -345,7 +236,6 @@ impl AuthMechanism<UserInfoRef> for NoAuthMechanism {
         _client: &(dyn ClientInfo + Send + Sync),
         _message: PasswordMessageFamily,
     ) -> PgWireResult<AuthState<UserInfoRef>> {
-        // `begin` completes immediately, so the driver never calls this.
         Err(PgWireError::NoAuthenticationInProgress)
     }
 }
@@ -359,6 +249,35 @@ where
     }
     if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
         session.set_schema(current_schema.clone());
+    }
+}
+
+enum MechanismSelection {
+    /// No user provider configured: skip authentication.
+    NoAuth,
+    Cleartext(Arc<PgUserProviderSource>),
+    Scram(Arc<PgUserProviderSource>),
+    /// Resolving the mechanism failed.
+    Failed,
+}
+
+impl PostgresServerHandlerInner {
+    async fn select_mechanism<C>(&self, client: &C) -> MechanismSelection
+    where
+        C: ClientInfo + Sync,
+    {
+        let Some(source) = self.auth_source.clone() else {
+            return MechanismSelection::NoAuth;
+        };
+        let login = WireLoginInfo::from_client_info(client);
+        if login.user() == Some(BEARER_TOKEN_USER) {
+            return MechanismSelection::Cleartext(source);
+        }
+        match source.postgres_auth_info(&login).await {
+            Err(_) => MechanismSelection::Failed,
+            Ok(PgAuthInfo::Cleartext) => MechanismSelection::Cleartext(source),
+            Ok(PgAuthInfo::ScramSha256 { .. }) => MechanismSelection::Scram(source),
+        }
     }
 }
 
@@ -419,102 +338,73 @@ impl StartupHandler for PostgresServerHandlerInner {
                     }
                 }
 
-                let mechanism = match &self.user_provider {
-                    None => None,
-                    Some(user_provider) => {
-                        let login = LoginInfo::from_client_info(client);
-                        if login.user.as_deref() == Some(BEARER_TOKEN_USER) {
-                            Some(Self::cleartext_mechanism(user_provider.clone(), login))
-                        } else {
-                            match postgres_auth_info(user_provider, &login).await {
-                                Err(_) => {
-                                    return send_password_authentication_failed(client).await;
-                                }
-                                Ok(PgAuthInfo::Cleartext) => {
-                                    Some(Self::cleartext_mechanism(user_provider.clone(), login))
-                                }
-                                Ok(PgAuthInfo::ScramSha256 {
-                                    verifier,
-                                    user_info,
-                                }) => Some(Self::scram_mechanism(
-                                    user_provider.clone(),
-                                    login,
-                                    user_info,
-                                    to_scram_secret(&verifier),
-                                )),
-                            }
-                        }
-                    }
-                };
-
-                match mechanism {
-                    // No user provider configured: skip authentication with a
-                    // mechanism that completes immediately.
-                    None => {
-                        self.session.set_user_info(userinfo_by_name(
-                            client.metadata().get(super::METADATA_USER).cloned(),
-                        ));
-                        set_client_info(client, &self.session);
-                        self.auth_driver
-                            .begin_authentication(client, Box::new(NoAuthMechanism))
-                            .await?;
-                    }
-                    Some(mechanism) => {
+                match self.select_mechanism(client).await {
+                    MechanismSelection::NoAuth => {
                         if self
                             .auth_driver
-                            .begin_authentication(client, mechanism)
+                            .begin_authentication(client, Box::new(NoAuthMechanism))
                             .await
                             .is_err()
                         {
                             return send_password_authentication_failed(client).await;
                         }
                     }
+                    MechanismSelection::Cleartext(source) => {
+                        if self
+                            .auth_driver
+                            .begin_authentication(
+                                client,
+                                CleartextPasswordAuth::new(source).create(),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return send_password_authentication_failed(client).await;
+                        }
+                    }
+                    MechanismSelection::Scram(source) => {
+                        self.is_scram_auth.store(true, Ordering::Relaxed);
+                        if self
+                            .auth_driver
+                            .begin_authentication(client, ScramAuth::new(source).create())
+                            .await
+                            .is_err()
+                        {
+                            return send_password_authentication_failed(client).await;
+                        }
+                    }
+                    MechanismSelection::Failed => {
+                        return send_password_authentication_failed(client).await;
+                    }
                 }
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
                 match self.auth_driver.advance_authentication(client, pwd).await {
-                    // The handshake completed and the mechanism reported the
-                    // verified identity; bind it to the session.
-                    Ok(AuthOutcome::Completed(identity)) => {
-                        if let Some(user_info) = identity {
-                            self.session.set_user_info(user_info);
-                        }
-                        set_client_info(client, &self.session);
-                    }
                     Ok(AuthOutcome::InProgress) => {}
-                    Err(_) => return send_password_authentication_failed(client).await,
+                    Ok(AuthOutcome::Completed(identity)) => {
+                        self.is_scram_auth.store(false, Ordering::Relaxed);
+                        match identity {
+                            Some(user_info) => {
+                                self.session.set_user_info(user_info);
+                                set_client_info(client, &self.session);
+                            }
+                            None => return send_password_authentication_failed(client).await,
+                        }
+                    }
+                    Err(_e) => {
+                        // SCRAM failures carry a uniform label so the metric
+                        // cannot distinguish wrong password, unknown and
+                        // unauthorized users.
+                        if self.is_scram_auth.swap(false, Ordering::Relaxed) {
+                            record_auth_failure(StatusCode::UserPasswordMismatch);
+                        }
+                        return send_password_authentication_failed(client).await;
+                    }
                 }
             }
             _ => {}
         }
         Ok(())
-    }
-}
-
-impl PostgresServerHandlerInner {
-    fn cleartext_mechanism(
-        user_provider: UserProviderRef,
-        login: LoginInfo,
-    ) -> Box<dyn AuthMechanism<UserInfoRef>> {
-        CleartextPasswordAuth::new(Arc::new(GreptimePasswordSource {
-            user_provider,
-            login,
-        }))
-        .create()
-    }
-
-    fn scram_mechanism(
-        user_provider: UserProviderRef,
-        login: LoginInfo,
-        user_info: Option<UserInfoRef>,
-        secret: ScramSecret,
-    ) -> Box<dyn AuthMechanism<UserInfoRef>> {
-        let scram = ScramAuth::new(Arc::new(FixedScramSecretSource::new(secret, user_info)));
-        Box::new(PgScramMechanism {
-            inner: scram.create(),
-            user_provider,
-            login,
-        })
     }
 }
 

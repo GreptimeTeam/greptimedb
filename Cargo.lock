@@ -1649,7 +1649,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.0.7",
  "rustix-linux-procfs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "winx",
 ]
 
@@ -6744,7 +6744,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -10706,7 +10706,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.41.1"
-source = "git+https://github.com/sunng87/pgwire?branch=feat%2Fauthsource-identity#faf840807adc5f105b4bbeb81d01efff21dd24a8"
+source = "git+https://github.com/sunng87/pgwire?branch=master#ea06997d8d4b8b0bc11f5136af07987eccf89dee"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -13949,7 +13949,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14335,7 +14335,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
