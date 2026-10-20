@@ -548,7 +548,11 @@ impl FrontendClient {
 
     /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
     /// optional read upper bounds used only by snapshot-fenced repair chunks.
-    pub(crate) async fn query_with_terminal_metrics(
+    ///
+    /// Public so an enterprise execution strategy can drive its own queries
+    /// through the same frontend path and read the same terminal metrics,
+    /// instead of duplicating the transport and metric plumbing.
+    pub async fn query_with_terminal_metrics(
         &self,
         catalog: &str,
         schema: &str,
