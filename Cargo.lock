@@ -11377,6 +11377,7 @@ dependencies = [
  "snafu 0.8.6",
  "store-api",
  "tokio",
+ "twox-hash",
 ]
 
 [[package]]
