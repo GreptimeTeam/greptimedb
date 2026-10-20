@@ -3902,25 +3902,28 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             (&area, ConcreteDataType::string_datatype()),
         ]);
         let dialect = GreptimeDbDialect {};
-        let mut parser = Parser::new(&dialect)
-            .try_with_sql("device_id >= 100")
-            .unwrap();
-        let remaining_old_expr = convert_one_expr(
-            &parser.parse_expr().unwrap(),
-            &column_name_and_type,
-            &timezone,
-        )
-        .unwrap();
         let target_partition_columns = HashSet::from([&area]);
+        for sql in ["device_id >= 100", "iceberg_hash(device_id) >= 0"] {
+            let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
+            let remaining_old_expr = convert_one_expr(
+                &parser.parse_expr().unwrap(),
+                &column_name_and_type,
+                &timezone,
+            )
+            .unwrap();
 
-        let err = ensure_partition_expr_columns_in_target(
-            &[remaining_old_expr],
-            &target_partition_columns,
-        )
-        .unwrap_err();
+            let err = ensure_partition_expr_columns_in_target(
+                &[remaining_old_expr],
+                &target_partition_columns,
+            )
+            .unwrap_err();
 
-        assert!(err.to_string().contains("device_id"));
-        assert!(err.to_string().contains("target partition columns"));
+            assert!(err.to_string().contains("device_id"), "{sql}");
+            assert!(
+                err.to_string().contains("target partition columns"),
+                "{sql}"
+            );
+        }
     }
 
     #[test]

@@ -101,6 +101,8 @@ pub(crate) fn changed_column_types(
 
 /// Returns an error naming the first region whose partition expression can't take
 /// the type changes in `changed_columns`.
+///
+/// Public so that tests in `partition` can run real serialized expressions through it.
 pub fn validate_region_partition_bounds(
     changed_columns: &HashMap<String, (ConcreteDataType, ConcreteDataType)>,
     region_routes: &[RegionRoute],
@@ -183,7 +185,8 @@ fn validate_comparison(
 ) -> Result<()> {
     let (column, value) = match (operand, other) {
         (PersistedOperand::Column(column), PersistedOperand::Value(value)) => (column, value),
-        // The hash depends on the column type, so any change reroutes rows.
+        // The hash depends on the column type, so any change reroutes rows. Table
+        // metadata rejects such changes first; this covers stale partition columns.
         (PersistedOperand::IcebergHash(column), PersistedOperand::Value(_)) => {
             return match changed_columns.get(column) {
                 Some((_, target_type)) => incompatible(region_id, column, target_type),

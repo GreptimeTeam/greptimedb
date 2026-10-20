@@ -14,8 +14,7 @@ PARTITION ON COLUMNS (host, tenant) (
 
 SHOW CREATE TABLE hash_routes;
 
--- SQLNESS REPLACE (\d{13}) ID
-SELECT partition_name, partition_expression FROM information_schema.partitions WHERE table_name = 'hash_routes' ORDER BY partition_name;
+SELECT partition_name, partition_description FROM information_schema.partitions WHERE table_name = 'hash_routes' ORDER BY partition_name;
 
 INSERT INTO hash_routes VALUES
   ('a', 1, 1, 1),

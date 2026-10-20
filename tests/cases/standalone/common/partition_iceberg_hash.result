@@ -37,17 +37,16 @@ SHOW CREATE TABLE hash_routes;
 |             |                                                             |
 +-------------+-------------------------------------------------------------+
 
--- SQLNESS REPLACE (\d{13}) ID
-SELECT partition_name, partition_expression FROM information_schema.partitions WHERE table_name = 'hash_routes' ORDER BY partition_name;
+SELECT partition_name, partition_description FROM information_schema.partitions WHERE table_name = 'hash_routes' ORDER BY partition_name;
 
-+----------------+----------------------+
-| partition_name | partition_expression |
-+----------------+----------------------+
-| p0             | host, tenant         |
-| p1             | host, tenant         |
-| p2             | host, tenant         |
-| p3             | host, tenant         |
-+----------------+----------------------+
++----------------+-------------------------------------------------------+
+| partition_name | partition_description                                 |
++----------------+-------------------------------------------------------+
+| p0             | iceberg_hash(host) < 0 AND tenant < 100               |
+| p1             | iceberg_hash(host) < 0 AND tenant >= 100              |
+| p2             | iceberg_hash(host) >= 0 AND iceberg_hash(tenant) < 0  |
+| p3             | iceberg_hash(host) >= 0 AND iceberg_hash(tenant) >= 0 |
++----------------+-------------------------------------------------------+
 
 INSERT INTO hash_routes VALUES
   ('a', 1, 1, 1),
