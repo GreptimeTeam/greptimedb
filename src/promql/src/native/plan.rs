@@ -335,12 +335,13 @@ impl NativeNode {
                 // field.
                 ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
-                // `select_instants` reads one series' complete axis, so the executor collects a
-                // series to its last chunk first: a single buffer closed by `is_last` and keyed by
-                // nothing else. That needs each series' chunks contiguous, which `Contiguous` and
-                // `KeyThenTime` both guarantee; `Interleaved` never reaches it because
-                // `unpack_raw_series` rejects that ordering at the raw-frame boundary. So no check
-                // is needed here.
+                // An instant selection reads one series' complete axis, so its consumer collects
+                // a series to its `is_last` chunk into one buffer keyed by nothing else:
+                // `NativeInstantManipulateExec` needs each series' chunks contiguous. This
+                // validator does not check that. `Instant` has no implementation in the native
+                // tree yet, and `try_to_native_execution_plan` has no callers, so the requirement
+                // is unenforced rather than satisfied in advance; it is settled when `Instant`
+                // lands in the tree.
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;
