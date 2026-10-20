@@ -131,16 +131,17 @@ pub(crate) fn pick_active_l1(
     options: PickLimits,
 ) -> Option<UnitPick> {
     let extents = extents_of(l1_files, mapper);
-    let mut units = conflict_units(l1_files, &extents);
+    let index = ExtentIndex::new(&extents);
+    let mut units = conflict_units(l1_files, &extents, &index);
     split_oversized_units(&mut units, l1_files, &extents, options.max_input_files);
-    if let Some(pick) = pick_reducing_interval(&mut units, l1_files, &extents, options) {
+    if let Some(pick) = pick_reducing_interval(&mut units, l1_files, options) {
         return Some(pick);
     }
     if units.len() == l1_files.len() {
         return None;
     }
     split_oversized_units(&mut units, l1_files, &extents, 1);
-    pick_reducing_interval(&mut units, l1_files, &extents, options)
+    pick_reducing_interval(&mut units, l1_files, options)
 }
 
 /// Picks the interval of `units` that removes the most files within the
@@ -148,12 +149,12 @@ pub(crate) fn pick_active_l1(
 fn pick_reducing_interval(
     units: &mut [Unit],
     files: &[FileHandle],
-    extents: &[Extent],
     options: PickLimits,
 ) -> Option<UnitPick> {
     sort_units(units);
     let mut best: Option<(usize, u64, Range<usize>)> = None;
-    for_each_interval(units, extents, options.max_input_files, |range, stats| {
+    // File reductions ignore conflicts, so split files are not counted.
+    for_each_interval(units, &[], options.max_input_files, |range, stats| {
         let reduction = stats
             .num_files
             .saturating_sub(options.predicted_outputs(stats));
@@ -215,13 +216,15 @@ pub(crate) fn pick_closed_merge(
 ) -> Option<UnitPick> {
     let limits = options.limits;
     let extents = extents_of(files, mapper);
-    let mut units = conflict_units(files, &extents);
-    close_units(&mut units, &extents);
+    let index = ExtentIndex::new(&extents);
+    let mut units = conflict_units(files, &extents, &index);
+    close_units(&mut units, &extents, &index);
     split_oversized_units(&mut units, files, &extents, limits.max_input_files);
     sort_units(&mut units);
+    let pairs = split_conflicts(&units, &extents, &index);
 
     let mut best: Option<(u64, u64, Range<usize>, bool)> = None;
-    for_each_interval(&units, &extents, limits.max_input_files, |range, stats| {
+    for_each_interval(&units, &pairs, limits.max_input_files, |range, stats| {
         if stats.num_files < 2 {
             return;
         }
@@ -254,7 +257,7 @@ pub(crate) fn pick_closed_merge(
         {
             return;
         }
-        if units.len() > 1 && !adds_no_conflicts(units, &extents, outputs) {
+        if units.len() > 1 && !adds_no_conflicts(units, &extents, &index, outputs) {
             return;
         }
         best = Some((benefit, stats.size, range, reduces_files));
@@ -373,6 +376,138 @@ fn is_inner_key(key: &Bytes, range: &(Bytes, Bytes)) -> bool {
     range.0 < *key && *key < range.1
 }
 
+/// Upper primary key bound, ordered after every key when unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UpperKey<'a> {
+    Key(&'a Bytes),
+    Unbounded,
+}
+
+/// Key and time bounds of the files in a subtree of [`ExtentIndex`].
+#[derive(Debug, Clone, Copy)]
+struct SubtreeBounds<'a> {
+    max_upper_key: UpperKey<'a>,
+    min_start: Timestamp,
+    max_end: Timestamp,
+}
+
+impl<'a> SubtreeBounds<'a> {
+    fn of(extent: &'a Extent) -> Self {
+        Self {
+            max_upper_key: match &extent.primary_key {
+                Some((_, max)) => UpperKey::Key(max),
+                None => UpperKey::Unbounded,
+            },
+            min_start: extent.start,
+            max_end: extent.end,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            max_upper_key: self.max_upper_key.max(other.max_upper_key),
+            min_start: self.min_start.min(other.min_start),
+            max_end: self.max_end.max(other.max_end),
+        }
+    }
+}
+
+/// Files of a window ordered by their lower primary key, in a segment tree
+/// holding the bounds of each subtree.
+///
+/// A query visits the files whose key and time ranges may overlap an area and
+/// skips subtrees whose keys end before the area or whose times miss it. The
+/// files of a sorted run split by key then only meet their key neighbors,
+/// instead of every file sharing their time range.
+struct ExtentIndex<'a> {
+    extents: &'a [Extent],
+    /// Indices into `extents`, sorted by lower key with unknown keys first.
+    /// Sorted offset `i` is leaf `leaf_base + i`.
+    by_lower_key: Vec<usize>,
+    /// Array-backed tree rooted at index 1; padding leaves are `None`.
+    bounds: Vec<Option<SubtreeBounds<'a>>>,
+    /// First leaf index, a power of two.
+    leaf_base: usize,
+}
+
+impl<'a> ExtentIndex<'a> {
+    fn new(extents: &'a [Extent]) -> Self {
+        let lower_key = |i: usize| extents[i].primary_key.as_ref().map(|(min, _)| min);
+        let mut by_lower_key: Vec<usize> = (0..extents.len()).collect();
+        by_lower_key.sort_by(|&lhs, &rhs| {
+            (lower_key(lhs), extents[lhs].start).cmp(&(lower_key(rhs), extents[rhs].start))
+        });
+        let leaf_base = extents.len().next_power_of_two();
+        let mut bounds = vec![None; 2 * leaf_base];
+        for (offset, &i) in by_lower_key.iter().enumerate() {
+            bounds[leaf_base + offset] = Some(SubtreeBounds::of(&extents[i]));
+        }
+        for node in (1..leaf_base).rev() {
+            bounds[node] = match (bounds[2 * node], bounds[2 * node + 1]) {
+                (Some(lhs), Some(rhs)) => Some(lhs.merge(rhs)),
+                (lhs, rhs) => lhs.or(rhs),
+            };
+        }
+        Self {
+            extents,
+            by_lower_key,
+            bounds,
+            leaf_base,
+        }
+    }
+
+    /// Visits the files whose inclusive key range meets `area`'s and whose time
+    /// range overlaps it, a superset of the files that conflict with or intrude
+    /// on `area`. Takes O(log N) per visited file.
+    fn for_each_near(&self, area: &Extent, mut visit: impl FnMut(usize)) {
+        let leaves_end = match &area.primary_key {
+            Some((_, max)) => self.by_lower_key.partition_point(|&i| {
+                self.extents[i]
+                    .primary_key
+                    .as_ref()
+                    .is_none_or(|(min, _)| min <= max)
+            }),
+            None => self.by_lower_key.len(),
+        };
+        self.visit_subtree(1, 0..self.leaf_base, leaves_end, area, &mut visit);
+    }
+
+    fn visit_subtree(
+        &self,
+        node: usize,
+        leaves: Range<usize>,
+        leaves_end: usize,
+        area: &Extent,
+        visit: &mut impl FnMut(usize),
+    ) {
+        if leaves.start >= leaves_end {
+            return;
+        }
+        let Some(bounds) = self.bounds[node] else {
+            return;
+        };
+        if bounds.min_start >= area.end
+            || bounds.max_end <= area.start
+            || area
+                .primary_key
+                .as_ref()
+                .is_some_and(|(min, _)| bounds.max_upper_key < UpperKey::Key(min))
+        {
+            return;
+        }
+        if leaves.len() == 1 {
+            let i = self.by_lower_key[leaves.start];
+            if self.extents[i].time_overlaps(area) {
+                visit(i);
+            }
+            return;
+        }
+        let mid = leaves.start + leaves.len() / 2;
+        self.visit_subtree(2 * node, leaves.start..mid, leaves_end, area, visit);
+        self.visit_subtree(2 * node + 1, mid..leaves.end, leaves_end, area, visit);
+    }
+}
+
 fn extents_of(files: &[FileHandle], mapper: &PrimaryKeyRangeMapper) -> Vec<Extent> {
     files
         .iter()
@@ -391,7 +526,7 @@ struct Unit {
     /// Number of conflicting file pairs inside the unit.
     conflicts: usize,
     /// A single file split from a unit over the input limit. It may conflict
-    /// with other split files, which [`for_each_interval`] counts.
+    /// with other split files, see [`split_conflicts`].
     split: bool,
 }
 
@@ -434,24 +569,20 @@ impl Unit {
 }
 
 /// Groups files into connected components of [`Extent::conflicts`], each with
-/// its number of conflicting pairs. A sweep in time order compares each file
-/// only with files whose time ranges are still open: O(N log N + C) for C
-/// compared pairs.
-fn conflict_units(files: &[FileHandle], extents: &[Extent]) -> Vec<Unit> {
-    let mut by_start: Vec<usize> = (0..extents.len()).collect();
-    by_start.sort_by_key(|&i| extents[i].start);
+/// its number of conflicting pairs. Each file only checks the files the index
+/// finds near it: O((N + M) log N) for M pairs of files whose key and time
+/// ranges meet.
+fn conflict_units(files: &[FileHandle], extents: &[Extent], index: &ExtentIndex) -> Vec<Unit> {
     let mut sets = DisjointSet::new(extents.len());
     let mut conflicts = vec![0; extents.len()];
-    let mut open: Vec<usize> = Vec::new();
-    for &i in &by_start {
-        open.retain(|&j| extents[j].end > extents[i].start);
-        for &j in &open {
-            if extents[i].conflicts(&extents[j]) {
+    for i in 0..extents.len() {
+        index.for_each_near(&extents[i], |j| {
+            // Counts each pair once, from its smaller index.
+            if j > i && extents[i].conflicts(&extents[j]) {
                 sets.union(i, j);
                 conflicts[i] += 1;
             }
-        }
-        open.push(i);
+        });
     }
     sets.groups()
         .into_iter()
@@ -487,12 +618,9 @@ fn split_oversized_units(
 
 /// Merges units until no file intrudes on a unit it does not belong to.
 ///
-/// Each merge re-checks only the merged unit against the files starting before
-/// its end, so the closure takes at most O(U · N) intrusion checks for U initial
-/// units and N files.
-fn close_units(units: &mut Vec<Unit>, extents: &[Extent]) {
-    let mut by_start: Vec<usize> = (0..extents.len()).collect();
-    by_start.sort_by_key(|&i| extents[i].start);
+/// Each check only visits the files the index finds near the unit, and each
+/// merge re-checks only the merged unit.
+fn close_units(units: &mut Vec<Unit>, extents: &[Extent], index: &ExtentIndex) {
     let mut owner = vec![0; extents.len()];
     for (u, unit) in units.iter().enumerate() {
         for &i in &unit.files {
@@ -506,13 +634,12 @@ fn close_units(units: &mut Vec<Unit>, extents: &[Extent]) {
             continue;
         }
         let area = &units[u].extent;
-        let candidates = by_start.partition_point(|&i| extents[i].start < area.end);
-        let intruders = by_start[..candidates]
-            .iter()
-            .copied()
-            .filter(|&i| owner[i] != u && extents[i].intrudes(area))
-            .map(|i| owner[i])
-            .collect::<std::collections::BTreeSet<_>>();
+        let mut intruders = std::collections::BTreeSet::new();
+        index.for_each_near(area, |i| {
+            if owner[i] != u && extents[i].intrudes(area) {
+                intruders.insert(owner[i]);
+            }
+        });
         if intruders.is_empty() {
             continue;
         }
@@ -561,19 +688,50 @@ struct IntervalStats<'a> {
     single_key: Option<&'a Bytes>,
 }
 
+/// Positions of the split units each unit conflicts with, sorted. Files of
+/// different units never conflict, so only split files have any.
+fn split_conflicts(units: &[Unit], extents: &[Extent], index: &ExtentIndex) -> Vec<Vec<usize>> {
+    let mut position = vec![None; extents.len()];
+    for (p, unit) in units.iter().enumerate() {
+        if unit.split {
+            position[unit.files[0]] = Some(p);
+        }
+    }
+    units
+        .iter()
+        .map(|unit| {
+            if !unit.split {
+                return Vec::new();
+            }
+            let i = unit.files[0];
+            let mut neighbors = Vec::new();
+            index.for_each_near(&extents[i], |j| {
+                if let Some(p) = position[j]
+                    && j != i
+                    && extents[i].conflicts(&extents[j])
+                {
+                    neighbors.push(p);
+                }
+            });
+            neighbors.sort_unstable();
+            neighbors
+        })
+        .collect()
+}
+
 /// Visits every contiguous interval of units with at most `max_input_files`
-/// files: O(U · K) intervals for an input limit K. Conflicts among split files
-/// are counted pairwise, which takes O(U · K²) checks at most.
+/// files: O(U · K) intervals for an input limit K. Each interval counts the
+/// conflicts of its split files from `split_conflicts` (see
+/// [`split_conflicts`]) with a binary search; an empty `split_conflicts`
+/// skips them.
 fn for_each_interval<'a>(
     units: &'a [Unit],
-    extents: &[Extent],
+    split_conflicts: &[Vec<usize>],
     max_input_files: usize,
     mut visit: impl FnMut(Range<usize>, &IntervalStats<'a>),
 ) {
-    let mut split_files = Vec::new();
     for left in 0..units.len() {
         let mut stats = IntervalStats::default();
-        split_files.clear();
         for (right, unit) in units.iter().enumerate().skip(left) {
             stats.num_files += unit.files.len();
             if stats.num_files > max_input_files {
@@ -589,14 +747,10 @@ fn for_each_interval<'a>(
                     .single_key
                     .filter(|&key| unit.single_key() == Some(key))
             };
-            if unit.split {
-                // Files of different units never conflict, only split files may.
-                let i = unit.files[0];
-                stats.conflicts += split_files
-                    .iter()
-                    .filter(|&&j| extents[i].conflicts(&extents[j]))
-                    .count();
-                split_files.push(i);
+            if let Some(neighbors) = split_conflicts.get(right) {
+                // Conflicts with the split files already in the interval.
+                stats.conflicts += neighbors.partition_point(|&p| p < right)
+                    - neighbors.partition_point(|&p| p < left);
             }
             visit(left..right + 1, &stats);
         }
@@ -607,19 +761,27 @@ fn for_each_interval<'a>(
 /// their files have with other files. Outputs stay inside the bounding box of
 /// the inputs, so each of them may conflict with every file intruding on that
 /// box. An interval without intruders is closed and adds no conflicts.
-fn adds_no_conflicts(units: &[Unit], extents: &[Extent], outputs: usize) -> bool {
+fn adds_no_conflicts(
+    units: &[Unit],
+    extents: &[Extent],
+    index: &ExtentIndex,
+    outputs: usize,
+) -> bool {
     let area = units[1..]
         .iter()
         .fold(units[0].extent.clone(), |area, unit| {
             area.union(&unit.extent)
         });
-    let mut selected = vec![false; extents.len()];
-    for &i in units.iter().flat_map(|unit| unit.files.iter()) {
-        selected[i] = true;
-    }
-    let intruders: Vec<usize> = (0..extents.len())
-        .filter(|&i| !selected[i] && extents[i].intrudes(&area))
+    let selected: std::collections::HashSet<usize> = units
+        .iter()
+        .flat_map(|unit| unit.files.iter().copied())
         .collect();
+    let mut intruders = Vec::new();
+    index.for_each_near(&area, |i| {
+        if !selected.contains(&i) && extents[i].intrudes(&area) {
+            intruders.push(i);
+        }
+    });
     if intruders.is_empty() {
         return true;
     }
@@ -869,6 +1031,59 @@ mod tests {
             let other = random_extent(&mut rng);
             if group.iter().any(|extent| other.conflicts(extent)) {
                 assert!(other.intrudes(&area), "{other:?} conflicts inside {area:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_extent_index_matches_linear_scan() {
+        let mut rng = Rng(29);
+        let mapper = primary_key_mapper_for_test();
+        for count in [0, 1, 2, 7, 64, 200] {
+            let extents: Vec<_> = (0..count)
+                .map(|_| {
+                    let start = rng.next(100) as i64;
+                    let end = start + rng.next(30) as i64;
+                    let min = rng.next(50) as u8;
+                    let max = min + rng.next(10) as u8;
+                    let range = if rng.next(10) > 0 {
+                        pk_range(&[b'0' + min], &[b'0' + max])
+                    } else {
+                        None
+                    };
+                    let file = new_file_handle_with_size_sequence_and_primary_key_range(
+                        FileId::random(),
+                        start,
+                        end,
+                        1,
+                        1,
+                        1,
+                        range,
+                    );
+                    Extent::of_file(&file, &mapper)
+                })
+                .collect();
+            let index = ExtentIndex::new(&extents);
+            for area in &extents {
+                let mut near = Vec::new();
+                index.for_each_near(area, |i| near.push(i));
+                near.sort_unstable();
+                let expected: Vec<_> = (0..extents.len())
+                    .filter(|&i| {
+                        let other = &extents[i];
+                        let keys_meet = match (&other.primary_key, &area.primary_key) {
+                            (Some(lhs), Some(rhs)) => lhs.0 <= rhs.1 && rhs.0 <= lhs.1,
+                            _ => true,
+                        };
+                        keys_meet && other.time_overlaps(area)
+                    })
+                    .collect();
+                assert_eq!(expected, near, "{area:?}");
+                for (i, other) in extents.iter().enumerate() {
+                    if other.conflicts(area) || other.intrudes(area) {
+                        assert!(near.binary_search(&i).is_ok(), "{other:?} near {area:?}");
+                    }
+                }
             }
         }
     }
