@@ -190,6 +190,30 @@ impl PendingBatch {
         self.eval_ts.is_empty()
     }
 
+    /// The bytes this batch's own vectors hold, by capacity.
+    fn bytes(&self) -> usize {
+        let spans = self
+            .spans
+            .iter()
+            .map(|spans| spans.capacity() * std::mem::size_of::<std::ops::Range<usize>>())
+            .fold(0usize, usize::saturating_add);
+        let columns = self
+            .columns
+            .iter()
+            .map(|column| column.capacity() * std::mem::size_of::<Option<f64>>())
+            .fold(0usize, usize::saturating_add);
+        self.indices
+            .capacity()
+            .saturating_mul(std::mem::size_of::<usize>())
+            .saturating_add(
+                self.eval_ts
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<i64>()),
+            )
+            .saturating_add(spans)
+            .saturating_add(columns)
+    }
+
     /// Drops the accumulated points, keeping the allocations.
     fn clear_points(&mut self) {
         self.indices.clear();
@@ -276,6 +300,27 @@ struct SeriesState {
     emitted_end: usize,
 }
 
+impl SeriesState {
+    /// The bytes this series' identity holds, which the rows handed out do not cover.
+    fn identity_bytes(&self) -> usize {
+        let primary_key = self.primary_key.as_ref().map_or(0, |key| key.len());
+        let metric: usize = self
+            .metric
+            .name()
+            .map_or(0, |name| name.len())
+            .saturating_add(
+                self.metric
+                    .tags()
+                    .iter()
+                    .map(|tag| tag.name.len() + tag.value.len())
+                    .fold(0usize, usize::saturating_add),
+            );
+        std::mem::size_of::<SeriesState>()
+            .saturating_add(primary_key)
+            .saturating_add(metric)
+    }
+}
+
 /// How the windows of an `@`-anchored selector map to the grid.
 ///
 /// Like Prometheus, an anchored selector is read once, as the window of the first grid point
@@ -334,6 +379,28 @@ fn resets_between(resets: &[CounterReset], start: u64, end: u64) -> &[CounterRes
 }
 
 impl FieldSamples {
+    /// The bytes this field's buffers hold, by capacity.
+    fn bytes(&self) -> usize {
+        self.timestamps
+            .capacity()
+            .saturating_mul(std::mem::size_of::<i64>())
+            .saturating_add(
+                self.values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<f64>()),
+            )
+            .saturating_add(
+                self.histograms
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(i64, FloatHistogram)>()),
+            )
+            .saturating_add(
+                self.resets
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<CounterReset>()),
+            )
+    }
+
     fn new(index_resets: bool) -> Self {
         Self {
             index_resets,
@@ -532,6 +599,33 @@ impl RangeEvaluator {
     #[cfg(test)]
     pub(crate) fn batch_call_count(&self) -> usize {
         self.batch_calls
+    }
+
+    /// An accounted lower bound on the bytes this evaluator keeps between pushes.
+    ///
+    /// Counted by capacity, so it is what the storage holds rather than what it uses: the retained
+    /// samples per field (timestamps, values and native histograms), the reset index, the row a push
+    /// fills, and the pending batch's own vectors. Left out are the kernel's scratch buffers, this
+    /// struct's `Vec` headers and the grid, which every chunk addressed on it shares.
+    ///
+    /// A push is the only caller that also holds the incoming chunk, and it charges that itself for
+    /// as long as the call runs; vector growth during a push is neither reserved nor bounded by one
+    /// doubling, so this is the storage's size, not a peak over the push. The figure must not be
+    /// per-chunk either: charging every chunk consumed would make the charge grow with the chunk
+    /// count, so a fixed window over a long series would read as an allocation failure even though
+    /// the window holds no more samples.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let per_field = self
+            .fields
+            .iter()
+            .map(FieldSamples::bytes)
+            .fold(0usize, usize::saturating_add);
+        let row = self.row.capacity() * std::mem::size_of::<Option<GridSample>>();
+        let series = self.series.as_ref().map_or(0, SeriesState::identity_bytes);
+        per_field
+            .saturating_add(row)
+            .saturating_add(series)
+            .saturating_add(self.pending.bytes())
     }
 
     /// Schema of the evaluated series: the input fields on the evaluation grid.
