@@ -20,11 +20,13 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
 use datatypes::json::JsonSettings;
+use parquet::basic::{Compression, Encoding};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterPropertiesBuilder;
 use parquet::schema::types::ColumnPath;
 use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::FloatFieldEncoding;
+use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{ColumnId, FileId};
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -88,6 +90,24 @@ pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 /// decode primary keys from it.
 pub(crate) const COLUMN_INDEX_TRUNCATE_LENGTH: Option<usize> =
     parquet::file::properties::DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH;
+
+/// Applies the encodings of the time index and internal columns shared by every SST writer.
+pub(crate) fn apply_internal_column_encoding(
+    builder: WriterPropertiesBuilder,
+    metadata: &RegionMetadataRef,
+) -> WriterPropertiesBuilder {
+    let ts_col = ColumnPath::new(vec![
+        metadata.time_index_column().column_schema.name.clone(),
+    ]);
+    let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+    let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
+    builder
+        .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(seq_col, false)
+        .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(ts_col, false)
+        .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
+}
 
 /// Applies the configured encoding to direct floating-point field columns.
 pub(crate) fn apply_float_field_encoding(
