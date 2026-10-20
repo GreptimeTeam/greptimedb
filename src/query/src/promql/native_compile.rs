@@ -391,20 +391,22 @@ fn range_signature(name: &str) -> Option<RangeSignature> {
 
 /// The number a parameterised range function was given, as the literal it was written as.
 ///
-/// A literal is the only parameter this compiler binds: a parameter computed at run time, such as
-/// `time()` or `1 + 1`, would make the kernel's constant a query-time value, which the tree has no
-/// field for. A quantile outside `[0, 1]` is not refused here: Prometheus binds it and the kernel
-/// reports `-Infinity` below zero and `+Infinity` above one, so refusing it would be this compiler
-/// inventing a rule the query engine does not have.
+/// A number literal is the only parameter this compiler binds. A parameter whose value is only
+/// known at run time, `time()` being the real case, would make the kernel's constant a query-time
+/// value, which the tree has no field for.
 ///
-/// Parentheses are looked through, as the planner looks through them when it reads a literal: a
-/// query written `(0.9)` is the same query, and the plan it already runs says so.
+/// A parameter written as an expression the existing planner folds to a literal is refused here
+/// and is a gap this stage leaves open on purpose: `quantile_over_time(1 - 0.1, x[5m])` and
+/// `quantile_over_time(-(0.9), x[5m])` plan today through `try_build_literal_expr`, which folds
+/// `Paren`, `Unary` and literal-only `Binary`, and reach this function still unfolded. They are
+/// refused rather than answered from the wrong number, and folding them here would be the work
+/// to close the gap.
+///
+/// A quantile outside `[0, 1]` is not refused here: Prometheus binds it and the kernel reports
+/// `-Infinity` below zero and `+Infinity` above one, so refusing it would be this compiler
+/// inventing a rule the query engine does not have.
 fn scalar_parameter(name: &str, parameter: &PromExpr) -> Result<f64> {
-    let mut parameter = parameter;
-    while let PromExpr::Paren(paren) = parameter {
-        parameter = &paren.expr;
-    }
-    match parameter {
+    match unparen(parameter) {
         PromExpr::NumberLiteral(NumberLiteral { val }) => Ok(*val),
         found => Err(not_implemented(&format!(
             "a call to `{name}` whose first argument is `{found}`, where it has to be a number \
