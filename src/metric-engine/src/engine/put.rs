@@ -70,16 +70,17 @@ impl MetricEngineInner {
     /// Retains every group's outcome instead of returning on the first failure.
     pub async fn put_regions_batch(
         &self,
-        requests: Vec<(RegionId, RegionPutRequest)>,
+        mut requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
     ) -> Vec<PutGroupResult> {
-        if requests.is_empty() {
+        let len = requests.len();
+        if len == 0 {
             return Vec::new();
         }
         let _timer = MITO_OPERATION_ELAPSED
             .with_label_values(&["put_batch"])
             .start_timer();
-        if requests.len() == 1 {
-            let (region_id, request) = requests.into_iter().next().unwrap();
+        if len == 1 {
+            let (region_id, request) = requests.next().unwrap();
             return vec![PutGroupResult {
                 request_indices: vec![0],
                 result: self.put_region(region_id, request).await,
@@ -87,7 +88,7 @@ impl MetricEngineInner {
         }
         let mut groups = HashMap::new();
         let mut results = Vec::new();
-        for (index, (region_id, request)) in requests.into_iter().enumerate() {
+        for (index, (region_id, request)) in requests.enumerate() {
             if let Err(error) = self.group_put_request(&mut groups, index, region_id, request) {
                 results.push(PutGroupResult {
                     request_indices: vec![index],
@@ -1002,7 +1003,7 @@ mod tests {
                     },
                 )
             });
-        let results = engine.put_regions_batch(requests.collect()).await;
+        let results = engine.put_regions_batch(requests).await;
         assert_eq!(results.len(), 1);
         let affected_rows = results.into_iter().next().unwrap().result.unwrap();
         assert_eq!(affected_rows, 6);
@@ -1379,7 +1380,10 @@ mod tests {
             for ((_, request), skip_wal) in mixed_requests.iter_mut().zip(policies) {
                 request.skip_wal = skip_wal;
             }
-            let results = env.metric().put_regions_batch(mixed_requests).await;
+            let results = env
+                .metric()
+                .put_regions_batch(mixed_requests.into_iter())
+                .await;
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].request_indices, vec![0, 1]);
             let err = results.into_iter().next().unwrap().result.unwrap_err();
@@ -1393,7 +1397,10 @@ mod tests {
             }
         }
 
-        let results = env.metric().put_regions_batch(build_requests()).await;
+        let results = env
+            .metric()
+            .put_regions_batch(build_requests().into_iter())
+            .await;
         assert_eq!(results.len(), 1);
         let affected_rows = results.into_iter().next().unwrap().result.unwrap();
         assert_eq!(affected_rows, 5);
@@ -1734,7 +1741,7 @@ mod tests {
         ];
 
         // Batch write
-        let results = engine.put_regions_batch(requests).await;
+        let results = engine.put_regions_batch(requests.into_iter()).await;
         assert_eq!(results.len(), 1);
         let affected_rows = results.into_iter().next().unwrap().result.unwrap();
         assert_eq!(affected_rows, 10);
@@ -1781,14 +1788,17 @@ mod tests {
         };
         let mut results = env
             .metric()
-            .put_regions_batch(vec![
-                (logical, request(0, None)),
-                (RegionId::new(9999, 0), request(1, None)),
-                (other_logical, request(2, Some(1))),
-                (other_logical, request(3, None)),
-                (logical, request(4, None)),
-                (physical, request(5, None)),
-            ])
+            .put_regions_batch(
+                vec![
+                    (logical, request(0, None)),
+                    (RegionId::new(9999, 0), request(1, None)),
+                    (other_logical, request(2, Some(1))),
+                    (other_logical, request(3, None)),
+                    (logical, request(4, None)),
+                    (physical, request(5, None)),
+                ]
+                .into_iter(),
+            )
             .await;
         results.sort_by_key(|result| result.request_indices[0]);
         assert_eq!(
@@ -1840,7 +1850,7 @@ mod tests {
             },
         )];
 
-        let results = engine.put_regions_batch(requests).await;
+        let results = engine.put_regions_batch(requests.into_iter()).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].request_indices, vec![0]);
         let err = results.into_iter().next().unwrap().result.unwrap_err();
@@ -1887,7 +1897,7 @@ mod tests {
             ),
         ];
 
-        let mut results = engine.put_regions_batch(requests).await;
+        let mut results = engine.put_regions_batch(requests.into_iter()).await;
         results.sort_by_key(|group| group.request_indices[0]);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].request_indices, vec![0]);
@@ -1922,7 +1932,7 @@ mod tests {
             },
         )];
 
-        let results = engine.put_regions_batch(requests).await;
+        let results = engine.put_regions_batch(requests.into_iter()).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].request_indices, vec![0]);
         let affected_rows = results.into_iter().next().unwrap().result.unwrap();
@@ -1935,7 +1945,12 @@ mod tests {
         env.init_metric_region().await;
         let engine = env.metric();
 
-        assert!(engine.put_regions_batch(vec![]).await.is_empty());
+        assert!(
+            engine
+                .put_regions_batch(vec![].into_iter())
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]

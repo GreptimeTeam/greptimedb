@@ -142,7 +142,8 @@ impl RegionRequester {
     ///
     /// Accepts both [`RegionRequest`] and [`Arc<RegionRequest>`]. Callers can retain a
     /// shared request for another attempt; this method does not retry or determine
-    /// whether replaying the request is safe.
+    /// whether replaying the request is safe. Callers accepting partial results in the
+    /// request header must inspect failed entries before retrying.
     pub async fn handle<R>(&self, request: R) -> Result<RegionResponse>
     where
         R: Borrow<RegionRequest> + Send + Sync + 'static,
@@ -205,6 +206,13 @@ impl RegionRequester {
             }
         }
 
+        let accept_partial_result = request
+            .borrow()
+            .header
+            .as_ref()
+            .and_then(|header| header.query_context.as_ref())
+            .and_then(|context| context.extensions.get(api::region::ACCEPT_PARTIAL_RESULT))
+            .is_some_and(|value| value == "true");
         let response = async {
             client
                 .ready()
@@ -230,8 +238,8 @@ impl RegionRequester {
         .into_inner();
 
         match request_count {
-            Some(count) => decode_write_response(response, count),
-            None => decode_region_response(response),
+            Some(count) if accept_partial_result => decode_write_response(response, count),
+            _ => decode_region_response(response),
         }
     }
 }
@@ -422,10 +430,7 @@ pub fn decode_region_response(response: PbRegionResponse) -> Result<RegionRespon
 
 /// Decodes an inserts/deletes response, validating failures against the original entry count.
 /// A failed single-entry request returns its underlying error.
-pub fn decode_write_response(
-    response: PbRegionResponse,
-    entry_count: usize,
-) -> Result<RegionResponse> {
+fn decode_write_response(response: PbRegionResponse, entry_count: usize) -> Result<RegionResponse> {
     if response.failures.is_empty() {
         if response
             .header
@@ -723,22 +728,61 @@ mod tests {
         }
         let requests = server.service.requests.lock().unwrap();
         assert_eq!(requests.len(), 12);
-        for (index, ((request, sends, accepts), (send, accept))) in requests
-            .iter()
-            .zip(
-                [(false, false), (true, false), (false, true), (true, true)]
-                    .into_iter()
-                    .flat_map(|settings| [settings, settings, settings]),
-            )
-            .enumerate()
-        {
-            let expected = if index % 3 == 0 {
-                shared.as_ref().clone()
-            } else {
-                with_partial_result(shared.as_ref().clone())
-            };
-            assert_eq!(request, &expected);
+        for ((request, sends, accepts), (send, accept)) in requests.iter().zip(
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .flat_map(|settings| [settings, settings, settings]),
+        ) {
+            assert_eq!(request, shared.as_ref());
             assert_eq!((*sends, *accepts), (send, accept));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_partial_result_requires_explicit_acceptance() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        for accepted in [false, true] {
+            let request = if accepted {
+                with_partial_result(build_insert_request())
+            } else {
+                build_insert_request()
+            };
+            let shared = Arc::new(request);
+            server
+                .service
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Ok(PbRegionResponse {
+                    header: Some(ResponseHeader {
+                        status: Some(PbStatus {
+                            status_code: StatusCode::PartialFailure as u32,
+                            ..Default::default()
+                        }),
+                    }),
+                    failures: vec![RegionRequestFailure {
+                        request_index: 0,
+                        status: Some(PbStatus {
+                            status_code: StatusCode::RegionNotFound as u32,
+                            retry_hint: RetryHint::RetryAfterRouteRefresh.as_str().to_string(),
+                            ..Default::default()
+                        }),
+                    }],
+                    ..Default::default()
+                }));
+            let error = requester.handle(Arc::clone(&shared)).await.unwrap_err();
+            if accepted {
+                assert_eq!(error.status_code(), StatusCode::RegionNotFound);
+                assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+            } else {
+                assert!(matches!(error, Error::IllegalDatabaseResponse { .. }));
+            }
+            assert_eq!(
+                &server.service.requests.lock().unwrap().last().unwrap().0,
+                shared.as_ref()
+            );
+            assert_eq!(Arc::strong_count(&shared), 1);
         }
     }
 
@@ -766,8 +810,8 @@ mod tests {
         requester.handle(Arc::clone(&shared)).await.unwrap();
         let requests = server.service.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].0, with_partial_result(shared.as_ref().clone()));
-        assert_eq!(requests[1].0, with_partial_result(shared.as_ref().clone()));
+        assert_eq!(&requests[0].0, shared.as_ref());
+        assert_eq!(&requests[1].0, shared.as_ref());
     }
 
     #[test]
@@ -868,7 +912,10 @@ mod tests {
                 assert_eq!(error.tonic_code(), baseline.tonic_code());
             }
             let datanode: &dyn Datanode = &requester;
-            let error = datanode.handle(build_insert_request()).await.unwrap_err();
+            let error = datanode
+                .handle_request(Arc::new(build_insert_request()))
+                .await
+                .unwrap_err();
             assert_eq!(error.status_code(), StatusCode::RegionNotFound);
             assert_eq!(error.retry_hint(), hint);
             assert!(matches!(error, meta_error::Error::External { .. }));
@@ -938,10 +985,16 @@ mod tests {
                     body: Some(body),
                 };
                 let shared = Arc::new(request);
-                let shared_error = datanode.handle(Arc::clone(&shared)).await.unwrap_err();
+                let shared_error = datanode
+                    .handle_request(Arc::clone(&shared))
+                    .await
+                    .unwrap_err();
                 assert_eq!(Arc::strong_count(&shared), 1);
                 let request = Arc::try_unwrap(shared).unwrap();
-                let owned_error = datanode.handle(request).await.unwrap_err();
+                let owned_error = datanode
+                    .handle_request(Arc::new(request))
+                    .await
+                    .unwrap_err();
                 for error in [owned_error, shared_error] {
                     assert_eq!(
                         error.retry_hint(),
@@ -1167,7 +1220,7 @@ mod tests {
         if let Some(region_request::Body::Inserts(inserts)) = &mut request.body {
             inserts.requests.push(inserts.requests[0].clone());
         }
-        let request = Arc::new(request);
+        let request = Arc::new(with_partial_result(request));
         let failure = RegionRequestFailure {
             request_index: 0,
             status: Some(PbStatus {
@@ -1264,7 +1317,7 @@ mod tests {
             }
         }
         for (received, send, accept) in server.service.requests.lock().unwrap().iter() {
-            assert_eq!(received, &with_partial_result(request.as_ref().clone()));
+            assert_eq!(received, request.as_ref());
             assert!(*send && *accept);
         }
         assert_eq!(Arc::strong_count(&request), 1);

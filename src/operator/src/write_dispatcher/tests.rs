@@ -356,6 +356,15 @@ async fn test_write_retry_disabled_and_enabled_ablation() {
             );
             assert_eq!(result.is_ok(), max_retries > 0);
             assert_eq!(attempts, max_retries + 1);
+            for request in server.service.requests.lock().unwrap().iter() {
+                let accepts_partial = request
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.query_context.as_ref())
+                    .and_then(|context| context.extensions.get(api::region::ACCEPT_PARTIAL_RESULT))
+                    .is_some_and(|value| value == "true");
+                assert_eq!(accepts_partial, max_retries > 0);
+            }
             assert!(server.invalidator.calls.lock().unwrap().is_empty());
         }
     }

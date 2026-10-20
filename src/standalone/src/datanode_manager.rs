@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::region::{RegionRequest, RegionResponse as RegionResponseV1, region_request};
+use api::v1::region::{RegionRequest, RegionResponse as RegionResponseV1};
 use async_trait::async_trait;
 use client::region;
 use common_error::ext::BoxedError;
@@ -75,7 +75,7 @@ impl RegionInvoker {
 impl Datanode for RegionInvoker {
     async fn handle_request(&self, request: Arc<RegionRequest>) -> MetaResult<RegionResponse> {
         // Local execution consumes the request; standalone does not retain it for retries.
-        let mut request = Arc::try_unwrap(request)
+        let request = Arc::try_unwrap(request)
             .map_err(|_| {
                 InvalidRegionRequestSnafu {
                     reason: "local region request has multiple owners",
@@ -84,16 +84,6 @@ impl Datanode for RegionInvoker {
             })
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        let request_count = match request.body.as_ref() {
-            Some(region_request::Body::Inserts(requests)) => Some(requests.requests.len()),
-            Some(region_request::Body::Deletes(requests)) => Some(requests.requests.len()),
-            _ => None,
-        };
-        if request_count.is_some() {
-            api::region::set_accept_partial_result(
-                request.header.get_or_insert_with(Default::default),
-            );
-        }
         let span = request
             .header
             .as_ref()
@@ -106,11 +96,7 @@ impl Datanode for RegionInvoker {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        match request_count {
-            Some(count) => region::decode_write_response(response, count),
-            None => region::decode_region_response(response),
-        }
-        .map_err(Into::into)
+        region::decode_region_response(response).map_err(Into::into)
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
@@ -136,8 +122,8 @@ impl Datanode for RegionInvoker {
 #[cfg(test)]
 mod tests {
     use api::v1::Rows;
-    use api::v1::region::{InsertRequest, InsertRequests};
-    use common_error::ext::{ErrorExt, RetryHint};
+    use api::v1::region::{InsertRequest, InsertRequests, region_request};
+    use common_error::ext::ErrorExt;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use datanode::tests::{MockRegionEngine, mock_region_server};
@@ -149,11 +135,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_partial_write_preserves_user_status() {
-        for (code, http_status) in [
-            (StatusCode::StorageUnavailable, 503),
-            (StatusCode::InvalidArguments, 400),
-        ] {
+    async fn test_write_preserves_original_error() {
+        for code in [StatusCode::StorageUnavailable, StatusCode::InvalidArguments] {
             let mut server = mock_region_server();
             let (engine, _receiver) = MockRegionEngine::with_mock_fn(
                 MITO_ENGINE_NAME,
@@ -192,21 +175,8 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(code, error.status_code());
-            assert_eq!(RetryHint::Retryable, error.retry_hint());
-            assert_eq!(
-                http_status,
-                servers::error::status_code_to_http_status(&error.status_code()).as_u16()
-            );
-            let meta_error::Error::PartialRegion { response } = error else {
-                panic!("expected partial write")
-            };
-            assert_eq!(2, response.failures.len());
-            assert!(
-                response
-                    .failures
-                    .iter()
-                    .all(|(_, error)| error.status_code() == code)
-            );
+            assert_eq!(MockError::new(code).retry_hint(), error.retry_hint());
+            assert!(!matches!(error, meta_error::Error::PartialRegion { .. }));
         }
     }
 }

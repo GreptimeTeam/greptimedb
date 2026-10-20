@@ -203,10 +203,13 @@ impl WriteDispatcher {
     pub(crate) async fn send(
         &self,
         peer: PeerRef,
-        request: RegionRequest,
+        mut request: RegionRequest,
         histogram: Option<&Histogram>,
     ) -> WriteAttempt {
         if let Some(retry) = &self.retry {
+            if matches!(&request.body, Some(Body::Inserts(_) | Body::Deletes(_))) {
+                api::region::set_accept_partial_result(request.header.get_or_insert_default());
+            }
             return retry
                 .send(
                     RoutedWrite {

@@ -662,13 +662,10 @@ impl RegionServer {
             .iter()
             .map(|request| (request.index, request.region_id))
             .collect();
-        let put_requests = requests
-            .into_iter()
-            .filter_map(|request| match request.request {
-                RegionRequest::Put(put) => Some((request.region_id, put)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let put_requests = requests.into_iter().map(|request| match request.request {
+            RegionRequest::Put(put) => (request.region_id, put),
+            _ => unreachable!("Already checked all are Put"),
+        });
         let tracing_context = TracingContext::from_current_span();
         let batch_size = put_requests.len();
         let span = tracing_context.attach(info_span!(
@@ -784,6 +781,7 @@ impl RegionServer {
                         response.extensions.extend(result.extensions);
                     }
                     Err(error) => {
+                        log_batch_write_error(&error, request_indices[0]);
                         let error = Arc::new(error);
                         response
                             .failures
@@ -2343,7 +2341,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::region::{InsertRequest, InsertRequests};
-    use api::v1::{Rows, SemanticType};
+    use api::v1::{PartitionExprVersion, Rows, SemanticType};
     use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
@@ -2885,56 +2883,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_legacy_response_decoder() {
-        // Frozen pre-partial protobuf envelope: no failures or retry_hint fields.
-        #[derive(prost::Message)]
-        struct LegacyStatus {
-            #[prost(uint32, tag = "1")]
-            status_code: u32,
-            #[prost(string, tag = "2")]
-            err_msg: String,
-        }
-        #[derive(prost::Message)]
-        struct LegacyHeader {
-            #[prost(message, optional, tag = "1")]
-            status: Option<LegacyStatus>,
-        }
-        #[derive(prost::Message)]
-        struct LegacyResponse {
-            #[prost(message, optional, tag = "1")]
-            header: Option<LegacyHeader>,
-        }
-        let server = mock_region_server();
-        let mut header = api::v1::region::RegionRequestHeader::default();
-        header
-            .query_context
-            .get_or_insert_with(Default::default)
-            .extensions
-            .insert(
-                api::region::ACCEPT_PARTIAL_RESULT.to_string(),
-                "true".to_string(),
-            );
-        let response = server
-            .handle_region_request(RegionRequestV1 {
-                header: Some(header),
-                body: Some(region_request::Body::Inserts(InsertRequests {
-                    requests: [1, 2]
-                        .map(|region_id| InsertRequest {
-                            region_id,
-                            rows: Some(Rows::default()),
-                            ..Default::default()
-                        })
-                        .to_vec(),
-                })),
-            })
-            .await
-            .unwrap();
-        let legacy = LegacyResponse::decode(response.encode_to_vec().as_slice()).unwrap();
-        // The old header decoder cannot turn unknown 1010 into the original error.
-        assert_eq!(1010, legacy.header.unwrap().status.unwrap().status_code);
     }
 
     #[tokio::test]
@@ -3821,58 +3769,126 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mito_batch_puts_retain_successful_regions() {
-        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-error").await;
-        let config = MitoConfig {
-            num_workers: 2,
-            ..Default::default()
-        };
-        let (region_server, log_store, wal_options) =
-            region_server_on_object_store_wal(&mut env, config).await;
-        // Regions 1 and 2 of table 1 belong to different workers. The put to region 1 waits for a
-        // WAL object whose create is held; Mito does not know region 2, so its put fails at once.
-        let held = RegionId::new(1, 1);
-        let unknown = RegionId::new(1, 2);
-        let held_insert = create_region(&region_server, held, &wal_options).await;
-        let unknown_insert = InsertRequest {
-            region_id: unknown.as_u64(),
-            ..held_insert.clone()
-        };
-        let mito = region_server
-            .inner
-            .region_map
-            .get(&held)
-            .unwrap()
-            .clone()
-            .into_engine();
-        region_server
-            .inner
-            .region_map
-            .insert(unknown, RegionEngineWithStatus::Ready(mito));
-        log_store.hold_creates();
-
-        let requests = vec![Default::default(), held_insert, unknown_insert];
-        let write = region_server.handle_requests_in_parallel(region_request::Body::Inserts(
-            InsertRequests { requests },
-        ));
-        tokio::pin!(write);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut write)
+    async fn test_mito_batch_failure_indices_for_same_region() {
+        for failed_index in [0, 1] {
+            let mut env = TestEnv::with_prefix("region-server-mito-same-region-failure").await;
+            let (server, _log_store, wal_options) =
+                region_server_on_object_store_wal(&mut env, MitoConfig::default()).await;
+            let region_id = RegionId::new(1, 1);
+            let insert = create_region(&server, region_id, &wal_options).await;
+            let mut requests = vec![insert.clone(), insert];
+            requests[failed_index].partition_expr_version = Some(PartitionExprVersion { value: 1 });
+            let response = server
+                .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests {
+                    requests,
+                }))
                 .await
-                .is_err()
-        );
-        log_store.release_creates();
-        let response = tokio::time::timeout(Duration::from_secs(10), write)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(3, response.affected_rows);
-        assert_eq!(1, response.failures.len());
-        assert_eq!(2, response.failures[0].0);
-        assert_eq!(
-            StatusCode::RegionNotFound,
-            response.failures[0].1.status_code()
-        );
+                .unwrap();
+            assert_eq!(response.affected_rows, 3);
+            assert_eq!(response.failures.len(), 1);
+            assert_eq!(response.failures[0].0, failed_index);
+            assert_eq!(
+                response.failures[0].1.status_code(),
+                StatusCode::InvalidArguments
+            );
+            let engine = server
+                .inner
+                .region_map
+                .get(&region_id)
+                .unwrap()
+                .clone()
+                .into_engine();
+            let mito = engine.as_any().downcast_ref::<MitoEngine>().unwrap();
+            let stream = mito
+                .scan_to_stream(region_id, Default::default())
+                .await
+                .unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                3
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mito_batch_puts_retain_successful_regions() {
+        for accept_partial_result in [false, true] {
+            let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-error").await;
+            let config = MitoConfig {
+                num_workers: 2,
+                ..Default::default()
+            };
+            let (region_server, log_store, wal_options) =
+                region_server_on_object_store_wal(&mut env, config).await;
+            // Regions 1 and 2 of table 1 belong to different workers. The put to region 1 waits for a
+            // WAL object whose create is held; Mito does not know region 2, so its put fails at once.
+            let held = RegionId::new(1, 1);
+            let unknown = RegionId::new(1, 2);
+            let held_insert = create_region(&region_server, held, &wal_options).await;
+            let unknown_insert = InsertRequest {
+                region_id: unknown.as_u64(),
+                ..held_insert.clone()
+            };
+            let mito = region_server
+                .inner
+                .region_map
+                .get(&held)
+                .unwrap()
+                .clone()
+                .into_engine();
+            region_server
+                .inner
+                .region_map
+                .insert(unknown, RegionEngineWithStatus::Ready(mito.clone()));
+            log_store.hold_creates();
+
+            let requests = vec![Default::default(), held_insert, unknown_insert];
+            let mut header = api::v1::region::RegionRequestHeader::default();
+            if accept_partial_result {
+                api::region::set_accept_partial_result(&mut header);
+            }
+            let write = region_server.handle_region_request(RegionRequestV1 {
+                header: Some(header),
+                body: Some(region_request::Body::Inserts(InsertRequests { requests })),
+            });
+            tokio::pin!(write);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut write)
+                    .await
+                    .is_err()
+            );
+            log_store.release_creates();
+            let result = tokio::time::timeout(Duration::from_secs(10), write)
+                .await
+                .unwrap();
+            if accept_partial_result {
+                let response = result.unwrap();
+                assert_eq!(3, response.affected_rows);
+                assert_eq!(
+                    StatusCode::PartialFailure as u32,
+                    response.header.unwrap().status.unwrap().status_code
+                );
+                assert_eq!(1, response.failures.len());
+                assert_eq!(2, response.failures[0].request_index);
+                assert_eq!(
+                    StatusCode::RegionNotFound as u32,
+                    response.failures[0].status.as_ref().unwrap().status_code
+                );
+            } else {
+                assert_eq!(
+                    StatusCode::RegionNotFound,
+                    result.unwrap_err().status_code()
+                );
+            }
+            let mito = mito.as_any().downcast_ref::<MitoEngine>().unwrap();
+            let stream = mito.scan_to_stream(held, Default::default()).await.unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                3
+            );
+        }
     }
 
     #[tokio::test]
