@@ -502,12 +502,6 @@ struct MapRuntime {
 struct WindowRuntime {
     /// This window's own evaluator, with its own input and output grid; `None` once closed.
     evaluator: Option<RangeEvaluator>,
-    /// The pieces the evaluator has decided that this node has not handed on yet.
-    ///
-    /// One push can decide several runs, and the evaluator hands them out one chunk at a time, so a
-    /// window that reported only what the push returned would strand the rest until the next push.
-    /// A piece is charged here from the moment it leaves the evaluator, which no longer holds it.
-    pending: VecDeque<EvaluatedChunk>,
 }
 
 impl WindowRuntime {
@@ -519,7 +513,6 @@ impl WindowRuntime {
             RangeEvaluator::try_new(input, Arc::clone(&op.output_grid), op.window, op.function)?;
         Ok(Self {
             evaluator: Some(evaluator),
-            pending: VecDeque::new(),
         })
     }
 
@@ -546,39 +539,24 @@ impl WindowRuntime {
     /// own timestamps, values, reset index and native histograms, and it drops them by its own
     /// rule. Mirroring that rule here would be a second copy of it, free to drift from the first.
     fn retained_bytes(&self) -> usize {
-        // A piece leaves the evaluator when it is decided, so from then on only this queue holds
-        // it. Each piece is counted once: it is either still inside the evaluator or already here.
-        let queued = self
-            .pending
-            .iter()
-            .map(evaluated_bytes)
-            .fold(0usize, usize::saturating_add);
         self.evaluator
             .as_ref()
             .map_or(0, RangeEvaluator::retained_bytes)
-            .saturating_add(queued)
     }
 
     /// Feeds one input chunk to the evaluator and returns the chunk it yields, if any.
     fn push(&mut self, path: &NodePath, chunk: &NativeChunk) -> Result<Option<EvaluatedChunk>> {
         let evaluator = self.evaluator.as_mut().ok_or_else(|| closed(path))?;
-        let decided = match chunk {
+        match chunk {
             // Raw samples are read window by window by the evaluator itself.
-            NativeChunk::Raw(chunk) => evaluator.push(chunk)?,
+            NativeChunk::Raw(chunk) => evaluator.push(chunk),
             // An evaluated input is read as computed samples: the evaluator carries the window
             // state of one series across its chunks and closes it on the chunk that says so.
             // Handing each chunk over as it arrives is what lets this window report a decision
             // before its input series has ended; buffering the chunks into a whole series first
             // would hold the input's bytes and delay every result to the end of the series.
-            NativeChunk::Evaluated(chunk) => evaluator.push_series(&chunk.series, chunk.is_last)?,
-        };
-        self.pending.extend(decided);
-        Ok(self.take_pending())
-    }
-
-    /// The next piece this window has decided, if it is holding one.
-    fn take_pending(&mut self) -> Option<EvaluatedChunk> {
-        self.pending.pop_front()
+            NativeChunk::Evaluated(chunk) => evaluator.push_series(&chunk.series, chunk.is_last),
+        }
     }
 
     /// Closes this window, reporting an input that ended mid-series.
@@ -1210,23 +1188,14 @@ impl NativeExecutor {
             }
             NodeTag::Window => {
                 let child = input.ok_or_else(|| missing_input(tag))?;
-                // A piece the window already decided goes out before more input is read, or a
-                // push that decides several runs would strand all but the first until the next
-                // push -- and the last of them would never leave at all.
-                if let Some(output) = self.take_window_output(index)? {
-                    return Ok(Some(output));
-                }
+                // A window reports on the chunk that closes a series, so a chunk that decides
+                // nothing yields nothing and the window asks its input again.
                 loop {
                     let Some(chunk) = self.pull(child)? else {
                         return Ok(None);
                     };
                     if let Some(output) = self.window_node(index, chunk)? {
                         return Ok(Some(NativeChunk::Evaluated(output)));
-                    }
-                    // The push may have decided several pieces without handing one back; they go
-                    // out before this window reads another chunk.
-                    if let Some(output) = self.take_window_output(index)? {
-                        return Ok(Some(output));
                     }
                 }
             }
@@ -1244,36 +1213,6 @@ impl NativeExecutor {
         let path = &self.state.paths[index];
         let runtime = &mut self.state.runtimes[index];
         Ok(runtime.map(path, chunk)?.map(NativeChunk::Evaluated))
-    }
-
-    /// The next piece the window at `index` already decided, if it is holding one.
-    ///
-    /// The charge is recomputed here: the piece leaves the queue, so the bytes the node holds drop
-    /// by exactly that piece, and leaving the old figure in place would hold a reservation for
-    /// memory nothing is using.
-    fn take_window_output(&mut self, index: usize) -> Result<Option<NativeChunk>> {
-        let path = &self.state.paths[index];
-        let runtime = &mut self.state.runtimes[index];
-        let Some(output) = runtime
-            .window
-            .as_mut()
-            .and_then(WindowRuntime::take_pending)
-        else {
-            return Ok(None);
-        };
-        let metrics = Arc::clone(&runtime.buffer.metrics);
-        metrics.record_grid_points(output.series.time.len());
-        metrics.record_output(1, valid_values(&output));
-        runtime.track(path, &output)?;
-        let retained = runtime
-            .window
-            .as_ref()
-            .map_or(0, WindowRuntime::retained_bytes);
-        let emitted = runtime.emitted_bytes();
-        runtime
-            .buffer
-            .hold_exactly(retained.saturating_add(emitted))?;
-        Ok(Some(NativeChunk::Evaluated(output)))
     }
 
     /// Feeds one chunk to the window at `index`.

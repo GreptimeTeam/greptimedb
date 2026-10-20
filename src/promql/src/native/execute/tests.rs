@@ -1891,3 +1891,59 @@ fn a_sparse_chunk_occupies_only_the_positions_it_holds() {
         .unwrap_or_else(|error| panic!("the series in the hole was refused: {error}"))
         .expect("the second series is handed on");
 }
+
+/// What an operation that empties every position hands on: nothing while the series is open, and
+/// one empty chunk when it closes.
+///
+/// The two are not interchangeable. A non-closing empty chunk is rejected by a downstream evaluator
+/// (an empty delivery inside a series decides nothing), and dropping the closing one would leave
+/// the consumer unable to tell "nothing more here" from "no more input", so the series would never
+/// close and `finish` would report an input that ended mid-series.
+#[test]
+fn an_emptying_operation_hands_on_nothing_until_it_closes_the_series() {
+    let inner_grid = grid(0, 60_000, 4);
+    let outer_grid = grid(0, 120_000, 2);
+    // `clamp` with `max < min` empties every field of every chunk it sees.
+    let emptying = vec![MathOp::Clamp { min: 1.0, max: 0.0 }];
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), emptying.clone()),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    // An open chunk that maps to nothing yields nothing at all: it is not handed to the window,
+    // which would refuse an empty delivery inside a series.
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![5.0, 6.0], false))
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "an emptying map handed on a chunk for a series still open"
+    );
+
+    // The closing chunk still closes: one empty chunk reaches the window and closes the series.
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 2, vec![7.0, 8.0], true))
+        .unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    out.extend(execution.finish().expect("the window closed its series"));
+
+    assert!(
+        out.iter().all(|chunk| chunk.series.time.is_empty()),
+        "the outer window produced a value for a series that held none"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the series closed a number of times other than once"
+    );
+    assert!(out.last().unwrap().is_last);
+}
