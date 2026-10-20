@@ -8742,7 +8742,6 @@ dependencies = [
  "partition",
  "pin-project",
  "prometheus 0.14.0",
- "promql",
  "prost 0.14.1",
  "puffin",
  "rand 0.9.4",

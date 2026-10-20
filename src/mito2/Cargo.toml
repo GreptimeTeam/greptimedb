@@ -101,7 +101,6 @@ dotenv.workspace = true
 log-store = { workspace = true, features = ["testing"] }
 mito-codec = { workspace = true, features = ["testing"] }
 object-store = { workspace = true, features = ["services-memory"] }
-promql.workspace = true
 rskafka.workspace = true
 rstest.workspace = true
 rstest_reuse.workspace = true
