@@ -46,6 +46,12 @@ pub(crate) struct CapturedDynFilter {
     /// A parent filter that references uncorrelated scalar subqueries. Its value is only
     /// known once `ScalarSubqueryExec` has run the subqueries, so `alive_dyn_filter`
     /// starts as `true` and is replaced by the resolved filter before regions are queried.
+    // TODO(discord9): temporary bridge. DataFusion fills the scalar subquery results in
+    // `ScalarSubqueryExec` but does not expose predicates using them as
+    // `DynamicFilterPhysicalExpr`, so we keep the predicate and bind it ourselves. Once
+    // upstream does and the pinned DataFusion includes it, remove this field and the
+    // scalar subquery capture/resolve path in favor of the regular dyn filter capture.
+    // Keep the per-phase bookkeeping in `MergeScanExec`.
     scalar_subquery_filter: Option<Arc<dyn PhysicalExpr>>,
 }
 
