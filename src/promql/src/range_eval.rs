@@ -303,7 +303,20 @@ struct SeriesState {
 impl SeriesState {
     /// The bytes this series' identity holds, which the rows handed out do not cover.
     fn identity_bytes(&self) -> usize {
-        let primary_key = self.primary_key.as_ref().map_or(0, |key| key.len());
+        // A scan slices the primary key out of a decoded dictionary-values buffer, so the bytes the
+        // key shows are not the bytes it keeps: a key of a few bytes pins the whole buffer it was
+        // sliced out of, which `capacity` reports for the allocation behind the slice. Charging
+        // the key's length instead would show a handful of bytes for an allocation the size of a
+        // decoded batch. (A buffer that does not own its memory reports no capacity, and then the
+        // bytes it shows are all there is.)
+        //
+        // No dedupe is needed against a second slice of the same allocation: one evaluator holds
+        // one series at a time, and a window over an evaluated input holds no key at all, so a
+        // pass over this state charges one slice of one allocation rather than one per slice.
+        let primary_key = self
+            .primary_key
+            .as_ref()
+            .map_or(0, |key| key.capacity().max(key.len()));
         let metric: usize = self
             .metric
             .name()
@@ -380,7 +393,17 @@ fn resets_between(resets: &[CounterReset], start: u64, end: u64) -> &[CounterRes
 
 impl FieldSamples {
     /// The bytes this field's buffers hold, by capacity.
+    ///
+    /// The histogram term is the slot of every retained sample plus the payload the histogram in
+    /// that slot owns: a slot is one `(i64, FloatHistogram)` worth of struct, and the buckets the
+    /// histogram keeps are on the heap behind it, up to tens of kilobytes per sample. Only the
+    /// retained slice is walked, which is the storage the windows still read; the samples before
+    /// `head` are gone, their payloads with them.
     fn bytes(&self) -> usize {
+        let histograms = self.histograms[self.histogram_head..]
+            .iter()
+            .map(|(_, histogram)| histogram.heap_bytes())
+            .fold(0usize, usize::saturating_add);
         self.timestamps
             .capacity()
             .saturating_mul(std::mem::size_of::<i64>())
@@ -394,6 +417,7 @@ impl FieldSamples {
                     .capacity()
                     .saturating_mul(std::mem::size_of::<(i64, FloatHistogram)>()),
             )
+            .saturating_add(histograms)
             .saturating_add(
                 self.resets
                     .capacity()
@@ -479,6 +503,26 @@ impl FieldSamples {
         let start = self.base + self.head as u64;
         resets_between(&self.resets, start, start + len as u64)
     }
+}
+
+/// The bytes the histograms a row holds box, beyond the slots they sit in.
+///
+/// A slot is an `Option<GridSample>`: a pointer and a tag, which is all
+/// `size_of::<Option<GridSample>>()` is. A result that is a native histogram does not live in that
+/// slot itself: the slot points at a `FloatHistogram` on the heap, which owns its bucket
+/// lists in turn, and both are what the row keeps alive between pushes. Only slots that hold a
+/// histogram are counted, and only those the last evaluated point left in place: a push clears the
+/// row, so the slots past its length hold nothing.
+fn boxed_bytes(row: &[Option<GridSample>]) -> usize {
+    row.iter()
+        .flatten()
+        .filter_map(|sample| match sample {
+            GridSample::Histogram(histogram) => {
+                Some(std::mem::size_of::<FloatHistogram>().saturating_add(histogram.heap_bytes()))
+            }
+            GridSample::Float(_) => None,
+        })
+        .fold(0usize, usize::saturating_add)
 }
 
 impl RangeEvaluator {
@@ -604,9 +648,10 @@ impl RangeEvaluator {
     /// An accounted lower bound on the bytes this evaluator keeps between pushes.
     ///
     /// Counted by capacity, so it is what the storage holds rather than what it uses: the retained
-    /// samples per field (timestamps, values and native histograms), the reset index, the row a push
-    /// fills, and the pending batch's own vectors. Left out are the kernel's scratch buffers, this
-    /// struct's `Vec` headers and the grid, which every chunk addressed on it shares.
+    /// samples per field (timestamps, values and the native histograms with the payload each of
+    /// them owns), the reset index, the row a push fills with the histograms it boxes, and the
+    /// pending batch's own vectors. Left out are the kernel's scratch buffers, this struct's `Vec`
+    /// headers and the grid, which every chunk addressed on it shares.
     ///
     /// A push is the only caller that also holds the incoming chunk, and it charges that itself for
     /// as long as the call runs; vector growth during a push is neither reserved nor bounded by one
@@ -621,9 +666,11 @@ impl RangeEvaluator {
             .map(FieldSamples::bytes)
             .fold(0usize, usize::saturating_add);
         let row = self.row.capacity() * std::mem::size_of::<Option<GridSample>>();
+        let boxed = boxed_bytes(&self.row);
         let series = self.series.as_ref().map_or(0, SeriesState::identity_bytes);
         per_field
             .saturating_add(row)
+            .saturating_add(boxed)
             .saturating_add(series)
             .saturating_add(self.pending.bytes())
     }

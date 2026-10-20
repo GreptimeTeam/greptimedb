@@ -786,6 +786,93 @@ fn a_chunk_with_histograms_is_not_appended_in_bulk() {
     assert_eq!(evaluator.bulk_ingest_count(), 0);
 }
 
+/// One raw chunk of one field holding a single native histogram sample at `ts`, whose positive side
+/// is one span of `buckets` buckets of one count each.
+fn histogram_chunk(schema: &SeriesSchema, buckets: i32, ts: i64) -> RawSeriesChunk {
+    let offsets = [0];
+    let lengths = [buckets];
+    let counts = vec![1.0; usize::try_from(buckets).unwrap()];
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder
+        .push(HistogramView {
+            schema: 0,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: f64::from(buckets),
+            sum: f64::from(buckets),
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &offsets,
+                span_lengths: &lengths,
+                buckets: &counts,
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        })
+        .unwrap();
+    let samples = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(index)]),
+        builder.finish().unwrap(),
+    )
+    .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from(0u64.to_le_bytes().to_vec()),
+        Some(metric(0)),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+        SeriesFields::try_from_vec(vec![samples]).unwrap(),
+        false,
+    )
+    .unwrap()
+}
+
+/// A window has to reserve what a native histogram it retains owns, not only the slot it sits in.
+///
+/// The histogram sample below stays ahead of the second grid point's window, so the evaluator keeps
+/// it, and the two runs differ in nothing but the number of buckets on the positive side: 4 and
+/// 4096. Those buckets are `(index, count)` pairs on the heap, which no `size_of` of the struct
+/// shows -- 64 KiB for the wider one -- so the bytes the evaluator reports have to grow by at least
+/// that payload between the two. A figure counting slots alone would report one number for both.
+#[test]
+fn a_retained_histogram_is_charged_for_its_buckets() {
+    let retained = |buckets: i32| -> usize {
+        let schema = raw_schema(1);
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(0, 10_000, 2),
+            // Far longer than the grid: the second point's window still reaches the sample, so the
+            // push retains it instead of advancing past it.
+            RangeWindow {
+                range_ms: 600_000,
+                offset_ms: 0,
+                anchor_ms: None,
+            },
+            // A function that counts the histogram, so what the row holds is a float: the two
+            // figures then differ in the payload of the retained sample alone, not in what the row
+            // boxes beside it.
+            RangeFunction::CountOverTime,
+        )
+        .unwrap();
+        evaluator
+            .push(&histogram_chunk(&schema, buckets, 0))
+            .unwrap();
+        evaluator.retained_bytes()
+    };
+    let (few, many) = (4, 4096);
+    let payload = usize::try_from(many - few).unwrap() * std::mem::size_of::<(i32, f64)>();
+    let (narrow, wide) = (retained(few), retained(many));
+    assert!(
+        wide >= narrow + payload,
+        "a window retaining one histogram of {many} buckets reports {wide} bytes, not the {narrow} \
+         it reports for {few} buckets plus the {payload} bytes of bucket payload between them",
+    );
+}
+
 /// `rate` over a float-only series takes the batch path. The per-window path produces the same
 /// output, so a test comparing values alone could not tell which one ran.
 #[test]

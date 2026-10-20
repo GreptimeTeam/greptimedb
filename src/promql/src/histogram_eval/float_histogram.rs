@@ -80,6 +80,40 @@ impl FloatHistogram {
         })
     }
 
+    /// The bytes this histogram's own heap buffers hold, by capacity.
+    ///
+    /// Everything a histogram keeps besides its scalars is on the heap: the bucket lists of both
+    /// sides, the custom bounds, and the span layout of a histogram read from a view, with the
+    /// `[Vec; 2]` array that holds the two layout vectors. No scalar of the struct shows any of it:
+    /// a histogram of 4096 positive buckets is 64 KiB of buckets, and a window that retains one
+    /// histogram per grid point retains that much per point.
+    ///
+    /// The layout array is stored inline in the histogram, so a ledger charging
+    /// `size_of::<FloatHistogram>()` per slot already pays for those 48 bytes. Counting the whole
+    /// footprint as one figure here costs a header of over-estimate on a reservation, against a
+    /// payload of tens of kilobytes that would otherwise be missing from it entirely.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        fn buckets(side: &Buckets) -> usize {
+            side.capacity() * std::mem::size_of::<(i32, f64)>()
+        }
+        let layout = self.layout.as_ref().map_or(0, |sides| {
+            std::mem::size_of::<[Vec<(i32, i32)>; 2]>().saturating_add(
+                sides
+                    .iter()
+                    .map(|side| side.capacity() * std::mem::size_of::<(i32, i32)>())
+                    .fold(0, usize::saturating_add),
+            )
+        });
+        buckets(&self.positive)
+            .saturating_add(buckets(&self.negative))
+            .saturating_add(
+                self.custom_values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<f64>()),
+            )
+            .saturating_add(layout)
+    }
+
     /// The spans of each side.
     fn spans(&self) -> [Vec<(i32, i32)>; 2] {
         self.layout

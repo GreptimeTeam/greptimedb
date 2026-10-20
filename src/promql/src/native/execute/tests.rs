@@ -20,8 +20,11 @@ use std::sync::Arc;
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue};
-use datatypes::arrow::array::Float64Array;
+use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+use datatypes::series::histogram::{
+    BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
+};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
@@ -29,8 +32,12 @@ use datatypes::series::samples::{
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 
-use super::{NativeExecutionState, NativeExecutor, map_chunk};
+use super::{
+    ChargedAllocations, Emitted, History, NativeExecutionState, NativeExecutor, Run, label_bytes,
+    map_chunk, raw_bytes,
+};
 use crate::evaluated::EvaluatedChunk;
+use crate::grid_series::{LabelSet, label_set};
 use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodePath};
 use crate::native::plan::{
@@ -252,6 +259,61 @@ fn raw_chunk_repeated(
         Some(metric()),
         RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
         fields,
+        is_last,
+    )
+    .unwrap()
+}
+
+/// Pushes one native histogram whose positive side is one span of `buckets` buckets of one count
+/// into `builder`, and returns the index it was filed under.
+fn push_histogram(builder: &mut HistogramBatchBuilder, buckets: i32) -> u32 {
+    let offsets = [0];
+    let lengths = [buckets];
+    let counts = vec![1.0; usize::try_from(buckets).unwrap()];
+    builder
+        .push(HistogramView {
+            schema: 0,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: f64::from(buckets),
+            sum: f64::from(buckets),
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &offsets,
+                span_lengths: &lengths,
+                buckets: &counts,
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        })
+        .unwrap()
+}
+
+/// One raw chunk of `series-a` whose one field holds a `buckets`-wide native histogram at each of
+/// `timestamps`.
+fn raw_histogram_chunk(
+    schema: &SeriesSchema,
+    timestamps: &[i64],
+    buckets: i32,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let mut builder = HistogramBatchBuilder::new();
+    let indices: UInt32Array = timestamps
+        .iter()
+        .map(|_| Some(push_histogram(&mut builder, buckets)))
+        .collect();
+    let samples = Samples::try_from_histogram(indices, builder.finish().unwrap()).unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric()),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        SeriesFields::one(samples),
         is_last,
     )
     .unwrap()
@@ -1951,4 +2013,155 @@ fn an_emptying_operation_hands_on_nothing_until_it_closes_the_series() {
         "the series closed a number of times other than once"
     );
     assert!(out.last().unwrap().is_last);
+}
+
+/// A window over native histograms reserves what it retains, payload included, and the label-set
+/// ledger it charges beside that agrees with a full walk of the table.
+///
+/// The chunk accounting walks the samples a chunk holds instead of charging one float per field and
+/// row, so a histogram field -- which holds no float at all -- reaches both figures as the table its
+/// indices point into. Neither may drift from what the node says it holds: the reservation is the
+/// retained bytes plus the emitted ones, and the running total of the emitted table is the same
+/// figure recounted in full.
+#[test]
+fn a_window_over_histograms_reserves_what_it_retains() {
+    let out = grid(0, 10_000, 2);
+    let tree = NativeTree::try_new(window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        20_000,
+        None,
+        Arc::clone(&out),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+
+    for (timestamp, is_last) in [(0, false), (10_000, true)] {
+        execution
+            .push_raw(raw_histogram_chunk(&schema, &[timestamp], 2, is_last))
+            .unwrap();
+        while execution.next_chunk().unwrap().is_some() {}
+        let (retained, emitted) = execution.state().window_charge(&NodePath::root());
+        assert!(
+            emitted > 0,
+            "the window handed nothing out, so the ledger below charges for nothing"
+        );
+        assert_eq!(
+            execution.state().reserved_bytes(),
+            retained.saturating_add(emitted),
+            "the reservation is not what the window retains ({retained} bytes) plus what it handed \
+             out ({emitted} bytes)",
+        );
+        let (folded, walked) = execution.state().emitted_charge_pair(&NodePath::root());
+        assert_eq!(
+            folded, walked,
+            "the folded charge of {folded} bytes is not the {walked} bytes the table holds",
+        );
+    }
+}
+
+/// One histogram table is charged once, however many chunks of the series reference it.
+///
+/// The chunks of one series can share the immutable table their histogram indices point into, and a
+/// node holding both of them holds one table: the source charges its queue as one accounting pass,
+/// which counts the table the first time it meets it and the address the `Arc` holds is what makes
+/// two clones one table.
+#[test]
+fn a_histogram_table_is_charged_once_per_pass() {
+    let schema = raw_schema();
+    let mut builder = HistogramBatchBuilder::new();
+    let index = push_histogram(&mut builder, 2);
+    let table = builder.finish().unwrap();
+    let chunk = |timestamp: i64, is_last: bool| {
+        let samples =
+            Samples::try_from_histogram(UInt32Array::from(vec![Some(index)]), Arc::clone(&table))
+                .unwrap();
+        RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from_slice_ref(b"series-a"),
+            Some(metric()),
+            RawTimestamps::try_new(ScalarBuffer::from(vec![timestamp])).unwrap(),
+            SeriesFields::one(samples),
+            is_last,
+        )
+        .unwrap()
+    };
+    let (first, second) = (chunk(0, false), chunk(10_000, true));
+
+    let mut charged = ChargedAllocations::default();
+    let queue = raw_bytes(&first, &mut charged).saturating_add(raw_bytes(&second, &mut charged));
+    let alone = raw_bytes(&first, &mut ChargedAllocations::default())
+        .saturating_add(raw_bytes(&second, &mut ChargedAllocations::default()));
+    assert!(
+        queue < alone,
+        "a queue of two chunks sharing one table is charged {queue} bytes, no less than the \
+         {alone} bytes they are charged apart: the table was counted twice",
+    );
+
+    // What the source reserves is exactly that one pass: it holds its queue and nothing else, and
+    // nothing has been pulled yet.
+    let tree = NativeTree::try_new(window(input(), grid(0, 10_000, 1))).unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution.push_raw(first).unwrap();
+    execution.push_raw(second).unwrap();
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        queue,
+        "the queue of two chunks sharing one table was not charged as one pass",
+    );
+}
+
+/// One entry's figure is the heap it owns, and its `History` header is charged once, by its slot.
+///
+/// The `History` of a label set lives in the map's slot, so a `size_of::<History>()` term in the
+/// entry's own figure billed one header twice: once here and once in the capacity term beside it.
+/// The two assertions below are the definition of the whole figure -- the labels, the vectors and
+/// their runs, and one label-set slot plus one history slot per entry -- so either header counted
+/// in the wrong place fails them.
+#[test]
+fn a_history_entry_is_charged_once_for_its_header() {
+    let grid = grid(0, 10_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let metric = named_metric("requests", "job");
+    let labels = label_set(&metric);
+    // Not the closing chunk: a closed label set drops its runs, and the runs are what the entry's
+    // own figure is.
+    let chunk = evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], false);
+
+    let mut emitted = Emitted::default();
+    emitted.occupy(&NodePath::root(), &chunk).unwrap();
+
+    let history = emitted
+        .sets
+        .get(&labels)
+        .expect("the chunk recorded its label set");
+    let entry = label_bytes(&labels)
+        .saturating_add(history.fields.capacity() * std::mem::size_of::<Vec<Run>>())
+        .saturating_add(
+            history
+                .fields
+                .iter()
+                .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
+                .sum::<usize>(),
+        );
+    assert!(
+        history.fields.iter().any(|runs| !runs.is_empty()),
+        "the entry kept no run, so it has no heap of its own to charge for"
+    );
+    assert_eq!(
+        emitted.entries,
+        entry,
+        "the entry's own bytes are not its labels and runs alone: a `History` header in the figure \
+         would add the {} bytes its slot already charges",
+        std::mem::size_of::<History>(),
+    );
+    assert_eq!(
+        emitted.bytes(),
+        entry.saturating_add(
+            emitted.sets.capacity()
+                * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>())
+        ),
+        "the table's capacity is where a label-set slot and one `History` per entry are charged",
+    );
 }

@@ -49,10 +49,14 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datatypes::arrow::array::Float64Array;
+use datatypes::arrow::array::{Array, Float64Array};
+use datatypes::arrow::buffer::Buffer;
 use datatypes::series::SeriesOrdering;
+use datatypes::series::histogram::HistogramBatch;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{SampleRef, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{
+    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::grid_series::{LabelSet, label_set};
@@ -95,32 +99,132 @@ impl NativeChunk {
         }
     }
 
-    /// An estimate of the bytes this chunk holds.
-    fn bytes(&self) -> usize {
+    /// The bytes this chunk holds, counting each shared allocation it references that `charged` has
+    /// not met yet.
+    fn bytes(&self, charged: &mut ChargedAllocations) -> usize {
         match self {
-            Self::Raw(chunk) => raw_bytes(chunk),
-            Self::Evaluated(chunk) => evaluated_bytes(chunk),
+            Self::Raw(chunk) => raw_bytes(chunk, charged),
+            Self::Evaluated(chunk) => evaluated_bytes(chunk, charged),
         }
     }
 }
 
-/// An estimate of the bytes a raw chunk holds: its timestamps, one float per field and its
-/// identity.
-fn raw_bytes(chunk: &RawSeriesChunk) -> usize {
-    std::mem::size_of::<RawSeriesChunk>()
-        + chunk.primary_key.len()
-        + chunk.time.len()
-            * (std::mem::size_of::<i64>() + chunk.fields.len() * std::mem::size_of::<f64>())
+/// The shared allocations one accounting pass has already counted.
+///
+/// A chunk holds very little of what it costs: a field of native histograms holds no floats at all,
+/// only indices into an immutable `Arc<HistogramBatch>` table, and both that table and the buffers
+/// behind the field's Arrow arrays are batch-wide allocations that a chunk can hold a slice of. Two
+/// chunks of one series can share one table by cloning the `Arc`, and both can hold sibling slices
+/// of one buffer, so a pass counts an allocation the first time it meets it. Charging it per
+/// referencing chunk instead would make the reservation grow with the number of chunks a node holds
+/// rather than with the data in them -- the figure the pool has to rank.
+///
+/// One pass walks one chunk, or the queue of one node, so the list stays as short as the
+/// allocations it met and is dropped with the pass; nothing outlives the call it was made for.
+#[derive(Default)]
+struct ChargedAllocations {
+    /// The address of every histogram table this pass has counted.
+    tables: Vec<*const HistogramBatch>,
+    /// The address of every Arrow buffer this pass has counted.
+    buffers: Vec<*const u8>,
 }
 
-/// An estimate of the bytes an evaluated chunk holds: one float per field and decided position.
+impl ChargedAllocations {
+    /// The bytes `table` holds, or zero when this pass has already counted it.
+    fn table(&mut self, table: &Arc<HistogramBatch>) -> usize {
+        let address = Arc::as_ptr(table);
+        if self.tables.contains(&address) {
+            return 0;
+        }
+        self.tables.push(address);
+        // The batch struct holds the struct array and the column arrays beside it, which are views
+        // of that array's children: the array reports the buffers of all of them, once.
+        std::mem::size_of::<HistogramBatch>()
+            .saturating_add(table.as_arrow().get_array_memory_size())
+    }
+
+    /// The bytes the allocation `buffer` is a slice of, or zero when this pass has already counted
+    /// it.
+    ///
+    /// The capacity is the whole allocation, which is what a slice keeps alive: a key of a few
+    /// bytes sliced out of a decoded dictionary values buffer pins that buffer. A buffer that owns
+    /// no memory of its own reports no capacity, and then the bytes it shows are all there is.
+    fn buffer(&mut self, buffer: &Buffer) -> usize {
+        let address = buffer.data_ptr().as_ptr().cast_const();
+        if self.buffers.contains(&address) {
+            return 0;
+        }
+        self.buffers.push(address);
+        buffer.capacity().max(buffer.len())
+    }
+
+    /// The bytes the buffers of one Arrow array hold.
+    fn array(&mut self, array: &dyn Array) -> usize {
+        let data = array.to_data();
+        let values = data.buffers().iter().fold(0usize, |total, buffer| {
+            total.saturating_add(self.buffer(buffer))
+        });
+        // The validity bitmap is not one of `buffers`: a field of a series with a missing sample
+        // carries one, and it is an allocation like any other.
+        let nulls = data
+            .nulls()
+            .map_or(0, |nulls| self.buffer(nulls.inner().inner()));
+        values.saturating_add(nulls)
+    }
+}
+
+/// The bytes a raw chunk holds: its identity, its timestamps and the Arrow buffers behind its
+/// fields.
 ///
-/// The grid itself is shared by every chunk addressed on it, so it is not counted per chunk. The
-/// figure only has to rank one chunk against another for the memory pool, which is what a
-/// reservation is for.
-fn evaluated_bytes(chunk: &EvaluatedChunk) -> usize {
+/// The figure is what the chunk keeps alive rather than one float per field and row: a histogram
+/// field holds no floats at all, only indices into the table its samples live in.
+fn raw_bytes(chunk: &RawSeriesChunk, charged: &mut ChargedAllocations) -> usize {
+    std::mem::size_of::<RawSeriesChunk>()
+        .saturating_add(charged.buffer(&chunk.primary_key))
+        .saturating_add(charged.buffer(chunk.time.as_buffer().inner()))
+        .saturating_add(fields_bytes(&chunk.fields, charged))
+}
+
+/// The bytes an evaluated chunk holds: its struct and the Arrow buffers behind its fields.
+///
+/// The figure is what the chunk keeps alive rather than one float per field and decided position:
+/// a histogram field holds no floats at all, only indices into the table its samples live in. The
+/// grid itself is shared by every chunk addressed on it, so it is not counted per chunk.
+fn evaluated_bytes(chunk: &EvaluatedChunk, charged: &mut ChargedAllocations) -> usize {
     std::mem::size_of::<EvaluatedChunk>()
-        + chunk.series.time.len() * chunk.series.fields.len() * std::mem::size_of::<f64>()
+        .saturating_add(fields_bytes(&chunk.series.fields, charged))
+}
+
+/// The bytes the fields of a chunk hold: the sample buffers of every segment, and the histogram
+/// tables those segments reference.
+fn fields_bytes(fields: &SeriesFields, charged: &mut ChargedAllocations) -> usize {
+    fields
+        .iter()
+        .map(|field| {
+            field
+                .segments()
+                .iter()
+                .map(|segment| segment_bytes(segment, charged))
+                .fold(0usize, usize::saturating_add)
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+/// The bytes one dense segment of samples holds.
+fn segment_bytes(segment: &Samples, charged: &mut ChargedAllocations) -> usize {
+    match segment.dense() {
+        Some(DenseSamplesRef::Float(values)) => charged.array(values),
+        Some(DenseSamplesRef::Histogram(histograms)) => charged
+            .array(histograms.indices())
+            .saturating_add(charged.table(histograms.batch())),
+        Some(DenseSamplesRef::Mixed(mixed)) => charged
+            .array(mixed.floats())
+            .saturating_add(charged.array(mixed.histograms().indices()))
+            .saturating_add(charged.table(mixed.histograms().batch())),
+        // `segments` hands out dense segments only, so a nested chunk never reaches here; one that
+        // somehow did is charged for the descriptor alone rather than for buffers it nests.
+        None => 0,
+    }
 }
 
 /// Which node kinds the runtime executes.
@@ -181,7 +285,7 @@ struct NodeSpec {
 struct NodeBuffer {
     metrics: Arc<NodeMetrics>,
     reservation: MemoryReservation,
-    /// The bytes `reservation` holds, mirrored so a chunk leaving shrinks it exactly.
+    /// The bytes `reservation` holds, mirrored so a chunk leaving returns exactly them.
     held: usize,
 }
 
@@ -201,15 +305,6 @@ impl NodeBuffer {
         self.reservation.try_grow(bytes)?;
         self.held += bytes;
         self.metrics.record_reserved_bytes(self.held);
-        Ok(())
-    }
-
-    /// Returns the bytes of a chunk this node no longer holds.
-    fn shrink(&mut self, bytes: usize) -> Result<()> {
-        let held = self.held.saturating_sub(bytes);
-        self.reservation.try_resize(held)?;
-        self.held = held;
-        self.metrics.record_reserved_bytes(held);
         Ok(())
     }
 
@@ -277,7 +372,8 @@ struct History {
     fields: Vec<Vec<Run>>,
     /// Whether the series on this label set closed. A second series cannot close it again.
     closed: bool,
-    /// The bytes this entry's labels and runs hold, kept current by [`Emitted::occupy`].
+    /// The heap this entry owns: the runs its per-field vectors hold, kept current by
+    /// [`Emitted::occupy`]. The header and the slot it sits in are charged by the table's capacity.
     bytes: usize,
 }
 
@@ -289,10 +385,14 @@ fn label_bytes(labels: &LabelSet) -> usize {
         .sum()
 }
 
-/// The bytes a history holds: the entry itself, the per-field vectors and the runs in them.
+/// The bytes a history holds: the per-field vectors and the runs in them.
+///
+/// This is what the entry itself allocates, not the slot it is filed under: the `History` lives in
+/// the map's slot, and that slot is what [`Emitted::bytes`] charges with the table's capacity. A
+/// `size_of::<History>()` term here billed every entry one header for a value it does not own,
+/// once in this figure and again in the slot term beside it.
 fn history_bytes(history: &History) -> usize {
-    std::mem::size_of::<History>()
-        + history.fields.capacity() * std::mem::size_of::<Vec<Run>>()
+    history.fields.capacity() * std::mem::size_of::<Vec<Run>>()
         + history
             .fields
             .iter()
@@ -378,10 +478,11 @@ impl Emitted {
 
     /// An estimate of the bytes this table holds, which the node reserves for.
     ///
-    /// It counts each label's name and value bytes with a tuple per label, a history with its runs,
-    /// and the table's capacity at a label-set slot plus a history per entry. It leaves out the
-    /// map's buckets and the `Arc` headers of the strings it shares, so it is a lower bound rather
-    /// than a measurement.
+    /// It counts each label's name and value bytes with a tuple per label, the runs a history keeps
+    /// in its per-field vectors, and the table's capacity at one label-set slot plus one history
+    /// slot per entry -- which is where a `History` header itself is charged, once, for the entry
+    /// that lives in it. It leaves out the map's buckets and the `Arc` headers of the strings it
+    /// shares, so it is a lower bound rather than a measurement.
     ///
     /// The per-entry part is a running total, so reading this after every output does not walk the
     /// table: only the entry that changed and the table's own capacity are read here.
@@ -519,15 +620,15 @@ impl WindowRuntime {
     /// The bytes this window's charge accounts for, as its evaluator's storage stands now.
     ///
     /// Between pushes this is the accounted retained size: the sample buffers the evaluator keeps
-    /// per field, by capacity, the row a push fills, the pending batch's inner vectors, and the
-    /// identity payload of the series still open. It is a lower bound on what is held, not a
-    /// measurement of it.
+    /// per field, by capacity, with the payload of every native histogram they retain, the row a
+    /// push fills with the histograms it boxes, the pending batch's inner vectors, and the identity
+    /// payload of the series still open -- the allocation behind its primary key, not the bytes the
+    /// key shows. It is a lower bound on what is held, not a measurement of it.
     ///
     /// The kernel's scratch is left out, being a constant factor of the window samples already
     /// counted. The `Emitted` table's own map overhead and the `Arc` headers of the strings it
     /// shares are charged for beside this figure rather than inside it. Of the pending batch only
-    /// the inner vectors are counted, not the outer `spans` and `columns` that hold them. And a
-    /// sliced buffer's backing can be larger than the bytes its primary key shows.
+    /// the inner vectors are counted, not the outer `spans` and `columns` that hold them.
     ///
     /// During a push the evaluator also holds the incoming chunk, which the caller charges while
     /// the call runs; vector growth during a push is not reserved at all, and is not bounded by one
@@ -587,12 +688,27 @@ struct NodeRuntime {
 
 impl NodeRuntime {
     /// Queues a source chunk, holding the bytes it needs until it leaves.
+    ///
+    /// What this node holds is its queue and nothing else, so the queue is counted in one pass and
+    /// the reservation set from that figure: a chunk of a series can share its histogram table with
+    /// a chunk of the same series beside it, and counting the queue chunk by chunk would charge
+    /// that one table once per chunk instead of once for the allocation.
     fn enqueue(&mut self, chunk: NativeChunk) -> Result<()> {
-        let (bytes, positions) = (chunk.bytes(), chunk.positions());
-        self.buffer.hold(bytes)?;
-        self.buffer.metrics.record_input(1, positions);
+        let positions = chunk.positions();
         self.queued.push_back(chunk);
+        let bytes = self.queued_bytes();
+        self.buffer.hold_exactly(bytes)?;
+        self.buffer.metrics.record_input(1, positions);
         Ok(())
+    }
+
+    /// The bytes the chunks this node still queues hold, counted as one accounting pass.
+    fn queued_bytes(&self) -> usize {
+        let mut charged = ChargedAllocations::default();
+        self.queued
+            .iter()
+            .map(|chunk| chunk.bytes(&mut charged))
+            .fold(0usize, usize::saturating_add)
     }
 
     /// Hands over the next queued source chunk, if there is one.
@@ -600,13 +716,14 @@ impl NodeRuntime {
         let Some(chunk) = self.queued.pop_front() else {
             return Ok(None);
         };
+        let bytes = self.queued_bytes();
         let metrics = Arc::clone(&self.buffer.metrics);
         {
             // An input node's own work is handing the chunk over, so its self time covers that and
             // nothing its producer did.
             let _timer = metrics.timer();
             // The chunk leaves this node, so the pool no longer has to hold it.
-            self.buffer.shrink(chunk.bytes())?;
+            self.buffer.hold_exactly(bytes)?;
         }
         metrics.record_output(1, chunk.positions());
         // An evaluated source is already addressed on its grid, so its decided positions are grid
@@ -626,7 +743,7 @@ impl NodeRuntime {
     /// there is nothing to hand on, and the input may still decide more.
     fn map(&mut self, path: &NodePath, chunk: EvaluatedChunk) -> Result<Option<EvaluatedChunk>> {
         let (bytes, positions, closing) = (
-            evaluated_bytes(&chunk),
+            evaluated_bytes(&chunk, &mut ChargedAllocations::default()),
             chunk.series.time.len(),
             chunk.is_last,
         );
@@ -662,7 +779,11 @@ impl NodeRuntime {
 
     /// Feeds one chunk to this node's window.
     fn window(&mut self, path: &NodePath, chunk: NativeChunk) -> Result<Option<EvaluatedChunk>> {
-        let (bytes, positions, closing) = (chunk.bytes(), chunk.positions(), chunk.is_last());
+        let (bytes, positions, closing) = (
+            chunk.bytes(&mut ChargedAllocations::default()),
+            chunk.positions(),
+            chunk.is_last(),
+        );
         // The chunk is held for as long as the evaluator consumes it.
         self.buffer.hold(bytes)?;
         let metrics = Arc::clone(&self.buffer.metrics);
@@ -692,13 +813,14 @@ impl NodeRuntime {
         // The chunk has been consumed: what this node still holds is what the evaluator kept of it
         // and the label sets it has already handed out. Between pushes the charge for both is the
         // accounted size of that storage, a lower bound on what is held rather than a measurement:
-        // the evaluator's buffers by capacity and every label set handed out, leaving out the
-        // kernel's scratch, this table's map overhead with the `Arc` headers of its strings, the
-        // outer vectors of the pending batch and a sliced buffer's extra backing. During one push
-        // the evaluator additionally holds the incoming chunk, charged by `hold` above for as long
-        // as the call runs, and vector growth is not reserved and not bounded by one doubling —
-        // a bulk append can allocate more than twice the previous capacity, and several vectors can
-        // grow at once — so this figure is what the storage stands at, not a peak over the push.
+        // the evaluator's buffers by capacity -- with the payload of the histograms they retain and
+        // of the ones the row boxes -- and every label set handed out, leaving out the kernel's
+        // scratch, this table's map overhead with the `Arc` headers of its strings and the outer
+        // vectors of the pending batch. During one push the evaluator additionally holds the
+        // incoming chunk, charged by `hold` above for as long as the call runs, and vector growth
+        // is not reserved and not bounded by one doubling — a bulk append can allocate more than
+        // twice the previous capacity, and several vectors can grow at once — so this figure is
+        // what the storage stands at, not a peak over the push.
         //
         // The reason the figure must not be per-chunk: charging every chunk consumed makes the
         // reservation grow with the chunk count, so a fixed window over a long series reads as an
