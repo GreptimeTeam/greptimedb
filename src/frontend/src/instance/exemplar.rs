@@ -42,7 +42,7 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableInfo;
 
-use super::Instance;
+use crate::instance::Instance;
 
 type Labels = BTreeMap<String, String>;
 // Retain NaN payloads and signed zero as distinct observations, using their stored bits.

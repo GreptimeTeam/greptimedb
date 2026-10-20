@@ -20,10 +20,10 @@ use futures::future::{join_all, ready};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use super::PromWriteBatch;
 use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::{self, Result};
 use crate::exemplar::{ExemplarRequests, into_rows};
+use crate::http::prom_store::PromWriteBatch;
 use crate::query_handler::PromStoreProtocolHandlerRef;
 
 #[derive(Default)]

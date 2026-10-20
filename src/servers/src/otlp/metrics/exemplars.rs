@@ -19,9 +19,9 @@ use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
 use session::protocol_ctx::OtlpMetricCtx;
 use snafu::{OptionExt, ensure};
 
-use super::{legacy_normalize_otlp_name, scalar_value_string, translate_label_name};
 use crate::error::{InvalidOtlpMetricInputSnafu, Result};
 use crate::exemplar::{self as normalized, Exemplar as Observation};
+use crate::otlp::metrics::{legacy_normalize_otlp_name, scalar_value_string, translate_label_name};
 use crate::row_writer::TableData;
 
 pub(super) fn value(exemplar: &Exemplar) -> Result<f64> {

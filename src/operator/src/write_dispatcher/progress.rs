@@ -22,7 +22,9 @@ use common_meta::error::{Error, UnexpectedSnafu};
 use common_query::WriteProgress;
 use futures::future;
 
-use super::{RoutedWrite, WriteAttempt, WriteDispatcher, get_peer, write_region_id};
+use crate::write_dispatcher::{
+    RoutedWrite, WriteAttempt, WriteDispatcher, get_peer, write_region_id,
+};
 
 /// A region payload and its original-input indices, in payload row order.
 /// Ownership stays local; it is never added to the schema or sent to storage.
