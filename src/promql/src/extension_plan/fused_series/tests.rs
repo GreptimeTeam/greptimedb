@@ -32,6 +32,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::test::TestMemoryExec;
@@ -50,8 +51,8 @@ use futures::{Stream, StreamExt};
 use store_api::region_engine::RawLabelSource;
 
 use super::{
-    FusedSeriesExec, MAX_CHUNKS_PER_POLL, apply_maps, classify_output, occupied_runs,
-    series_to_record_batch,
+    ENTRY_OVERHEAD, FusedSeriesExec, LabelSets, LabelsKey, MAX_CHUNKS_PER_POLL, apply_maps,
+    classify_output, occupied_runs, runs_bytes, series_to_record_batch,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
@@ -384,6 +385,67 @@ fn collect(items: Vec<Result<RecordBatch>>) -> Vec<RecordBatch> {
         .into_iter()
         .map(|item| item.expect("the fused stream must not fail"))
         .collect()
+}
+
+/// A task context plus the memory pool it uses, so a test can read what the node charged.
+fn observed_context() -> (Arc<TaskContext>, Arc<dyn MemoryPool>) {
+    let context = Arc::new(TaskContext::default());
+    let pool = Arc::clone(context.memory_pool());
+    (context, pool)
+}
+
+/// Drains one partition's stream on `context` and returns every item the stream produced.
+async fn run_on(
+    exec: &FusedSeriesExec,
+    partition: usize,
+    context: Arc<TaskContext>,
+) -> Vec<Result<RecordBatch>> {
+    let mut stream = exec.execute(partition, context).unwrap();
+    let mut items = Vec::new();
+    while let Some(item) = stream.next().await {
+        items.push(item);
+    }
+    items
+}
+
+/// Number of label sets the plan's occupancy map tracks.
+fn tracked_label_sets(exec: &FusedSeriesExec) -> usize {
+    exec.labels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .seen
+        .len()
+}
+
+/// Bytes the plan's occupancy map keeps charged on its memory pool.
+fn charged_bytes(exec: &FusedSeriesExec) -> usize {
+    exec.labels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reservation
+        .as_ref()
+        .map(|reservation| reservation.size())
+        .unwrap_or(0)
+}
+
+/// One `Float64` value column, one `Utf8` column per `(tag, nullable)` pair, then the timestamp.
+fn tag_output_schema(tags: &[(&str, bool)]) -> SchemaRef {
+    let mut columns = vec![Field::new(VALUE, DataType::Float64, true)];
+    columns.extend(
+        tags.iter()
+            .map(|(name, nullable)| Field::new(*name, DataType::Utf8, *nullable)),
+    );
+    columns.push(Field::new(
+        TIME,
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+        false,
+    ));
+    Arc::new(Schema::new(columns))
+}
+
+/// A metric with no labels at all, so every ordinary tag is absent.
+fn untagged_metric(name: &str) -> MetricName {
+    MetricName::try_new(Some(Arc::from(name)), vec![]).unwrap()
 }
 
 fn float_column(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
@@ -1635,6 +1697,311 @@ async fn a_poll_consumes_at_most_the_chunk_budget() {
         (consumed as u32) < SERIES,
         "consumed {consumed} of {SERIES} chunks, the whole input was drained"
     );
+}
+
+/// An absent tag must never write a NULL into a non-nullable column: the classifier accepts that
+/// column shape by promising the empty label value Prometheus reads for a missing label, while a
+/// nullable column keeps reporting the absence as a NULL.
+#[tokio::test]
+async fn an_absent_tag_is_the_empty_value_only_in_a_non_nullable_column() {
+    let rows = counter_rows(60.0);
+    let window = RangeWindow {
+        range_ms: 300_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    // `rate` drops `__name__`, and the untagged metric has no ordinary label either.
+    let tagged = named_chunk("a_total", 1, "x", &rows, true);
+    let untagged = chunk_with(1, untagged_metric("a_total"), &rows, true);
+    let cases = [
+        ("__name__", false, &tagged, Some("")),
+        ("__name__", true, &tagged, None),
+        ("host", false, &untagged, Some("")),
+        ("host", true, &untagged, None),
+    ];
+    for (tag, nullable, raw, expected) in cases {
+        let context = format!("tag {tag}, nullable {nullable}");
+        let case = Case::new(&[tag], window, RangeFunction::Rate, vec![])
+            .with_output_schema(tag_output_schema(&[(tag, nullable)]));
+        let chunks = vec![raw.clone()];
+        let reference = case.reference(&chunks);
+        assert_eq!(
+            reference[0].0.metric.get(tag),
+            None,
+            "{context}: the evaluated series must not carry the tag"
+        );
+        let batches = collect(run(case.fused(memory_child(&chunks)).unwrap()).await);
+        assert!(!batches.is_empty(), "{context}: expected a batch");
+        assert_matches_reference(&batches, &reference, &context);
+        let expected = vec![expected.map(str::to_string); batches[0].num_rows()];
+        assert_eq!(string_column(&batches[0], tag), expected, "{context}");
+    }
+}
+
+/// A later partition must still see what an earlier one emitted, even though no stream was alive in
+/// between, and a collision must not disturb the map or its charge.
+#[tokio::test]
+async fn a_later_partition_still_collides_with_an_earlier_one() {
+    // `rate` drops `__name__`, so both raw series reach `{host="x"}` and both cover every grid
+    // point. Checking only while a stream is alive would miss this.
+    let rows = counter_rows(60.0);
+    let a = vec![named_chunk("a_total", 1, "x", &rows, true)];
+    let b = vec![named_chunk("b_total", 2, "x", &rows, true)];
+    let case = Case::new(
+        &["host"],
+        RangeWindow {
+            range_ms: 300_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+        vec![],
+    );
+    let exec = case.fused(partitioned_child(&[&a, &b])).unwrap();
+    assert_eq!(
+        exec.properties().output_partitioning().partition_count(),
+        2,
+        "this test needs two partitions to place one series in each"
+    );
+    let (context, pool) = observed_context();
+
+    let first = run_on(&exec, 0, Arc::clone(&context)).await;
+    assert!(!first.is_empty(), "{first:?}");
+    assert!(first.iter().all(Result::is_ok), "{first:?}");
+    // No stream is alive now, yet the plan keeps both the collision record and its charge.
+    let charged = charged_bytes(&exec);
+    assert!(charged > 0, "the occupancy map must stay charged");
+    assert_eq!(pool.reserved(), charged);
+    assert_eq!(tracked_label_sets(&exec), 1);
+
+    let second = run_on(&exec, 1, Arc::clone(&context)).await;
+    assert_eq!(
+        second.len(),
+        1,
+        "the collision must surface once: {second:?}"
+    );
+    let error = second
+        .into_iter()
+        .next()
+        .unwrap()
+        .expect_err("the same final labels at the same grid points must collide");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "{message}"
+    );
+    assert!(message.contains("host=\"x\""), "{message}");
+    // A collision is not a claim: the map and the charge stay as they were.
+    assert_eq!(tracked_label_sets(&exec), 1);
+    assert_eq!(charged_bytes(&exec), charged);
+    assert_eq!(pool.reserved(), charged);
+}
+
+/// Sequential partitions of one final label set with disjoint grid points are legal, and each claim
+/// grows the charge the plan keeps.
+#[tokio::test]
+async fn sequential_partitions_grow_the_shared_charge_until_the_owner_is_dropped() {
+    // Same final labels after `rate` drops `__name__`, but disjoint grid points, so both are
+    // emitted and the second one extends the first one's run storage.
+    let a = vec![named_chunk(
+        "a_total",
+        1,
+        "x",
+        &[(60_000, Some(60.0)), (120_000, Some(120.0))],
+        true,
+    )];
+    let b = vec![named_chunk(
+        "b_total",
+        2,
+        "x",
+        &[(420_000, Some(420.0)), (480_000, Some(480.0))],
+        true,
+    )];
+    let case = Case::new(
+        &["host"],
+        RangeWindow {
+            range_ms: 300_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+        vec![],
+    );
+    let exec = case.fused(partitioned_child(&[&a, &b])).unwrap();
+    let (context, pool) = observed_context();
+
+    let first = run_on(&exec, 0, Arc::clone(&context)).await;
+    assert!(first.iter().all(Result::is_ok), "{first:?}");
+    let after_first = charged_bytes(&exec);
+    assert!(after_first > 0, "the first partition must be charged");
+
+    let second = run_on(&exec, 1, Arc::clone(&context)).await;
+    assert!(second.iter().all(Result::is_ok), "{second:?}");
+    let after_second = charged_bytes(&exec);
+    assert_eq!(
+        tracked_label_sets(&exec),
+        1,
+        "both partitions reach one final label set"
+    );
+    assert!(
+        after_second > after_first,
+        "the second partition must grow the charge: {after_first} -> {after_second}"
+    );
+    assert_eq!(pool.reserved(), after_second);
+
+    drop(exec);
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the last owner of the map must release the charge"
+    );
+}
+
+/// A claim charges the key buffer, an estimated container slot and the run vector's capacity. A
+/// merge charges both vectors while they coexist and gives the replaced one back, so the charge
+/// follows the merged capacity rather than the peak.
+#[test]
+fn repeated_claims_charge_run_capacity_until_the_owner_is_dropped() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let metric = metric("a");
+    let key_bytes = LabelsKey::new(&metric).capacity();
+    let mut sets = LabelSets::default();
+    sets.attach(&pool);
+    assert_eq!(pool.reserved(), 0, "attaching alone reserves nothing");
+
+    let first = vec![(0usize, 2usize)];
+    let first_capacity = first.capacity();
+    sets.claim(LabelsKey::new(&metric), first, &metric).unwrap();
+    assert_eq!(
+        pool.reserved(),
+        key_bytes + ENTRY_OVERHEAD + runs_bytes(first_capacity),
+        "a new label set is charged for its key, its slot and its runs"
+    );
+
+    sets.claim(LabelsKey::new(&metric), vec![(5usize, 7usize)], &metric)
+        .unwrap();
+    assert_eq!(
+        pool.reserved(),
+        key_bytes + ENTRY_OVERHEAD + runs_bytes(2),
+        "the merged two-run vector is charged while the one-run vector is still live, and that \
+         one-run vector is given back when it is replaced"
+    );
+
+    sets.claim(LabelsKey::new(&metric), vec![(9usize, 10usize)], &metric)
+        .unwrap();
+    assert_eq!(
+        pool.reserved(),
+        key_bytes + ENTRY_OVERHEAD + runs_bytes(3),
+        "the replaced vector's capacity is given back, so the charge follows the three-run merge"
+    );
+    assert_eq!(sets.seen.len(), 1, "three chunks, one label set");
+    assert_eq!(
+        sets.seen.values().next().unwrap(),
+        &vec![(0, 2), (5, 7), (9, 10)]
+    );
+    assert_eq!(
+        sets.reservation.as_ref().unwrap().size(),
+        pool.reserved(),
+        "the pool and the owner agree"
+    );
+
+    drop(sets);
+    assert_eq!(pool.reserved(), 0, "the last owner releases the charge");
+}
+
+/// A pool that refuses the growth must leave both the occupancy state and the charge untouched, so
+/// the same claim can succeed once memory is free again.
+#[test]
+fn a_refused_merge_leaves_the_label_set_and_the_charge_unchanged() {
+    let metric = metric("a");
+    let key_bytes = LabelsKey::new(&metric).capacity();
+    let limit = key_bytes + ENTRY_OVERHEAD + runs_bytes(1);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(limit));
+    let mut sets = LabelSets::default();
+    sets.attach(&pool);
+    sets.claim(LabelsKey::new(&metric), vec![(0usize, 2usize)], &metric)
+        .unwrap();
+    assert_eq!(pool.reserved(), limit, "the first claim fills the pool");
+
+    let error = sets
+        .claim(LabelsKey::new(&metric), vec![(5usize, 7usize)], &metric)
+        .expect_err("the merged vector cannot be charged from a full pool");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(
+        sets.seen.values().next().unwrap(),
+        &vec![(0usize, 2usize)],
+        "the refused claim must not touch the stored runs"
+    );
+    assert_eq!(pool.reserved(), limit, "the refused claim must not charge");
+    assert_eq!(sets.reservation.as_ref().unwrap().size(), limit);
+}
+
+/// The default `reset_state` rebuilds the node through `with_new_children`, and `try_new` gives the
+/// rebuilt plan its own owner: re-running the same labels must succeed, and the old owner must stay
+/// untouched.
+#[tokio::test]
+async fn reset_state_returns_a_plan_with_its_own_owner() {
+    let chunks = vec![chunk(1, "a", &counter_rows(60.0), true)];
+    let case = Case::new(
+        &["host"],
+        RangeWindow {
+            range_ms: 300_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::Rate,
+        vec![],
+    );
+    let exec = Arc::new(case.fused(memory_child(&chunks)).unwrap());
+    let (context, pool) = observed_context();
+    let plan = Arc::clone(&exec) as Arc<dyn ExecutionPlan>;
+    let first = datafusion::physical_plan::collect(plan, Arc::clone(&context))
+        .await
+        .expect("the first execution must emit its labels");
+    let charged = charged_bytes(&exec);
+    assert!(charged > 0, "the first execution must be charged");
+    assert_eq!(pool.reserved(), charged);
+    assert_eq!(tracked_label_sets(&exec), 1);
+
+    let reset = Arc::clone(&exec)
+        .reset_state()
+        .expect("the default reset_state rebuilds the node");
+    let reset_exec = reset.downcast_ref::<FusedSeriesExec>().unwrap();
+    assert!(
+        !Arc::ptr_eq(&exec.labels, &reset_exec.labels),
+        "the rebuilt plan must not share the old owner"
+    );
+    assert_eq!(
+        tracked_label_sets(reset_exec),
+        0,
+        "the rebuilt plan starts with an empty map"
+    );
+
+    let second = datafusion::physical_plan::collect(Arc::clone(&reset), Arc::clone(&context))
+        .await
+        .expect("a reset plan must emit the identical labels again");
+    assert_eq!(second.len(), first.len(), "same batches as the first run");
+    assert_eq!(
+        second.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        first.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        "same rows as the first run"
+    );
+    // The old owner was never mutated, and both owners are charged on the same pool.
+    assert_eq!(tracked_label_sets(&exec), 1);
+    assert_eq!(charged_bytes(&exec), charged);
+    assert_eq!(pool.reserved(), charged + charged_bytes(reset_exec));
+
+    drop(reset);
+    assert_eq!(
+        pool.reserved(),
+        charged,
+        "dropping the rebuilt plan releases only its own charge"
+    );
+    drop(exec);
+    assert_eq!(pool.reserved(), 0);
 }
 
 /// Emits prepared raw frame batches and reports how often it ran and when its stream was dropped.

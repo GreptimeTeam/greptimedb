@@ -23,9 +23,10 @@
 //! Phase 1 scope: the child produces raw frames of one partition with explicit labels and is not
 //! interleaved, and the output schema must classify into exactly one timestamp column, one
 //! `Float64` column per series field, and one `Utf8` column per declared tag. Anything outside
-//! this scope is rejected at construction instead of silently falling back. The field and tag
-//! columns must be declared nullable: a grid point inside the trimmed interval can be missing, and
-//! the range functions and the map kernels drop `__name__`.
+//! this scope is rejected at construction instead of silently falling back. Field columns must be
+//! declared nullable, because a grid point inside the trimmed interval can be missing; a tag column
+//! may be nullable or not, and the range functions and the map kernels drop `__name__`, so either
+//! kind reports an absent label, as a NULL or as the empty label value Prometheus reads.
 //!
 //! This node computes floats only, and admitting raw samples is the caller's responsibility:
 //! validating the declared frame schema cannot prove that the samples are float, so a histogram
@@ -40,10 +41,12 @@
 //! Prometheus merges them into one output series. This node emits such series as separate batches
 //! and defers that merge to matrix assembly, so no sample is dropped.
 //!
-//! Memory: the only state retained across polls that grows with the output is the per-stream
-//! label-set occupancy map, and its bytes are reserved on the task's memory pool. The range-window
-//! samples [`RangeEvaluator`] retains across chunks and the batches already handed downstream are
-//! deliberately not reserved here.
+//! Memory: the only state this node keeps that grows with the output is the label-set occupancy
+//! map. That map belongs to the plan rather than to one stream, so a later partition still collides
+//! with a series an earlier one already emitted; the reservation that pays for it is plan state too,
+//! attached to the memory pool of the first execution and released only when the plan is dropped.
+//! The range-window samples [`RangeEvaluator`] retains across chunks and the batches already handed
+//! downstream are deliberately not reserved here.
 //!
 //! The child's `is_last` is the only completion signal. This node neither recomputes finality
 //! across inputs nor emits a series it has not seen finalized, so a child that merges regions must
@@ -68,7 +71,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -177,9 +180,11 @@ impl FusedSeriesExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
-        // Shared by every partition's stream. Creating it needs no memory pool; each stream
-        // accounts its own additions in its own reservation.
-        let labels: SharedLabelSets = Arc::new(Mutex::new(HashMap::new()));
+        // Shared by every partition's stream, and retained after those streams end, so a partition
+        // executed later still collides with a label set an earlier one emitted. Construction has no
+        // `TaskContext` and therefore no memory pool; the owner's reservation is attached in
+        // `execute`, from the pool of the first execution.
+        let labels: SharedLabelSets = Arc::new(Mutex::new(LabelSets::default()));
         Ok(Self {
             input,
             series_schema,
@@ -286,6 +291,13 @@ impl ExecutionPlan for FusedSeriesExec {
             )));
         }
         let memory_pool = Arc::clone(&context.runtime_env().memory_pool);
+        // The occupancy map is plan state, so the reservation that pays for it is attached exactly
+        // once, to the pool of the first execution. Re-registering per stream would move a charge
+        // the other partitions keep growing and would free it when this stream ends.
+        self.labels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attach(&memory_pool);
         let frame = self.input.execute(partition, context)?;
         let input = unpack_raw_series(
             frame,
@@ -315,7 +327,6 @@ impl ExecutionPlan for FusedSeriesExec {
             // Shared with every other partition's stream: a duplicate label set is a property of
             // the whole output, not of one partition.
             labels: Arc::clone(&self.labels),
-            reservation: MemoryConsumer::new("FusedSeriesStream").register(&memory_pool),
             finished: false,
         }))
     }
@@ -533,6 +544,14 @@ fn series_to_record_batch(
                     ))
                 })?;
                 let value = series.metric.get(name);
+                // A nullable column reports an absent label as a NULL; a non-nullable one, which is
+                // what the PromQL plan declares, carries the empty label value Prometheus reads for
+                // a label the series does not have. A non-nullable column must never hold a NULL.
+                let value = match (value, output_schema.field(position).is_nullable()) {
+                    (Some(value), _) => Some(value),
+                    (None, true) => None,
+                    (None, false) => Some(""),
+                };
                 columns.push(Arc::new(StringArray::from(vec![value; rows])));
             }
         }
@@ -707,9 +726,12 @@ impl LabelsKey {
         Self(bytes)
     }
 
-    /// Number of bytes this key occupies, for the memory reservation.
-    fn len(&self) -> usize {
-        self.0.len()
+    /// Bytes this key's buffer occupies, for the memory reservation.
+    ///
+    /// The buffer is what the map entry actually keeps, so its capacity is charged rather than the
+    /// encoded length.
+    fn capacity(&self) -> usize {
+        self.0.capacity()
     }
 }
 
@@ -835,40 +857,38 @@ fn merge_runs(stored: &mut Vec<(usize, usize)>, new: &[(usize, usize)]) {
     *stored = merged;
 }
 
-/// Turns raw series chunks into one output batch per evaluated chunk.
-/// The grid positions each final label set already occupies, as merged, sorted runs.
+/// The label-set occupancy state of the whole output, plus the reservation that pays for it.
 ///
-/// Shared by every partition's stream, because a label-set collision is a property of the whole
-/// output vector and not of one partition. `PerSeries` distribution keeps each series whole inside
-/// one partition, but two series that carry the same labels after the range function and its maps
-/// drop a label can still land in different partitions. Checking only within a partition would
-/// miss exactly those collisions.
-type SharedLabelSets = Arc<Mutex<HashMap<LabelsKey, Vec<(usize, usize)>>>>;
-
-struct FusedSeriesStream {
-    input: SendableRawSeriesStream,
-    /// `None` once the stream is finished; `finish(self)` consumes the evaluator.
-    evaluator: Option<RangeEvaluator>,
-    maps: Vec<MathOp>,
-    tags: Arc<[String]>,
-    output_schema: SchemaRef,
-    classification: Arc<[OutputColumn]>,
-    /// Shared with the other partitions' streams; this stream holds one reference.
-    labels: SharedLabelSets,
-    /// Accounts for what this stream adds to `labels`; freed when the stream ends.
-    reservation: MemoryReservation,
-    finished: bool,
+/// This belongs to the plan, not to a stream. `PerSeries` distribution keeps each series whole
+/// inside one partition, but two series that carry the same labels after the range function and
+/// its maps drop a label can still land in different partitions, and partitions may run one after
+/// another with no stream alive in between. Keeping the map and its charge here is what makes a
+/// later partition collide with an earlier one and keeps the bytes it grew charged; the reservation
+/// is released only when the last reference to this owner goes away.
+///
+/// Bytes charged per claimed label set: the key's own buffer, an estimated container slot
+/// ([`ENTRY_OVERHEAD`]), and the capacity of the run vector. While a merge replaces a run vector the
+/// old and the new allocation coexist, so the merged capacity is charged before the merge and the
+/// released allocation is given back afterwards.
+#[derive(Default)]
+struct LabelSets {
+    /// The grid positions each final label set already occupies, as merged, sorted runs.
+    seen: HashMap<LabelsKey, Vec<(usize, usize)>>,
+    /// What `seen` keeps charged on the task's memory pool. `None` until the first execution, since
+    /// construction has no `TaskContext` and therefore no pool to register against.
+    reservation: Option<MemoryReservation>,
 }
 
-impl FusedSeriesStream {
-    /// Marks the stream terminal and gives everything it still retained back to the pool.
-    fn abort(&mut self) {
-        self.finished = true;
-        self.evaluator = None;
-        // The label-set map is shared, so one partition finishing early must not clear entries
-        // another partition is still checking against. Its own reservation is what this stream
-        // owns, and that is what it gives back.
-        self.reservation.free();
+impl LabelSets {
+    /// Attaches the reservation to the pool of the first execution.
+    ///
+    /// Later executions keep the first reservation: it already pays for what `seen` holds, and
+    /// moving it to another pool would drop the bytes other partitions are still growing.
+    fn attach(&mut self, pool: &Arc<dyn MemoryPool>) {
+        if self.reservation.is_none() {
+            self.reservation =
+                Some(MemoryConsumer::new("FusedSeriesExec label sets").register(pool));
+        }
     }
 
     /// Claims the occupied grid positions of one evaluated chunk for its final label set.
@@ -877,34 +897,102 @@ impl FusedSeriesStream {
     /// timestamp, which is Prometheus' range-query rule. Series with disjoint points are legal:
     /// Prometheus merges them into one output series, while this node emits them as separate
     /// batches and defers that merge to matrix assembly, so every sample survives.
-    fn claim_label_set(&mut self, series: &Series) -> Result<()> {
-        let runs = occupied_runs(series)?;
-        let key = LabelsKey::new(&series.metric);
-        let mut seen = self.labels.lock().unwrap_or_else(|e| e.into_inner());
+    ///
+    /// The bytes a claim keeps are reserved before the map changes, so a pool that refuses the
+    /// growth leaves both the occupancy state and the charge untouched.
+    fn claim(
+        &mut self,
+        key: LabelsKey,
+        runs: Vec<(usize, usize)>,
+        metric: &MetricName,
+    ) -> Result<()> {
+        let Self { seen, reservation } = self;
+        let Some(reservation) = reservation.as_ref() else {
+            return Err(DataFusionError::Execution(
+                "FusedSeriesExec label-set state is not attached to a memory pool".into(),
+            ));
+        };
         match seen.entry(key) {
             Entry::Occupied(mut entry) => {
                 let stored = entry.get_mut();
                 if runs_overlap(stored, &runs) {
                     return Err(DataFusionError::Execution(format!(
                         "vector cannot contain metrics with the same labelset: {}",
-                        render_labels(&series.metric)
+                        render_labels(metric)
                     )));
                 }
+                // `merge_runs` allocates the merged vector while the old one is still live, so the
+                // peak is both allocations at once. It then replaces the old vector, whose bytes are
+                // released and given back below. The old bytes were part of this reservation, so the
+                // release can never exceed it.
+                let peak = runs_bytes(stored.len() + runs.len());
+                let released = runs_bytes(stored.capacity());
+                reservation.try_grow(peak)?;
                 merge_runs(stored, &runs);
+                reservation.shrink(released);
             }
             Entry::Vacant(entry) => {
-                // Only the label-set state is this node's own cross-poll state that grows with
-                // the output, so it is the only thing reserved here.
-                let bytes = entry.key().len() + runs.len() * 2 * size_of::<usize>();
-                self.reservation.try_grow(bytes)?;
+                let bytes = entry.key().capacity() + ENTRY_OVERHEAD + runs_bytes(runs.capacity());
+                reservation.try_grow(bytes)?;
                 entry.insert(runs);
             }
         }
         Ok(())
     }
+}
+
+/// Bytes one occupancy entry keeps besides its key buffer and its run vector.
+///
+/// A hashbrown bucket holds the `(LabelsKey, Vec<(usize, usize)>)` pair itself, and hashbrown keeps
+/// one control byte per bucket. The table also grows by rehashing into a fresh allocation while the
+/// old buckets are still live, and keeps its buckets below full, neither of which this per-entry
+/// estimate models: it is a documented approximation of the container, not an allocator trace.
+const ENTRY_OVERHEAD: usize = size_of::<(LabelsKey, Vec<(usize, usize)>)>() + size_of::<u8>();
+
+/// Bytes one run vector of `capacity` runs occupies.
+fn runs_bytes(capacity: usize) -> usize {
+    capacity * size_of::<(usize, usize)>()
+}
+
+type SharedLabelSets = Arc<Mutex<LabelSets>>;
+
+/// Turns raw series chunks into one output batch per evaluated chunk.
+struct FusedSeriesStream {
+    input: SendableRawSeriesStream,
+    /// `None` once the stream is finished; `finish(self)` consumes the evaluator.
+    evaluator: Option<RangeEvaluator>,
+    maps: Vec<MathOp>,
+    tags: Arc<[String]>,
+    output_schema: SchemaRef,
+    classification: Arc<[OutputColumn]>,
+    /// Shared with the other partitions' streams and with the plan, which owns its charge; this
+    /// stream holds one reference.
+    labels: SharedLabelSets,
+    finished: bool,
+}
+
+impl FusedSeriesStream {
+    /// Marks the stream terminal and gives up the evaluator it still held.
+    fn abort(&mut self) {
+        self.finished = true;
+        self.evaluator = None;
+        // The label-set map and its charge belong to the plan: they must outlive this stream so a
+        // partition executed later still collides with what this one emitted, and so the bytes it
+        // grew stay charged. Ending one stream therefore frees neither the map nor its reservation.
+    }
+
+    /// Claims the occupied grid positions of one evaluated chunk for its final label set.
+    fn claim_label_set(&self, series: &Series) -> Result<()> {
+        let runs = occupied_runs(series)?;
+        let key = LabelsKey::new(&series.metric);
+        self.labels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .claim(key, runs, &series.metric)
+    }
 
     /// Registers the label set of one evaluated chunk and converts it into one output batch.
-    fn emit(&mut self, series: &Series) -> Result<RecordBatch> {
+    fn emit(&self, series: &Series) -> Result<RecordBatch> {
         self.claim_label_set(series)?;
         series_to_record_batch(
             &self.classification,
