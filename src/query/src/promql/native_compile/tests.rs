@@ -18,8 +18,9 @@ use std::time::{Duration, UNIX_EPOCH};
 use datafusion::error::DataFusionError;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
+use promql::map::MathOp;
 use promql::native::plan::{
-    BoundInstant, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundInstant, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
 use promql_parser::parser::{EvalStmt, Expr as PromExpr, NumberLiteral};
@@ -82,6 +83,18 @@ fn with_call_arguments(query: &str, edit: impl FnOnce(&mut Vec<Box<PromExpr>>)) 
     stmt
 }
 
+/// The range selector out of `rate(x[5m])`.
+///
+/// The parser type-checks function arguments, so a range selector can only be handed to a function
+/// that does not take one by editing a tree the parser accepted.
+fn a_matrix_selector() -> Box<PromExpr> {
+    let mut stmt = eval_stmt("rate(x[5m])");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("`rate(x[5m])` parses to a call");
+    };
+    call.args.args.remove(0)
+}
+
 /// The window at the root of `tree`, for the range-function shape.
 fn root_window(tree: &NativeTree) -> (&NativeNode, &BoundWindow) {
     let NativeExpr::Window { input, op } = &tree.root().expr else {
@@ -99,6 +112,32 @@ fn root_instant(tree: &NativeTree) -> (&NativeNode, &BoundInstant) {
         );
     };
     (input, op)
+}
+
+/// The input and the operation of a `Map` node.
+fn map_parts(node: &NativeNode) -> (&NativeNode, &BoundMap) {
+    let NativeExpr::Map { input, op } = &node.expr else {
+        panic!("the node is not a map: {:?}", node.expr);
+    };
+    (input, op)
+}
+
+/// The one operation a `Map` node applies.
+fn map_op(node: &NativeNode) -> MathOp {
+    let (_, op) = map_parts(node);
+    let [only] = &op.ops[..] else {
+        panic!("the map holds {} operation(s)", op.ops.len());
+    };
+    *only
+}
+
+/// The schema a node's evaluated output carries.
+fn evaluated(node: &NativeNode) -> &Arc<SeriesSchema> {
+    let Some(schema) = node.output.samples() else {
+        panic!("the node does not produce samples: {:?}", node.output);
+    };
+    assert!(schema.eval_grid.is_some(), "the node is not evaluated");
+    schema
 }
 
 /// `rate(x[5m])` becomes a window over the raw input, on the statement's grid.
@@ -277,27 +316,29 @@ fn a_parenthesised_selector_binds_as_written() {
     }
 }
 
-/// A parameter the planner folds to a literal is still refused, and that gap is deliberate: the
-/// kernel's constant is a field of the tree, so binding `1 - 0.1` means folding it here rather than
-/// carrying an expression. A refusal is the agreed behaviour for this stage; an answer computed
-/// from the wrong number would not be.
+/// A parameter written as an expression binds the number it folds to, because the kernel's constant
+/// is a field of the tree: `1 - 0.1` is the quantile `0.9` written two ways, and carrying the
+/// expression would bind nothing at all. The value is asserted exactly, so a fold that produced a
+/// neighbouring number rather than the arithmetic's own result would fail here.
 #[test]
-fn a_parameter_folded_from_an_expression_is_refused() {
-    for query in [
-        "quantile_over_time(1 - 0.1, x[5m])",
-        "quantile_over_time(-(0.9), x[5m])",
-    ] {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .expect_err(&format!("`{query}` compiled, and it should not have"));
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "`{query}` did not report NotImplemented: {error}"
+fn a_parameter_folded_from_an_expression_binds_its_value() {
+    // `1 - 0.1` is `0.9` bit for bit in IEEE754, and `-(0.9)` is the negative of the same number:
+    // negation is exact, and the fold does not decide whether a quantile is inside `[0, 1]`.
+    let cases = [
+        ("quantile_over_time(1 - 0.1, x[5m])", 0.9),
+        ("quantile_over_time(-(0.9), x[5m])", -0.9),
+    ];
+
+    for (query, quantile) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = root_window(&tree);
+        assert_eq!(
+            op.function,
+            RangeFunction::QuantileOverTime(quantile),
+            "`{query}` did not bind the quantile it folds to"
         );
-        let message = error.to_string();
-        assert!(
-            message.contains("number literal"),
-            "`{query}` did not say what the argument has to be: {message}"
-        );
+        assert_eq!(op.window.range_ms, 300_000, "`{query}` lost its window");
     }
 }
 
@@ -368,6 +409,15 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
             }),
             "rate",
             "where it takes 1",
+        ),
+        // A math function's constants are counted the same way: `clamp` reads two of them after its
+        // vector, so one is one too few.
+        (
+            with_call_arguments("clamp(x, 0, 1)", |args| {
+                args.pop();
+            }),
+            "clamp",
+            "where it takes its vector and two constants",
         ),
     ];
 
@@ -725,11 +775,11 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
         // A function with no kernel, whether or not it takes a constant argument.
         (
             "predict_linear(x[5m], 300)",
-            "a call to `predict_linear`, which has no native range kernel",
+            "a call to `predict_linear`, which has no native kernel",
         ),
         (
             "absent(x)",
-            "a call to `absent`, which has no native range kernel",
+            "a call to `absent`, which has no native kernel",
         ),
     ];
 
@@ -797,6 +847,245 @@ fn parentheses_around_the_accepted_shape_are_transparent() {
             tree.to_string(),
             bare.to_string(),
             "`{query}` did not compile to the tree `rate(x[5m])` does"
+        );
+    }
+}
+/// A math function compiles by compiling the expression it is applied to, so its node sits over the
+/// node that expression produces: `abs(rate(x[5m]))` is a map over the window `rate(x[5m])` is, not
+/// a fourth shape the compiler knows by name. The same rule reads `abs(x)` over an instant
+/// selection, which is why the two are asserted together: nothing below the map is specific to it.
+#[test]
+fn a_math_function_maps_over_the_node_its_argument_compiles_to() {
+    let tree = compile(
+        &eval_stmt("abs(rate(x[5m]))"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`abs(rate(x[5m]))` was refused: {error}"));
+
+    assert!(
+        matches!(map_op(tree.root()), MathOp::Abs),
+        "the root is not an abs: {:?}",
+        map_parts(tree.root()).1.ops
+    );
+    let (window, _) = map_parts(tree.root());
+    let NativeExpr::Window { input, op } = &window.expr else {
+        panic!("the map's input is not a window: {:?}", window.expr);
+    };
+    assert_eq!(op.function, RangeFunction::Rate);
+    assert_eq!(op.window.range_ms, 300_000);
+    let NativeExpr::Input(bound) = &input.expr else {
+        panic!("the window's input is not an input: {:?}", input.expr);
+    };
+    assert!(
+        matches!(&bound.output, NativeType::Samples(schema) if schema.eval_grid.is_none()),
+        "the window's input is not raw samples: {:?}",
+        bound.output
+    );
+    assert_eq!(bound.ordering, SeriesOrdering::KeyThenTime);
+
+    // The same rule over the other selection shape: a map over an instant selection.
+    let tree = compile(
+        &eval_stmt("abs(x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`abs(x)` was refused: {error}"));
+    assert!(matches!(map_op(tree.root()), MathOp::Abs));
+    let (instant, _) = map_parts(tree.root());
+    assert!(
+        matches!(instant.expr, NativeExpr::Instant { .. }),
+        "`abs(x)`'s map is not over an instant selection: {:?}",
+        instant.expr
+    );
+}
+
+/// Nested math functions are two maps over one window, and every map reports that window's layout.
+///
+/// The maps are separate nodes because the arguments nest, not because the compiler knows
+/// `clamp_min(abs(...))`: a compiler that bound the pair to one node would fail the tree assertions
+/// here. The grids are compared by allocation identity, since a pointwise function moves no value to
+/// another grid point and has no reason to allocate a second grid that merely agrees.
+#[test]
+fn nested_math_functions_are_two_maps_over_one_window() {
+    let tree = compile(
+        &eval_stmt("clamp_min(abs(rate(x[5m])), 0)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`clamp_min(abs(rate(x[5m])), 0)` was refused: {error}"));
+
+    let MathOp::ClampMin { min } = map_op(tree.root()) else {
+        panic!(
+            "the root is not a clamp_min: {:?}",
+            map_parts(tree.root()).1.ops
+        );
+    };
+    assert_eq!(
+        min, 0.0,
+        "the clamp bound is not the number the query wrote"
+    );
+
+    let (inner, _) = map_parts(tree.root());
+    assert!(
+        matches!(map_op(inner), MathOp::Abs),
+        "the inner node is not an abs: {:?}",
+        map_parts(inner).1.ops
+    );
+    let (window, op) = map_parts(inner);
+    let NativeExpr::Window { op: bound, .. } = &window.expr else {
+        panic!("the inner map's input is not a window: {:?}", window.expr);
+    };
+    assert_eq!(bound.function, RangeFunction::Rate);
+    assert_eq!(op.ops.len(), 1, "a map applies one operation");
+
+    let window_schema = evaluated(window);
+    let window_grid = window_schema
+        .eval_grid
+        .as_ref()
+        .expect("the window is evaluated");
+    for (what, node) in [("the clamp_min", tree.root()), ("the abs", inner)] {
+        let schema = evaluated(node);
+        assert!(
+            Arc::ptr_eq(
+                schema.eval_grid.as_ref().expect("the map is evaluated"),
+                window_grid
+            ),
+            "`{what}` reports a grid the window does not"
+        );
+        assert!(
+            Arc::ptr_eq(&schema.fields, &window_schema.fields),
+            "`{what}` reports fields the window does not"
+        );
+    }
+}
+
+/// Every listed math name binds its own kernel, with the constants the call wrote. The display names
+/// the operation and its constants, so a name that fell through to a neighbour's variant — or a
+/// parameter that was bound from the wrong argument — shows up in a line someone would read.
+#[test]
+fn the_supported_math_functions_map_to_their_kernels() {
+    let cases = [
+        ("abs(x)", "abs"),
+        ("ceil(x)", "ceil"),
+        ("floor(x)", "floor"),
+        ("sqrt(x)", "sqrt"),
+        ("exp(x)", "exp"),
+        ("ln(x)", "ln"),
+        ("log2(x)", "log2"),
+        ("log10(x)", "log10"),
+        ("sin(x)", "sin"),
+        ("cos(x)", "cos"),
+        ("tan(x)", "tan"),
+        ("asin(x)", "asin"),
+        ("acos(x)", "acos"),
+        ("atan(x)", "atan"),
+        ("sinh(x)", "sinh"),
+        ("cosh(x)", "cosh"),
+        ("tanh(x)", "tanh"),
+        ("asinh(x)", "asinh"),
+        ("acosh(x)", "acosh"),
+        ("atanh(x)", "atanh"),
+        ("deg(x)", "deg"),
+        ("rad(x)", "rad"),
+        ("sgn(x)", "sgn"),
+        // The three shapes that carry constants, including the default `round` binds one for.
+        ("round(x)", "round 1"),
+        ("round(x, 0.5)", "round 0.5"),
+        ("clamp(x, 0, 1)", "clamp 0 1"),
+        ("clamp_min(x, 0)", "clamp_min 0"),
+        ("clamp_max(x, 1)", "clamp_max 1"),
+    ];
+
+    for (query, op) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let display = tree.to_string();
+        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        assert_eq!(
+            root,
+            format!("  root Map {op}"),
+            "`{query}` bound the wrong kernel"
+        );
+    }
+}
+
+/// The constants a function folds are folded by the kernel's own arithmetic, not by a second copy of
+/// it: `%` keeps the sign of its left operand and `^` is a power. A fold that used a Euclidean modulo
+/// or treated `^` as multiplication would bind a different number and fail here, which is the point:
+/// the compiler must not disagree with the kernel about what an operator means.
+#[test]
+fn the_constant_fold_is_the_kernels_arithmetic() {
+    // Go's `math.Mod` gives -1 for `-7 % 3`; a Euclidean modulo would give 2.
+    let tree = compile(
+        &eval_stmt("clamp_min(x, (-7) % 3)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`clamp_min(x, (-7) % 3)` was refused: {error}"));
+    let MathOp::ClampMin { min } = map_op(tree.root()) else {
+        panic!(
+            "the root is not a clamp_min: {:?}",
+            map_parts(tree.root()).1.ops
+        );
+    };
+    assert_eq!(min, -1.0, "`-7 % 3` did not fold with `math.Mod`'s sign");
+
+    // `2 ^ 10` is 1024 as a power; as multiplication it would be 20, and it is neither a comparison
+    // nor a set operator, which fold nothing at all.
+    let tree = compile(
+        &eval_stmt("round(x, 2 ^ 10)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`round(x, 2 ^ 10)` was refused: {error}"));
+    let MathOp::Round { nearest } = map_op(tree.root()) else {
+        panic!(
+            "the root is not a round: {:?}",
+            map_parts(tree.root()).1.ops
+        );
+    };
+    assert_eq!(nearest, 1024.0, "`2 ^ 10` did not fold as a power");
+}
+
+/// A math function is pointwise over a vector, so an argument that is not one is refused and the
+/// rejection names the argument rather than the function alone. The parser refuses `abs(1)` too, so
+/// the AST is edited the way the arity test edits one: a shape the parser would have caught is still
+/// a shape the compiler must not compile into something else.
+#[test]
+fn a_math_function_over_a_non_vector_argument_is_refused_and_names_it() {
+    let cases = [
+        // A scalar, which a pointwise function has no positions to be pointwise over.
+        (
+            with_call_arguments("abs(x)", |args| {
+                *args[0] = PromExpr::NumberLiteral(NumberLiteral::new(1.0));
+            }),
+            "a call to `abs` whose first argument is `1`, which is a scalar",
+        ),
+        // A range selector, which belongs in a window rather than under a map.
+        (
+            with_call_arguments("abs(x)", |args| {
+                args[0] = a_matrix_selector();
+            }),
+            "a call to `abs` whose first argument is `x[5m]`, which is a matrix",
+        ),
+    ];
+
+    for (stmt, named) in cases {
+        let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err("a math function over a non-vector compiled");
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "the refusal is not NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(named),
+            "the refusal did not name the argument it found: {message}"
+        );
+        assert!(
+            message.contains("where the function takes a vector"),
+            "the refusal did not say what the argument has to be: {message}"
         );
     }
 }
