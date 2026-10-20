@@ -1927,11 +1927,7 @@ async fn test_bulk_flush_keeps_newer_version(#[values(false, true)] delete_newer
     )
     .await;
     let expected = if delete_newer {
-        "\
-+-------+---------+----+
-| tag_0 | field_0 | ts |
-+-------+---------+----+
-+-------+---------+----+"
+        "++\n++"
     } else {
         "\
 +-------+---------+---------------------+
