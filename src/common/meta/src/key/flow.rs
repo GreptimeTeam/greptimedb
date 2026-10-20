@@ -870,9 +870,10 @@ mod tests {
         assert_eq!(names.len(), 1);
         assert_eq!(names[0].0, "legacy_flow");
 
-        // Dropping a legacy flow only needs the metadata; no runtime is involved.
+        // Deleting this metadata needs no runtime, so it works for a legacy flow. Passing the
+        // value read back above also checks that it is enough to delete the flow's metadata.
         flow_metadata_manager
-            .destroy_flow_metadata(flow_id, &flow_value)
+            .destroy_flow_metadata(flow_id, &listed)
             .await
             .unwrap();
         assert!(mem_kv.is_empty());

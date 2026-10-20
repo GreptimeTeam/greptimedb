@@ -2005,8 +2005,9 @@ impl BatchingTask {
 
     /// Generate the create table SQL
     ///
-    /// the auto created table will automatically added a `update_at` Milliseconds DEFAULT now() column in the end,
-    /// matching the layout sink tables created by earlier versions already have
+    /// the auto created table gets an extra `update_at` millisecond timestamp column appended at the
+    /// end. It is nullable and has no default value, matching the layout of sink tables created by
+    /// earlier versions
     ///
     /// and it will use first timestamp column as time index, all other columns will be added as normal columns and nullable
     async fn gen_create_table_expr(
