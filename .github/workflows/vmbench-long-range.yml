@@ -275,6 +275,18 @@ jobs:
         ref: ${{ env.RESOLVED_O11YBENCH_REF }}
         path: o11ybench
         persist-credentials: false
+    - name: Set up Python for cache capacity control
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        update-environment: true
+    - name: Apply reviewed cache capacity control
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 greptimedb/.github/scripts/apply-cache-capacity-patch.py --lane vmbench \
+          --checkout "$GITHUB_WORKSPACE/o11ybench" --expected-revision "$RESOLVED_O11YBENCH_REF" \
+          --output "$GITHUB_WORKSPACE/cache-capacity-patch"
     - uses: actions/download-artifact@v4
       with:
         name: ${{ needs.validate.outputs.plan_artifact }}
@@ -340,6 +352,14 @@ jobs:
           rsync -a --no-owner --no-group --exclude='db-data/' --exclude='/data/*.bin' \
             "$ARTIFACT_ROOT-warm/" "$RUNNER_TEMP/vmbench-artifacts/$(basename "$ARTIFACT_ROOT-warm")/"
         fi
+    - name: Upload cache capacity patch evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: cache-capacity-patch
+        path: ${{ github.workspace }}/cache-capacity-patch
+        if-no-files-found: warn
+        retention-days: 14
     - name: Upload HTML and results (no dataset or DB files)
       if: always()
       uses: actions/upload-artifact@v4

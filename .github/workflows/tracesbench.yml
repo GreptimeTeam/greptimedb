@@ -314,6 +314,18 @@ jobs:
         ref: ${{ env.RESOLVED_O11YBENCH_REF }}
         path: o11ybench
         persist-credentials: false
+    - name: Set up Python for cache capacity control
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        update-environment: true
+    - name: Apply reviewed cache capacity control
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 greptimedb/.github/scripts/apply-cache-capacity-patch.py --lane traces \
+          --checkout "$GITHUB_WORKSPACE/o11ybench" --expected-revision "$RESOLVED_O11YBENCH_REF" \
+          --output "$GITHUB_WORKSPACE/cache-capacity-patch"
     - name: Check runner and runtime identity
       id: runtime
       run: |
@@ -446,6 +458,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tracesbench-artifacts/baseline"
           rsync -a --no-owner --no-group "$RUN_ROOT/baseline/runs" "$RUNNER_TEMP/tracesbench-artifacts/baseline/"
         fi
+    - name: Upload cache capacity patch evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: cache-capacity-patch
+        path: ${{ github.workspace }}/cache-capacity-patch
+        if-no-files-found: warn
+        retention-days: 14
     - name: Upload HTML and results (no corpus)
       if: always()
       uses: actions/upload-artifact@v4

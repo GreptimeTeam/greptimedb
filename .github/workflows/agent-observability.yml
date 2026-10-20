@@ -333,6 +333,18 @@ jobs:
           ref: ${{ env.RESOLVED_O11YBENCH_REF }}
           path: o11ybench
           persist-credentials: false
+      - name: Set up Python for cache capacity control
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          update-environment: true
+      - name: Apply reviewed cache capacity control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 greptimedb/.github/scripts/apply-cache-capacity-patch.py --lane agent \
+            --checkout "$GITHUB_WORKSPACE/o11ybench" --expected-revision "$RESOLVED_O11YBENCH_REF" \
+            --output "$GITHUB_WORKSPACE/cache-capacity-patch"
       - name: Verify benchmark checkout revision
         shell: bash
         run: test "$(git -C "$O11YBENCH_DIR" rev-parse HEAD)" = "$RESOLVED_O11YBENCH_REF"
@@ -424,6 +436,14 @@ jobs:
         if: always() && inputs.compare_greptimedb
         run: |
           python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind agent --root "$ARTIFACT_ROOT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload cache capacity patch evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-capacity-patch
+          path: ${{ github.workspace }}/cache-capacity-patch
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload results (no dataset)
         if: always()
         uses: actions/upload-artifact@v4

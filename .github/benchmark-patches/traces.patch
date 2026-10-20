@@ -1,0 +1,223 @@
+--- a/scripts/run_tracesbench_docker.py
++++ b/scripts/run_tracesbench_docker.py
+@@ -30,6 +30,8 @@
+         limits += ['--cpus', args.runtime_cpus]
+     if args.runtime_memory != '0':
+         limits += ['--memory', args.runtime_memory, '--memory-swap', args.runtime_memory]
++    for source in ('run_tracesbench_docker.py', 'cache_capacity_evidence.py'):
++        limits += ['--mount', f'type=bind,src={ROOT / "scripts" / source},dst=/opt/o11ybench/scripts/{source},readonly']
+     command[2:2] = [*limits, '--env', f'SQLITE_TMPDIR={args.root}/scratch']
+     return command
+ 
+@@ -111,6 +113,8 @@
+ 
+ def limited_docker(args, command, **kwargs):
+     if command[:2] == ['docker', 'create']:
++        if args.target == 'greptimedb':
++            command = command[:2] + ['--entrypoint', '/greptime/bin/greptime', '--env', 'GREPTIMEDB_STANDALONE__REGION_ENGINE[0]__MITO__PAGE_CACHE_SIZE=512MiB'] + command[2:]
+         command = command[:2] + ['--cpus', args.db_cpus, '--memory', args.db_memory, '--memory-swap', args.db_memory] + command[2:]
+     return subprocess.run(command, **kwargs)
+ 
+@@ -195,6 +199,7 @@
+                   success=False, correctness=[], samples=[], output=str(output), command=sys.argv,
+                   execution={'runtime_image': args.runtime_image, 'db_cpus': args.db_cpus, 'db_memory': args.db_memory,
+                              'sources': bench.runtime.source_revisions(['scripts/run_tracesbench_docker.py',
++                                                                       'scripts/cache_capacity_evidence.py',
+                                                                        'scripts/tracesbench_runtime_task.py',
+                                                                        'scripts/tracesbench_query_plans.py',
+                                                                        'scripts/tracesbench_physical_probe.py',
+@@ -272,6 +277,9 @@
+         for source, dest in copies:
+             owned.copy_in(source, dest)
+         owned.start(ready)
++        if args.target == 'greptimedb':
++            from cache_capacity_evidence import attest
++            record['execution']['cache_capacity'] = attest(owned.id, endpoint, output)
+         if args.target == 'tempo' and args.dataset == 'main':
+             _, effective = runner.loader.read_effective_config(endpoint)
+             (output / 'tempo-effective.yaml').write_text(effective)
+--- /dev/null
++++ b/scripts/cache_capacity_evidence.py
+@@ -0,0 +1,182 @@
++#!/usr/bin/env python3
++# Copyright 2023 Greptime Team
++# Licensed under the Apache License, Version 2.0.
++"""Benchmark-only gate for equal Parquet capacity, before load/query work."""
++import decimal
++import hashlib
++import json
++from pathlib import Path
++import re
++import subprocess
++import sys
++import tomllib
++import urllib.request
++
++KEY = 'GREPTIMEDB_STANDALONE__REGION_ENGINE[0]__MITO__PAGE_CACHE_SIZE'
++VALUE = '512MiB'
++EXPECTED = 512 * 1024**2
++# Audited source: Serialize omits content_cache_size iff its value is 512 MiB.
++# Unknown revisions must provide an explicit value; schema shape alone is not proof.
++OMISSION_RULES = {
++    'c7d970da0bb0aa2420cefef5c2cd72d6e6bb6972': {
++        'config_git_blob': '94428174f16c79cc0dcf41715501d707272a1dc8',
++        'path': 'src/mito2/src/config.rs',
++        'rule': 'ParquetPageConfig::is_default_content_cache_size == ReadableSize::mb(512)',
++    },
++}
++
++
++def size(value):
++    if not isinstance(value, str):
++        raise ValueError('Cache capacity must be an explicit byte string')
++    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)\s*(B|KiB|MiB|GiB)', value)
++    if not match:
++        raise ValueError('Unsupported cache byte format')
++    return int(decimal.Decimal(match[1]) * {'B': 1, 'KiB': 1024, 'MiB': 1024**2, 'GiB': 1024**3}[match[2]])
++
++
++def resolve_capacity(mito, revision):
++    page = mito.get('parquet_page', {})
++    if not isinstance(page, dict):
++        raise ValueError('Invalid Parquet page configuration')
++    declared = [size(value) for value in
++        (mito.get('page_cache_size'), page.get('content_cache_size')) if value is not None]
++    if len(set(declared)) > 1:
++        raise ValueError('Conflicting cache capacity aliases')
++    proof = None
++    if declared:
++        capacity, method = declared[0], 'explicit_serialized_config'
++    elif revision in OMISSION_RULES and 'content_cache_page_size' in page:
++        capacity, method = EXPECTED, 'audited_serialization_omission_rule'
++        proof = OMISSION_RULES[revision]
++    else:
++        raise ValueError('Missing capacity without an audited serialization rule')
++    if capacity != EXPECTED:
++        raise ValueError('Effective Parquet cache capacity is not 512MiB')
++    return capacity, method, proof
++
++
++def other_cache_settings(mito):
++    memory_fields = ('sst_meta_cache_size', 'vector_cache_size', 'selector_result_cache_size',
++                     'range_result_cache_size', 'prefilter_result_cache_size', 'manifest_cache_size')
++    index = mito['index']
++    index_fields = ('metadata_cache_size', 'content_cache_size', 'content_cache_page_size',
++                    'result_cache_size', 'staging_size', 'write_buffer_size')
++    boolean_fields = ('enable_write_cache', 'preload_index_cache', 'enable_refill_cache_on_read')
++    if any(type(mito[field]) is not bool for field in boolean_fields):
++        raise ValueError('Invalid cache policy boolean')
++    if type(mito['index_cache_percent']) is not int or not 0 <= mito['index_cache_percent'] <= 100:
++        raise ValueError('Invalid index file-cache share')
++    return {
++        'memory_cache_bytes': {field: size(mito[field]) for field in memory_fields},
++        'write_cache': {
++            **{field: mito[field] for field in boolean_fields},
++            'capacity_bytes': size(mito['write_cache_size']),
++            'index_cache_percent': mito['index_cache_percent'],
++            # Option<Duration>::None has no TOML value; absence is retained as null.
++            'ttl': mito.get('write_cache_ttl'),
++        },
++        'index': {
++            **{field + '_bytes': size(index[field]) for field in index_fields},
++            'staging_ttl': index.get('staging_ttl'),
++            'build_mode': index['build_mode'],
++        },
++    }
++
++
++def observed_cache_settings(mito):
++    """Retain only cache settings, before parsing or validating their values."""
++    fields = ('page_cache_size', 'sst_meta_cache_size', 'vector_cache_size',
++              'selector_result_cache_size', 'range_result_cache_size',
++              'prefilter_result_cache_size', 'manifest_cache_size',
++              'enable_write_cache', 'write_cache_size', 'write_cache_ttl',
++              'preload_index_cache', 'enable_refill_cache_on_read', 'index_cache_percent')
++    nested = {
++        'parquet_page': ('content_cache_size', 'content_cache_page_size'),
++        'index': ('metadata_cache_size', 'content_cache_size', 'content_cache_page_size',
++                  'result_cache_size', 'staging_size', 'write_buffer_size',
++                  'staging_ttl', 'build_mode'),
++    }
++    # Never copy arbitrary nested objects, even if a malformed cache field contains one.
++    def scalar(value):
++        return value if value is None or type(value) in (str, int, float, bool) else '<invalid type>'
++    values = {key: scalar(mito[key]) for key in fields if key in mito}
++    missing = [key for key in fields if key not in mito]
++    for section, names in nested.items():
++        table = mito.get(section)
++        if isinstance(table, dict):
++            values[section] = {key: scalar(table[key]) for key in names if key in table}
++            missing.extend(section + '.' + key for key in names if key not in table)
++        elif section in mito:
++            values[section] = '<invalid type>'
++        else:
++            missing.append(section)
++    return {'values': values, 'missing_fields': missing}
++
++
++def attest(container, endpoint, output):
++    output = Path(output)
++    output.mkdir(parents=True, exist_ok=True)
++    evidence = {'status': 'started', 'environment_key': KEY, 'requested_bytes': EXPECTED,
++                'helper_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
++                'observation': {}}
++    def save():
++        temporary = output / 'cache-capacity.json.tmp'
++        temporary.write_text(json.dumps(evidence, indent=2) + '\n')
++        temporary.replace(output / 'cache-capacity.json')
++    save()
++    observations = evidence['observation']
++    failures = []
++    # Attempt independent observations even if the environment or one endpoint is wrong.
++    for stage in ('container', 'status', 'config'):
++        try:
++            if stage == 'container':
++                info = json.loads(subprocess.check_output(['docker', 'inspect', container]))[0]
++                env = [value for value in info['Config']['Env'] if value.startswith(KEY + '=')]
++                observations['environment_values'] = env
++                observations['running'] = info['State']['Running']
++                evidence.update(image=info['Config']['Image'], container_id=info['Id'])
++            elif stage == 'status':
++                with urllib.request.urlopen(endpoint.rstrip('/') + '/status', timeout=15) as response:
++                    evidence['source_revision'] = json.load(response)['commit']
++            else:
++                with urllib.request.urlopen(endpoint.rstrip('/') + '/config', timeout=15) as response:
++                    raw = response.read()
++                evidence['config_sha256'] = hashlib.sha256(raw).hexdigest()
++                config = tomllib.loads(raw.decode())
++                engines = [engine['mito'] for engine in config['region_engine'] if 'mito' in engine]
++                observations['mito_engine_count'] = len(engines)
++                observations['mito_cache_settings'] = [observed_cache_settings(engine) for engine in engines]
++        except Exception as error:
++            # Exception messages can embed response bodies or arbitrary configuration values.
++            failures.append({'stage': stage, 'error_type': type(error).__name__})
++        save()
++    stage = 'observations'
++    try:
++        if failures:
++            observations['errors'] = failures
++            raise ValueError('Incomplete capacity observations')
++        stage = 'environment'
++        if env != [KEY + '=' + VALUE] or not info['State']['Running']:
++            raise ValueError('Missing explicit Parquet capacity or stopped database')
++        stage = 'mito_engine_count'
++        if len(engines) != 1:
++            raise ValueError('Expected one Mito engine')
++        mito = engines[0]
++        stage = 'parquet_capacity'
++        capacity, method, proof = resolve_capacity(mito, evidence['source_revision'])
++        evidence.update(effective_parquet_cache_bytes=capacity, capacity_evidence=method,
++                        serialization_rule_evidence=proof)
++        stage = 'other_cache_settings'
++        evidence['other_cache_settings'] = other_cache_settings(mito)
++        evidence['status'] = 'passed'
++        save()
++        return evidence
++    except Exception as error:
++        evidence.update(status='failed', failed_stage=stage, error_type=type(error).__name__)
++        save()
++        raise
++
++
++if __name__ == '__main__':
++    attest(*sys.argv[1:])
