@@ -722,7 +722,6 @@ mod tests {
             write_buffer_size: ReadableSize(write_buffer_size as u64),
             row_group_size: 50,
             max_file_size: Some(1024 * 16),
-            ..Default::default()
         };
 
         let path_provider = RegionFilePathFactory {
