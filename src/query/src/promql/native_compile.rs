@@ -63,7 +63,7 @@ use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AtModifier, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral, Offset,
-    VectorSelector,
+    VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -688,19 +688,19 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
 
 /// The arithmetic operator a PromQL token denotes, or `None` when the token is not arithmetic.
 ///
-/// The token is read as it is written, because the parser keeps its token ids to itself: a symbol
-/// this compiler does not recognise is not arithmetic here rather than a wrong operator. A
-/// comparison and a set operator are the cases that reach this and fold nothing, which is this
-/// batch's boundary rather than an accident of the map.
+/// The token is matched by its id, which is stable and is what the rest of the planner matches on,
+/// rather than by the text it displays as: a symbol this compiler does not recognise is not
+/// arithmetic here rather than a wrong operator. A comparison and a set operator are the cases that
+/// reach this and fold nothing, which is this batch's boundary rather than an accident of the map.
 fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
-    match op.to_string().as_str() {
-        "+" => Some(ArithmeticOp::Add),
-        "-" => Some(ArithmeticOp::Subtract),
-        "*" => Some(ArithmeticOp::Multiply),
-        "/" => Some(ArithmeticOp::Divide),
-        "%" => Some(ArithmeticOp::Modulo),
-        "^" => Some(ArithmeticOp::Power),
-        "atan2" => Some(ArithmeticOp::Atan2),
+    match op.id() {
+        token::T_ADD => Some(ArithmeticOp::Add),
+        token::T_SUB => Some(ArithmeticOp::Subtract),
+        token::T_MUL => Some(ArithmeticOp::Multiply),
+        token::T_DIV => Some(ArithmeticOp::Divide),
+        token::T_MOD => Some(ArithmeticOp::Modulo),
+        token::T_POW => Some(ArithmeticOp::Power),
+        token::T_ATAN2 => Some(ArithmeticOp::Atan2),
         _ => None,
     }
 }
