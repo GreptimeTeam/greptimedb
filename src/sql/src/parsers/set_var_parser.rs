@@ -60,7 +60,7 @@ mod tests {
     use sqlparser::ast::{Expr, Ident, ObjectName, Value};
 
     use super::*;
-    use crate::dialect::GreptimeDbDialect;
+    use crate::dialect::{GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
     use crate::parser::ParseOptions;
 
     fn assert_mysql_parse_result(sql: &str, indent_str: &str, expr: Expr) {
@@ -142,6 +142,40 @@ mod tests {
         );
         let sql = "SET STATEMENT_TIMEOUT TO 5000";
         assert_pg_parse_result(sql, "STATEMENT_TIMEOUT", expected_query_timeout_expr);
+    }
+
+    #[test]
+    fn test_set_query_option_dialects_and_case() {
+        let cases = [
+            (
+                "SET query_parallelism = 4",
+                &MySqlDialect {} as &dyn sqlparser::dialect::Dialect,
+                "query_parallelism",
+                "4",
+            ),
+            (
+                "SET QUERY.ALLOW_QUERY_FALLBACK TO false",
+                &PostgreSqlDialect {},
+                "QUERY.ALLOW_QUERY_FALLBACK",
+                "false",
+            ),
+            (
+                "SET datafusion.optimizer.repartition_joins = true",
+                &GenericDialect {},
+                "datafusion.optimizer.repartition_joins",
+                "true",
+            ),
+        ];
+        for (sql, dialect, variable, value) in cases {
+            let result =
+                ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).unwrap();
+            let [Statement::SetVariables(set)] = result.as_slice() else {
+                panic!("unexpected SET parse result for {sql}");
+            };
+            assert_eq!(set.variable.to_string(), variable);
+            assert_eq!(set.value.len(), 1);
+            assert_eq!(set.value[0].to_string(), value, "{sql}");
+        }
     }
 
     #[test]

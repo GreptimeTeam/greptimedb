@@ -90,6 +90,7 @@ macro_rules! sql_tests {
                 test_postgres_regclass_bind_parameter,
                 test_postgres_uint64_parameter,
                 test_postgres_explain_bind_parameter,
+                test_postgres_show_query_options,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
                 test_mysql_prepare_stmt_timezone,
@@ -2155,6 +2156,61 @@ pub async fn test_postgres_extended_query_row_returning_statements(store_type: S
     drop(client);
     rx.await.unwrap();
 
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_show_query_options(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_show_query_options").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    // `SHOW` is served through the simple query protocol; preparing it over the
+    // extended protocol is not supported.
+    async fn show_value(client: &tokio_postgres::Client, option: &str) -> String {
+        let msgs = client
+            .simple_query(&format!("SHOW {option}"))
+            .await
+            .unwrap();
+        msgs.into_iter()
+            .find_map(|msg| match msg {
+                SimpleQueryMessage::Row(row) => Some(row.get(0).unwrap_or_default().to_string()),
+                _ => None,
+            })
+            .expect("SHOW must return one row")
+    }
+
+    for (option, value) in [
+        ("query.parallelism", "2"),
+        ("datafusion.optimizer.prefer_hash_join", "false"),
+        ("datafusion.optimizer.max_passes", "5"),
+    ] {
+        client
+            .batch_execute(&format!("SET {option} TO {value}"))
+            .await
+            .unwrap();
+        assert_eq!(show_value(&client, option).await, value);
+
+        if option == "query.parallelism" {
+            client
+                .batch_execute("SET query.parallelism TO 7")
+                .await
+                .unwrap();
+            assert_eq!(show_value(&client, option).await, "7");
+        }
+    }
+
+    drop(client);
+    rx.await.unwrap();
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
