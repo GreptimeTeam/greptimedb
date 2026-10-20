@@ -235,19 +235,17 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     );
 }
 
-/// A kind with no executor says so, so its line is not read as an operation that will run.
+/// A leaf kind renders what it holds, whether or not anything could run it: the line names the
+/// node it is and makes no claim about executability.
 #[test]
-fn a_kind_without_an_executor_says_so() {
+fn a_scalar_and_an_instant_line_show_what_they_hold() {
     let out = grid(0, 60_000, 4);
     let scalar = NativeNode {
         expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
         output: NativeType::Scalar(Arc::clone(&out)),
     };
     let tree = NativeTree::try_new(scalar).unwrap();
-    assert_eq!(
-        tree.to_string(),
-        shown(&["NativeTree", "  root Scalar 2 (no executor)"])
-    );
+    assert_eq!(tree.to_string(), shown(&["NativeTree", "  root Scalar 2"]));
 
     let instant = NativeNode {
         expr: NativeExpr::Instant {
@@ -265,14 +263,14 @@ fn a_kind_without_an_executor_says_so() {
         tree.to_string(),
         shown(&[
             "NativeTree",
-            "  root Instant lookback 300000ms offset 60000 on grid 0/60000x4 (no executor)",
+            "  root Instant lookback 300000ms offset 60000 on grid 0/60000x4",
             "    input Input raw samples",
         ])
     );
 }
 
 /// An aggregate and a binary operation name the binding they were compiled with, which is what
-/// makes the line worth reading once they have executors.
+/// makes the line worth reading.
 #[test]
 fn an_aggregate_and_a_binary_name_their_binding() {
     let out = grid(0, 60_000, 4);
@@ -299,7 +297,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
         tree.to_string(),
         shown(&[
             "NativeTree",
-            "  root Aggregate sum by [job] complete (no executor)",
+            "  root Aggregate sum by [job] complete",
             "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
             "      input Input raw samples",
         ])
@@ -335,8 +333,8 @@ fn an_aggregate_and_a_binary_name_their_binding() {
         tree.to_string(),
         shown(&[
             "NativeTree",
-            "  root Binary + ignoring [] one-to-one (no executor)",
-            "    left Scalar 2 (no executor)",
+            "  root Binary + ignoring [] one-to-one",
+            "    left Scalar 2",
             "    right Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
             "      input Input raw samples",
         ])

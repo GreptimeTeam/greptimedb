@@ -212,12 +212,21 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
             SeriesOrdering::KeyThenTime,
             Expected::Rejected(Rejection::Plan),
         ),
-        // The ordering a scan guarantees is recorded on the input rather than dropped.
+        // A range window reads one series to its last chunk before the next, so a scan whose
+        // chunks of different series interleave is refused instead of recorded onto an input the
+        // window would fail on.
         (
-            "a non-default ordering",
+            "an interleaved ordering, which a window cannot consume to its last chunk",
             eval_stmt("rate(x[5m])"),
             SeriesOrdering::Interleaved,
-            Expected::Ordering(SeriesOrdering::Interleaved),
+            Expected::Rejected(Rejection::NotImplemented),
+        ),
+        // A supported ordering is recorded on the input rather than dropped.
+        (
+            "a non-default ordering a window can consume",
+            eval_stmt("rate(x[5m])"),
+            SeriesOrdering::Contiguous,
+            Expected::Ordering(SeriesOrdering::Contiguous),
         ),
         // A shape outside the subset is refused for its shape, whatever its timing: the statement
         // range of an unsupported query is not read, so it cannot turn a refusal into a plan error.
@@ -305,7 +314,8 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
             "absent(x)",
             "a call to `absent`, which has no native range kernel",
         ),
-        // An anchored window is step-invariant, which the native model cannot replay yet.
+        // An anchored selector needs its anchor resolved to an absolute millisecond value, which
+        // this compiler does not do yet.
         ("rate(x[5m] @ 100)", "`@`-anchored selector"),
     ];
 
