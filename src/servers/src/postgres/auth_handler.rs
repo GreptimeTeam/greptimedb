@@ -28,14 +28,13 @@ use common_time::Timezone;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
 use pgwire::api::auth::cleartext::CleartextPasswordAuth;
-use pgwire::api::auth::driver::AuthOutcome;
-use pgwire::api::auth::mechanism::{AuthMechanism, AuthMechanismFactory, AuthState};
+use pgwire::api::auth::mechanism::AuthMechanismFactory;
 use pgwire::api::auth::sasl::scram::{ScramAuth, ScramSecret};
-use pgwire::api::auth::{AuthSource, LoginInfo as WireLoginInfo};
+use pgwire::api::auth::{AuthOutcome, AuthSource, LoginInfo as WireLoginInfo};
 use pgwire::api::{ClientInfo, PidSecretKeyGenerator, auth};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
-use pgwire::messages::startup::{PasswordMessageFamily, SecretKey};
+use pgwire::messages::startup::SecretKey;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::Session;
 use snafu::IntoError;
@@ -67,7 +66,11 @@ fn record_auth_failure(status_code: StatusCode) {
 /// Stateless by design: it only holds the user provider, everything about
 /// the current login arrives with each call, and the verified
 /// [`UserInfoRef`] travels back to the startup handler as the source
-/// identity, reported by [`AuthOutcome::Completed`].
+/// identity, reported by [`AuthOutcome::Authenticated`].
+///
+/// Read-only: it resolves credentials and checks authorization with the
+/// provider, but holds no policy — authorization runs in the startup
+/// handler after verification, before the startup completes.
 pub(crate) struct PgUserProviderSource {
     user_provider: UserProviderRef,
 }
@@ -114,25 +117,29 @@ impl PgUserProviderSource {
         }
     }
 
-    /// The real verifier with its identity, for known users passing the
-    /// authorization check.
-    async fn authorized_scram_secret(
+    /// Checks with the provider that the user may access this
+    /// catalog/schema. Called by the startup handler after verification,
+    /// while nothing terminal has been sent yet.
+    async fn authorize(
         &self,
         login: &WireLoginInfo<'_>,
-    ) -> Option<(ScramSecret, UserInfoRef)> {
-        let (_, catalog, schema) = Self::resolve(login)?;
-        let PgAuthInfo::ScramSha256 {
-            verifier,
-            user_info: Some(user_info),
-        } = self.postgres_auth_info(login).await.ok()?
-        else {
-            return None;
+        user_info: &UserInfoRef,
+    ) -> PgWireResult<()> {
+        let Some((_, catalog, schema)) = Self::resolve(login) else {
+            return Err(PgWireError::UserNameRequired);
         };
-        self.user_provider
-            .authorize(&catalog, &schema, &user_info)
+
+        match self
+            .user_provider
+            .authorize(&catalog, &schema, user_info)
             .await
-            .ok()?;
-        Some((to_scram_secret(&verifier), user_info))
+        {
+            Err(e) => {
+                record_auth_failure(e.status_code());
+                Err(PgWireError::ApiError(Box::new(AuthSnafu.into_error(e))))
+            }
+            Ok(()) => Ok(()),
+        }
     }
 }
 
@@ -147,31 +154,27 @@ impl AuthSource<UserInfoRef> for PgUserProviderSource {
         ))
     }
 
-    /// Cleartext and bearer-token verification. The provider verifies the
-    /// password and authorizes the login itself (`auth()` combines
-    /// authenticate and authorize), so both mismatches fail the handshake
-    /// before `AuthenticationOk`.
+    /// Cleartext and bearer-token verification; the provider verifies the
+    /// password itself. Authorization is left to the startup handler.
     async fn verify_password(
         &self,
         login: &WireLoginInfo,
         presented_password: &[u8],
     ) -> PgWireResult<Option<UserInfoRef>> {
-        let Some((user, catalog, schema)) = Self::resolve(login) else {
+        let Some((user, catalog, _schema)) = Self::resolve(login) else {
             return Err(PgWireError::UserNameRequired);
         };
         let password = String::from_utf8_lossy(presented_password).into_owned();
 
         let result = if user == BEARER_TOKEN_USER {
             self.user_provider
-                .auth_bearer_token(&password, &catalog, &schema)
+                .authenticate_bearer_token(&password, &catalog)
                 .await
         } else {
             self.user_provider
-                .auth(
+                .authenticate(
                     Identity::UserId(&user, None),
                     Password::PlainText(password.into()),
-                    &catalog,
-                    &schema,
                 )
                 .await
         };
@@ -188,20 +191,26 @@ impl AuthSource<UserInfoRef> for PgUserProviderSource {
         &self,
         login: &WireLoginInfo,
     ) -> PgWireResult<(ScramSecret, Option<UserInfoRef>)> {
-        if let Some((secret, identity)) = self.authorized_scram_secret(login).await {
-            return Ok((secret, Some(identity)));
+        match self.postgres_auth_info(login).await {
+            // For unknown users the provider hands out a mock verifier with
+            // no identity, so their handshake fails at proof verification
+            // exactly like a wrong password.
+            Ok(PgAuthInfo::ScramSha256 {
+                verifier,
+                user_info,
+            }) => Ok((to_scram_secret(&verifier), user_info)),
+            // SCRAM was selected but the provider no longer backs it: fail
+            // closed with a mock verifier.
+            _ => {
+                let user = login.user().unwrap_or_default();
+                Ok((
+                    to_scram_secret(&PgScramSha256Verifier::mock_for_unknown_user(
+                        user.as_bytes(),
+                    )),
+                    None,
+                ))
+            }
         }
-        // Unknown or unauthorized users get a mock verifier, so the
-        // handshake fails at proof verification exactly like a wrong
-        // password: same stage, same error, same metric label, and no
-        // user-existence leak.
-        let user = login.user().unwrap_or_default();
-        Ok((
-            to_scram_secret(&PgScramSha256Verifier::mock_for_unknown_user(
-                user.as_bytes(),
-            )),
-            None,
-        ))
     }
 }
 
@@ -211,32 +220,6 @@ fn to_scram_secret(verifier: &PgScramSha256Verifier) -> ScramSecret {
         iterations: verifier.iterations() as usize,
         stored_key: verifier.stored_key().to_vec(),
         server_key: verifier.server_key().to_vec(),
-    }
-}
-
-/// Completes the handshake without authentication (no user provider
-/// configured), reporting the name-derived user info as identity.
-struct NoAuthMechanism;
-
-#[async_trait]
-impl AuthMechanism<UserInfoRef> for NoAuthMechanism {
-    async fn begin(
-        &mut self,
-        client: &(dyn ClientInfo + Send + Sync),
-    ) -> PgWireResult<AuthState<UserInfoRef>> {
-        let user_info = userinfo_by_name(client.metadata().get(super::METADATA_USER).cloned());
-        Ok(AuthState::Ok {
-            final_message: None,
-            identity: Some(user_info),
-        })
-    }
-
-    async fn next(
-        &mut self,
-        _client: &(dyn ClientInfo + Send + Sync),
-        _message: PasswordMessageFamily,
-    ) -> PgWireResult<AuthState<UserInfoRef>> {
-        Err(PgWireError::NoAuthenticationInProgress)
     }
 }
 
@@ -340,14 +323,13 @@ impl StartupHandler for PostgresServerHandlerInner {
 
                 match self.select_mechanism(client).await {
                     MechanismSelection::NoAuth => {
-                        if self
-                            .auth_driver
-                            .begin_authentication(client, Box::new(NoAuthMechanism))
-                            .await
-                            .is_err()
-                        {
-                            return send_password_authentication_failed(client).await;
-                        }
+                        self.session.set_user_info(userinfo_by_name(
+                            client.metadata().get(super::METADATA_USER).cloned(),
+                        ));
+                        set_client_info(client, &self.session);
+                        self.auth_driver
+                            .complete_authentication(client, None)
+                            .await?;
                     }
                     MechanismSelection::Cleartext(source) => {
                         if self
@@ -381,15 +363,35 @@ impl StartupHandler for PostgresServerHandlerInner {
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
                 match self.auth_driver.advance_authentication(client, pwd).await {
                     Ok(AuthOutcome::InProgress) => {}
-                    Ok(AuthOutcome::Completed(identity)) => {
+                    Ok(AuthOutcome::Authenticated {
+                        identity,
+                        final_message,
+                    }) => {
                         self.is_scram_auth.store(false, Ordering::Relaxed);
-                        match identity {
-                            Some(user_info) => {
-                                self.session.set_user_info(user_info);
-                                set_client_info(client, &self.session);
+                        let Some(user_info) = identity else {
+                            return send_password_authentication_failed(client).await;
+                        };
+
+                        // Nothing terminal has been sent yet: authorize
+                        // before completing, so a rejection reaches the
+                        // client as an authentication failure. Failures are
+                        // recorded by `authorize` itself.
+                        let authorized = {
+                            let login = WireLoginInfo::from_client_info(client);
+                            match &self.auth_source {
+                                Some(source) => source.authorize(&login, &user_info).await.is_ok(),
+                                None => false,
                             }
-                            None => return send_password_authentication_failed(client).await,
+                        };
+                        if !authorized {
+                            return send_password_authentication_failed(client).await;
                         }
+
+                        self.session.set_user_info(user_info);
+                        set_client_info(client, &self.session);
+                        self.auth_driver
+                            .complete_authentication(client, final_message)
+                            .await?;
                     }
                     Err(_e) => {
                         // SCRAM failures carry a uniform label so the metric
