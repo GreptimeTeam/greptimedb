@@ -30,7 +30,7 @@ use tokio::time::error::Elapsed;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to write a metric batch group"))]
+    #[snafu(display("Failed to write a batch group"))]
     BatchWrite { source: std::sync::Arc<Error> },
 
     #[snafu(display("Failed to execute async task"))]

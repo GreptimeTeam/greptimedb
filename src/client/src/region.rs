@@ -653,6 +653,20 @@ mod tests {
         }
     }
 
+    fn with_partial_result(mut request: RegionRequest) -> RegionRequest {
+        request
+            .header
+            .get_or_insert_with(Default::default)
+            .query_context
+            .get_or_insert_with(Default::default)
+            .extensions
+            .insert(
+                api::region::ACCEPT_PARTIAL_RESULT.to_string(),
+                "true".to_string(),
+            );
+        request
+    }
+
     #[tokio::test]
     async fn test_owned_and_shared_requests_preserve_payload_and_compression() {
         let server = RegionTestServer::start().await;
@@ -700,12 +714,21 @@ mod tests {
         }
         let requests = server.service.requests.lock().unwrap();
         assert_eq!(requests.len(), 12);
-        for ((request, sends, accepts), (send, accept)) in requests.iter().zip(
-            [(false, false), (true, false), (false, true), (true, true)]
-                .into_iter()
-                .flat_map(|settings| [settings, settings, settings]),
-        ) {
-            assert_eq!(request, shared.as_ref());
+        for (index, ((request, sends, accepts), (send, accept))) in requests
+            .iter()
+            .zip(
+                [(false, false), (true, false), (false, true), (true, true)]
+                    .into_iter()
+                    .flat_map(|settings| [settings, settings, settings]),
+            )
+            .enumerate()
+        {
+            let expected = if index % 3 == 0 {
+                shared.as_ref().clone()
+            } else {
+                with_partial_result(shared.as_ref().clone())
+            };
+            assert_eq!(request, &expected);
             assert_eq!((*sends, *accepts), (send, accept));
         }
     }
@@ -734,8 +757,8 @@ mod tests {
         requester.handle(Arc::clone(&shared)).await.unwrap();
         let requests = server.service.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(&requests[0].0, shared.as_ref());
-        assert_eq!(&requests[1].0, shared.as_ref());
+        assert_eq!(requests[0].0, with_partial_result(shared.as_ref().clone()));
+        assert_eq!(requests[1].0, with_partial_result(shared.as_ref().clone()));
     }
 
     #[test]
@@ -1232,7 +1255,7 @@ mod tests {
             }
         }
         for (received, send, accept) in server.service.requests.lock().unwrap().iter() {
-            assert_eq!(received, request.as_ref());
+            assert_eq!(received, &with_partial_result(request.as_ref().clone()));
             assert!(*send && *accept);
         }
         assert_eq!(Arc::strong_count(&request), 1);
@@ -1283,11 +1306,58 @@ mod tests {
             failures: vec![failure],
             ..Default::default()
         };
-        // Old clients check the header and cannot mistake partial failure for success.
+        // A partial envelope must not be interpreted as success by the header-only decoder.
         assert!(check_response_header(&response.header).is_err());
         let error = decode_region_response(response, Some(1)).unwrap_err();
         assert_eq!(error.status_code(), StatusCode::RegionNotFound);
         assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+    }
+
+    #[test]
+    fn test_partial_error_preserves_status_and_retry_hint() {
+        for code in [StatusCode::StorageUnavailable, StatusCode::InvalidArguments] {
+            let response = PbRegionResponse {
+                header: Some(ResponseHeader {
+                    status: Some(PbStatus {
+                        status_code: StatusCode::PartialFailure as u32,
+                        ..Default::default()
+                    }),
+                }),
+                failures: vec![
+                    RegionRequestFailure {
+                        request_index: 1,
+                        status: Some(PbStatus {
+                            status_code: StatusCode::Internal as u32,
+                            ..Default::default()
+                        }),
+                    },
+                    RegionRequestFailure {
+                        request_index: 0,
+                        status: Some(PbStatus {
+                            status_code: code as u32,
+                            retry_hint: RetryHint::NonRetryable.as_str().to_string(),
+                            ..Default::default()
+                        }),
+                    },
+                ],
+                ..Default::default()
+            };
+            let error = decode_region_response(response, Some(2)).unwrap_err();
+            assert_eq!(code, error.status_code());
+            assert_eq!(RetryHint::Retryable, error.retry_hint());
+            let error: common_meta::error::Error = error.into();
+            assert_eq!(code, error.status_code());
+            assert_eq!(RetryHint::Retryable, error.retry_hint());
+            let common_meta::error::Error::PartialRegion { response } = error else {
+                panic!("expected partial result")
+            };
+            assert!(
+                response
+                    .failures
+                    .iter()
+                    .all(|(_, error)| error.retry_hint() == RetryHint::NonRetryable)
+            );
+        }
     }
 
     #[tokio::test]

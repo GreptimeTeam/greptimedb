@@ -15,7 +15,7 @@
 use std::borrow::Borrow;
 use std::marker::PhantomData;
 
-use api::v1::region::{RegionRequest, RegionResponse};
+use api::v1::region::{RegionRequest, RegionResponse, region_request};
 use prost::Message;
 use tonic::Status;
 use tonic::codec::{Codec, EncodeBuf, Encoder};
@@ -56,8 +56,35 @@ impl<R: Borrow<RegionRequest>> Encoder for RegionEncoder<R> {
     type Error = Status;
 
     fn encode(&mut self, item: R, buf: &mut EncodeBuf<'_>) -> Result<(), Status> {
-        item.borrow()
-            .encode(buf)
-            .map_err(|error| Status::internal(error.to_string()))
+        let request = item.borrow();
+        if matches!(
+            request.body,
+            Some(region_request::Body::Inserts(_) | region_request::Body::Deletes(_))
+        ) {
+            // Only the header is copied; retries keep borrowing the shared rows.
+            let mut header = request.header.clone().unwrap_or_default();
+            header
+                .query_context
+                .get_or_insert_with(Default::default)
+                .extensions
+                .insert(
+                    api::region::ACCEPT_PARTIAL_RESULT.to_string(),
+                    "true".to_string(),
+                );
+            RegionRequest {
+                header: Some(header),
+                body: None,
+            }
+            .encode(&mut *buf)
+            .map_err(|error| Status::internal(error.to_string()))?;
+            if let Some(body) = &request.body {
+                body.encode(buf);
+            }
+            Ok(())
+        } else {
+            request
+                .encode(buf)
+                .map_err(|error| Status::internal(error.to_string()))
+        }
     }
 }

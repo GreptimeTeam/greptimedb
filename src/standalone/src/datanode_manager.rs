@@ -75,7 +75,7 @@ impl RegionInvoker {
 impl Datanode for RegionInvoker {
     async fn handle_request(&self, request: Arc<RegionRequest>) -> MetaResult<RegionResponse> {
         // Local execution consumes the request; standalone does not retain it for retries.
-        let request = Arc::try_unwrap(request)
+        let mut request = Arc::try_unwrap(request)
             .map_err(|_| {
                 InvalidRegionRequestSnafu {
                     reason: "local region request has multiple owners",
@@ -89,6 +89,18 @@ impl Datanode for RegionInvoker {
             Some(region_request::Body::Deletes(requests)) => Some(requests.requests.len()),
             _ => None,
         };
+        if request_count.is_some() {
+            request
+                .header
+                .get_or_insert_with(Default::default)
+                .query_context
+                .get_or_insert_with(Default::default)
+                .extensions
+                .insert(
+                    api::region::ACCEPT_PARTIAL_RESULT.to_string(),
+                    "true".to_string(),
+                );
+        }
         let span = request
             .header
             .as_ref()
@@ -121,5 +133,83 @@ impl Datanode for RegionInvoker {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::Rows;
+    use api::v1::region::{InsertRequest, InsertRequests};
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
+    use datanode::tests::{MockRegionEngine, mock_region_server};
+    use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::test_util::CreateRequestBuilder;
+    use store_api::region_request::RegionRequest as StoreRegionRequest;
+    use store_api::storage::RegionId;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_partial_write_preserves_user_status() {
+        for (code, http_status) in [
+            (StatusCode::StorageUnavailable, 503),
+            (StatusCode::InvalidArguments, 400),
+        ] {
+            let mut server = mock_region_server();
+            let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+                MITO_ENGINE_NAME,
+                Box::new(move |region_id, request| {
+                    if matches!(request, StoreRegionRequest::Put(_)) {
+                        Err(BoxedError::new(MockError::new(code)))
+                            .context(datanode::error::HandleRegionRequestSnafu { region_id })
+                    } else {
+                        Ok(0)
+                    }
+                }),
+            );
+            server.register_engine(engine);
+            let mut requests = Vec::new();
+            for number in 0..2 {
+                let region_id = RegionId::new(1, number);
+                server
+                    .handle_request(
+                        region_id,
+                        StoreRegionRequest::Create(CreateRequestBuilder::new().build()),
+                    )
+                    .await
+                    .unwrap();
+                requests.push(InsertRequest {
+                    region_id: region_id.as_u64(),
+                    rows: Some(Rows::default()),
+                    ..Default::default()
+                });
+            }
+            let datanode: DatanodeRef = RegionInvoker::arc(server);
+            let error = datanode
+                .handle(RegionRequest {
+                    header: Some(Default::default()),
+                    body: Some(region_request::Body::Inserts(InsertRequests { requests })),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(code, error.status_code());
+            assert_eq!(RetryHint::Retryable, error.retry_hint());
+            assert_eq!(
+                http_status,
+                servers::error::status_code_to_http_status(&error.status_code()).as_u16()
+            );
+            let meta_error::Error::PartialRegion { response } = error else {
+                panic!("expected partial write")
+            };
+            assert_eq!(2, response.failures.len());
+            assert!(
+                response
+                    .failures
+                    .iter()
+                    .all(|(_, error)| error.status_code() == code)
+            );
+        }
     }
 }

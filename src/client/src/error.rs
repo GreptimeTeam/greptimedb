@@ -173,7 +173,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::PartialRegion { .. } => StatusCode::PartialFailure,
+            Error::PartialRegion { response } => response
+                .failures
+                .iter()
+                .min_by_key(|(index, _)| *index)
+                .map_or(StatusCode::Internal, |(_, error)| error.status_code()),
             Error::IllegalFlightMessages { .. }
             | Error::MissingField { .. }
             | Error::IllegalDatabaseResponse { .. } => StatusCode::Internal,
@@ -199,6 +203,7 @@ impl ErrorExt for Error {
 
     fn retry_hint(&self) -> RetryHint {
         match self {
+            Error::PartialRegion { .. } => RetryHint::Retryable,
             Error::Tonic { retry_hint, .. } | Error::Server { retry_hint, .. } => *retry_hint,
             Error::FlightGet { source, .. }
             | Error::FlightStream { source, .. }

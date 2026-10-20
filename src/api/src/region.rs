@@ -18,6 +18,9 @@ use common_base::AffectedRows;
 use common_error::ext::ErrorExt;
 use greptime_proto::v1::region::RegionResponse as RegionResponseV1;
 
+/// Request extension advertising support for per-entry write failures.
+pub const ACCEPT_PARTIAL_RESULT: &str = "accept_partial_result";
+
 /// This result struct is derived from [RegionResponseV1]
 #[derive(Debug)]
 pub struct RegionResponse {

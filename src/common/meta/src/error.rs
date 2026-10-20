@@ -1204,7 +1204,11 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            Error::PartialRegion { .. } => StatusCode::PartialFailure,
+            Error::PartialRegion { response } => response
+                .failures
+                .iter()
+                .min_by_key(|(index, _)| *index)
+                .map_or(StatusCode::Internal, |(_, error)| error.status_code()),
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
@@ -1371,6 +1375,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            Error::PartialRegion { .. } => RetryHint::Retryable,
             RetryLater { source, .. } => match source.retry_hint() {
                 RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
                 RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,
