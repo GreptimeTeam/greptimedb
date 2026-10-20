@@ -56,7 +56,7 @@ use datafusion_expr::expr_fn::when;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
-    ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, ident, lit,
+    ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, ident, lit,
 };
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
@@ -7166,7 +7166,7 @@ mod test {
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::datasource::{MemTable, provider_as_source};
     use datafusion::execution::context::SessionContext;
-    use datafusion::logical_expr::Extension;
+    use datafusion::logical_expr::{Extension, col};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
