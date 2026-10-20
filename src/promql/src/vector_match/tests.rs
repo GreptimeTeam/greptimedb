@@ -15,22 +15,27 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use datafusion::arrow::array::{Float64Array, UInt32Array};
 use datafusion::error::DataFusionError;
-use datatypes::series::samples::{FieldSpec, RowCursor, SampleRef, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::histogram::HistogramBatchBuilder;
+use datatypes::series::samples::{
+    FieldSpec, HistogramSamples, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::{
-    BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp, binary_vectors,
-    binary_vectors_with_reservation, set_vectors,
+    BinaryMatching, BinaryOp, Cardinality, MatchingLabels, RESULT_ROW_BYTES, SetOp, binary_vectors,
+    binary_vectors_with_reservation, elem_binop, histogram_pair_bytes, result_histogram_bytes,
+    set_vectors,
 };
-use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
     Dense, OwnedHistogram, Points, assert_histogram_close, assert_result_eq, golden_cases,
     mixed_series, piece_ranges, random_dense, run_ranges, sparse_series,
 };
+use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
 /// Labels with `__name__` as an ordinary entry, the way Prometheus holds them.
@@ -505,8 +510,9 @@ fn binary_vectors_match_prometheus_reference() {
             &rhs.schema,
             &rhs.series,
         );
-        // The budgeted entry runs the same kernel: it admits the workspace it asks for, asks for a
-        // growing total and returns what the public form returns, error text included.
+        // The budgeted entry runs the same kernel: it admits the live workspace it holds, asking
+        // again only when that figure changes. Every request is a different figure, because a step
+        // replaces the one before it instead of adding to it.
         let (reserved, seen) = budgeted(
             &matching,
             &lhs.schema,
@@ -516,20 +522,27 @@ fn binary_vectors_match_prometheus_reference() {
             usize::MAX,
         );
         assert!(
-            seen.windows(2).all(|pair| pair[0] < pair[1]),
+            seen.windows(2).all(|pair| pair[0] != pair[1]),
             "seed {seed}: {seen:?}"
         );
-        assert_same_result(
-            reserved,
-            binary_vectors(
-                &matching,
-                &lhs.schema,
-                &lhs.series,
-                &rhs.schema,
-                &rhs.series,
-            ),
-            &format!("seed {seed}"),
-        );
+        // Both entries are held to the reference rather than to each other's error text: two
+        // label sets failing at one point are reported in the order the result table walks them,
+        // which is a hash order, so the message can name either. The class of failure is what a
+        // run must share with the other entry, and `assert_output` checks it against the reference.
+        match (&reserved, &actual) {
+            (Ok(_), Ok(_)) | (Err(_), Err(_)) => {}
+            (reserved, actual) => {
+                panic!("seed {seed}: the entries disagree on failing: {reserved:?} vs {actual:?}")
+            }
+        }
+        if let (Err(reserved), Err(actual)) = (&reserved, &actual) {
+            assert_eq!(
+                violation_of(reserved),
+                violation_of(actual),
+                "seed {seed}: {reserved} vs {actual}"
+            );
+        }
+        assert_output(reserved, expected.clone(), seed);
         assert_output(actual, expected, seed);
     }
     assert!(
@@ -1457,6 +1470,52 @@ fn budget_operand(schema: &Arc<SeriesSchema>, name: &str, at: &[usize]) -> Serie
     jobbed_operand(schema, name, "x", at)
 }
 
+/// The first sample of a one-field, one-row series.
+fn first_sample(series: &Series) -> SampleRef<'_> {
+    series.fields.as_slice()[0]
+        .cursor()
+        .at(0)
+        .expect("the one-row operand holds a value")
+}
+
+/// A one-field operand on `grid` whose first point holds a histogram of `buckets` buckets with
+/// `count` as its count, and whose remaining points hold the float 1.
+///
+/// A comparison can therefore discard the histogram at the first point and keep the floats after
+/// it, which is the shape the ownership regressions need.
+fn wide_histogram_operand(
+    grid: &Arc<EvalGrid>,
+    name: &str,
+    points: usize,
+    buckets: usize,
+    count: &str,
+) -> Series {
+    let labels = Labels::from([
+        ("__name__".to_string(), name.to_string()),
+        ("job".to_string(), "x".to_string()),
+    ]);
+    let floats: Float64Array = std::iter::once(None::<f64>)
+        .chain((1..points).map(|_| Some(1.0)))
+        .collect();
+    let list = vec!["4014000000000000"; buckets].join(",");
+    let text = format!("0/0/0/{count}/4014000000000000/0/0_{buckets}/{list}///");
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder.push(OwnedHistogram::parse(&text).view()).unwrap();
+    let indices: Vec<Option<u32>> = std::iter::once(Some(index))
+        .chain((1..points).map(|_| None))
+        .collect();
+    let samples = Samples::try_from_mixed(
+        floats,
+        HistogramSamples::try_new(UInt32Array::from(indices), builder.finish().unwrap()).unwrap(),
+    )
+    .unwrap();
+    Series {
+        metric: metric(&labels),
+        time: TimeAxis::Grid(GridRange::try_new(grid.clone(), 0, points).unwrap()),
+        fields: SeriesFields::one(samples),
+    }
+}
+
 fn budget_matching(op: BinaryOp, labels: MatchingLabels) -> BinaryMatching {
     BinaryMatching {
         op,
@@ -1467,7 +1526,7 @@ fn budget_matching(op: BinaryOp, labels: MatchingLabels) -> BinaryMatching {
 }
 
 /// Runs a binary operation with a budget admitting at most `limit` bytes, recording every total it
-/// is asked for.
+/// is asked for. The totals are the live workspace, so they fall as a step's scratch ends.
 fn budgeted(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -1490,7 +1549,8 @@ fn budgeted(
     (output, seen)
 }
 
-/// The workspace a binary operation asks for last: the total it needs admitted in all.
+/// The widest workspace a binary operation asks for: the largest total it holds, which is also the
+/// smallest limit it runs under.
 fn budget_total(
     matching: &BinaryMatching,
     schema: &SeriesSchema,
@@ -1499,56 +1559,20 @@ fn budget_total(
 ) -> usize {
     let (output, seen) = budgeted(matching, schema, lhs, schema, rhs, usize::MAX);
     assert!(output.is_ok(), "{output:?}");
-    *seen.last().expect("the operation asks for its workspace")
+    *seen
+        .iter()
+        .max()
+        .expect("the operation asks for its workspace")
 }
 
-/// One field's values of one label set, by grid point, as the bits they were computed with.
-type FieldValues = BTreeMap<usize, u64>;
-
-/// A float result: every label set with the values of each of its fields.
-type FloatOutput = BTreeMap<Labels, Vec<FieldValues>>;
-
-/// Every label set of a float result with its values per field and grid point, so two runs of the
-/// same operation compare regardless of the order their label sets came back in.
-fn float_output(series: Vec<Series>) -> FloatOutput {
-    let mut output: FloatOutput = BTreeMap::new();
-    for series in crate::golden::fold_pieces(series) {
-        let width = series.fields.as_slice().len();
-        let entry = output
-            .entry(labels_of(&series.metric))
-            .or_insert_with(|| vec![BTreeMap::new(); width]);
-        for (field, samples) in series.fields.as_slice().iter().enumerate() {
-            let mut cursor = samples.cursor();
-            for (point, row) in series.time.positions() {
-                match cursor.at(row).expect("the axis and the fields are aligned") {
-                    SampleRef::Missing => {}
-                    SampleRef::Float(value) => {
-                        entry[field].insert(point, value.to_bits());
-                    }
-                    SampleRef::Histogram(_) => panic!("a float result holds no histogram"),
-                }
-            }
-        }
-    }
-    output
-}
-
-/// Asserts two runs of one operation agree: the same label sets with the same values, or the same
-/// error.
-fn assert_same_result(
-    actual: Result<Vec<Series>, DataFusionError>,
-    expected: Result<Vec<Series>, DataFusionError>,
-    context: &str,
-) {
-    match (actual, expected) {
-        (Ok(actual), Ok(expected)) => {
-            assert_eq!(float_output(actual), float_output(expected), "{context}")
-        }
-        (Err(actual), Err(expected)) => {
-            assert_eq!(actual.to_string(), expected.to_string(), "{context}")
-        }
-        (actual, expected) => panic!("{context}: got {actual:?}, expected {expected:?}"),
-    }
+/// The total the operation asks for once its last field has released its tables: what the results
+/// keep until the merge takes over. The field's tables are dropped right before the merge, so the
+/// value after the last fall is exactly the retained figure.
+fn retained_total(seen: &[usize]) -> usize {
+    seen.windows(2)
+        .rfind(|pair| pair[0] > pair[1])
+        .map(|pair| pair[1])
+        .unwrap_or_else(|| panic!("the operation never released a step's workspace: {seen:?}"))
 }
 
 /// The workspace grows with the pairings a field walks, not with the product of the two sides: each
@@ -1713,7 +1737,10 @@ fn included_labels_cost_their_descriptors_and_disjoint_axes_cost_no_rows() {
         );
         (
             output.expect("the operands are both readable"),
-            *seen.last().expect("the operation asks for its workspace"),
+            *seen
+                .iter()
+                .max()
+                .expect("the operation asks for its workspace"),
         )
     };
     let (short_output, short) = measure(2_000);
@@ -1771,29 +1798,62 @@ fn a_pairings_scratch_is_replaced_by_the_next_one() {
 }
 
 /// A group the one side holds twice is charged the rows it files: the kernel pairs every member of
-/// the group and keeps those rows until it reports the duplicate.
+/// the group and keeps those rows until it reports the duplicate, while a point its group has
+/// already matched costs no second slot of the match set.
 #[test]
 fn a_duplicated_group_is_charged_the_rows_it_files() {
-    let grid = budget_grid(32);
+    let points = 512;
+    let grid = budget_grid(points);
     let schema = Arc::new(schema(1, &grid));
     let matching = budget_matching(BinaryOp::Add, MatchingLabels::On(vec![Arc::from("job")]));
-    let at: Vec<usize> = (0..32).collect();
+    let at: Vec<usize> = (0..points).collect();
     let one = vec![budget_operand(&schema, "b", &at)];
-    let total = |many: &[Series]| -> usize {
-        let (output, seen) = budgeted(&matching, &schema, many, &schema, &one, usize::MAX);
-        assert!(output.is_err(), "a duplicated group is rejected");
-        *seen.last().expect("the operation asks for its workspace")
-    };
-    let single = total(&[budget_operand(&schema, "a", &at)]);
-    let duplicated = total(&[
-        budget_operand(&schema, "a", &at),
-        budget_operand(&schema, "c", &at),
-    ]);
-    // The second member pairs at every position, so at least the slots of those 32 rows are charged
-    // on top of the single pairing.
+    // One member of the group is a valid one-to-one match.
+    let (output, single_seen) = budgeted(
+        &matching,
+        &schema,
+        &[budget_operand(&schema, "a", &at)],
+        &schema,
+        &one,
+        usize::MAX,
+    );
+    assert!(output.is_ok(), "one member per group is a valid match");
+    // A second member of the same group matches the same points again.
+    let (output, seen) = budgeted(
+        &matching,
+        &schema,
+        &[
+            budget_operand(&schema, "a", &at),
+            jobbed_operand(&schema, "c", "x", &at),
+        ],
+        &schema,
+        &one,
+        usize::MAX,
+    );
+    let error = output.expect_err("a second member of one group is rejected");
+    assert_eq!(
+        violation_of(&error),
+        Violation::ImplicitManyToOne,
+        "{error}"
+    );
+    // The rows of the second member are what the run costs on top of the single pairing.
+    let single = *single_seen
+        .iter()
+        .max()
+        .expect("the operation asks for its workspace");
+    let duplicated = *seen.iter().max().unwrap();
     assert!(
-        duplicated >= single + 32 * FILED_ROW,
-        "duplicated {duplicated} vs single {single}"
+        duplicated >= single + points * FILED_ROW,
+        "single {single}, duplicated {duplicated}"
+    );
+    // The match set holds one slot per matched point, not one per attempt: a slot charged for the
+    // second member would show up in what the results keep after the field releases its tables.
+    let floor = retained_total(&seen);
+    let rows = 2 * points * RESULT_ROW_BYTES;
+    assert!(floor >= rows, "floor {floor}, rows {rows}");
+    assert!(
+        floor <= rows + 8 * 1024,
+        "floor {floor}: a matched point is charged twice, or the set is kept past its field"
     );
 }
 
@@ -1823,40 +1883,40 @@ fn a_pairing_the_operator_skips_files_no_row() {
         labels: MatchingLabels::On(vec![Arc::from("job")]),
         cardinality: Cardinality::OneToOne,
     };
-    let lhs = vec![series("a", text)];
-    let rhs = vec![series("b", text)];
-    let run = |op: BinaryOp, return_bool: bool| {
+    // One series per side is one pairing: a second of either side would share the match group and
+    // be rejected instead of measuring what the pairing keeps.
+    let run = |op: BinaryOp, return_bool: bool, lhs: &str, rhs: &str| {
         budgeted(
             &matching(op, return_bool),
             &schema,
-            &lhs,
+            &[series("a", lhs)],
             &schema,
-            &rhs,
+            &[series("b", rhs)],
             usize::MAX,
         )
     };
-    let (added, seen) = run(BinaryOp::Add, false);
+    let (added, seen) = run(BinaryOp::Add, false, text, text);
     let added = added.expect("`+` keeps the pair");
     assert_eq!(added.len(), 1, "{added:?}");
-    let added_total = *seen.last().unwrap();
+    let added_total = *seen.iter().max().unwrap();
     // `%` is one of the pairings Prometheus skips: nothing of it is retained, so nothing of it is
     // charged as output.
-    let (skipped, seen) = run(BinaryOp::Mod, false);
+    let (skipped, seen) = run(BinaryOp::Mod, false, text, text);
     assert!(
         skipped
             .expect("a skipped pairing is not an error")
             .is_empty()
     );
-    let skipped_total = *seen.last().unwrap();
+    let skipped_total = *seen.iter().max().unwrap();
     assert!(
         added_total > skipped_total,
         "added {added_total}, skipped {skipped_total}"
     );
     // A `bool` comparison keeps a float, so its rows hold no histogram heap.
-    let (booled, seen) = run(BinaryOp::Ne, true);
+    let (booled, seen) = run(BinaryOp::Ne, true, text, text);
     let booled = booled.expect("a `bool` comparison holds");
     assert_eq!(booled.len(), 1, "{booled:?}");
-    let booled_total = *seen.last().unwrap();
+    let booled_total = *seen.iter().max().unwrap();
     assert!(
         booled_total < added_total,
         "booled {booled_total}, added {added_total}"
@@ -1872,32 +1932,21 @@ fn a_pairing_the_operator_skips_files_no_row() {
         );
     }
     // An empty histogram still keeps its row, so its table row is charged even without buckets.
-    let empty_operands = |text: &str| -> Vec<Series> { vec![series("a", text), series("b", text)] };
-    let run = |op: BinaryOp, operands: &[Series]| {
-        budgeted(
-            &matching(op, false),
-            &schema,
-            operands,
-            &schema,
-            operands,
-            usize::MAX,
-        )
-    };
-    let (kept, kept_seen) = run(BinaryOp::Add, &empty_operands(empty));
+    let (kept, kept_seen) = run(BinaryOp::Add, false, empty, empty);
     assert_eq!(
         kept.expect("an empty histogram is a histogram").len(),
         1,
         "an empty histogram keeps its row"
     );
-    // The same operands under an operator the pair does not support keep nothing.
-    let (unkept, unkept_seen) = run(BinaryOp::Mod, &empty_operands(empty));
+    // The same pair under an operator it does not support keeps nothing.
+    let (unkept, unkept_seen) = run(BinaryOp::Mod, false, empty, empty);
     assert!(
         unkept
             .expect("a skipped pairing is not an error")
             .is_empty()
     );
     assert!(
-        *kept_seen.last().unwrap() > *unkept_seen.last().unwrap(),
+        *kept_seen.iter().max().unwrap() > *unkept_seen.iter().max().unwrap(),
         "an empty histogram keeps its row"
     );
 }
@@ -1963,7 +2012,10 @@ fn a_filtered_comparison_files_a_row_that_carries_no_value() {
     let total = |rhs: &[Series]| -> usize {
         let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, rhs, usize::MAX);
         assert!(output.expect("a filtered comparison holds").is_empty());
-        *seen.last().expect("the operation asks for its workspace")
+        *seen
+            .iter()
+            .max()
+            .expect("the operation asks for its workspace")
     };
     let filtered = total(&equal);
     let unmatched = total(&other);
@@ -2030,8 +2082,398 @@ fn fields_holding_different_positions_merge_into_one_series() {
     );
 }
 
-/// A budget below what the operation needs stops it at whichever step it runs out, and the totals it
-/// asks for never go back.
+/// One pairing whose wide histograms the comparison discards, followed by the points it keeps rows
+/// from: the discarded step is released before the later rows are filed, so the operation's widest
+/// figure is the larger step and not the two added up.
+#[test]
+fn a_discarded_wide_histogram_is_not_added_to_the_rows_filed_after_it() {
+    let points = 256;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(1, &grid));
+    let per_side = 1_024;
+    let matching = budget_matching(BinaryOp::Eq, MatchingLabels::On(vec![Arc::from("job")]));
+    // The counts tell the two sides apart, so `==` keeps neither histogram at the first point. One
+    // series per side is one pairing, walked in axis order.
+    let lhs = vec![wide_histogram_operand(
+        &grid,
+        "a",
+        points,
+        per_side,
+        "4014000000000000",
+    )];
+    let rhs = vec![wide_histogram_operand(
+        &grid,
+        "b",
+        points,
+        per_side,
+        "401c000000000000",
+    )];
+    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+    let output = output.expect("a filtered comparison holds");
+    assert_eq!(output.len(), 1, "{output:?}");
+    // The histogram point is filed with no value, so the series starts after it.
+    assert_eq!(run_ranges(&output[0]), vec![(1, points - 1)]);
+    // The step that reads the wide histograms is followed by one that does not, so the report falls:
+    // a figure that kept the discarded step would never come back down.
+    assert!(seen.windows(2).any(|pair| pair[0] > pair[1]), "{seen:?}");
+    let peak = *seen.iter().max().unwrap();
+    // A lower bound on the two phases: the owned buckets of both sides and the union they are
+    // merged into, which the discarded row still pays, and the slots of the rows that are kept.
+    let owned = 2 * per_side * std::mem::size_of::<(i32, f64)>();
+    let growth = 2 * per_side * 2 * std::mem::size_of::<(i32, f64)>();
+    let histograms = owned + growth;
+    let kept_rows = (points - 1) * RESULT_ROW_BYTES;
+    assert!(
+        peak < histograms + kept_rows,
+        "peak {peak} reaches the sum of the phases, {histograms} + {kept_rows}"
+    );
+    let tight = peak + (histograms + kept_rows - peak) / 2;
+    assert!(
+        budgeted(&matching, &schema, &lhs, &schema, &rhs, tight)
+            .0
+            .is_ok(),
+        "a limit between the widest step and the sum of the phases, {tight}, is enough"
+    );
+
+    // A `bool` comparison keeps a float, so the histogram it built is dropped and its step falls
+    // there too: the discarded value does not stay charged to the end of the row.
+    let booled = BinaryMatching {
+        op: BinaryOp::Ne,
+        return_bool: true,
+        ..matching.clone()
+    };
+    let (output, seen) = budgeted(&booled, &schema, &lhs, &schema, &rhs, usize::MAX);
+    let output = output.expect("a `bool` comparison holds");
+    assert_eq!(output.len(), 1, "{output:?}");
+    assert_eq!(
+        run_ranges(&output[0]),
+        vec![(0, points)],
+        "a `bool` comparison answers every shared point"
+    );
+    assert!(seen.windows(2).any(|pair| pair[0] > pair[1]), "{seen:?}");
+}
+
+/// A histogram `+` the row keeps hands its value over instead of holding it beside the operator's
+/// temporary: the figure falls by exactly what the operator allocated and did not keep.
+#[test]
+fn a_kept_wide_histogram_is_transferred_not_held_beside_the_operator_temporary() {
+    let grid = budget_grid(1);
+    let schema = Arc::new(schema(1, &grid));
+    // One point whose value is a histogram on both sides, in one match group, so the single row is
+    // kept and its value is the union of the two bucket lists.
+    let lhs = vec![wide_histogram_operand(
+        &grid,
+        "a",
+        1,
+        1_024,
+        "4014000000000000",
+    )];
+    let rhs = vec![wide_histogram_operand(
+        &grid,
+        "b",
+        1,
+        4_096,
+        "4014000000000000",
+    )];
+    let matching = BinaryMatching {
+        op: BinaryOp::Add,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("job")]),
+        cardinality: Cardinality::ManyToOne(Vec::new()),
+    };
+    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+    let output = output.expect("`+` of two histograms keeps the union");
+    assert_eq!(output.len(), 1, "{output:?}");
+    // What the row holds, read from its view: every bucket of the wider side is present and the
+    // counts are added. This says the value is the union the operator computed, so the figure below
+    // is measured on the object the kernel really kept.
+    match first_sample(&output[0]) {
+        SampleRef::Histogram(view) => {
+            assert_eq!(view.count, 10.0, "the counts of both sides are added");
+            assert_eq!(
+                view.positive.buckets.len(),
+                4_096,
+                "the row keeps the union of both bucket lists"
+            );
+        }
+        SampleRef::Float(_) => panic!("`+` of two histograms keeps a histogram"),
+        SampleRef::Missing => panic!("the row holds a value"),
+    }
+    // The ownership figures, taken from the same operands the kernel read: what the operator
+    // allocates to read the pair, and what the object it hands back holds. The value is measured on
+    // the object the operator returned -- not on one rebuilt from its serialized view, whose
+    // buffers and span layout a round trip allocates differently.
+    let transient = histogram_pair_bytes(&first_sample(&lhs[0]), &first_sample(&rhs[0]));
+    let (result, keep) = elem_binop(matching.op, first_sample(&lhs[0]), first_sample(&rhs[0]))
+        .expect("the operator reads both histograms")
+        .expect("`+` of two histograms keeps the union");
+    assert!(keep, "`+` of two histograms keeps its row");
+    let kept = match &result {
+        GridSample::Histogram(histogram) => result_histogram_bytes(histogram),
+        GridSample::Float(_) => panic!("`+` of two histograms keeps a histogram"),
+    };
+    assert!(transient > kept, "transient {transient}, kept {kept}");
+    // One fall in the report is exactly what the operator allocated and the row did not keep: the
+    // operator's temporary is replaced by the value it handed back, so the figure holds that value
+    // once -- never beside the copy the operator built it from, and never twice.
+    assert!(
+        seen.windows(2)
+            .any(|pair| pair[0] > pair[1] && pair[0] - pair[1] == transient - kept),
+        "the operator's temporary was not released exactly: {seen:?}"
+    );
+    // The value that survived that fall is still charged: it is part of the rows the merge writes.
+    assert!(
+        *seen.last().expect("the operation asks for its workspace") >= kept,
+        "the kept value is not part of what the operation finally holds: {seen:?}"
+    );
+}
+
+/// Only the field that matches keeps storage: a second field whose operands share no value files
+/// nothing, and the match slots of the first field are released with it.
+#[test]
+fn only_the_field_that_matches_keeps_storage() {
+    let points = 512;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(2, &grid));
+    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    let metric_of = |name: &str| {
+        metric(&Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+        ]))
+    };
+    // The first field holds a value on both sides at every point; the second holds none on the
+    // left, so that pairing has nothing to match.
+    builder.begin_series();
+    for point in 0..points {
+        builder.push(point, &[Some(1.0), None]).unwrap();
+    }
+    let lhs: Vec<Series> = builder
+        .finish(metric_of("a"))
+        .unwrap()
+        .into_iter()
+        .collect();
+    builder.begin_series();
+    for point in 0..points {
+        builder.push(point, &[Some(1.0), Some(2.0)]).unwrap();
+    }
+    let rhs: Vec<Series> = builder
+        .finish(metric_of("b"))
+        .unwrap()
+        .into_iter()
+        .collect();
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+    let output = output.expect("the fields pair");
+    assert_eq!(output.len(), 1, "{output:?}");
+    let mut first = output[0].fields.as_slice()[0].cursor();
+    let mut second = output[0].fields.as_slice()[1].cursor();
+    let mut kept = 0;
+    for (_, row) in output[0].time.positions() {
+        if let SampleRef::Float(value) = first.at(row).expect("a row never goes back") {
+            assert_eq!(value, 2.0);
+            kept += 1;
+        }
+        assert!(matches!(
+            second.at(row).expect("a row never goes back"),
+            SampleRef::Missing
+        ));
+    }
+    assert_eq!(kept, points, "the matching field keeps every point");
+    // What the operation still holds once its last field released its tables is the rows it filed:
+    // no match slot of the field that matched, no table of the field that did not.
+    let floor = retained_total(&seen);
+    let rows = points * RESULT_ROW_BYTES;
+    assert!(floor >= rows, "floor {floor}, rows {rows}");
+    assert!(
+        floor <= rows + 8 * 1024,
+        "floor {floor}: a released field's slots or tables are still charged"
+    );
+}
+
+/// A field that reports nothing keeps no message storage: what the successful fields leave behind
+/// is the same figure whatever the text of their labels, while the messages they could have written
+/// grow with it.
+///
+/// `ignoring(...)` matching shares the label `Arc`s with the operand, so the result label set keeps
+/// the same descriptors and the same key in both runs; only the text of each label differs. A field
+/// that reserved for the messages it might report would leave the wide run's result storage larger by
+/// three label sets, which this comparison rules out without any allowance of its own.
+#[test]
+fn successful_fields_keep_no_message_storage() {
+    let points = 16;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(2, &grid));
+    let operand = |builder: &mut GridSeriesBuilder, name: &str, text: &str, values: [f64; 2]| {
+        let mut labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+        ]);
+        for index in 0..40 {
+            labels.insert(format!("l{index}"), text.to_string());
+        }
+        builder.begin_series();
+        for point in 0..points {
+            builder
+                .push(point, &[Some(values[0]), Some(values[1])])
+                .unwrap();
+        }
+        builder
+            .finish(metric(&labels))
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<Series>>()
+    };
+    // The figure the operation still holds once its last field released its tables, with the values
+    // it answers checked as sums of the two operands' fields.
+    let floor = |text: &str| -> usize {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        let lhs = operand(&mut builder, "a", text, [1.0, 2.0]);
+        let rhs = operand(&mut builder, "b", text, [3.0, 4.0]);
+        let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+        let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+        let output = output.expect("both fields match");
+        assert_eq!(output.len(), 1, "{output:?}");
+        // Each field answers the sum of its operands at every point: `1+3` and `2+4`.
+        for (field, expected) in [4.0, 6.0].into_iter().enumerate() {
+            let mut cursor = output[0].fields.as_slice()[field].cursor();
+            let mut rows = 0;
+            for (_, row) in output[0].time.positions() {
+                match cursor.at(row).expect("the axis and the fields are aligned") {
+                    SampleRef::Float(value) => assert_eq!(value, expected, "{text}"),
+                    _ => panic!("a field of the sum holds no float at {row}"),
+                }
+                rows += 1;
+            }
+            assert_eq!(rows, points, "every point of the field is kept: {text}");
+        }
+        retained_total(&seen)
+    };
+    let narrow = floor("v");
+    let wide_text = "v".repeat(200);
+    let wide = floor(&wide_text);
+    // Both runs file the same rows and keep the same label-set descriptors: a field that reserved
+    // for the messages it could have written would leave the wide run larger by their text.
+    assert_eq!(narrow, wide, "narrow {narrow}, wide {wide}");
+    // The rows themselves are part of that figure, so neither run is trivially zero.
+    assert!(
+        narrow >= 2 * points * RESULT_ROW_BYTES,
+        "floor {narrow} does not hold the rows both fields filed"
+    );
+}
+
+/// The matching label names are collected into a reference vector before the label list is
+/// rewritten, so a wide `ignoring(...)` and a wide `on(...)` cost their names even when no series
+/// carries them and the pairing's axes share no position.
+#[test]
+fn the_budget_charges_the_matching_names_it_collects() {
+    let grid = budget_grid(2);
+    let schema = Arc::new(schema(1, &grid));
+    // Almost no labels on either side, and axes that share no position: the operands still share
+    // one match group, and the pairing files no row.
+    let lhs = vec![budget_operand(&schema, "a", &[0])];
+    let rhs = vec![budget_operand(&schema, "b", &[1])];
+    let absent = |n: usize| -> Vec<Arc<str>> {
+        (0..n)
+            .map(|index| Arc::from(format!("absent_{index}")))
+            .collect()
+    };
+    // The peak of the whole run and the figure of its pairing step: no row is filed here, so the
+    // tables request comes first, the pairing's request second, and only then the sort, the field's
+    // release and the merge.
+    let measure = |labels: fn(Vec<Arc<str>>) -> MatchingLabels, n: usize| -> (usize, usize) {
+        let matching = budget_matching(BinaryOp::Add, labels(absent(n)));
+        let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+        assert!(
+            output.expect("the operands are readable").is_empty(),
+            "no position is shared"
+        );
+        let peak = *seen
+            .iter()
+            .max()
+            .expect("the operation asks for its workspace");
+        let pairing = *seen
+            .get(2)
+            .expect("the pairing's request follows the field's tables");
+        (peak, pairing)
+    };
+    let names = 2_000 * std::mem::size_of::<&str>();
+    let kinds = [
+        MatchingLabels::On as fn(Vec<Arc<str>>) -> MatchingLabels,
+        MatchingLabels::Ignoring,
+    ];
+    for labels in kinds {
+        let (none_peak, none_pair) = measure(labels, 0);
+        let (many_peak, many_pair) = measure(labels, 2_000);
+        // The names are charged in the pairing step itself, where the label list is collected
+        // before it is rewritten: exactly one reference per name, and nothing else moves.
+        assert_eq!(
+            many_pair,
+            none_pair + names,
+            "pairing without the names {none_pair}, with them {many_pair}"
+        );
+        assert!(
+            many_peak > none_peak,
+            "the names are not in the widest figure: {none_peak} vs {many_peak}"
+        );
+        // A limit the run without the names admits is refused once they are collected.
+        let matching = budget_matching(BinaryOp::Add, labels(absent(2_000)));
+        let (output, admitted) = budgeted(&matching, &schema, &lhs, &schema, &rhs, none_peak);
+        let error = output.expect_err("the names are charged before the rewrite");
+        assert!(
+            matches!(error, DataFusionError::ResourcesExhausted(_)),
+            "{error}"
+        );
+        assert!(
+            admitted.iter().all(|&total| total <= none_peak),
+            "{admitted:?}"
+        );
+    }
+}
+
+/// The output schema is allocated after the first reservation, so a wide schema's field list is
+/// covered before it exists, and a schema with no paired fields still answers an empty vector.
+#[test]
+fn the_first_request_covers_the_output_schema() {
+    let grid = budget_grid(1);
+    let wide = Arc::new(schema(10, &grid));
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    let (output, seen) = budgeted(&matching, &wide, &[], &wide, &[], usize::MAX);
+    assert!(output.expect("nothing pairs with nothing").is_empty());
+    let first = *seen.first().expect("the schema is reserved first");
+    assert!(
+        first >= 10 * 2 * std::mem::size_of::<FieldSpec>(),
+        "the first request holds the field list: {first}"
+    );
+    // A limit below the schema's own descriptors is refused before the schema is built.
+    let (output, admitted) = budgeted(&matching, &wide, &[], &wide, &[], first - 1);
+    let error = output.expect_err("the schema's descriptors are reserved before it exists");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert!(admitted.is_empty(), "{admitted:?}");
+
+    // No paired fields pair nothing: the operands are never read, so a series that disagrees with
+    // a fieldless schema is answered with an empty vector, as the unbudgeted form answers.
+    let none = Arc::new(schema(0, &grid));
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let points: Points = BTreeMap::from([(0, f64::to_bits(1.0))]);
+    let operand = vec![
+        sparse_series(&Arc::new(schema(1, &grid)), &labels, &points)
+            .expect("the operand holds a value"),
+    ];
+    assert!(
+        binary_vectors(&matching, &none, &operand, &none, &[])
+            .expect("no field pairs")
+            .is_empty()
+    );
+    let (output, _) = budgeted(&matching, &none, &operand, &none, &[], usize::MAX);
+    assert!(output.expect("no field pairs").is_empty());
+}
+
+/// A budget below what the operation needs stops it at the step that outgrows it, and the totals it
+/// asks for are the live ones: the widest is what it needs, and anything under it is refused.
 #[test]
 fn a_budget_below_the_workspace_stops_the_operation() {
     let grid = budget_grid(8);
@@ -2046,16 +2488,30 @@ fn a_budget_below_the_workspace_stops_the_operation() {
         seen.len() > 2,
         "the workspace is admitted in steps: {seen:?}"
     );
-    assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
-    // The last total it asks for is enough, and every earlier total is not: the operation outgrows
-    // it in the tables, the rows or the merge.
-    let needed = *seen.last().unwrap();
+    // Every request is a different figure, and a step replaces the one before it, so the sequence
+    // falls as well as rises.
+    assert!(seen.windows(2).all(|pair| pair[0] != pair[1]), "{seen:?}");
+    assert!(
+        seen.windows(2).any(|pair| pair[0] > pair[1]),
+        "no step's workspace was released: {seen:?}"
+    );
+    // The widest total is what the operation needs; every figure under it is refused at the step
+    // that would hold more.
+    let needed = *seen.iter().max().unwrap();
     assert!(
         budgeted(&matching, &schema, &lhs, &schema, &rhs, needed)
             .0
             .is_ok()
     );
-    for &limit in &seen[..seen.len() - 1] {
+    let mut limits: Vec<usize> = seen
+        .iter()
+        .copied()
+        .filter(|&total| total < needed)
+        .collect();
+    limits.sort_unstable();
+    limits.dedup();
+    assert!(!limits.is_empty(), "{seen:?}");
+    for limit in limits {
         let (output, admitted) = budgeted(&matching, &schema, &lhs, &schema, &rhs, limit);
         let error = output.unwrap_err().to_string();
         assert!(error.contains("more than the"), "{error}");
@@ -2067,22 +2523,43 @@ fn a_budget_below_the_workspace_stops_the_operation() {
     assert!(admitted.is_empty(), "{admitted:?}");
 }
 
-/// An operand that disagrees with its schema is rejected exactly as the public form rejects it,
-/// before any field's tables are admitted for it.
+/// The public form and the budgeted one report the same error for the same operands, whether the
+/// grid or a series' layout is what disagrees, and neither reads a field it cannot place.
 #[test]
 fn a_budgeted_run_reports_the_public_rejection() {
     let grid = budget_grid(4);
-    // A schema with no fields: the kernel's field loop would not run a single time.
-    let empty = Arc::new(schema(0, &grid));
-    let one = Arc::new(schema(1, &grid));
-    let labels = Labels::from([("job".to_string(), "x".to_string())]);
-    let points: Points = BTreeMap::from([(0, f64::to_bits(1.0))]);
-    let series = vec![sparse_series(&one, &labels, &points).expect("the operand holds a value")];
+    let shared_schema = Arc::new(schema(1, &grid));
     let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
-    let public = binary_vectors(&matching, &empty, &series, &empty, &[]).unwrap_err();
-    let (budgeted, seen) = budgeted(&matching, &empty, &series, &empty, &[], usize::MAX);
-    assert_eq!(budgeted.unwrap_err().to_string(), public.to_string());
-    // Only the output descriptors were admitted: no field was reserved for an operand the kernel
-    // cannot read.
+    // A schema evaluated on another grid: refused before anything is reserved for the operands.
+    let elsewhere = Arc::new(schema(1, &budget_grid(8)));
+    let public = binary_vectors(&matching, &shared_schema, &[], &elsewhere, &[]).unwrap_err();
+    let (output, seen) = budgeted(&matching, &shared_schema, &[], &elsewhere, &[], usize::MAX);
+    assert_eq!(output.unwrap_err().to_string(), public.to_string());
+    assert!(seen.is_empty(), "{seen:?}");
+
+    // A series whose axis places two rows and whose field carries one: the kernel cannot read it,
+    // and only the output descriptors were admitted before it said so.
+    let short = Series {
+        metric: metric(&Labels::from([("job".to_string(), "x".to_string())])),
+        time: TimeAxis::Grid(GridRange::try_new(grid.clone(), 0, 2).unwrap()),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(1.0)]))),
+    };
+    let public = binary_vectors(
+        &matching,
+        &shared_schema,
+        std::slice::from_ref(&short),
+        &shared_schema,
+        &[],
+    )
+    .unwrap_err();
+    let (output, seen) = budgeted(
+        &matching,
+        &shared_schema,
+        std::slice::from_ref(&short),
+        &shared_schema,
+        &[],
+        usize::MAX,
+    );
+    assert_eq!(output.unwrap_err().to_string(), public.to_string());
     assert_eq!(seen.len(), 1, "{seen:?}");
 }

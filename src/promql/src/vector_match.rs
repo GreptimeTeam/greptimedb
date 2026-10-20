@@ -136,9 +136,6 @@ pub fn binary_output_schema(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Ar
 /// and `__unit__`; comparisons without `bool` keep the left value where they hold. Native
 /// histograms support `+`, `-`, `==` and `!=` with each other, `*` with a float on either side
 /// and `/` by a float; Prometheus skips any other pairing of a histogram.
-///
-/// A caller that accounts for the workspace this allocates calls
-/// [`binary_vectors_with_reservation`]; this form reserves nothing.
 pub fn binary_vectors(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -146,25 +143,18 @@ pub fn binary_vectors(
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
 ) -> Result<Vec<Series>> {
-    binary_vectors_with_reservation(
-        matching,
-        lhs_schema,
-        lhs,
-        rhs_schema,
-        rhs,
-        &mut |_: usize| -> Result<()> { Ok(()) },
-    )
+    binary_vectors_inner(matching, lhs_schema, lhs, rhs_schema, rhs, None)
 }
 
-/// [`binary_vectors`], handing the workspace it needs to `reserve` as it allocates.
+/// [`binary_vectors`], handing the live workspace it holds to `reserve` as it allocates.
 ///
 /// What the operation will allocate cannot be known before it allocates: which series match each
 /// other, where their axes overlap and which rows the operator keeps all come out of the operands
-/// as they are read. So `reserve` receives the **total** additional live workspace the operation
-/// needs, never an increment: the first call covers what the operands' metadata bounds, and every
-/// later call only grows it, because the rows the results keep are added as they are filed while a
-/// step's scratch replaces the scratch of the step before it. A total `reserve` refuses ends the
-/// operation with that error, and what it admitted stays the caller's to release.
+/// as they are read. So `reserve` receives the **total** live workspace the operation holds, and it
+/// is asked whenever that total changes: it grows as rows are kept and falls as a step's scratch --
+/// one field's tables, one pairing's label set, an owned copy of a histogram -- is replaced or
+/// dropped. A total `reserve` refuses ends the operation with that error, and what it admitted stays
+/// the caller's to release.
 pub(crate) fn binary_vectors_with_reservation(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -173,54 +163,83 @@ pub(crate) fn binary_vectors_with_reservation(
     rhs: &[Series],
     reserve: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Vec<Series>> {
-    let output = binary_output_schema(lhs_schema, rhs_schema)?;
-    let grid = output
-        .eval_grid
-        .clone()
-        .expect("set by binary_output_schema");
     let mut budget = Budget::new(reserve);
-    // The output schema's field list, one result table per field and the vector holding them.
-    let descriptors = output
-        .fields
-        .len()
-        .saturating_mul(std::mem::size_of::<Results>() + 2 * std::mem::size_of::<FieldSpec>())
-        .saturating_add(std::mem::size_of::<SeriesSchema>());
-    budget.retain(descriptors)?;
+    binary_vectors_inner(
+        matching,
+        lhs_schema,
+        lhs,
+        rhs_schema,
+        rhs,
+        Some(&mut budget),
+    )
+}
+
+/// The one binary kernel: one walk, one lookup and one error order, whether or not a caller
+/// accounts for the workspace. Every figure is reserved only when `budget` is held.
+fn binary_vectors_inner(
+    matching: &BinaryMatching,
+    lhs_schema: &SeriesSchema,
+    lhs: &[Series],
+    rhs_schema: &SeriesSchema,
+    rhs: &[Series],
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Vec<Series>> {
+    // The grid both operands are evaluated on, checked before anything is reserved for them.
+    let grid = same_grid(lhs_schema, rhs_schema)?;
+    // The fields paired by position and the descriptors they are handed back in: one result table
+    // per field, the field list both the results and the output schema keep, and the schema itself.
+    // The schema is what these bytes cover, so they are reserved before it is built.
+    let width = lhs_schema.fields.len().min(rhs_schema.fields.len());
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.retain(output_bytes(width))?;
+    }
+    let output = binary_output_schema(lhs_schema, rhs_schema)?;
     let mut errors = Vec::new();
-    let mut fields = Vec::with_capacity(output.fields.len());
-    for field in 0..output.fields.len() {
+    let mut fields = Vec::with_capacity(width);
+    for field in 0..width {
         let lhs = Operand::try_new(lhs_schema, lhs, field)?;
         let rhs = Operand::try_new(rhs_schema, rhs, field)?;
-        fields.push(binary_field(
+        let results = binary_field(
             matching,
             &grid,
             &lhs,
             &rhs,
             &mut errors,
-            &mut budget,
-        )?);
+            budget.as_deref_mut(),
+        )?;
+        // The field's tables and sort are destroyed with its frame, so their release is admitted
+        // here: one figure for what the field kept -- its messages and rows -- once they are gone.
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.drop_scratch()?;
+        }
+        fields.push(results);
     }
     earliest_error(errors)?;
     // The merge holds every field's results at once: the triples it files, the table it files them
-    // in and the builder writing the series out are the last scratch of the operation.
-    let sets = fields
-        .iter()
-        .map(|results| results.series.len())
-        .fold(0usize, usize::saturating_add);
-    let merge = merge_bytes(
-        budget.rows,
-        sets,
-        output.fields.len(),
-        budget.histograms,
-        budget.histogram_heap,
-    );
-    budget.drop_scratch();
-    budget.step(merge)?;
+    // in and the builder writing the series out are the last workspace of the operation.
+    if let Some(budget) = budget {
+        let sets = fields
+            .iter()
+            .map(|results| results.series.len())
+            .fold(0usize, usize::saturating_add);
+        let merge = merge_bytes(
+            budget.kept,
+            sets,
+            width,
+            budget.histograms,
+            budget.histogram_heap,
+        );
+        budget.step(merge)?;
+    }
     merge_fields(fields, output)
 }
 
 /// One label of a match key, charged twice because `group_key` grows its `Vec` by doubling.
 const KEY_LABEL_BYTES: usize = 2 * std::mem::size_of::<(Arc<str>, Arc<str>)>();
+
+/// One name of [`MatchingLabels`], which `result_metric` collects into a reference vector. The
+/// vector is collected from an exact-size iterator, so its buffer holds one `&str` per name.
+const MATCHING_NAME_BYTES: usize = std::mem::size_of::<&str>();
 
 /// One entry of a match-group table, with the control byte and spare capacity it keeps.
 const GROUP_SLOT_BYTES: usize = 2 * std::mem::size_of::<(GroupKey, Vec<usize>)>();
@@ -236,6 +255,11 @@ const RESULT_SLOT_BYTES: usize = 2 * std::mem::size_of::<(GroupKey, ResultRows)>
 const RESULT_ROW_BYTES: usize =
     2 * (2 * std::mem::size_of::<usize>() + std::mem::size_of::<Option<GridSample>>());
 
+/// One row while a label set is sorted: the old and the new copy of its point, group and value
+/// vectors, each charged twice for the capacity it ends at, and the row order the sort reads.
+const SORT_ROW_BYTES: usize =
+    4 * std::mem::size_of::<usize>() + 2 * std::mem::size_of::<Option<GridSample>>();
+
 /// One row of the merge's table, charged the same way.
 const MERGE_SLOT_BYTES: usize =
     2 * std::mem::size_of::<(GroupKey, (MetricName, Vec<(usize, usize, GridSample)>))>();
@@ -249,24 +273,35 @@ const HISTOGRAM_ROW_BYTES: usize = 4 * std::mem::size_of::<f64>()
 /// The fixed text of one error message, around the label set it renders.
 const ERROR_TEXT_BYTES: usize = 256;
 
-/// The workspace a binary operation admits as it allocates.
+/// The bytes the operation's own descriptors cost: one result table per paired field, the field
+/// list the results and the output schema each keep, and the schema struct.
+fn output_bytes(fields: usize) -> usize {
+    fields
+        .saturating_mul(std::mem::size_of::<Results>() + 2 * std::mem::size_of::<FieldSpec>())
+        .saturating_add(std::mem::size_of::<SeriesSchema>())
+}
+
+/// The live workspace a binary operation admits as it allocates.
 ///
-/// What the results retain -- rows, the label sets they are filed under, their histograms -- only
-/// grows, while the scratch of a step replaces the scratch of the step before it. So the total
-/// handed to the caller is the live peak: the retained bytes plus the largest scratch beside them,
-/// never the sum of everything the operation allocated along the way.
+/// What the results keep -- rows, the label sets they are filed under, their histograms -- stays
+/// live until the operation returns, while the scratch of a step is what one step holds beside it.
+/// [`Budget::step`] replaces that scratch instead of adding to it, so the total handed to the caller
+/// is what is retained plus the step being run: it rises when a wider step begins and falls when a
+/// narrower one replaces it, and it is never the sum of every step the operation has run.
 struct Budget<'a> {
-    /// Admits a total of additional live workspace, or refuses it.
+    /// Admits the live workspace, or refuses it.
     reserve: &'a mut dyn FnMut(usize) -> Result<()>,
     /// The bytes the results keep until the operation returns.
     retained: usize,
-    /// The largest scratch needed beside them by the step being run.
+    /// The bytes of the step being run, beside what is retained.
     scratch: usize,
-    /// The largest total admitted so far.
-    total: usize,
-    /// The result rows filed, which the merge holds until it writes them out.
+    /// The total handed to `reserve` last, so an unchanged one is not asked for twice.
+    requested: Option<usize>,
+    /// The result rows filed, rows the operator filtered included: what the sort walks.
     rows: usize,
-    /// The result rows holding a histogram, and the heap those histograms hold.
+    /// The result rows holding a value: what the merge files as triples and writes out.
+    kept: usize,
+    /// The retained rows holding a histogram, and the heap those histograms hold.
     histograms: usize,
     histogram_heap: usize,
 }
@@ -277,8 +312,9 @@ impl<'a> Budget<'a> {
             reserve,
             retained: 0,
             scratch: 0,
-            total: 0,
+            requested: None,
             rows: 0,
+            kept: 0,
             histograms: 0,
             histogram_heap: 0,
         }
@@ -290,54 +326,82 @@ impl<'a> Budget<'a> {
         self.admit()
     }
 
-    /// Admits a step needing `bytes` beside what is retained, replacing the previous step's
-    /// scratch.
+    /// Admits `bytes` as the whole workspace of the step being run, replacing the step before it.
     fn step(&mut self, bytes: usize) -> Result<()> {
-        self.scratch = self.scratch.max(bytes);
+        self.scratch = bytes;
         self.admit()
     }
 
     /// Forgets the last step's scratch: its tables and buffers are gone.
-    fn drop_scratch(&mut self) {
+    fn drop_scratch(&mut self) -> Result<()> {
         self.scratch = 0;
+        self.admit()
     }
 
-    /// Retains one histogram result row: the value it boxes and the heap its buckets hold.
-    fn retain_histogram(&mut self, heap: usize) -> Result<()> {
+    /// Adds `bytes` to what the results retain without admitting it, for a figure the next
+    /// [`Budget::step`] admits as one total.
+    fn keep(&mut self, bytes: usize) {
+        self.retained = self.retained.saturating_add(bytes);
+    }
+
+    /// Moves one kept histogram into what the results retain: the value it boxes and the heap its
+    /// buckets and bounds hold. The [`Budget::step`] that follows admits the transfer together with
+    /// the released operator temporary, so the figure never holds the histogram twice.
+    fn keep_histogram(&mut self, histogram: &FloatHistogram) {
         self.histograms = self.histograms.saturating_add(1);
-        self.histogram_heap = self.histogram_heap.saturating_add(heap);
-        self.retain(std::mem::size_of::<FloatHistogram>().saturating_add(heap))
+        self.histogram_heap = self.histogram_heap.saturating_add(histogram.heap_bytes());
+        self.keep(result_histogram_bytes(histogram));
     }
 
-    /// Hands the live total to `reserve` once it has grown. It never shrinks, so the caller never
-    /// gives back what a later step no longer needs.
+    /// Counts one filed row: every row is what the sort walks, a row holding a value is what the
+    /// merge files and writes out.
+    fn file_row(&mut self, kept: bool) {
+        self.rows = self.rows.saturating_add(1);
+        if kept {
+            self.kept = self.kept.saturating_add(1);
+        }
+    }
+
+    /// Hands the live total to `reserve` when it differs from the last one. It falls as well as
+    /// rises, and only a repeated figure is left out.
     fn admit(&mut self) -> Result<()> {
         let total = self.retained.saturating_add(self.scratch);
-        if total > self.total {
-            self.total = total;
+        if self.requested != Some(total) {
+            self.requested = Some(total);
             (self.reserve)(total)?;
         }
         Ok(())
     }
 }
 
-/// What one field's tables, flags and messages cost before it pairs anything, with the largest
-/// label-set key it can file a row under.
+/// What one field's tables, flags and messages cost before it pairs anything.
+#[derive(Default)]
+struct FieldMetadata {
+    /// The presence flags, the one side's match groups and the duplicate scan's points.
+    tables: usize,
+    /// The allowance for the messages the field can report, which it reserves for its sort before
+    /// it knows which of them it appends; only the ones it writes are kept.
+    errors: usize,
+    /// The largest key a row of the field is filed under.
+    largest_key: usize,
+}
+
+/// The bytes one field's tables, flags and messages cost.
 ///
 /// The presence of each side and of the points both are present at are three flags per grid point;
 /// the one side's groups are a key, the values `on(...)` matching copies and a member list per
 /// series with the table holding them and the references indexing them; the duplicate scan
 /// collects that side's present points; one series of the many side is looked up by a key of its
 /// own; and a field reports at most three messages, each a fixed frame around one rendering.
-/// Nothing here counts the pairing the field walks: which series match and where their axes
-/// overlap is only known as the walk reaches them.
+/// Nothing here counts the pairing the field walks: which series match, where their axes overlap
+/// and which rows the operator keeps is only known as the walk reaches them.
 fn field_metadata_bytes(
     matching: &BinaryMatching,
     include: &[Arc<str>],
     points: usize,
     many: &Operand<'_>,
     one: &Operand<'_>,
-) -> (usize, usize) {
+) -> FieldMetadata {
     let mut bytes = points.saturating_mul(3);
     let mut largest_key = 0usize;
     for series in one.series {
@@ -368,22 +432,45 @@ fn field_metadata_bytes(
         .fold(include_text, |bytes, series| {
             bytes.max(label_text_bytes(&series.metric).saturating_add(include_text))
         });
-    let errors = 3usize.saturating_mul(ERROR_TEXT_BYTES.saturating_add(text));
-    (
-        bytes.saturating_add(lookup).saturating_add(errors),
-        largest_key.saturating_add(include.len().saturating_mul(KEY_LABEL_BYTES)),
-    )
+    FieldMetadata {
+        tables: bytes.saturating_add(lookup),
+        errors: 3usize.saturating_mul(ERROR_TEXT_BYTES.saturating_add(text)),
+        largest_key: largest_key.saturating_add(include.len().saturating_mul(KEY_LABEL_BYTES)),
+    }
+}
+
+/// The workspace one row of a pairing holds: the field's tables, the match slots it holds, the
+/// pairing's label set and -- while the operator reads one -- its histogram temporaries.
+fn row_workspace(
+    metadata: &FieldMetadata,
+    matched: usize,
+    pairing: usize,
+    histograms: usize,
+) -> usize {
+    metadata
+        .tables
+        .saturating_add(matched)
+        .saturating_add(pairing)
+        .saturating_add(histograms)
 }
 
 /// The bytes one pairing allocates before it files a row: the result label set `result_metric`
-/// rewrites, the `group_*` labels it copies in, and the key its rows are looked up by.
+/// rewrites, the `group_*` labels it copies in, the reference vector it collects the matching label
+/// names into, and the key its rows are looked up by.
 ///
-/// Each rewrite filters the tag list into a `Vec` and turns that into a shared slice, so the list
-/// it replaces is alive while two copies of the new one are built, and an included label the many
-/// side does not carry is inserted, which costs its descriptor too. This is one pairing's scratch:
-/// the next pairing replaces it, and a pairing whose axes share no position still pays it, because
-/// the label set is built before the axes are intersected.
-fn pair_bytes(many: &MetricName, one: &MetricName, include: &[Arc<str>]) -> usize {
+/// Each rewrite filters the tag list into a `Vec` and turns that into a shared slice, so the list it
+/// replaces is alive while two copies of the new one are built, and an included label the many side
+/// does not carry is inserted, which costs its descriptor too. The matching names are collected into
+/// a reference vector of their own before the rewrite, for `on(...)` and `ignoring(...)` alike and
+/// whether or not the series carries them. This is one pairing's scratch: the next pairing replaces
+/// it, and a pairing whose axes share no position still pays it, because the label set is built
+/// before the axes are intersected.
+fn pair_bytes(
+    many: &MetricName,
+    one: &MetricName,
+    matching: &BinaryMatching,
+    include: &[Arc<str>],
+) -> usize {
     // The label list each rewrite builds and the one it replaces, then the key `key_of` builds for
     // a row: every label with a value and the name, each charged twice for the growth of the key's
     // `Vec`, and the name string it copies.
@@ -397,9 +484,19 @@ fn pair_bytes(many: &MetricName, one: &MetricName, include: &[Arc<str>]) -> usiz
         .saturating_add(1)
         .saturating_mul(KEY_LABEL_BYTES)
         .saturating_add(many.name().map_or(0, str::len));
+    // Only a one-to-one match rewrites the label list by its matching labels, and it collects their
+    // names first; `group_left` and `group_right` copy the included labels instead.
+    let names = match (&matching.cardinality, &matching.labels) {
+        (Cardinality::OneToOne, MatchingLabels::On(names))
+        | (Cardinality::OneToOne, MatchingLabels::Ignoring(names)) => {
+            names.len().saturating_mul(MATCHING_NAME_BYTES)
+        }
+        _ => 0,
+    };
     labels
         .saturating_add(copied_bytes(one, include))
         .saturating_add(key)
+        .saturating_add(names)
 }
 
 /// The label text `result_metric` copies from the one side: the value of every included label it
@@ -442,12 +539,13 @@ fn result_set_bytes(metric: &MetricName, one: &MetricName, include: &[Arc<str>])
 ///
 /// The merge files every kept triple under its label set and hands one series per label set to a
 /// builder, so the triples, the table, the row it fills, the output vector and the builder's own
-/// buffers are alive together: one index per retained row, one value and validity bit per field
-/// and row, the span a run may start with, a row of the histogram table per histogram and the heap
-/// its buckets are copied to. Every term counts a row or a label set a field actually filed, so
-/// operands whose pairs keep nothing cost no output.
+/// buffers are alive together: one index per retained row, one value and validity bit per field and
+/// row, the span a run may start with, a row of the histogram table per histogram and the heap its
+/// buckets are copied to. Every term counts a value a field actually kept or a label set it filed,
+/// so a pair the operator filtered costs its label set -- the table holds one without a value --
+/// and no row at all.
 fn merge_bytes(
-    rows: usize,
+    kept: usize,
     sets: usize,
     fields: usize,
     histograms: usize,
@@ -462,7 +560,7 @@ fn merge_bytes(
         .saturating_add(2 * std::mem::size_of::<GridSpan>())
         .saturating_add(values)
         .saturating_add(std::mem::size_of::<Option<u32>>());
-    rows.saturating_mul(row)
+    kept.saturating_mul(row)
         // One label set's entry in the merge table and the series it is written out as.
         .saturating_add(
             sets.saturating_mul(MERGE_SLOT_BYTES.saturating_add(2 * std::mem::size_of::<Series>())),
@@ -547,6 +645,12 @@ fn owned_histogram_bytes(view: &HistogramView<'_>) -> usize {
         )
 }
 
+/// The bytes one boxed histogram value holds: its scalars inline and the heap its buckets, bounds
+/// and span layout own.
+fn result_histogram_bytes(histogram: &FloatHistogram) -> usize {
+    std::mem::size_of::<FloatHistogram>().saturating_add(histogram.heap_bytes())
+}
+
 /// The bytes `elem_binop` allocates to read one histogram pairing before it can hand back a value.
 ///
 /// The operator copies both operands into owned [`FloatHistogram`]s that stay alive while the
@@ -592,13 +696,17 @@ fn histogram_pair_bytes(lhs: &SampleRef<'_>, rhs: &SampleRef<'_>) -> usize {
 
 /// Matches one field of each side, collecting the first failure of each kind as
 /// `(point, rank, message)`.
+///
+/// The field's tables and the match set it builds are its own workspace: they replace what the field
+/// before held and are gone when it returns, which is why the caller admits that release after the
+/// call. The messages it appended and the rows it filed are what stays live.
 fn binary_field(
     matching: &BinaryMatching,
     grid: &EvalGrid,
     lhs: &Operand<'_>,
     rhs: &Operand<'_>,
     errors: &mut Vec<(usize, u8, String)>,
-    budget: &mut Budget<'_>,
+    mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Results> {
     let (many, one, include, one_is_left) = match &matching.cardinality {
         Cardinality::OneToOne => (lhs, rhs, &[][..], false),
@@ -606,11 +714,16 @@ fn binary_field(
         Cardinality::OneToMany(include) => (rhs, lhs, &include[..], true),
     };
     let points = grid.timestamps().len();
-    // Only the rows of the previous field are still live, so its tables are dropped and this
-    // field's are reserved before they are built.
-    budget.drop_scratch();
-    let (metadata, largest_key) = field_metadata_bytes(matching, include, points, many, one);
-    budget.step(metadata)?;
+    let errors_before = errors.len();
+    // This field's tables, before it pairs anything: nothing of the field before is still live.
+    let metadata = match budget.as_deref_mut() {
+        Some(budget) => {
+            let metadata = field_metadata_bytes(matching, include, points, many, one);
+            budget.step(metadata.tables)?;
+            metadata
+        }
+        None => FieldMetadata::default(),
+    };
     // Prometheus short-circuits a point where either side is empty, before any check.
     let both_present: Vec<bool> = lhs
         .presence(points)
@@ -639,8 +752,10 @@ fn binary_field(
         .collect();
     // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
     // comparison as a match too, but not an operation that failed.
-    let rows_before = budget.rows;
+    let rows_before = budget.as_deref().map_or(0, |budget| budget.rows);
     let mut matched: HashSet<(usize, usize)> = HashSet::new();
+    // The slots the match set holds are part of this field's workspace, not of what a row keeps.
+    let mut matched_bytes = 0usize;
     let mut implicit_many_to_one: Option<(usize, &GroupKey)> = None;
     for (many_index, many_series) in many.series.iter().enumerate() {
         let key = group_key(&many_series.metric, &matching.labels);
@@ -649,12 +764,18 @@ fn binary_field(
         };
         let group_id = group_ids[&key];
         for &one_index in candidates {
-            // One pairing's label set is built before the axes are intersected, so it is
-            // reserved first and whatever it keeps is charged as the rows are filed. The next
-            // pairing replaces this scratch instead of adding to it, and a pairing whose axes
-            // share no position still paid for its label set.
-            let pairing = pair_bytes(&many_series.metric, &one.series[one_index].metric, include);
-            budget.step(metadata.saturating_add(pairing))?;
+            // One pairing's label set is built before the axes are intersected, so it is reserved
+            // first and the next pairing replaces it.
+            let mut pairing = 0usize;
+            if let Some(budget) = budget.as_deref_mut() {
+                pairing = pair_bytes(
+                    &many_series.metric,
+                    &one.series[one_index].metric,
+                    matching,
+                    include,
+                );
+                budget.step(row_workspace(&metadata, matched_bytes, pairing, 0))?;
+            }
             let metric = result_metric(
                 &many_series.metric,
                 &one.series[one_index].metric,
@@ -662,7 +783,11 @@ fn binary_field(
                 include,
                 drop_name,
             )?;
-            let label_set = result_set_bytes(&metric, &one.series[one_index].metric, include);
+            let label_set = if budget.is_some() {
+                result_set_bytes(&metric, &one.series[one_index].metric, include)
+            } else {
+                0
+            };
             // Only the positions both operands carry are evaluated, and each keeps its own row:
             // the intersection is a merge of the two axes, never an envelope with offsets.
             // One cursor per side serves this whole pairing: `intersect_runs` walks both axes'
@@ -692,52 +817,105 @@ fn binary_field(
                     } else {
                         (many_value, one_value)
                     };
-                    // The operator's own scratch: an owned copy of each histogram operand and
-                    // the union it grows into. It is replaced by the row after it, so a float
-                    // pairing and the rows of the pairing before it cost nothing more.
-                    budget.step(
-                        metadata
-                            .saturating_add(pairing)
-                            .saturating_add(histogram_pair_bytes(&lhs_value, &rhs_value)),
-                    )?;
+                    // The operator's temporaries: an owned copy of each histogram operand and the
+                    // union it grows into, live while the row it reads is computed.
+                    if let Some(budget) = budget.as_deref_mut() {
+                        let histograms = histogram_pair_bytes(&lhs_value, &rhs_value);
+                        budget.step(row_workspace(
+                            &metadata,
+                            matched_bytes,
+                            pairing,
+                            histograms,
+                        ))?;
+                    }
                     let Some((result, keep)) = elem_binop(matching.op, lhs_value, rhs_value)?
                     else {
+                        // The operator skipped the pair: its temporaries are gone and nothing of
+                        // it was filed.
+                        if let Some(budget) = budget.as_deref_mut() {
+                            budget.step(row_workspace(&metadata, matched_bytes, pairing, 0))?;
+                        }
                         continue;
                     };
+                    // The operator has returned, so the copies it read its operands into are gone
+                    // and what it still owns -- possibly on the heap -- is the value it handed
+                    // back. That value is live until it is dropped or filed, so the figure it costs
+                    // replaces the operator's temporary and is held across the steps below.
+                    let owned = match &result {
+                        GridSample::Histogram(histogram) => result_histogram_bytes(histogram),
+                        GridSample::Float(_) => 0,
+                    };
+                    if let Some(budget) = budget.as_deref_mut() {
+                        budget.step(row_workspace(&metadata, matched_bytes, pairing, owned))?;
+                    }
                     if matching.cardinality == Cardinality::OneToOne {
-                        budget.retain(MATCH_SLOT_BYTES)?;
-                        if !matched.insert((group_id, point))
-                            && implicit_many_to_one.is_none_or(|(first, _)| point < first)
-                        {
-                            implicit_many_to_one = Some((point, group_keys[group_id]));
+                        let slot = (group_id, point);
+                        if matched.contains(&slot) {
+                            if implicit_many_to_one.is_none_or(|(first, _)| point < first) {
+                                implicit_many_to_one = Some((point, group_keys[group_id]));
+                            }
+                        } else {
+                            // Only a point the group has not been matched at yet costs an entry,
+                            // charged with the value that is still owned beside it.
+                            if let Some(budget) = budget.as_deref_mut() {
+                                matched_bytes = matched_bytes.saturating_add(MATCH_SLOT_BYTES);
+                                budget.step(row_workspace(
+                                    &metadata,
+                                    matched_bytes,
+                                    pairing,
+                                    owned,
+                                ))?;
+                            }
+                            matched.insert(slot);
                         }
                     }
+                    // The value the row keeps. A `bool` comparison keeps a float and a filtered
+                    // comparison keeps nothing, so what the operator built is dropped there before
+                    // its charge is given up; a kept value is moved into the row.
                     let value = if matching.return_bool {
+                        drop(result);
                         Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
+                    } else if keep {
+                        Some(result)
                     } else {
-                        keep.then_some(result)
+                        drop(result);
+                        None
                     };
-                    // Only a histogram the row keeps is retained: a filtered comparison drops the
-                    // value it computed, and a `bool` comparison keeps a float.
-                    if let Some(GridSample::Histogram(histogram)) = &value {
-                        budget.retain_histogram(histogram.heap_bytes())?;
+                    // One total replaces the operator's temporary: a kept histogram moves into the
+                    // results as it goes, and in every other case the value is already dropped.
+                    if let Some(budget) = budget.as_deref_mut() {
+                        if let Some(GridSample::Histogram(histogram)) = &value {
+                            budget.keep_histogram(histogram);
+                        }
+                        budget.step(row_workspace(&metadata, matched_bytes, pairing, 0))?;
                     }
-                    results.insert(&metric, group_id, point, value, label_set, budget)?;
+                    results.insert(
+                        &metric,
+                        group_id,
+                        point,
+                        value,
+                        label_set,
+                        budget.as_deref_mut(),
+                    )?;
                 }
             }
         }
     }
-    // The sort of a label set is the last scratch of the field: the row order it reads, the
-    // vectors it rebuilds and the label set a duplicate report clones. Charged for every row the
-    // field filed, which bounds one label set's worst case.
-    let sort = budget
-        .rows
-        .saturating_sub(rows_before)
-        .saturating_mul(
-            4 * std::mem::size_of::<usize>() + 2 * std::mem::size_of::<Option<GridSample>>(),
-        )
-        .saturating_add(largest_key);
-    budget.step(metadata.saturating_add(sort))?;
+    // The match set is a step of the walk, not something the field keeps: it goes before the sort
+    // is charged, so the sort figure is the one that is live.
+    drop(matched);
+    // The messages the field reports and the sort of its rows are its last workspace, with the
+    // messages it may append charged before they exist.
+    if let Some(budget) = budget.as_deref_mut() {
+        let rows = budget.rows.saturating_sub(rows_before);
+        budget.step(
+            metadata
+                .tables
+                .saturating_add(metadata.errors)
+                .saturating_add(metadata.largest_key)
+                .saturating_add(rows.saturating_mul(SORT_ROW_BYTES)),
+        )?;
+    }
     // Prometheus fails at the first failing step. Within a step it checks the one side, then
     // matches, and only after the operator checks that result label sets are unique.
     if let Some((point, key)) = one_duplicate {
@@ -786,6 +964,19 @@ fn binary_field(
                 same_labelset(&duplicate.key, grid.timestamps()[duplicate.point]),
             )
         });
+    }
+    // Only the messages this field actually appended stay live until the earliest one is reported.
+    // They join what the results retain, and the caller admits them once the field's tables and
+    // sort -- still live here -- are gone.
+    if let Some(budget) = budget {
+        let appended = errors[errors_before..]
+            .iter()
+            .fold(0usize, |bytes, (_, _, text)| {
+                bytes
+                    .saturating_add(std::mem::size_of::<String>())
+                    .saturating_add(text.capacity())
+            });
+        budget.keep(appended);
     }
     Ok(results)
 }
@@ -848,24 +1039,15 @@ fn set_field(
         SetOp::Or => (rhs, lhs, false),
     };
     let filter_groups = group(filter, labels);
-    let mut results = Results::default();
     // A set operator hands on the label sets of its operands and no caller accounts for its
-    // workspace, so it admits every total and charges no label set of its own.
-    let mut unbounded = |_: usize| -> Result<()> { Ok(()) };
-    let mut budget = Budget::new(&mut unbounded);
+    // workspace, so it files its rows without charging them.
+    let mut results = Results::default();
     if op == SetOp::Or {
         for index in 0..lhs.series.len() {
             let mut cursor = lhs.cursor(index);
             for (point, row) in lhs.positions(index) {
                 if let Some(value) = owned(cursor.at(row).expect("a row never goes back"))? {
-                    results.insert(
-                        &lhs.series[index].metric,
-                        0,
-                        point,
-                        Some(value),
-                        0,
-                        &mut budget,
-                    )?;
+                    results.insert(&lhs.series[index].metric, 0, point, Some(value), 0, None)?;
                 }
             }
         }
@@ -895,7 +1077,7 @@ fn set_field(
                 }
             }
             if matched == keep_matched {
-                results.insert(&series.metric, 0, point, owned(sample)?, 0, &mut budget)?;
+                results.insert(&series.metric, 0, point, owned(sample)?, 0, None)?;
             }
         }
     }
@@ -1072,8 +1254,8 @@ fn result_metric(
 ///
 /// [`Series`] keeps its fields public, so a series built by struct literal can disagree with the
 /// schema it is handed in with, and then the row the axis names has nothing to read. The kernel
-/// cannot read such an operand, and it must say so before it allocates anything for it, so the
-/// check lives here and runs before a field reserves its tables.
+/// cannot read such an operand, so the check lives here and runs before a field builds its matching
+/// tables: the output schema is reserved before it, but nothing of the walk is.
 pub(crate) fn validate_binary_operand(schema: &SeriesSchema, series: &[Series]) -> Result<()> {
     let grid = schema.eval_grid.as_ref().map(|grid| grid.spec());
     for item in series {
@@ -1287,8 +1469,10 @@ impl Results {
     /// Files one row of one field, retaining the slots it takes.
     ///
     /// The label set the row is filed under is only built when the table does not hold it yet, so
-    /// `label_set` -- the bytes that set keeps -- is charged on the vacant entry alone. The value
-    /// is charged by the caller, which knows whether the row keeps a histogram.
+    /// `label_set` -- the bytes that set keeps -- is charged on the vacant entry alone. A row whose
+    /// value the operator filtered is still a row: it keeps its slots and its label set, which the
+    /// merge carries as a set without a value. The value itself is charged by the caller, which
+    /// knows whether the row keeps a histogram.
     fn insert(
         &mut self,
         metric: &MetricName,
@@ -1296,12 +1480,15 @@ impl Results {
         point: usize,
         value: Option<GridSample>,
         label_set: usize,
-        budget: &mut Budget<'_>,
+        mut budget: Option<&mut Budget<'_>>,
     ) -> Result<()> {
+        let kept = value.is_some();
         let rows = match self.series.entry(key_of(metric)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                budget.retain(label_set)?;
+                if let Some(budget) = budget.as_deref_mut() {
+                    budget.retain(label_set)?;
+                }
                 entry.insert(ResultRows {
                     metric: metric.clone(),
                     points: Vec::new(),
@@ -1310,11 +1497,13 @@ impl Results {
                 })
             }
         };
-        budget.retain(RESULT_ROW_BYTES)?;
+        if let Some(budget) = budget {
+            budget.retain(RESULT_ROW_BYTES)?;
+            budget.file_row(kept);
+        }
         rows.points.push(point);
         rows.groups.push(group);
         rows.values.push(value);
-        budget.rows = budget.rows.saturating_add(1);
         Ok(())
     }
 

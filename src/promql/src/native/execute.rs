@@ -1510,14 +1510,10 @@ impl BinaryRuntime {
 
     /// Runs the kernel over both operands and returns the series it produced.
     ///
-    /// The kernel allocates its matching tables, its per-point presence arrays and its result rows
-    /// before it can report anything it finds wrong with the operands, so it is handed a way to
-    /// reserve each figure before it allocates it: the callback receives the total workspace the
-    /// kernel is about to hold, and the reservation becomes the retained operands plus that
-    /// workspace. Nothing is estimated on the kernel's behalf -- the figure that is reserved is the
-    /// one the kernel itself derived, so the reservation is asked for before the allocation exists
-    /// and covers it for as long as it is alive. The reservation keeps covering what the kernel
-    /// returned until the caller queues it.
+    /// The kernel requests a conservative live-workspace budget before allocating its matching
+    /// tables, per-point presence arrays and results. The reservation covers the retained operands
+    /// plus that workspace, and resizes as temporary storage is released. It keeps covering the
+    /// returned results until the caller queues them.
     fn compute(&mut self, path: &NodePath, buffer: &mut NodeBuffer) -> Result<Option<Vec<Series>>> {
         // The kernel reads the operands once and drops them, so a second call has nothing to read
         // and nothing left to produce: what it produced the first time is in the node's queue, and
@@ -1532,7 +1528,7 @@ impl BinaryRuntime {
         let retained = self.retained_bytes();
         // The operands are still held while the kernel runs, so what this node holds is both the
         // operands and the workspace the kernel reports; the callback resizes the reservation to
-        // that sum each time the kernel is about to grow.
+        // that sum as the live workspace changes.
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             // The timer covers this node's own work only: it is dropped before the driver polls
