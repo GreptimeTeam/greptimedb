@@ -21,6 +21,8 @@ mod bucket;
 mod builder;
 mod catalog;
 pub(crate) mod format;
+#[cfg(test)]
+mod format_tests;
 mod maintenance;
 mod purger;
 mod searcher;

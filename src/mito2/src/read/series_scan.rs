@@ -818,24 +818,6 @@ impl RegionScanner for SeriesScan {
             if !supported {
                 return Ok(None);
             }
-            // The first source increment admits only fully covered SST inputs.
-            if stream_ctx.input.num_memtables() > 0
-                || stream_ctx
-                    .input
-                    .series_index
-                    .as_ref()
-                    .is_none_or(|context| {
-                        context.formats.samples.is_none()
-                            || stream_ctx.input.files.iter().any(|file| {
-                                !context
-                                    .version
-                                    .samples
-                                    .contains_key(&file.file_id().file_id())
-                            })
-                    })
-            {
-                return Ok(None);
-            }
             prepared::prepare(
                 stream_ctx,
                 partitions,
