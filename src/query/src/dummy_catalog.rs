@@ -290,6 +290,31 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().memtable_max_sequence = Some(sequence);
     }
 
+    /// Binds this per-scan provider to the exact sequence range `(after,
+    /// snapshot]` of one scan use-site.
+    ///
+    /// The range only covers memtable rows: the upper bound is not rebound on
+    /// scan open, SST files are not skipped by sequence, and the engine filters
+    /// rows exactly instead of approximating. Callers pass a provider from
+    /// [`DummyTableProvider::clone_for_scan`] so the range stays local to one
+    /// use-site; a scan open may refresh `memtable_max_sequence` from the cached
+    /// per-region snapshot but leaves `memtable_min_sequence` and
+    /// `exact_sequence_range` as written here.
+    pub fn with_sequence_range(&self, after: u64, snapshot: u64) {
+        let mut request = self.scan_request.lock().unwrap();
+        // The lower bound is written even when `after` is `0`. In exact mode
+        // `None` does not mean the same as sequence `0`: the engine derives the
+        // exact-range capability from the request's lower bound, so `None` makes
+        // the capability unavailable and fails the whole scan instead of reading
+        // `(0, snapshot]`. An explicit `0` is the "read the whole history" bound
+        // and is what the engine filters rows against.
+        request.memtable_min_sequence = Some(after);
+        request.memtable_max_sequence = Some(snapshot);
+        request.exact_sequence_range = true;
+        request.sst_min_sequence = None;
+        request.snapshot_on_scan = false;
+    }
+
     pub(crate) fn with_json_type_hint(&self, hint: HashMap<String, JsonNativeType>) {
         self.scan_request.lock().unwrap().json_type_hint = hint;
     }

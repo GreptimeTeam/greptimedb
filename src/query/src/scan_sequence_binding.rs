@@ -27,20 +27,29 @@
 //! those two overrides the default [`UserDefinedLogicalNodeCore`]
 //! implementations keep the scan on a full-column, unfiltered read.
 //!
-//! This module only defines the plan node and assigns scan ids. Validating the
-//! sequence bounds against query parameters (parameter binding) and lowering the
-//! node to a physical plan are follow-up steps; this module does not implement
-//! serialization either.
+//! This module owns the whole in-process lifecycle of a binding:
+//!
+//! 1. [`identify_sequence_scans`] numbers the scan positions of a query plan.
+//! 2. [`bind_sequence_scans`] fills in the per-region sequence lower bounds of
+//!    every numbered position from the query parameters.
+//! 3. [`lower_sequence_bindings`] removes the node again and moves its bounds
+//!    into the wrapped scan's [`ScanRequest`](store_api::storage::ScanRequest),
+//!    as the last plan step before physical planning.
+//!
+//! The module does not implement serialization.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{Formatter, Result as FmtResult};
 use std::sync::Arc;
 
+use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::{DFSchemaRef, TableReference, plan_err};
 use datafusion_expr::logical_plan::TableScan;
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+
+use crate::dummy_catalog::DummyTableProvider;
 
 /// Identifies one table-scan position inside a single logical plan.
 ///
@@ -79,6 +88,31 @@ impl ScanLayoutEntry {
     /// Returns the table reference the scan position reads from.
     pub fn source(&self) -> &TableReference {
         &self.source
+    }
+}
+
+/// Resolved sequence bounds of one scan position, as supplied by the query
+/// parameters.
+///
+/// Parameter binding requires one of these for every scan position of a
+/// template, including historical scans whose lower bound is `0`: a scan that is
+/// listed nowhere must not silently fall back to the visible sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanSequenceParams {
+    /// The scan position the bounds belong to, as assigned by
+    /// [`identify_sequence_scans`].
+    pub scan_id: ScanId,
+    /// Per-region sequence lower bounds the scan must read after.
+    pub after_seqs: RegionSeqs,
+}
+
+impl ScanSequenceParams {
+    /// Creates the bounds of the scan position `scan_id`.
+    pub fn new(scan_id: ScanId, after_seqs: RegionSeqs) -> Self {
+        Self {
+            scan_id,
+            after_seqs,
+        }
     }
 }
 
@@ -172,6 +206,16 @@ impl ScanSequenceBinding {
         LogicalPlan::Extension(Extension {
             node: Arc::new(self),
         })
+    }
+
+    /// Returns this binding with `after_seqs` replaced, keeping the scan id and
+    /// the wrapped plan.
+    fn with_after_seqs(self, after_seqs: RegionSeqs) -> Self {
+        Self {
+            scan_id: self.scan_id,
+            after_seqs,
+            input: self.input,
+        }
     }
 
     /// Renders [`ScanSequenceBinding::after_seqs`] for explain output.
@@ -285,6 +329,242 @@ pub fn identify_sequence_scans(plan: LogicalPlan) -> DfResult<(LogicalPlan, Vec<
         .data;
 
     Ok((plan, assigner.layout))
+}
+
+/// Fills in the sequence bounds of every scan position in `identified`.
+///
+/// `identified` must be the plan returned by [`identify_sequence_scans`], and
+/// `params` must cover every [`ScanSequenceBinding`] in it exactly once:
+///
+/// - A binding without parameters is an error. Historical scans whose lower
+///   bound is `0` must be listed explicitly instead of inheriting the visible
+///   sequence.
+/// - Parameters for an unknown [`ScanId`], and two parameter sets for the same
+///   [`ScanId`], are errors.
+/// - Scan ids are never renumbered and the plan is neither re-parsed nor
+///   optimized here: the returned plan has the same shape as `identified`, only
+///   with the bounds of its bindings filled in. Bindings that are no longer
+///   directly above their [`TableScan`] (the optimizer may have pushed a
+///   [`Projection`](datafusion_expr::logical_plan::Projection) above them) are
+///   still found, because positions are matched by node type and carry their
+///   own id.
+pub fn bind_sequence_scans(
+    identified: LogicalPlan,
+    params: Vec<ScanSequenceParams>,
+) -> DfResult<LogicalPlan> {
+    let mut binder = SequenceBinder::default();
+    for param in params {
+        let ScanSequenceParams {
+            scan_id,
+            after_seqs,
+        } = param;
+        if binder.params.insert(scan_id, after_seqs).is_some() {
+            return plan_err!(
+                "duplicate {} parameters for scan_id {}: every scan position must be bound exactly once",
+                ScanSequenceBinding::name(),
+                scan_id
+            );
+        }
+    }
+
+    let plan = identified
+        .transform_up_with_subqueries(|plan| binder.bind(plan))?
+        .data;
+    binder.reject_unknown_ids()?;
+
+    Ok(plan)
+}
+
+/// Applies the parameters during one [`bind_sequence_scans`] walk.
+#[derive(Debug, Default)]
+struct SequenceBinder {
+    /// Bounds to apply, by scan position.
+    params: BTreeMap<ScanId, RegionSeqs>,
+    /// Scan positions the walk has already bound.
+    bound: BTreeSet<ScanId>,
+}
+
+impl SequenceBinder {
+    /// Binds `plan` when it is a [`ScanSequenceBinding`], and returns it
+    /// unchanged otherwise.
+    fn bind(&mut self, plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+        let LogicalPlan::Extension(extension) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(binding) = extension
+            .node
+            .as_any()
+            .downcast_ref::<ScanSequenceBinding>()
+        else {
+            // Another extension node: hand it back untouched.
+            return Ok(Transformed::no(LogicalPlan::Extension(extension)));
+        };
+
+        let scan_id = binding.scan_id();
+        let Some(after_seqs) = self.params.get(&scan_id).cloned() else {
+            return plan_err!(
+                "no {} parameters for scan_id {}: every scan position needs an explicit sequence range",
+                ScanSequenceBinding::name(),
+                scan_id
+            );
+        };
+        self.bound.insert(scan_id);
+
+        // Only the bounds change: the scan id, the wrapped plan and this node's
+        // position in the plan are kept as they are.
+        Ok(Transformed::yes(
+            binding
+                .clone()
+                .with_after_seqs(after_seqs)
+                .into_logical_plan(),
+        ))
+    }
+
+    /// Rejects parameters that no scan position of the plan claimed.
+    fn reject_unknown_ids(&self) -> DfResult<()> {
+        let unknown = self
+            .params
+            .keys()
+            .filter(|scan_id| !self.bound.contains(scan_id))
+            .copied()
+            .collect::<Vec<_>>();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+
+        plan_err!(
+            "{} parameters for scan_id(s) {:?} do not match any scan position in the plan",
+            ScanSequenceBinding::name(),
+            unknown
+        )
+    }
+}
+
+/// Removes every [`ScanSequenceBinding`] from `plan` and lowers its bounds into
+/// the wrapped scan.
+///
+/// A lowered binding position is the wrapped [`TableScan`] itself, reading from
+/// a per-scan clone of the region's [`DummyTableProvider`]: the clone owns its
+/// own [`ScanRequest`](store_api::storage::ScanRequest) mutex, so two positions
+/// that read the same table with different bounds never share a request. The
+/// scan reads memtable rows in `(after, snapshot]`, where `snapshot` comes from
+/// `snapshot_seqs` and is the same for every position of a region.
+///
+/// Two positions of one region are never merged, not even when their bounds are
+/// equal or when they scan the same table with the same projection and filters:
+/// reusing one scan for several positions would make the positions
+/// indistinguishable again.
+///
+/// This must be the last plan step before physical planning: an optimizer pass
+/// that runs afterwards sees two ordinary scans of one table and may
+/// legitimately collapse them into one.
+///
+/// Scan-open dependency: the provider's `scan` implementation re-reads its
+/// request when it builds the physical scan, and
+/// `apply_cached_snapshot_to_request` may then refresh `memtable_max_sequence`
+/// from the query's cached per-region snapshot. That refresh leaves
+/// `memtable_min_sequence` and `exact_sequence_range` untouched, so the lower
+/// bound and the exactness written here survive scan open; the refreshed upper
+/// bound is the same snapshot sequence passed in `snapshot_seqs`.
+pub fn lower_sequence_bindings(
+    plan: LogicalPlan,
+    snapshot_seqs: RegionSeqs,
+) -> DfResult<LogicalPlan> {
+    let mut lowerer = SequenceLowerer { snapshot_seqs };
+    let plan = plan
+        .transform_up_with_subqueries(|plan| lowerer.lower(plan))?
+        .data;
+
+    Ok(plan)
+}
+
+/// Lowers bindings during one [`lower_sequence_bindings`] walk.
+#[derive(Debug)]
+struct SequenceLowerer {
+    /// Sequence upper bound of each region, shared by every scan position.
+    snapshot_seqs: RegionSeqs,
+}
+
+impl SequenceLowerer {
+    /// Returns the scan that replaces the [`ScanSequenceBinding`] `plan`, and
+    /// leaves any other node unchanged.
+    fn lower(&mut self, plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+        let LogicalPlan::Extension(extension) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let Some(binding) = extension
+            .node
+            .as_any()
+            .downcast_ref::<ScanSequenceBinding>()
+        else {
+            // Another extension node: hand it back untouched.
+            return Ok(Transformed::no(LogicalPlan::Extension(extension)));
+        };
+
+        let scan_id = binding.scan_id();
+        let Some(mut scan) = binding.table_scan().cloned() else {
+            return plan_err!(
+                "cannot lower {} of scan_id {}: it does not wrap a TableScan",
+                ScanSequenceBinding::name(),
+                scan_id
+            );
+        };
+        let Some(provider) = region_provider(&scan) else {
+            return plan_err!(
+                "cannot lower {} of scan_id {} on table {}: the scan does not read a {}",
+                ScanSequenceBinding::name(),
+                scan_id,
+                scan.table_name,
+                std::any::type_name::<DummyTableProvider>()
+            );
+        };
+
+        let region_id = provider.region_metadata().region_id.as_u64();
+        let Some(&after) = binding.after_seqs().get(&region_id) else {
+            return plan_err!(
+                "cannot lower {} of scan_id {}: no lower sequence bound for region {}",
+                ScanSequenceBinding::name(),
+                scan_id,
+                region_id
+            );
+        };
+        let Some(&snapshot) = self.snapshot_seqs.get(&region_id) else {
+            return plan_err!(
+                "cannot lower {} of scan_id {}: no snapshot sequence for region {}",
+                ScanSequenceBinding::name(),
+                scan_id,
+                region_id
+            );
+        };
+        if after > snapshot {
+            return plan_err!(
+                "cannot lower {} of scan_id {}: region {} must read after sequence {} but the snapshot sequence is only {}",
+                ScanSequenceBinding::name(),
+                scan_id,
+                region_id,
+                after,
+                snapshot
+            );
+        }
+
+        let adapter = provider.clone_for_scan();
+        adapter.with_sequence_range(after, snapshot);
+        scan.source = Arc::new(DefaultTableSource::new(Arc::new(adapter)));
+
+        Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+    }
+}
+
+/// Returns the [`DummyTableProvider`] `scan` reads from, if it reads one.
+///
+/// A region-server scan is a [`TableScan`] over a [`DefaultTableSource`] that
+/// wraps one [`DummyTableProvider`]; the same downcast is used by
+/// [`crate::optimizer::scan_hint`] to attach scan hints.
+fn region_provider(scan: &TableScan) -> Option<&DummyTableProvider> {
+    scan.source
+        .downcast_ref::<DefaultTableSource>()?
+        .table_provider
+        .downcast_ref::<DummyTableProvider>()
 }
 
 /// Allocates scan ids during one [`identify_sequence_scans`] walk.
@@ -427,6 +707,48 @@ mod tests {
         binding.hash(&mut hasher);
 
         hasher.finish()
+    }
+
+    /// Collects the [`TableScan`]s of `plan` in walk order.
+    fn collect_scans(plan: &LogicalPlan) -> Vec<TableScan> {
+        let mut scans = Vec::new();
+        plan.apply_with_subqueries(|plan| {
+            if let LogicalPlan::TableScan(scan) = plan {
+                scans.push(scan.clone());
+            }
+
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+
+        scans
+    }
+
+    /// Returns the provider `scan` reads from.
+    fn provider_of(scan: &TableScan) -> &DummyTableProvider {
+        region_provider(scan).expect("the scan reads a DummyTableProvider")
+    }
+
+    /// Returns the table source of `scan`.
+    fn source_of(scan: &TableScan) -> &DefaultTableSource {
+        scan.source
+            .downcast_ref::<DefaultTableSource>()
+            .expect("the scan reads a DefaultTableSource")
+    }
+
+    /// Builds a plan that reads `name` twice through one provider.
+    fn union_of_two_scans(provider: Arc<DummyTableProvider>, name: &str) -> LogicalPlan {
+        let left = scan_plan(provider.clone(), name);
+        let right = scan_plan(provider, name);
+        // Both references are the same table with the same provider, so they are
+        // equal `TableScan`s and only their sequence bounds tell them apart.
+        assert_eq!(left, right);
+
+        LogicalPlanBuilder::from(left)
+            .union(right)
+            .unwrap()
+            .build()
+            .unwrap()
     }
 
     #[test]
@@ -585,5 +907,387 @@ mod tests {
             .build()
             .unwrap();
         assert!(ScanSequenceBinding::try_new(0, RegionSeqs::new(), not_a_scan).is_err());
+    }
+
+    #[test]
+    fn test_bind_rejects_unknown_scan_id() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let (identified, layout) = identify_sequence_scans(scan_plan(provider, "devices")).unwrap();
+        assert_eq!(1, layout.len());
+
+        let err = bind_sequence_scans(
+            identified,
+            vec![
+                ScanSequenceParams::new(0, RegionSeqs::from([(1, 0)])),
+                // No scan position of the plan was numbered 7.
+                ScanSequenceParams::new(7, RegionSeqs::from([(1, 0)])),
+            ],
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("scan_id(s) [7]"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn test_bind_rejects_duplicate_scan_id() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let (identified, _layout) =
+            identify_sequence_scans(scan_plan(provider, "devices")).unwrap();
+
+        let err = bind_sequence_scans(
+            identified,
+            vec![
+                ScanSequenceParams::new(0, RegionSeqs::from([(1, 1)])),
+                ScanSequenceParams::new(0, RegionSeqs::from([(1, 2)])),
+            ],
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("duplicate ScanSequenceBinding parameters for scan_id 0"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn test_bind_rejects_missing_parameters() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let (identified, layout) =
+            identify_sequence_scans(union_of_two_scans(provider, "devices")).unwrap();
+        assert_eq!(2, layout.len());
+
+        // Scan 0 is bound, scan 1 is not: no position may fall back to the
+        // visible sequence.
+        let err = bind_sequence_scans(
+            identified,
+            vec![ScanSequenceParams::new(0, RegionSeqs::from([(1, 0)]))],
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("no ScanSequenceBinding parameters for scan_id 1"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn test_bind_keeps_plan_shape() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let (identified, _layout) =
+            identify_sequence_scans(union_of_two_scans(provider.clone(), "devices")).unwrap();
+        let before = collect_bindings(&identified);
+        assert_eq!(2, before.len());
+
+        let bound = bind_sequence_scans(
+            identified,
+            vec![
+                ScanSequenceParams::new(0, RegionSeqs::from([(1, 0)])),
+                ScanSequenceParams::new(1, RegionSeqs::from([(1, 3)])),
+            ],
+        )
+        .unwrap();
+
+        let after = collect_bindings(&bound);
+        assert_eq!(2, after.len());
+        for (before, after) in before.iter().zip(&after) {
+            assert_eq!(before.scan_id(), after.scan_id());
+            // Binding does not re-plan: the wrapped scan is untouched, and it still
+            // reads the catalog provider instead of a forked per-scan one.
+            assert_eq!(before.input(), after.input());
+            let scan = after
+                .table_scan()
+                .expect("the binding still wraps a TableScan");
+            assert!(std::ptr::eq(provider_of(scan), &*provider));
+        }
+        assert_eq!(2, count_table_scans(&bound));
+    }
+
+    #[test]
+    fn test_bind_keeps_scan_ids_and_only_replaces_after_seqs() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        // Three positions of one provider, numbered `0`, `1`, `2` in walk order.
+        let plan = LogicalPlanBuilder::from(scan_plan(provider.clone(), "devices"))
+            .union(scan_plan(provider.clone(), "devices"))
+            .unwrap()
+            .union(scan_plan(provider, "devices"))
+            .unwrap()
+            .build()
+            .unwrap();
+        let (identified, layout) = identify_sequence_scans(plan).unwrap();
+        assert_eq!(
+            vec![0, 1, 2],
+            layout
+                .iter()
+                .map(ScanLayoutEntry::scan_id)
+                .collect::<Vec<_>>()
+        );
+        let before = collect_bindings(&identified);
+        assert_eq!(
+            vec![0, 1, 2],
+            before
+                .iter()
+                .map(ScanSequenceBinding::scan_id)
+                .collect::<Vec<_>>()
+        );
+
+        // The parameter order is irrelevant: bounds are matched by scan id.
+        let bound = bind_sequence_scans(
+            identified,
+            vec![
+                ScanSequenceParams::new(2, RegionSeqs::from([(1, 30)])),
+                ScanSequenceParams::new(0, RegionSeqs::from([(1, 10)])),
+                ScanSequenceParams::new(1, RegionSeqs::from([(1, 20)])),
+            ],
+        )
+        .unwrap();
+
+        let after = collect_bindings(&bound);
+        assert_eq!(
+            vec![0, 1, 2],
+            after
+                .iter()
+                .map(ScanSequenceBinding::scan_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![
+                RegionSeqs::from([(1, 10)]),
+                RegionSeqs::from([(1, 20)]),
+                RegionSeqs::from([(1, 30)]),
+            ],
+            after
+                .iter()
+                .map(|binding| binding.after_seqs().clone())
+                .collect::<Vec<_>>()
+        );
+        // Nothing but the bounds changed.
+        for (before, after) in before.iter().zip(&after) {
+            assert_eq!(before.input(), after.input());
+        }
+        assert_eq!(3, count_table_scans(&bound));
+    }
+
+    #[test]
+    fn test_lower_removes_every_binding() {
+        let state = session_state();
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let (identified, _layout) =
+            identify_sequence_scans(union_of_two_scans(provider, "devices")).unwrap();
+        let bound = bind_sequence_scans(
+            identified,
+            vec![
+                ScanSequenceParams::new(0, RegionSeqs::from([(1, 0)])),
+                ScanSequenceParams::new(1, RegionSeqs::from([(1, 7)])),
+            ],
+        )
+        .unwrap();
+        let optimized = analyze_and_optimize(&state, bound);
+        assert_eq!(2, collect_bindings(&optimized).len());
+
+        let lowered = lower_sequence_bindings(optimized, RegionSeqs::from([(1, 100)])).unwrap();
+
+        // Whole-tree check, subqueries included: no binding survives lowering.
+        assert_eq!(0, collect_bindings(&lowered).len());
+        assert!(
+            !lowered
+                .display_indent()
+                .to_string()
+                .contains(ScanSequenceBinding::name())
+        );
+        assert_eq!(2, count_table_scans(&lowered));
+    }
+
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_lower_two_references_of_one_table_read_different_ranges() {
+        const AFTER: u64 = 10;
+        const SNAPSHOT: u64 = 42;
+
+        let state = session_state();
+        // One provider, so both references read the same region.
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let region_id = provider.region_metadata().region_id.as_u64();
+        assert_eq!(1, region_id);
+
+        let (identified, layout) =
+            identify_sequence_scans(union_of_two_scans(provider.clone(), "devices")).unwrap();
+        assert_eq!(2, layout.len());
+        let bound = bind_sequence_scans(
+            identified,
+            vec![
+                // Scan 0 reads the delta `(C, H]`.
+                ScanSequenceParams::new(0, RegionSeqs::from([(region_id, AFTER)])),
+                // Scan 1 reads the whole history `(0, H]`.
+                ScanSequenceParams::new(1, RegionSeqs::from([(region_id, 0)])),
+            ],
+        )
+        .unwrap();
+
+        let optimized = analyze_and_optimize(&state, bound);
+        let bindings = collect_bindings(&optimized);
+        // The positions stay apart because their bounds differ.
+        assert_eq!(2, bindings.len());
+        assert_eq!(0, bindings[0].scan_id());
+        assert_eq!(
+            &RegionSeqs::from([(region_id, AFTER)]),
+            bindings[0].after_seqs()
+        );
+        assert_eq!(1, bindings[1].scan_id());
+        assert_eq!(
+            &RegionSeqs::from([(region_id, 0)]),
+            bindings[1].after_seqs()
+        );
+
+        let lowered =
+            lower_sequence_bindings(optimized, RegionSeqs::from([(region_id, SNAPSHOT)])).unwrap();
+        assert!(collect_bindings(&lowered).is_empty());
+
+        let scans = collect_scans(&lowered);
+        assert_eq!(2, scans.len());
+        let (first, second) = (&scans[0], &scans[1]);
+        let (first_source, second_source) = (source_of(first), source_of(second));
+
+        // Every position owns a provider, so every position owns a request.
+        let first_ptr = Arc::as_ptr(&first_source.table_provider);
+        let second_ptr = Arc::as_ptr(&second_source.table_provider);
+        println!("scan 0 provider: {first_ptr:p}, scan 1 provider: {second_ptr:p}");
+        assert!(
+            !Arc::ptr_eq(&first_source.table_provider, &second_source.table_provider),
+            "two positions of one table must not share a provider"
+        );
+
+        let first_request = provider_of(first).scan_request();
+        let second_request = provider_of(second).scan_request();
+        // `ScanRequest`'s `Display` omits the lower bound, so the evidence prints
+        // the fields it asserts on.
+        for (scan, request) in [(0, &first_request), (1, &second_request)] {
+            println!(
+                "scan {scan}: memtable_min_sequence={:?}, memtable_max_sequence={:?}, \
+                 exact_sequence_range={}, sst_min_sequence={:?}, snapshot_on_scan={}",
+                request.memtable_min_sequence,
+                request.memtable_max_sequence,
+                request.exact_sequence_range,
+                request.sst_min_sequence,
+                request.snapshot_on_scan,
+            );
+        }
+
+        // Scan 0 reads `(C, H]`.
+        assert_eq!(Some(AFTER), first_request.memtable_min_sequence);
+        assert_eq!(Some(SNAPSHOT), first_request.memtable_max_sequence);
+        // Scan 1 reads `(0, H]`: the whole history keeps an explicit `0` lower
+        // bound. `None` is not a wider read: the engine derives the exact-range
+        // capability from the lower bound, so `None` makes the capability
+        // unavailable and fails the scan instead of returning `(0, H]`.
+        assert_eq!(
+            Some(0),
+            second_request.memtable_min_sequence,
+            "the lower bound must be an explicit 0, not a missing bound"
+        );
+        assert_eq!(Some(SNAPSHOT), second_request.memtable_max_sequence);
+        for request in [&first_request, &second_request] {
+            assert!(request.exact_sequence_range);
+            assert_eq!(None, request.sst_min_sequence);
+            assert!(!request.snapshot_on_scan);
+        }
+
+        // The catalog provider is untouched: the bounds only live on the clones.
+        assert_eq!(None, provider.scan_request().memtable_min_sequence);
+        assert_eq!(None, provider.scan_request().memtable_max_sequence);
+    }
+
+    #[test]
+    fn test_lower_keeps_equal_ranges_of_two_positions_separate() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let (identified, _layout) =
+            identify_sequence_scans(union_of_two_scans(provider, "devices")).unwrap();
+        // Both positions ask for the same range. They still stay two positions:
+        // this step reuses no scan across scan ids.
+        let bound = bind_sequence_scans(
+            identified,
+            vec![
+                ScanSequenceParams::new(0, RegionSeqs::from([(1, 5)])),
+                ScanSequenceParams::new(1, RegionSeqs::from([(1, 5)])),
+            ],
+        )
+        .unwrap();
+
+        let lowered = lower_sequence_bindings(bound, RegionSeqs::from([(1, 9)])).unwrap();
+
+        let scans = collect_scans(&lowered);
+        assert_eq!(2, scans.len());
+        assert!(
+            !Arc::ptr_eq(&scans[0].source, &scans[1].source),
+            "two positions must not share a table source"
+        );
+        for scan in &scans {
+            let request = provider_of(scan).scan_request();
+            assert_eq!(Some(5), request.memtable_min_sequence);
+            assert_eq!(Some(9), request.memtable_max_sequence);
+            assert!(request.exact_sequence_range);
+        }
+    }
+
+    #[test]
+    fn test_lower_rejects_after_greater_than_snapshot() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let (identified, _layout) =
+            identify_sequence_scans(scan_plan(provider, "devices")).unwrap();
+        let bound = bind_sequence_scans(
+            identified,
+            vec![ScanSequenceParams::new(0, RegionSeqs::from([(1, 10)]))],
+        )
+        .unwrap();
+
+        let err = lower_sequence_bindings(bound, RegionSeqs::from([(1, 5)])).unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("must read after sequence 10"),
+            "unexpected error: {message}"
+        );
+        assert!(message.contains("only 5"), "unexpected error: {message}");
+    }
+
+    #[test]
+    fn test_lower_rejects_missing_region_bounds() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+
+        // The scan reads region 1, but the parameters only cover region 2.
+        let (identified, _layout) =
+            identify_sequence_scans(scan_plan(provider.clone(), "devices")).unwrap();
+        let bound = bind_sequence_scans(
+            identified,
+            vec![ScanSequenceParams::new(0, RegionSeqs::from([(2, 0)]))],
+        )
+        .unwrap();
+        let err = lower_sequence_bindings(bound, RegionSeqs::from([(1, 100)])).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("no lower sequence bound for region 1"),
+            "unexpected error: {message}"
+        );
+
+        // The lower bound is known, but there is no snapshot sequence for the
+        // region.
+        let (identified, _layout) =
+            identify_sequence_scans(scan_plan(provider, "devices")).unwrap();
+        let bound = bind_sequence_scans(
+            identified,
+            vec![ScanSequenceParams::new(0, RegionSeqs::from([(1, 0)]))],
+        )
+        .unwrap();
+        let err = lower_sequence_bindings(bound, RegionSeqs::new()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("no snapshot sequence for region 1"),
+            "unexpected error: {message}"
+        );
     }
 }

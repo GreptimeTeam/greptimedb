@@ -5112,3 +5112,203 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
         })
         .collect()
 }
+
+/// End-to-end counterpart of the request shape that the query layer's
+/// `DummyTableProvider::with_sequence_range` writes when it lowers a scan
+/// sequence binding for one use-site: `memtable_min_sequence = Some(after)`, an
+/// explicit `0` for a historical scan and never `None`, plus `memtable_max_sequence
+/// = Some(snapshot)`, `exact_sequence_range = true`, `sst_min_sequence = None`
+/// and `snapshot_on_scan = false`. The query layer only asserts those fields;
+/// this test proves the engine accepts that shape and returns exactly the rows
+/// in `(after, snapshot]`. The `None` case at the end pins the reason it has to
+/// be an explicit bound: mito rejects the request instead of widening it.
+///
+/// The fixture is one flushed SST holding three sequence segments, so no source
+/// can be skipped wholesale and every row outside the range has to be dropped
+/// row by row:
+///
+/// - `seq <= C`, dropped by the lower bound,
+/// - `C < seq <= H`, the delta,
+/// - `seq > H`, dropped by the upper bound.
+#[tokio::test]
+#[allow(clippy::print_stdout)]
+async fn test_exact_sequence_range_scan_sequence_binding_request() {
+    use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+
+    use crate::read::stream::ScanBatch;
+
+    // The row written with timestamp `i` seconds carries sequence `i + 1`.
+    const ROWS: u64 = 10;
+    // Lower bound of the incremental read, and upper bound of both reads.
+    const C: u64 = 3;
+    const H: u64 = 7;
+
+    let mut env =
+        TestEnv::with_prefix("test_exact_sequence_range_scan_sequence_binding_request").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+
+    // One write per segment: sequences `1..=3` (`<= C`), `4..=7`
+    // (`C < seq <= H`) and `8..=10` (`> H`).
+    for (start, end) in [(0, 3), (3, 7), (7, ROWS as usize)] {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: test_util::build_rows(start, end),
+            },
+        )
+        .await;
+    }
+    // Every segment, including the rows after `H`, is in an SST: the scan reads
+    // that file and has to drop the out-of-range rows one by one.
+    test_util::flush_region(&engine, region_id, None).await;
+
+    // Opens the binding's request shape over `(after, snapshot]` and returns the
+    // `(timestamp, __sequence)` of every returned row, plus the number of files
+    // and memtables the scan read.
+    let scan_exact = async |after: u64, snapshot: u64| -> (Vec<(i64, u64)>, usize, usize) {
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    memtable_min_sequence: Some(after),
+                    memtable_max_sequence: Some(snapshot),
+                    exact_sequence_range: true,
+                    sst_min_sequence: None,
+                    snapshot_on_scan: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let (num_files, num_memtables) = (scanner.num_files(), scanner.num_memtables());
+        let mut stream = scanner.scan_batch().unwrap();
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.try_next().await.unwrap() {
+            let ScanBatch::RecordBatch(batch) = batch else {
+                panic!("expects a flat record batch scan");
+            };
+            let sequences = batch
+                .column_by_name(SEQUENCE_COLUMN_NAME)
+                .expect("the flat batch keeps __sequence")
+                .as_primitive::<UInt64Type>();
+            let timestamps = batch
+                .column_by_name("ts")
+                .expect("the flat batch keeps the time index")
+                .as_primitive::<TimestampMillisecondType>();
+            for row in 0..batch.num_rows() {
+                rows.push((timestamps.value(row), sequences.value(row)));
+            }
+        }
+        rows.sort_unstable_by_key(|(_, sequence)| *sequence);
+
+        (rows, num_files, num_memtables)
+    };
+    // Sequence `s` was written at timestamp `(s - 1)` seconds.
+    let expected = |sequences: std::ops::RangeInclusive<u64>| -> Vec<(i64, u64)> {
+        sequences
+            .map(|sequence| ((sequence - 1) as i64 * 1000, sequence))
+            .collect()
+    };
+
+    // The whole history, so the assertions below show the bounds shaping the
+    // result instead of the fixture already being empty.
+    let (all, num_files, _) = scan_exact(0, ROWS).await;
+    println!("fixture (0, {ROWS}]: {all:?}");
+    assert_eq!(expected(1..=ROWS), all, "unexpected fixture rows");
+    assert_eq!(1, num_files, "the fixture must be one flushed SST");
+
+    // Historical read `(0, H]`: the lower bound is the explicit `0` that
+    // lowering writes for `after == 0`.
+    let (historical, num_files, num_memtables) = scan_exact(0, H).await;
+    println!("historical (0, {H}]: {historical:?}");
+    assert_eq!(expected(1..=H), historical);
+    assert_eq!(1, num_files, "the rows after H must be read, not pruned");
+    assert_eq!(0, num_memtables);
+    assert!(
+        historical.iter().all(|(_, sequence)| *sequence <= H),
+        "rows after H leaked into (0, {H}]: {historical:?}"
+    );
+
+    // Incremental read `(C, H]`.
+    let (delta, num_files, num_memtables) = scan_exact(C, H).await;
+    println!("incremental ({C}, {H}]: {delta:?}");
+    assert_eq!(expected(C + 1..=H), delta);
+    assert_eq!(
+        1, num_files,
+        "the rows at or below C must be read, not pruned"
+    );
+    assert_eq!(0, num_memtables);
+    assert!(
+        delta
+            .iter()
+            .all(|(_, sequence)| C < *sequence && *sequence <= H),
+        "rows outside ({C}, {H}] leaked: {delta:?}"
+    );
+
+    // Two more rows above `H` in the memtable: `(C, H]` must still return only
+    // the delta from both sources, and `(C, ROWS + 2]` must return them, so the
+    // bound filters rows instead of dropping a whole source.
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(ROWS as usize, ROWS as usize + 2),
+        },
+    )
+    .await;
+    let (delta_after_put, num_files, num_memtables) = scan_exact(C, H).await;
+    println!("incremental ({C}, {H}] with rows after H in the memtable: {delta_after_put:?}");
+    assert_eq!(expected(C + 1..=H), delta_after_put);
+    assert_eq!(1, num_files);
+    assert_eq!(1, num_memtables, "the memtable must be read, not skipped");
+
+    let (extended, _, _) = scan_exact(C, ROWS + 2).await;
+    println!("incremental ({C}, {}]: {extended:?}", ROWS + 2);
+    assert_eq!(expected(C + 1..=ROWS + 2), extended);
+
+    // The lower bound has to be explicit: `None` is not "no bound" in exact
+    // mode. The engine derives the exact-range capability from the lower bound,
+    // so a missing bound makes the capability unavailable and fails the whole
+    // scan with an unsupported error, which is the failure a lowering that wrote
+    // `None` for `after == 0` would hit. The bound is taken from the current
+    // committed sequence so the stale-fence checks cannot fire instead.
+    let committed = engine
+        .find_region(region_id)
+        .unwrap()
+        .find_committed_sequence();
+    assert_eq!(ROWS + 2, committed);
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: None,
+                memtable_max_sequence: Some(committed),
+                exact_sequence_range: true,
+                sst_min_sequence: None,
+                snapshot_on_scan: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a missing lower bound must not be read as sequence 0");
+    println!("missing lower bound failed with: {err}");
+    assert!(
+        matches!(err, Error::SequenceRangeUnsupported { .. }),
+        "unexpected err: {err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
