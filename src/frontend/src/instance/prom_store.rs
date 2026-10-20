@@ -35,6 +35,8 @@ use common_query::Output;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::Schema;
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
     build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
@@ -52,7 +54,7 @@ use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::SST_FORMAT_KEY;
 use table::TableRef;
@@ -61,7 +63,7 @@ use tracing::instrument;
 
 use crate::error::{
     AmbiguousValueColumnSnafu, CatalogSnafu, ColumnNotFoundSnafu, ExecLogicalPlanSnafu,
-    PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result, TableNotFoundSnafu,
+    InvalidPromRemoteReadSchemaSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
 };
 use crate::instance::Instance;
 
@@ -172,7 +174,7 @@ async fn to_query_result(
     })
 }
 
-fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
+fn resolve_value_column_name(table_name: &str, table: &TableRef) -> Result<String> {
     let columns = table
         .field_columns()
         .map(|column| column.name)
@@ -198,6 +200,29 @@ fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
     }
 }
 
+fn ensure_string_label_columns(
+    schema: &Schema,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+) -> Result<()> {
+    for column in schema.column_schemas() {
+        if column.name == timestamp_column_name || column.name == value_column_name {
+            continue;
+        }
+        // All remaining columns are emitted as labels, including non-key columns.
+        ensure!(
+            matches!(column.data_type, ConcreteDataType::String(_)),
+            InvalidPromRemoteReadSchemaSnafu {
+                detail: format!(
+                    "Prometheus remote read only supports string labels: column '{}' has type {:?}",
+                    column.name, column.data_type
+                ),
+            }
+        );
+    }
+    Ok(())
+}
+
 impl Instance {
     #[tracing::instrument(skip_all)]
     async fn handle_remote_query(
@@ -207,15 +232,21 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         query: &Query,
-    ) -> Result<RemoteQueryOutput> {
-        let table = self
+    ) -> Result<Option<RemoteQueryOutput>> {
+        let Some(table) = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name, Some(ctx))
             .await
             .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(catalog_name, schema_name, table_name),
-            })?;
+        else {
+            debug!(
+                catalog = catalog_name,
+                schema = schema_name,
+                table = table_name,
+                "Table not found during remote read, returning empty result"
+            );
+            return Ok(None);
+        };
 
         let timestamp_column_name = table
             .schema()
@@ -226,7 +257,9 @@ impl Instance {
             .name
             .clone();
 
-        let value_column_name = resolve_column_names(table_name, &table)?;
+        let value_column_name = resolve_value_column_name(table_name, &table)?;
+
+        ensure_string_label_columns(&table.schema(), &timestamp_column_name, &value_column_name)?;
 
         let dataframe = self
             .query_engine
@@ -250,12 +283,12 @@ impl Instance {
             .await
             .context(ExecLogicalPlanSnafu)?;
 
-        Ok(RemoteQueryOutput {
+        Ok(Some(RemoteQueryOutput {
             table_name: table_name.to_string(),
             timestamp_column_name,
             value_column_name,
             output,
-        })
+        }))
     }
 
     #[tracing::instrument(skip_all)]
@@ -264,7 +297,7 @@ impl Instance {
         ctx: QueryContextRef,
         queries: &[Query],
         query_targets: &[PermissionTableTarget],
-    ) -> ServerResult<Vec<RemoteQueryOutput>> {
+    ) -> ServerResult<Vec<Option<RemoteQueryOutput>>> {
         let mut results = Vec::with_capacity(queries.len());
 
         for (query, target) in queries.iter().zip(query_targets) {
@@ -599,6 +632,10 @@ impl PromStoreProtocolHandler for Instance {
 
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
+        for query in &request.queries {
+            prom_store::validate_matchers(&query.matchers)?;
+        }
+
         // TODO(dennis): use read_hints to speedup query if possible
         let results = self
             .handle_remote_queries(ctx, &request.queries, &query_targets)
@@ -609,6 +646,10 @@ impl PromStoreProtocolHandler for Instance {
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
                 for result in results {
+                    let Some(result) = result else {
+                        query_results.push(QueryResult { timeseries: vec![] });
+                        continue;
+                    };
                     let RemoteQueryOutput {
                         table_name,
                         timestamp_column_name,
@@ -803,9 +844,58 @@ mod tests {
     use std::sync::Arc;
 
     use api::prom_store::remote::LabelMatcher;
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use session::context::QueryContext;
 
     use super::*;
+
+    #[test]
+    fn test_remote_read_label_types() {
+        use datatypes::schema::ColumnSchema;
+
+        for (label_type, supported) in [
+            (ConcreteDataType::string_datatype(), true),
+            (ConcreteDataType::large_string_datatype(), true),
+            (ConcreteDataType::utf8_view_datatype(), true),
+            (ConcreteDataType::binary_datatype(), false),
+            (ConcreteDataType::binary_view_datatype(), false),
+            (ConcreteDataType::json_datatype(), false),
+            (ConcreteDataType::vector_datatype(3), false),
+            (ConcreteDataType::int64_datatype(), false),
+            (ConcreteDataType::boolean_datatype(), false),
+        ] {
+            let schema = Schema::new(vec![
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                ColumnSchema::new("value", label_type.clone(), true),
+                ColumnSchema::new("label", ConcreteDataType::string_datatype(), true),
+            ]);
+            // Value columns are validated separately, regardless of their type.
+            ensure_string_label_columns(&schema, "ts", "value").unwrap();
+
+            let result = ensure_string_label_columns(&schema, "ts", "label");
+            assert_eq!(supported, result.is_ok(), "{label_type:?}");
+            if let Err(err) = result {
+                assert!(matches!(
+                    err,
+                    crate::error::Error::InvalidPromRemoteReadSchema { .. }
+                ));
+                assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+                assert!(
+                    err.to_string()
+                        .starts_with("Invalid Prometheus remote read schema: ")
+                );
+                assert!(
+                    err.to_string()
+                        .contains("only supports string labels: column 'value'")
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_auto_create_table_type_for_prom_remote_write_metric_engine() {

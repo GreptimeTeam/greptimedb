@@ -38,7 +38,10 @@ use crate::error::{
     UpgradeWeakCatalogManagerRefSnafu, ViewInfoNotFoundSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::system_schema::information_schema::{InformationTable, Predicates, VIEWS};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, Predicates, VIEWS,
+};
 const INIT_CAPACITY: usize = 42;
 
 pub const TABLE_CATALOG: &str = "table_catalog";
@@ -102,6 +105,12 @@ impl InformationSchemaViews {
 }
 
 impl InformationTable for InformationSchemaViews {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaViews {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_VIEW_TABLE_ID
     }

@@ -515,6 +515,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid SQL, error: {err_msg}"))]
+    InvalidFlowOption {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid flow request body: {:?}", body))]
     InvalidFlowRequestBody {
         body: Box<Option<api::v1::flow::flow_request::Body>>,
@@ -1142,6 +1149,20 @@ pub enum Error {
         actual_column_id: u32,
     },
 
+    #[snafu(display(
+        "Partition expression of region {} is incompatible with the altered column '{}': the persisted bound can no longer be compared with the new column type {}",
+        region_id,
+        column,
+        target_type
+    ))]
+    PartitionExprIncompatible {
+        region_id: RegionId,
+        column: String,
+        target_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Too large duration"))]
     TooLargeDuration {
@@ -1247,6 +1268,7 @@ impl ErrorExt for Error {
 
             ProcedureNotFound { .. }
             | InvalidViewInfo { .. }
+            | InvalidFlowOption { .. }
             | PrimaryKeyNotFound { .. }
             | EmptyKey { .. }
             | AlterLogicalTablesInvalidArguments { .. }
@@ -1260,7 +1282,8 @@ impl ErrorExt for Error {
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }
             | InvalidFilePath { .. }
-            | ConflictingSchemaOptions { .. } => StatusCode::InvalidArguments,
+            | ConflictingSchemaOptions { .. }
+            | PartitionExprIncompatible { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {
@@ -1338,8 +1361,11 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            RetryLater { .. }
-            | GetLatestCacheRetryExceeded { .. }
+            RetryLater { source, .. } => match source.retry_hint() {
+                RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
+                RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,
+            },
+            GetLatestCacheRetryExceeded { .. }
             | NoLeader { .. }
             | ElectionNoLeader { .. }
             | ElectionLeaderLeaseExpired { .. }
@@ -1362,15 +1388,15 @@ impl ErrorExt for Error {
             | StartProcedureManager { source, .. }
             | StopProcedureManager { source, .. }
             | RegisterProcedureLoader { source, .. }
-            | PutPoison { source, .. }
-            | ProcedureStateReceiver { source, .. } => source.retry_hint(),
+            | PutPoison { source, .. } => source.retry_hint(),
             External { source, .. }
             | ResponseExceededSizeLimit { source, .. }
             | OperateDatanode { source, .. }
-            | AbortProcedure { source, .. }
             | RegisterRepartitionProcedureLoader { source, .. }
             | CreateRepartitionProcedure { source, .. }
             | PersistRepartitionGcRequirement { source, .. } => source.retry_hint(),
+            // These errors end an operation; their sources cannot make it retryable.
+            AbortProcedure { .. } | ProcedureStateReceiver { .. } => RetryHint::NonRetryable,
             Table { source, .. } => source.retry_hint(),
             ConvertAlterTableRequest { source, .. } => source.retry_hint(),
             ConvertColumnDef { source, .. } => source.retry_hint(),
@@ -1455,6 +1481,7 @@ mod retry_hint_tests {
     use std::sync::Arc;
 
     use common_error::mock::MockError;
+    use snafu::ResultExt;
 
     use super::*;
 
@@ -1470,6 +1497,42 @@ mod retry_hint_tests {
         let err = GetLatestCacheRetryExceededSnafu { attempts: 3_usize }.build();
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_leader_retry_hints() {
+        for (error, expected) in [
+            (
+                NoLeaderSnafu { table_id: 1_u32 }.build(),
+                RetryHint::Retryable,
+            ),
+            (ElectionNoLeaderSnafu.build(), RetryHint::Retryable),
+            (
+                ElectionLeaderLeaseExpiredSnafu.build(),
+                RetryHint::Retryable,
+            ),
+            (
+                ElectionLeaderLeaseChangedSnafu.build(),
+                RetryHint::Retryable,
+            ),
+        ] {
+            assert_eq!(error.retry_hint(), expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn test_procedure_error_retry_hints() {
+        let source = common_procedure::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(source).context(PutPoisonSnafu).unwrap_err();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+
+        let source = common_procedure::Error::retry_later(MockError::new(StatusCode::Internal));
+        let err = Err::<(), _>(source)
+            .context(ProcedureStateReceiverSnafu {
+                procedure_id: ProcedureId::random(),
+            })
+            .unwrap_err();
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 
     #[test]

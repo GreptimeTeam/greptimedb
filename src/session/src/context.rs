@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -34,12 +35,14 @@ use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub use crate::hints::{
-    LIVE_ANALYZE_METRICS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
-    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+    LIVE_ANALYZE_METRICS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
+    REMOTE_QUERY_ID_EXTENSION_KEY, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
 };
 use crate::protocol_ctx::ProtocolCtx;
 use crate::query_id::QueryId;
-use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
+use crate::session_config::{
+    InvalidConfigValueSnafu, PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle,
+};
 use crate::{MutableInner, ReadPreference};
 
 pub type QueryContextRef = Arc<QueryContext>;
@@ -75,6 +78,8 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
+    #[builder(setter(skip))]
+    query_options_snapshotted: bool,
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
@@ -180,25 +185,41 @@ impl QueryContextBuilder {
     }
 }
 
-impl From<&RegionRequestHeader> for QueryContext {
-    fn from(value: &RegionRequestHeader) -> Self {
+impl TryFrom<&RegionRequestHeader> for QueryContext {
+    type Error = crate::session_config::Error;
+
+    fn try_from(value: &RegionRequestHeader) -> Result<Self, Self::Error> {
         if let Some(ctx) = &value.query_context {
-            ctx.clone().into()
+            ctx.clone().try_into()
         } else {
-            QueryContextBuilder::default()
+            Ok(QueryContextBuilder::default()
                 .set_extension(
                     REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
                     generate_remote_query_id(),
                 )
-                .build()
+                .build())
         }
     }
 }
 
-impl From<api::v1::QueryContext> for QueryContext {
-    fn from(ctx: api::v1::QueryContext) -> Self {
+impl TryFrom<api::v1::QueryContext> for QueryContext {
+    type Error = crate::session_config::Error;
+
+    fn try_from(mut ctx: api::v1::QueryContext) -> Result<Self, Self::Error> {
+        let read_preference = ctx.extensions.remove(READ_PREFERENCE_EXTENSION_KEY);
+        let read_preference = match read_preference {
+            Some(value) => ReadPreference::from_str(&value).map_err(|_| {
+                InvalidConfigValueSnafu {
+                    name: "read_preference",
+                    value,
+                    hint: "Expected a supported read preference",
+                }
+                .build()
+            })?,
+            None => ReadPreference::default(),
+        };
         let sequences = ctx.snapshot_seqs.as_ref();
-        QueryContextBuilder::default()
+        Ok(QueryContextBuilder::default()
             .current_catalog(ctx.current_catalog)
             .current_schema(ctx.current_schema)
             .timezone(parse_timezone(Some(&ctx.timezone)))
@@ -215,7 +236,8 @@ impl From<api::v1::QueryContext> for QueryContext {
                     .unwrap_or_default(),
             )))
             .explain_options(ctx.explain)
-            .build()
+            .read_preference(read_preference)
+            .build())
     }
 }
 
@@ -234,6 +256,17 @@ impl From<QueryContext> for api::v1::QueryContext {
     ) -> Self {
         let explain = mutable_query_context_data.read().unwrap().explain_options;
         let mutable_inner = mutable_inner.read().unwrap();
+        let mut extensions = extensions;
+        extensions.remove(READ_PREFERENCE_EXTENSION_KEY);
+        if mutable_inner.read_preference != ReadPreference::Leader {
+            extensions.insert(
+                READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                mutable_inner
+                    .read_preference
+                    .to_string()
+                    .to_ascii_lowercase(),
+            );
+        }
         api::v1::QueryContext {
             current_catalog,
             current_schema: mutable_inner.schema.clone(),
@@ -416,6 +449,11 @@ impl QueryContext {
         self.extensions.insert(key.into(), value.into());
     }
 
+    #[cfg(feature = "enterprise")]
+    pub fn remove_extension(&mut self, key: &str) {
+        self.extensions.remove(key);
+    }
+
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
         self.extensions.get(key.as_ref()).map(|v| v.as_str())
     }
@@ -443,6 +481,71 @@ impl QueryContext {
 
     pub fn extensions(&self) -> HashMap<String, String> {
         self.extensions.clone()
+    }
+
+    /// Returns normalized query options from the request over session defaults.
+    pub fn effective_query_options(
+        &self,
+    ) -> Result<HashMap<String, String>, crate::session_config::Error> {
+        let mut request_options = HashMap::new();
+        for (key, value) in &self.extensions {
+            if crate::hints::is_reserved_extension_key(key) {
+                continue;
+            }
+            // Older Frontends and Flownodes forward `query_parallelism=0` (their
+            // "use the server default" encoding) untouched inside the wire
+            // query context, so accept it as unset instead of failing the
+            // query on the Datanode side. The canonical
+            // `query.parallelism = 0` stays rejected.
+            if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
+                continue;
+            }
+            // Wire decoding preserves legacy frontend nonzero values; public entry points enforce the limit.
+            if let Some((canonical, normalized)) =
+                crate::query_options::parse_query_option(key, value, u16::MAX)?
+            {
+                if request_options
+                    .get(&canonical)
+                    .is_some_and(|previous| previous != &normalized)
+                {
+                    return crate::session_config::InvalidConfigValueSnafu {
+                        name: key,
+                        value,
+                        hint: "Conflicting aliases for the same query option",
+                    }
+                    .fail();
+                }
+                request_options.insert(canonical, normalized);
+            }
+        }
+        let mut effective = if self.query_options_snapshotted {
+            HashMap::new()
+        } else {
+            self.configuration_parameter.query_options()
+        };
+        effective.extend(request_options);
+        Ok(effective)
+    }
+
+    /// Creates a per-query immutable option snapshot while retaining shared mutable session data.
+    pub fn query_option_snapshot(&self) -> Result<Self, crate::session_config::Error> {
+        let mut snapshot = self.clone();
+        let options = snapshot.effective_query_options()?;
+        snapshot
+            .extensions
+            .retain(|key, _| crate::query_options::canonical_query_option_name(key).is_none());
+        // Older Datanodes only understand the legacy `query_parallelism` hint key, so
+        // mirror the canonical parallelism override for the wire format while keeping
+        // the canonical key for in-process consumers.
+        let legacy_parallelism = options
+            .get("query.parallelism")
+            .map(|parallelism| ("query_parallelism".to_string(), parallelism.clone()));
+        snapshot.extensions.extend(options);
+        if let Some((key, value)) = legacy_parallelism {
+            snapshot.extensions.entry(key).or_insert(value);
+        }
+        snapshot.query_options_snapshotted = true;
+        Ok(snapshot)
     }
 
     /// Default to double quote and fallback to back quote
@@ -640,6 +743,7 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions,
+            query_options_snapshotted: false,
             configuration_parameter: self
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
@@ -704,7 +808,7 @@ pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
-    allow_query_fallback: ArcSwap<bool>,
+    query_options: RwLock<HashMap<String, String>>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -713,7 +817,7 @@ impl Clone for ConfigurationVariables {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
-            allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            query_options: RwLock::new(self.query_options.read().unwrap().clone()),
         }
     }
 }
@@ -748,11 +852,43 @@ impl ConfigurationVariables {
     }
 
     pub fn allow_query_fallback(&self) -> bool {
-        **self.allow_query_fallback.load()
+        self.query_options().get("query.allow_query_fallback") == Some(&"true".to_string())
     }
 
     pub fn set_allow_query_fallback(&self, allow: bool) {
-        self.allow_query_fallback.swap(Arc::new(allow));
+        self.query_options
+            .write()
+            .unwrap()
+            .insert("query.allow_query_fallback".to_string(), allow.to_string());
+    }
+
+    /// Validates and stores one canonicalized per-session query option.
+    pub fn set_query_option(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), crate::session_config::Error> {
+        let (canonical, normalized) = crate::query_options::parse_query_option(
+            key,
+            value,
+            crate::query_options::MAX_PUBLIC_PARALLELISM,
+        )?
+        .ok_or_else(|| crate::session_config::Error::InvalidConfigValue {
+            name: key.to_string(),
+            value: value.to_string(),
+            hint: "Not a supported query option".to_string(),
+            location: snafu::Location::new(file!(), line!(), column!()),
+        })?;
+        self.query_options
+            .write()
+            .unwrap()
+            .insert(canonical, normalized);
+        Ok(())
+    }
+
+    /// Returns the session's canonical query option overrides.
+    pub fn query_options(&self) -> HashMap<String, String> {
+        self.query_options.read().unwrap().clone()
     }
 }
 
@@ -764,6 +900,37 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
+
+    #[test]
+    fn test_query_parallelism_wire_accepts_legacy_value() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension("query_parallelism", "2048");
+
+        assert_eq!(
+            context
+                .effective_query_options()
+                .unwrap()
+                .get("query.parallelism"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_query_parallelism_public_limit() {
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1025")
+                .is_err()
+        );
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1024")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_session() {
@@ -843,7 +1010,7 @@ mod test {
             0
         );
         let wire: api::v1::QueryContext = admitted.into();
-        let restored = QueryContext::from(wire);
+        let restored = QueryContext::try_from(wire).unwrap();
         assert_eq!(restored.write_rows_to_admit("greptime", "public", 100), 100);
     }
 
@@ -856,7 +1023,7 @@ mod test {
                 .extensions
                 .contains_key(crate::hints::INSERT_SKIP_WAL_HINT)
         );
-        let restored: QueryContext = api_context.into();
+        let restored: QueryContext = api_context.try_into().unwrap();
         assert!(!restored.skip_wal());
     }
 
@@ -875,7 +1042,7 @@ mod test {
             explain: None,
         };
 
-        let session_ctx: QueryContext = api_ctx.clone().into();
+        let session_ctx: QueryContext = api_ctx.clone().try_into().unwrap();
         let roundtrip_api: api::v1::QueryContext = session_ctx.into();
 
         assert_eq!(roundtrip_api.current_catalog, api_ctx.current_catalog);
@@ -910,11 +1077,122 @@ mod test {
         assert_eq!(ctx.remote_query_id_value().unwrap().to_string(), query_id);
 
         let proto: api::v1::QueryContext = (&ctx).into();
-        let restored = QueryContext::from(proto);
+        let restored = QueryContext::try_from(proto).unwrap();
         assert_eq!(restored.remote_query_id(), Some(query_id));
         assert_eq!(
             restored.remote_query_id_value().unwrap().to_string(),
             query_id
+        );
+    }
+
+    #[test]
+    fn test_query_context_read_preference_wire_values() {
+        let wire = |value: Option<&str>| api::v1::QueryContext {
+            current_catalog: DEFAULT_CATALOG_NAME.to_string(),
+            current_schema: DEFAULT_SCHEMA_NAME.to_string(),
+            timezone: "UTC".to_string(),
+            extensions: value
+                .map(|value| {
+                    HashMap::from([(READ_PREFERENCE_EXTENSION_KEY.to_string(), value.to_string())])
+                })
+                .unwrap_or_default(),
+            channel: Channel::Internal as u32,
+            snapshot_seqs: None,
+            explain: None,
+        };
+
+        let header = RegionRequestHeader::default();
+        let header_context = QueryContext::try_from(&header).unwrap();
+        assert_eq!(header_context.read_preference(), ReadPreference::Leader);
+
+        for value in [None, Some("leader"), Some("LEADER")] {
+            let ctx = QueryContext::try_from(wire(value)).unwrap();
+            assert_eq!(ctx.read_preference(), ReadPreference::Leader);
+            assert!(!ctx.extensions().contains_key(READ_PREFERENCE_EXTENSION_KEY));
+        }
+        for value in ["", "unknown"] {
+            let error = QueryContext::try_from(wire(Some(value))).unwrap_err();
+            assert!(matches!(
+                error,
+                crate::session_config::Error::InvalidConfigValue {
+                    name,
+                    value: actual,
+                    ..
+                } if name == "read_preference" && actual == value
+            ));
+        }
+    }
+
+    #[test]
+    fn test_legacy_query_context_wire_defaults_to_leader() {
+        use prost::Message;
+
+        let legacy = api::v1::QueryContext::decode(
+            include_bytes!(
+                "../../../tests/compatibility/wire/read_preference/legacy_query_context.pb"
+            )
+            .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(legacy.current_catalog, "c1");
+        assert_eq!(legacy.current_schema, "s1");
+        assert_eq!(legacy.timezone, "UTC");
+        assert_eq!(legacy.channel, Channel::Internal as u32);
+        assert_eq!(
+            legacy
+                .extensions
+                .get("flow.return_region_seq")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(
+            !legacy
+                .extensions
+                .contains_key(READ_PREFERENCE_EXTENSION_KEY)
+        );
+
+        let restored = QueryContext::try_from(legacy).unwrap();
+        assert_eq!(restored.read_preference(), ReadPreference::Leader);
+        assert_eq!(restored.current_catalog(), "c1");
+        assert_eq!(restored.current_schema(), "s1");
+        assert_eq!(restored.timezone().to_string(), "UTC");
+        assert_eq!(restored.channel(), Channel::Internal);
+        assert_eq!(restored.extension("flow.return_region_seq"), Some("true"));
+
+        let outbound: api::v1::QueryContext = restored.into();
+        let roundtrip = api::v1::QueryContext::decode(outbound.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(roundtrip.current_catalog, "c1");
+        assert_eq!(roundtrip.current_schema, "s1");
+        assert_eq!(roundtrip.timezone, "UTC");
+        assert_eq!(roundtrip.channel, Channel::Internal as u32);
+        assert_eq!(
+            roundtrip
+                .extensions
+                .get("flow.return_region_seq")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(
+            !roundtrip
+                .extensions
+                .contains_key(READ_PREFERENCE_EXTENSION_KEY)
+        );
+    }
+
+    #[test]
+    fn test_outbound_read_preference_clears_stale_extension() {
+        let context = QueryContextBuilder::default()
+            .set_extension(
+                READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                "stale".to_string(),
+            )
+            .set_extension("unrelated".to_string(), "preserved".to_string())
+            .build();
+        let wire: api::v1::QueryContext = context.into();
+        assert!(!wire.extensions.contains_key(READ_PREFERENCE_EXTENSION_KEY));
+        assert_eq!(
+            wire.extensions.get("unrelated").map(String::as_str),
+            Some("preserved")
         );
     }
 
@@ -944,7 +1222,7 @@ mod test {
         assert!(ctx.clone().batching_enabled());
         assert!(ctx.fork().batching_enabled());
         let wire: api::v1::QueryContext = ctx.into();
-        let restored = QueryContext::from(wire);
+        let restored = QueryContext::try_from(wire).unwrap();
         assert!(!restored.batching_enabled());
         assert!(!restored.logical_batching_enabled());
         let ctx = QueryContextBuilder::default()

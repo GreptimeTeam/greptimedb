@@ -306,7 +306,8 @@ impl ErrorExt for Error {
             | Error::DeletePoison { source, .. }
             | Error::GetPoison { source, .. }
             | Error::CheckStatus { source, .. } => source.retry_hint(),
-            Error::ProcedureExec { source, .. } => source.retry_hint(),
+            // The watcher reports this only after the child has failed or been poisoned.
+            Error::ProcedureExec { .. } => RetryHint::NonRetryable,
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.retry_hint(),
             Error::DeleteState { error, .. } => retry_hint_from_opendal_error(error),
@@ -379,8 +380,11 @@ mod tests {
     use std::sync::Arc;
 
     use common_error::mock::MockError;
+    use tokio::sync::watch;
 
     use super::*;
+    use crate::procedure::ProcedureState;
+    use crate::watcher;
 
     #[test]
     fn test_retry_later_hint_is_retryable() {
@@ -395,6 +399,21 @@ mod tests {
         let err = Error::external(source);
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[tokio::test]
+    async fn test_finished_procedure_hint_is_non_retryable() {
+        let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
+        for state in [
+            ProcedureState::failed(source.clone()),
+            ProcedureState::poisoned(Default::default(), source),
+        ] {
+            let (sender, mut receiver) = watch::channel(ProcedureState::Running);
+            sender.send(state).unwrap();
+            let err = watcher::wait(&mut receiver).await.unwrap_err();
+
+            assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+        }
     }
 
     #[test]

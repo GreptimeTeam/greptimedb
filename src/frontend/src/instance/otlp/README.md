@@ -19,7 +19,7 @@ flowchart TD
     A["POST /v1/otlp/v1/traces<br/>OTLP protobuf"] --> B["HTTP handler<br/>decode, select table and pipeline"]
     B --> C["Instance::traces<br/>permission and interceptor"]
     C --> D["Derive trace conventions<br/>parse resource/scope groups"]
-    D --> E["Chunk spans within each group"]
+    D --> E["Chunk spans across groups"]
     E --> F{"Trace pipeline"}
 
     F -->|greptime_trace_v0| G["v0 conversion<br/>fixed columns and JSON attributes"]
@@ -72,8 +72,10 @@ After permission checks, admission counts all spans in the request once per
 database. Chunks, schema retries, and derived lookup-table writes retain that
 admission; their actual writes still contribute WCU accounting.
 
-`ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans in
-each group into owned chunks. `trace_ingest_chunk_size` defaults to 512; setting
+`ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans of
+all resource/scope groups in the request into owned chunks; a chunk can mix
+groups because every span carries its own resource and scope attributes.
+`trace_ingest_chunk_size` defaults to 512; setting
 it to 0 disables splitting. The option is defined in
 [`service_config/otlp.rs`](../../service_config/otlp.rs).
 
@@ -113,11 +115,11 @@ The v1 path performs these steps before the normal chunk writes:
    `TraceBatchSchema` that records observed scalar types, sparse row presence,
    and binary logical types. Drop the dense request after collecting its
    lightweight schema observations.
-2. Mark a chunk for span-only fallback if one column contains both raw OTLP
-   bytes and arrays or key-value lists encoded as JSONB. Both use protobuf
-   `BinaryValue`, but a Greptime column cannot represent both logical schemas.
-   The chunk bypasses request-wide schema planning and is reconciled span by
-   span.
+2. Split a chunk into single-span planning units if one column contains both
+   raw OTLP bytes and arrays or key-value lists encoded as JSONB. Both use
+   protobuf `BinaryValue`, but a Greptime column cannot represent both logical
+   schemas. Only the spans whose logical types conflict are removed from the
+   request-wide plan; the other spans keep contributing to it.
 3. Aggregate the compatible observations into `TraceRequestSchema` and
    compare them with the existing table schema and the fixed types in
    [`trace_semconv.rs`](trace_semconv.rs).
@@ -150,7 +152,7 @@ determines the next action when that preparation fails:
 
 | Reaction | Behavior |
 | --- | --- |
-| `RetryPerSpan` | Prepare and write each span independently. Successful spans are accepted; deterministic per-span preparation failures are rejected. A v1 chunk with incompatible raw-binary and JSONB values starts here without attempting a chunk write. |
+| `RetryPerSpan` | Prepare and write each span independently. Successful spans are accepted; deterministic per-span preparation failures are rejected. |
 | `DiscardChunk` | Do not retry the chunk at span granularity. Count every span in the chunk as rejected. |
 | `Propagate` | Return retryable or unclassified failures instead of reporting a partial success. Retry hints take precedence over status-code classification. |
 
@@ -174,6 +176,58 @@ Accounting follows the main-table write:
 - an auxiliary-table failure adds failure detail but does not change the
   accepted or rejected span counts; and
 - failure details are bounded before they are folded into `TraceIngestOutcome`.
+
+A cache shared by each frontend's `Instance` clones skips previously confirmed
+auxiliary writes for v0, v1, and v2. `otlp.trace_aux_cache_size` sets an estimated
+memory budget across all catalogs, schemas, and trace tables on each frontend.
+By default, the budget is 1/128 of the pod's cgroup memory limit or total host
+memory, with a minimum of `32MiB`. If memory detection is unavailable, it uses
+`32MiB`. An explicit size overrides this default; `0` disables caching.
+The estimate includes key structs and allocated string capacity, charging shared
+table names per entry. It excludes cache and allocator overhead, so it is not a
+strict process-memory limit. Changes take effect on frontend or standalone
+restart. There is no time-based expiry.
+Services and operations are cached independently. Only a successful
+auxiliary write populates the cache. Auxiliary writes always bypass batching,
+including when main spans use asynchronous batching. Failures, eviction,
+frontend restarts, and concurrent misses can cause repeat writes. Write cost
+reflects only the writes actually performed.
+
+`greptime_frontend_cache_hit{type="otlp_trace_aux"}` and
+`greptime_frontend_cache_miss{type="otlp_trace_aux"}` count distinct service and
+operation keys at the first cache check in each request.
+Requests with auxiliary admission count before acquiring a slot; other requests
+count when preparing auxiliary writes. Admission and write rechecks do not count.
+When the cache is disabled, all checked keys count as misses.
+
+Successful auxiliary writes with `skip_wal` enabled are cached too. If a
+datanode crashes before flushing those rows while the frontend survives, the
+cache can suppress their recreation, even by later WAL-enabled requests, until
+eviction or frontend restart. Missing service/operation discovery rows in this
+case are an accepted limitation; the cache does not guarantee durability beyond
+the write's WAL policy.
+
+With asynchronous main-table batching, the response still acknowledges queue
+admission. A frontend task waits for the storage results and writes auxiliary
+rows only for successful chunks. Failed chunks do not populate the auxiliary
+tables or cache. Deferred auxiliary failures are logged; they cannot change an
+already returned response. Deferred writes retain the original request's row
+admission, and their write cost is not included in the early response.
+
+Async trace requests with cache misses acquire one shared auxiliary-work slot
+before submitting main chunks. Each frontend limits these requests separately
+from main-table batching, using `pending_rows_batcher.max_inflight_requests`.
+The slot is held through auxiliary completion, including failures. Requests
+whose service/operation entries are all cached bypass this admission and need
+no deferred task. Cache lookups and updates hold no lock across storage writes.
+
+The auxiliary tables are ingestion-managed. When caching is enabled, manual
+`DROP`, `TRUNCATE`, `DELETE`, or other mutations require clearing the affected
+caches or restarting all serving frontends before relying on ingestion to
+populate the lookup rows again.
+There is no automatic invalidation or public cache-clear command. In v0, fewer
+duplicate rows are appended; distinct service/operation lookup results remain
+the same.
 
 A rejection detail carries the failing cause, not just a status code, so an
 unusable attribute value names its column, source value, and target type. Repeats

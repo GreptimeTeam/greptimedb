@@ -15,22 +15,36 @@
 use axum::body::Body;
 use axum::http::Request;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use common_telemetry::debug;
 use session::context::QueryContext;
 use session::hints::is_reserved_extension_key;
 
+use crate::error::{InvalidParameterSnafu, Result};
 use crate::hint_headers;
 
 pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
     let hints = hint_headers::extract_hints(request.headers());
-    if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
-        apply_hints(query_ctx, hints);
+    let dedicated_read_preference = request
+        .headers()
+        .contains_key(&crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE);
+    let hints = match hint_headers::validate_public_hints(hints) {
+        Ok(hints) => hints,
+        Err(error) => return error.into_response(),
+    };
+    if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>()
+        && let Err(error) = apply_hints(query_ctx, hints, dedicated_read_preference)
+    {
+        return error.into_response();
     }
     next.run(request).await
 }
 
-fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
+fn apply_hints(
+    query_ctx: &mut QueryContext,
+    hints: Vec<(String, String)>,
+    dedicated_read_preference: bool,
+) -> Result<()> {
     for (key, value) in hints {
         if is_reserved_extension_key(&key) {
             debug!(
@@ -39,8 +53,21 @@ fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
             );
             continue;
         }
-        query_ctx.set_extension(key, value);
+        if key.eq_ignore_ascii_case(session::hints::READ_PREFERENCE_HINT) {
+            if !dedicated_read_preference {
+                let preference = value.parse::<session::ReadPreference>().map_err(|_| {
+                    InvalidParameterSnafu {
+                        reason: format!("Invalid read_preference hint: {value}"),
+                    }
+                    .build()
+                })?;
+                query_ctx.set_read_preference(preference);
+            }
+        } else {
+            query_ctx.set_extension(key, value);
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -49,7 +76,8 @@ mod tests {
     use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::context::{QueryContextBuilder, generate_remote_query_id};
     use session::hints::{
-        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
+        REMOTE_QUERY_ID_EXTENSION_KEY,
     };
 
     use super::apply_hints;
@@ -76,12 +104,18 @@ mod tests {
                     "spoofed-regs".to_string(),
                 ),
                 (
+                    READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                    "follower".to_string(),
+                ),
+                (
                     FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                     "1700000000000".to_string(),
                 ),
                 ("ttl".to_string(), "7d".to_string()),
             ],
-        );
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             query_ctx.remote_query_id(),
@@ -92,6 +126,8 @@ mod tests {
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
                 .is_none()
         );
+        assert_eq!(query_ctx.read_preference(), session::ReadPreference::Leader);
+        assert!(query_ctx.extension(READ_PREFERENCE_EXTENSION_KEY).is_none());
         assert_eq!(
             query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
             Some("1700000000000")

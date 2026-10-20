@@ -377,6 +377,11 @@ impl MitoRegion {
             == RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
     }
 
+    /// Returns whether the region is truncating.
+    pub(crate) fn is_truncating(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Truncating)
+    }
+
     pub fn region_id(&self) -> RegionId {
         self.region_id
     }
@@ -594,11 +599,23 @@ impl MitoRegion {
                         info!("Region {} already in downgrading mode", self.region_id);
                         wait_for_checkpoint = true;
                     }
-                    _ => {
+                    RegionRoleState::Follower => {
                         warn!(
                             "Cannot start downgrade for region {} from state {:?}",
                             self.region_id, current_state
                         );
+                    }
+                    RegionRoleState::Leader(_) => {
+                        // The region may become writable again when the
+                        // current operation, such as an ALTER, finishes. Fail
+                        // with a retryable error instead of reporting a
+                        // downgrade that does not fence writes.
+                        return Err(RegionStateSnafu {
+                            region_id: self.region_id,
+                            state: current_state,
+                            expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+                        }
+                        .build());
                     }
                 }
                 None

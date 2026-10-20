@@ -1,0 +1,148 @@
+-- Regression coverage for issues 9456/9492 (PR 9491): preserve merge-scan
+-- results for a pruned left join over partitioned append data.
+CREATE TABLE merge_left_data (
+  k STRING,
+  kind STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY (k, kind)
+)
+PARTITION ON COLUMNS (k) (
+  k < '1', k >= '1' AND k < '2', k >= '2' AND k < '3',
+  k >= '3' AND k < '4', k >= '4' AND k < '5', k >= '5' AND k < '6',
+  k >= '6' AND k < '7', k >= '7' AND k < '8', k >= '8' AND k < '9',
+  k >= '9' AND k < 'a', k >= 'a' AND k < 'b', k >= 'b' AND k < 'c',
+  k >= 'c' AND k < 'd', k >= 'd' AND k < 'e', k >= 'e' AND k < 'f',
+  k >= 'f'
+)
+ENGINE=mito WITH (append_mode = 'true');
+
+Affected Rows: 0
+
+INSERT INTO merge_left_data VALUES
+  ('0', 'root', '2026-10-09 00:00:00'),
+  ('1', 'root', '2026-10-09 00:00:00'),
+  ('2', 'root', '2026-10-09 00:00:00'),
+  ('3', 'root', '2026-10-09 00:00:00'),
+  ('4', 'root', '2026-10-09 00:00:00'),
+  ('5', 'root', '2026-10-09 00:00:00'),
+  ('6', 'root', '2026-10-09 00:00:00'),
+  ('7', 'root', '2026-10-09 00:00:00'),
+  ('8', 'root', '2026-10-09 00:00:00'),
+  ('9', 'root', '2026-10-09 00:00:00'),
+  ('a', 'root', '2026-10-09 00:00:00'),
+  ('b', 'root', '2026-10-09 00:00:00'),
+  ('c', 'root', '2026-10-09 00:00:00'),
+  ('d', 'root', '2026-10-09 00:00:00'),
+  ('e', 'root', '2026-10-09 00:00:00'),
+  ('f', 'root', '2026-10-09 00:00:00'),
+  ('z', 'root', '2026-10-09 00:00:00'),
+  ('0', 'child', '2026-10-09 00:00:00'), ('0', 'child', '2026-10-09 00:00:00'), ('0', 'child', '2026-10-09 00:00:00'),
+  ('1', 'child', '2026-10-09 00:00:00'), ('1', 'child', '2026-10-09 00:00:00'), ('1', 'child', '2026-10-09 00:00:00'),
+  ('2', 'child', '2026-10-09 00:00:00'), ('2', 'child', '2026-10-09 00:00:00'), ('2', 'child', '2026-10-09 00:00:00'),
+  ('3', 'child', '2026-10-09 00:00:00'), ('3', 'child', '2026-10-09 00:00:00'), ('3', 'child', '2026-10-09 00:00:00'),
+  ('4', 'child', '2026-10-09 00:00:00'), ('4', 'child', '2026-10-09 00:00:00'), ('4', 'child', '2026-10-09 00:00:00'),
+  ('5', 'child', '2026-10-09 00:00:00'), ('5', 'child', '2026-10-09 00:00:00'), ('5', 'child', '2026-10-09 00:00:00'),
+  ('6', 'child', '2026-10-09 00:00:00'), ('6', 'child', '2026-10-09 00:00:00'), ('6', 'child', '2026-10-09 00:00:00'),
+  ('7', 'child', '2026-10-09 00:00:00'), ('7', 'child', '2026-10-09 00:00:00'), ('7', 'child', '2026-10-09 00:00:00'),
+  ('8', 'child', '2026-10-09 00:00:00'), ('8', 'child', '2026-10-09 00:00:00'), ('8', 'child', '2026-10-09 00:00:00'),
+  ('9', 'child', '2026-10-09 00:00:00'), ('9', 'child', '2026-10-09 00:00:00'), ('9', 'child', '2026-10-09 00:00:00'),
+  ('a', 'child', '2026-10-09 00:00:00'), ('a', 'child', '2026-10-09 00:00:00'), ('a', 'child', '2026-10-09 00:00:00'),
+  ('b', 'child', '2026-10-09 00:00:00'), ('b', 'child', '2026-10-09 00:00:00'), ('b', 'child', '2026-10-09 00:00:00'),
+  ('c', 'child', '2026-10-09 00:00:00'), ('c', 'child', '2026-10-09 00:00:00'), ('c', 'child', '2026-10-09 00:00:00'),
+  ('d', 'child', '2026-10-09 00:00:00'), ('d', 'child', '2026-10-09 00:00:00'), ('d', 'child', '2026-10-09 00:00:00'),
+  ('e', 'child', '2026-10-09 00:00:00'), ('e', 'child', '2026-10-09 00:00:00'), ('e', 'child', '2026-10-09 00:00:00'),
+  ('f', 'child', '2026-10-09 00:00:00'), ('f', 'child', '2026-10-09 00:00:00'), ('f', 'child', '2026-10-09 00:00:00');
+
+Affected Rows: 65
+
+-- Full join: 17 roots, 16 matched roots, 48 child rows.
+SELECT r.k, c.n
+FROM (SELECT k FROM merge_left_data WHERE kind = 'root') r
+LEFT JOIN (
+  SELECT k, COUNT(*) AS n FROM merge_left_data WHERE kind = 'child' GROUP BY k
+) c ON r.k = c.k
+ORDER BY r.k;
+
++---+---+
+| k | n |
++---+---+
+| 0 | 3 |
+| 1 | 3 |
+| 2 | 3 |
+| 3 | 3 |
+| 4 | 3 |
+| 5 | 3 |
+| 6 | 3 |
+| 7 | 3 |
+| 8 | 3 |
+| 9 | 3 |
+| a | 3 |
+| b | 3 |
+| c | 3 |
+| d | 3 |
+| e | 3 |
+| f | 3 |
+| z |   |
++---+---+
+
+-- Assert partitioned hash join and both hash repartition keys at SQLness N=4.
+-- SQLNESS REPLACE (peers.*) peers=REDACTED
+EXPLAIN SELECT r.k, c.n
+FROM (SELECT k FROM merge_left_data WHERE kind = 'root' AND k >= '1' AND k < '5') r
+LEFT JOIN (
+  SELECT k, COUNT(*) AS n FROM merge_left_data
+  WHERE kind = 'child' AND k < '4' GROUP BY k
+) c ON r.k = c.k
+ORDER BY r.k;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                                                                                                                                                                                  |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: r.k ASC NULLS LAST                                                                                                                                                                                                                                                                                                                                                                                                              |
+|               |   Projection: r.k, c.n                                                                                                                                                                                                                                                                                                                                                                                                                |
+|               |     Left Join: r.k = c.k                                                                                                                                                                                                                                                                                                                                                                                                              |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                                                                                                                                                 |
+|               | SubqueryAlias: r                                                                                                                                                                                                                                                                                                                                                                                                                      |
+|               |   Projection: merge_left_data.k                                                                                                                                                                                                                                                                                                                                                                                                       |
+|               |     Filter: merge_left_data.kind = Utf8("root") AND merge_left_data.k >= Utf8("1") AND merge_left_data.k < Utf8("5")                                                                                                                                                                                                                                                                                                                  |
+|               |       TableScan: merge_left_data, partial_filters=[merge_left_data.kind = Utf8("root"), merge_left_data.k >= Utf8("1"), merge_left_data.k < Utf8("5")]                                                                                                                                                                                                                                                                                |
+|               | ]]                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                                                                                                                                                 |
+|               | SubqueryAlias: c                                                                                                                                                                                                                                                                                                                                                                                                                      |
+|               |   Projection: merge_left_data.k, count(Int64(1)) AS count(*) AS n                                                                                                                                                                                                                                                                                                                                                                     |
+|               |     Aggregate: groupBy=[[merge_left_data.k]], aggr=[[count(merge_left_data.ts) AS count(Int64(1))]]                                                                                                                                                                                                                                                                                                                                   |
+|               |       Filter: merge_left_data.kind = Utf8("child") AND merge_left_data.k < Utf8("4") AND merge_left_data.k IS NOT NULL                                                                                                                                                                                                                                                                                                                |
+|               |         TableScan: merge_left_data, partial_filters=[merge_left_data.kind = Utf8("child"), merge_left_data.k < Utf8("4"), merge_left_data.k IS NOT NULL]                                                                                                                                                                                                                                                                              |
+|               | ]]                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| physical_plan | SortPreservingMergeExec: [k@0 ASC NULLS LAST]                                                                                                                                                                                                                                                                                                                                                                                         |
+|               |   SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                   |
+|               |     HashJoinExec: mode=Partitioned, join_type=Left, on=[(k@0, k@0)], projection=[k@0, n@2]                                                                                                                                                                                                                                                                                                                                            |
+|               |       RepartitionExec: partitioning=Hash([k@0], 4), input_partitions=4                                                                                                                                                                                                                                                                                                                                                                |
+|               |         MergeScanExec: peers=REDACTED
+|               |       RepartitionExec: partitioning=Hash([k@0], 4), input_partitions=4                                                                                                                                                                                                                                                                                                                                                                |
+|               |         MergeScanExec: peers=REDACTED
+|               |                                                                                                                                                                                                                                                                                                                                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- Four roots, three matches, nine child rows; key 4 remains with NULL n.
+SELECT r.k, c.n
+FROM (SELECT k FROM merge_left_data WHERE kind = 'root' AND k >= '1' AND k < '5') r
+LEFT JOIN (
+  SELECT k, COUNT(*) AS n FROM merge_left_data
+  WHERE kind = 'child' AND k < '4' GROUP BY k
+) c ON r.k = c.k
+ORDER BY r.k;
+
++---+---+
+| k | n |
++---+---+
+| 1 | 3 |
+| 2 | 3 |
+| 3 | 3 |
+| 4 |   |
++---+---+
+
+DROP TABLE merge_left_data;
+
+Affected Rows: 0
+

@@ -1275,15 +1275,26 @@ async fn test_scan_with_min_sst_sequence_with_format(flat_format: bool) {
 
 #[tokio::test]
 async fn test_max_concurrent_scan_files() {
-    test_max_concurrent_scan_files_with_format(false).await;
-    test_max_concurrent_scan_files_with_format(true).await;
+    test_max_concurrent_scan_files_with_format(false, false).await;
+    test_max_concurrent_scan_files_with_format(true, false).await;
 }
 
-async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
+#[tokio::test]
+async fn test_scan_memory_limit_small_legacy_files() {
+    test_max_concurrent_scan_files_with_format(false, true).await;
+    test_max_concurrent_scan_files_with_format(true, true).await;
+}
+
+async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated: bool) {
     let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
     let config = MitoConfig {
         default_flat_format: flat_format,
         max_concurrent_scan_files: 2,
+        scan_memory_limit: if estimated {
+            common_base::memory_limit::MemoryLimit::Size(ReadableSize::mb(1))
+        } else {
+            common_base::memory_limit::MemoryLimit::Unlimited
+        },
         ..Default::default()
     };
     let engine = env.create_engine(config).await;
@@ -1311,13 +1322,45 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     put_and_flush(3, 7).await;
     put_and_flush(6, 9).await;
 
+    if estimated {
+        // Simulate SSTs created before the manifest recorded row-group sizes.
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version_control.current().version;
+        let legacy_files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .map(|file| {
+                let mut meta = file.meta_ref().clone();
+                meta.max_row_group_uncompressed_size = 0;
+                meta
+            })
+            .collect::<Vec<_>>();
+        let version = crate::region::version::VersionBuilder::from_version(version)
+            .clear_files()
+            .add_files(
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+                legacy_files.into_iter(),
+            )
+            .build();
+        region.version_control.overwrite_current(Arc::new(version));
+    }
+
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).await.unwrap();
     let Scanner::Seq(scanner) = scanner else {
         panic!("Scanner should be seq scan");
     };
-    let error = scanner.check_scan_limit().unwrap_err();
-    assert_eq!(StatusCode::RateLimited, error.status_code());
+    if estimated {
+        scanner.check_scan_limit().unwrap();
+        RecordBatches::try_collect(scanner.build_stream().unwrap())
+            .await
+            .unwrap();
+    } else {
+        let error = scanner.check_scan_limit().unwrap_err();
+        assert_eq!(StatusCode::RateLimited, error.status_code());
+    }
 
     let request = ScanRequest {
         distribution: Some(TimeSeriesDistribution::PerSeries),
@@ -1327,8 +1370,15 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool) {
     let Scanner::Series(scanner) = scanner else {
         panic!("Scanner should be series scan");
     };
-    let error = scanner.check_scan_limit().unwrap_err();
-    assert_eq!(StatusCode::RateLimited, error.status_code());
+    if estimated {
+        scanner.check_scan_limit().unwrap();
+        RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+            .await
+            .unwrap();
+    } else {
+        let error = scanner.check_scan_limit().unwrap_err();
+        assert_eq!(StatusCode::RateLimited, error.status_code());
+    }
 }
 
 #[tokio::test]
@@ -1443,9 +1493,15 @@ async fn test_series_scan_with_format(flat_format: bool) {
 async fn test_two_phase_series_scan() {
     for use_index in [false, true] {
         for use_range_index in [false, true] {
-            check_two_phase_series_scan(use_index, use_range_index, true).await;
+            for mode in [
+                crate::config::ScanMemoryMode::Basic,
+                crate::config::ScanMemoryMode::Extended,
+            ] {
+                check_two_phase_series_scan(use_index, use_range_index, true, mode).await;
+            }
         }
-        check_two_phase_series_scan(use_index, true, false).await;
+        check_two_phase_series_scan(use_index, true, false, crate::config::ScanMemoryMode::Basic)
+            .await;
     }
 }
 
@@ -1453,10 +1509,15 @@ async fn check_two_phase_series_scan(
     use_index: bool,
     use_range_index: bool,
     enable_range_index: bool,
+    scan_memory_mode: crate::config::ScanMemoryMode,
 ) {
     let mut env = TestEnv::with_prefix("test_two_phase_series_scan").await;
     let engine = env
         .create_engine(MitoConfig {
+            scan_memory_mode,
+            scan_memory_on_exhausted: common_memory_manager::OnExhaustedPolicy::Wait {
+                timeout: std::time::Duration::from_secs(30),
+            },
             experimental_series_scan_v2: true,
             experimental_enable_series_index: true,
             experimental_enable_range_index: enable_range_index,
@@ -1685,7 +1746,12 @@ async fn check_two_phase_series_scan(
         .unwrap();
 
     let metrics_set = ExecutionPlanMetricsSet::default();
-    let context = store_api::region_engine::QueryScanContext::default();
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+    let context = store_api::region_engine::QueryScanContext {
+        memory_pool: pool.clone(),
+        ..Default::default()
+    };
     let partition_batches = try_join_all((0..3).map(|partition| {
         let stream = scanner
             .scan_partition(&context, &metrics_set, partition)
@@ -1744,6 +1810,65 @@ async fn check_two_phase_series_scan(
     assert_eq!(Some(&2), series_to_partition.get("b"));
     assert_eq!(Some(&2), series_to_partition.get("d"));
 
+    assert_eq!(0, pool.reserved());
+    // Existing query operators consume the same pool in either scan mode.
+    scanner.reset_state();
+    let other = MemoryConsumer::new("other-query-operator").register(&pool);
+    other.try_grow(1024 * 1024).unwrap();
+    let failed = try_join_all((0..3).map(|partition| {
+        let stream = scanner
+            .scan_partition(&context, &metrics_set, partition)
+            .unwrap();
+        async move { stream.try_collect::<Vec<_>>().await }
+    }))
+    .await;
+    assert!(failed.is_err());
+    other.free();
+    assert_eq!(0, pool.reserved());
+
+    // Exhausting the scan budget must fail even with an unbounded query pool.
+    scanner.reset_state();
+    let scan_tracker = &engine.inner.scan_memory_tracker;
+    // Cancelled background readers release their reservations asynchronously.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while scan_tracker.current() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let scan_guard = scan_tracker.reserve(scan_tracker.limit()).unwrap();
+    let fresh_context = store_api::region_engine::QueryScanContext::default();
+    let fresh_pool = Arc::downgrade(&fresh_context.memory_pool);
+    let failed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        try_join_all((0..3).map(|partition| {
+            let stream = scanner
+                .scan_partition(&fresh_context, &metrics_set, partition)
+                .unwrap();
+            async move { stream.try_collect::<Vec<_>>().await }
+        })),
+    )
+    .await
+    .expect("legacy wait policy must fail immediately on scan memory exhaustion");
+    assert!(failed.is_err());
+    drop(fresh_context);
+    // Keep the external quota occupied while failure tears down the distributor
+    // and readers. Cleanup must not depend on quota becoming available.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fresh_pool.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(scan_tracker.limit(), scan_tracker.current());
+    drop(scan_guard);
+    assert_eq!(0, scan_tracker.current());
+
+    // Keep the previous execution's pool exhausted while replay uses a fresh pool.
+    other.try_grow(1024 * 1024).unwrap();
+    let context = store_api::region_engine::QueryScanContext::default();
     scanner.reset_state();
     assert_eq!("two_phase", scanner.mode());
     assert_eq!(
@@ -1788,6 +1913,42 @@ async fn check_two_phase_series_scan(
     }
     replay_rows.sort();
     assert_eq!(actual_rows, replay_rows);
+
+    // Dropping every partition must let the shared distributor release its pool.
+    scanner.reset_state();
+    let cancelled_context = store_api::region_engine::QueryScanContext::default();
+    let cancelled_pool = Arc::downgrade(&cancelled_context.memory_pool);
+    let streams = (0..3)
+        .map(|partition| {
+            scanner
+                .scan_partition(&cancelled_context, &metrics_set, partition)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    drop(streams);
+    drop(cancelled_context);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while cancelled_pool.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    scanner.reset_state();
+    let direct_batches = scanner
+        .build_stream()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        actual_rows.len(),
+        direct_batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>()
+    );
 
     // Exercise precise field/time filtering and candidate tag filtering on both paths.
     let filtered = engine
@@ -4495,6 +4656,143 @@ async fn test_range_cache_key_separates_sequence_ranges() {
         vec!["| 3     | 3.0     | 1970-01-01T00:00:03 |"],
         second,
         "different (C, H] shared a range-cache entry"
+    );
+}
+
+#[tokio::test]
+async fn test_single_source_ranges_preserve_batches() {
+    for (file_count, row_group_size) in [(1, 64), (1, 16), (2, 16)] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: true,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", "bulk")
+            .insert_option("max_row_group_row_count", &row_group_size.to_string())
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows_per_file = 64 / file_count;
+        for file in 0..file_count {
+            test_util::put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows: test_util::build_rows(file * rows_per_file, (file + 1) * rows_per_file),
+                },
+            )
+            .await;
+            test_util::flush_region(&engine, region_id, None).await;
+        }
+        let Scanner::Seq(scanner) = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+        else {
+            panic!("expected a sequential scan");
+        };
+        assert_eq!(file_count, scanner.input().files.len());
+        assert_eq!(
+            64 / row_group_size,
+            scanner.properties().partitions[0].len()
+        );
+        let stream = scanner
+            .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+            .unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(
+            vec![row_group_size; 64 / row_group_size],
+            batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .collect::<Vec<_>>()
+        );
+        let mut values = scan_field_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!((0..64).map(|i| i as f64).collect::<Vec<_>>(), values);
+    }
+}
+
+#[tokio::test]
+async fn test_short_series_level_zero_merge_preserves_batches_and_latest_values() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("max_row_group_row_count", "65536")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for (start, end, offset) in [(0, 12_000, 0), (6_000, 18_000, 100_000)] {
+        let rows = (start..end)
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue(format!("{i:05}")),
+                    ValueData::F64Value((i + offset) as f64),
+                    ValueData::TimestampMillisecondValue(0),
+                ])
+            })
+            .collect();
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let Scanner::Seq(scanner) = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+    else {
+        panic!("expected a sequential scan");
+    };
+    assert_eq!(2, scanner.input().files.len());
+    for file in &scanner.input().files {
+        assert_eq!(0, file.meta_ref().level);
+        assert_eq!(12_000, file.meta_ref().num_series);
+    }
+    let batches = scanner
+        .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(
+        batches.len() < 64,
+        "short series became {} batches",
+        batches.len()
+    );
+    assert_eq!(
+        (0..18_000)
+            .map(|i| if i < 6_000 {
+                i as f64
+            } else {
+                (i + 100_000) as f64
+            })
+            .collect::<Vec<_>>(),
+        scan_field_values(&batches),
     );
 }
 

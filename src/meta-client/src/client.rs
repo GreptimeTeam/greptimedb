@@ -13,12 +13,11 @@
 // limitations under the License.
 
 mod ask_leader;
+mod cluster;
 mod config;
 pub mod heartbeat;
 mod load_balance;
 mod procedure;
-
-mod cluster;
 mod store;
 mod util;
 
@@ -69,7 +68,8 @@ use common_time::util::DefaultSystemTimer;
 use config::Client as ConfigClient;
 use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
-use procedure::{Client as ProcedureClient, procedure_actor, procedure_event_context};
+use procedure::Client as ProcedureClient;
+pub use procedure::{procedure_actor, procedure_event_context};
 use serde::de::DeserializeOwned;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
@@ -318,15 +318,35 @@ impl MetaClient {
 pub type RegionFollowerClientRef = Arc<dyn RegionFollowerClient>;
 
 /// A trait for clients that can manage region followers.
+///
+/// The executor context carries the actor and the event input of the
+/// submission, so implementations can forward them to the metasrv and the
+/// region follower procedures record who submitted the operation.
 #[async_trait::async_trait]
 pub trait RegionFollowerClient: Sync + Send + Debug {
-    async fn add_region_follower(&self, request: AddRegionFollowerRequest) -> Result<()>;
+    async fn add_region_follower(
+        &self,
+        ctx: &ExecutorContext,
+        request: AddRegionFollowerRequest,
+    ) -> Result<()>;
 
-    async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
+    async fn remove_region_follower(
+        &self,
+        ctx: &ExecutorContext,
+        request: RemoveRegionFollowerRequest,
+    ) -> Result<()>;
 
-    async fn add_table_follower(&self, request: AddTableFollowerRequest) -> Result<()>;
+    async fn add_table_follower(
+        &self,
+        ctx: &ExecutorContext,
+        request: AddTableFollowerRequest,
+    ) -> Result<()>;
 
-    async fn remove_table_follower(&self, request: RemoveTableFollowerRequest) -> Result<()>;
+    async fn remove_table_follower(
+        &self,
+        ctx: &ExecutorContext,
+        request: RemoveTableFollowerRequest,
+    ) -> Result<()>;
 
     async fn start(&self, urls: &[&str]) -> Result<()>;
 
@@ -370,31 +390,31 @@ impl ProcedureExecutor for MetaClient {
 
     async fn manage_region_follower(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: ManageRegionFollowerRequest,
     ) -> MetaResult<()> {
         if let Some(region_follower) = &self.region_follower {
             match request {
                 ManageRegionFollowerRequest::AddRegionFollower(add_region_follower_request) => {
                     region_follower
-                        .add_region_follower(add_region_follower_request)
+                        .add_region_follower(ctx, add_region_follower_request)
                         .await
                 }
                 ManageRegionFollowerRequest::RemoveRegionFollower(
                     remove_region_follower_request,
                 ) => {
                     region_follower
-                        .remove_region_follower(remove_region_follower_request)
+                        .remove_region_follower(ctx, remove_region_follower_request)
                         .await
                 }
                 ManageRegionFollowerRequest::AddTableFollower(add_table_follower_request) => {
                     region_follower
-                        .add_table_follower(add_table_follower_request)
+                        .add_table_follower(ctx, add_table_follower_request)
                         .await
                 }
                 ManageRegionFollowerRequest::RemoveTableFollower(remove_table_follower_request) => {
                     region_follower
-                        .remove_table_follower(remove_table_follower_request)
+                        .remove_table_follower(ctx, remove_table_follower_request)
                         .await
                 }
             }

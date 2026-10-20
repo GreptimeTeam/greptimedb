@@ -19,6 +19,7 @@ chrono.workspace = true
 chrono-tz.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
+common-frontend.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-query.workspace = true
@@ -60,6 +61,8 @@ yaml-rust = "0.4"
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
 criterion = { workspace = true, features = ["html_reports"] }
+temp-env.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "processor"

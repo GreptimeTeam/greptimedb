@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use api::v1::meta::Peer;
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 
+use crate::affinity::AffinityRequirements;
 use crate::cluster::NodeInfo;
 use crate::error::Error;
 use crate::{DatanodeId, FlownodeId};
+
+/// Shared reference to a [`Peer`].
+pub type PeerRef = Arc<Peer>;
 
 /// [`PeerResolver`] provides methods to look up peer information by node ID.
 ///
@@ -77,7 +80,8 @@ pub type PeerDiscoveryRef = Arc<dyn PeerDiscovery>;
 
 #[derive(Debug, Clone, Default)]
 pub struct PeerAllocContext {
-    pub extensions: HashMap<String, String>,
+    /// Resolved requirements passed to node selection.
+    pub affinity: Option<AffinityRequirements>,
 }
 
 /// [`PeerAllocator`] allocates [`Peer`]s for creating region or flow.

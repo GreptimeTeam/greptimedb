@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cache::{
-    build_datanode_cache_registry, build_fundamental_cache_registry,
+    build_datanode_layered_cache_registry, build_fundamental_cache_registry,
     with_default_composite_cache_registry,
 };
 use catalog::information_schema::NoopInformationExtension;
@@ -88,10 +88,10 @@ pub struct GreptimeDbStandaloneBuilder {
     slow_query_options: SlowQueryOptions,
     event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
-    experimental_metric_export: bool,
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
     mito_config: Option<mito2::config::MitoConfig>,
+    pipeline_options: pipeline::PipelineOptions,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -110,10 +110,10 @@ impl GreptimeDbStandaloneBuilder {
             },
             event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
-            experimental_metric_export: false,
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
             mito_config: None,
+            pipeline_options: pipeline::PipelineOptions::default(),
         }
     }
 
@@ -124,10 +124,10 @@ impl GreptimeDbStandaloneBuilder {
         self
     }
 
-    /// Enables experimental Metric export for the standalone test instance.
+    /// Configures pipeline compilation and caching for this test instance.
     #[must_use]
-    pub fn with_experimental_metric_export(mut self) -> Self {
-        self.experimental_metric_export = true;
+    pub fn with_pipeline_options(mut self, options: pipeline::PipelineOptions) -> Self {
+        self.pipeline_options = options;
         self
     }
 
@@ -209,11 +209,8 @@ impl GreptimeDbStandaloneBuilder {
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
 
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
-                .build(),
-        );
+        let layered_cache_registry =
+            Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
 
         let mut builder =
             DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), kv_backend.clone());
@@ -293,6 +290,9 @@ impl GreptimeDbStandaloneBuilder {
         let repartition_procedure_factory = Arc::new(StandaloneRepartitionProcedureFactory);
         let ddl_manager = Arc::new(DdlManager::new(
             DdlContext {
+                affinity_resolver: None,
+                affinity_fallback: Default::default(),
+                peer_alloc_context_provider: None,
                 node_manager: node_manager.clone(),
                 cache_invalidator: cache_registry.clone(),
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
@@ -401,7 +401,7 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
-            experimental_metric_export: self.experimental_metric_export,
+            pipeline: self.pipeline_options.clone(),
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
                 table: self.table_batcher.clone(),

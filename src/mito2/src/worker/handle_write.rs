@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{
     InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RejectWriteSnafu, Result,
+    RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
 };
 use crate::metrics;
 use crate::metrics::{
@@ -34,7 +34,9 @@ use crate::metrics::{
 };
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
-use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
+use crate::request::{
+    SenderBulkRequest, SenderWriteRequest, WriteRequest, check_bulk_insert_batch,
+};
 use crate::wal::Wal;
 use crate::worker::RegionWorkerLoop;
 
@@ -335,7 +337,7 @@ impl<S> RegionWorkerLoop<S> {
                         if region.reject_all_writes_in_staging() {
                             sender_req
                                 .sender
-                                .send(RejectWriteSnafu { region_id }.fail());
+                                .send(RejectWriteInStagingSnafu { region_id }.fail());
                             continue;
                         }
 
@@ -399,7 +401,7 @@ impl<S> RegionWorkerLoop<S> {
             if region.reject_all_writes_in_staging() {
                 sender_req
                     .sender
-                    .send(RejectWriteSnafu { region_id }.fail());
+                    .send(RejectWriteInStagingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();
@@ -481,7 +483,9 @@ impl<S> RegionWorkerLoop<S> {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         if region.reject_all_writes_in_staging() {
-                            bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                            bulk_req
+                                .sender
+                                .send(RejectWriteInStagingSnafu { region_id }.fail());
                             continue;
                         }
                         let region_ctx = RegionWriteCtx::new(
@@ -529,7 +533,9 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             };
             if region.reject_all_writes_in_staging() {
-                bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                bulk_req
+                    .sender
+                    .send(RejectWriteInStagingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();
@@ -548,19 +554,21 @@ impl<S> RegionWorkerLoop<S> {
                     aligned_schema.schema_version == region_ctx.version().metadata.schema_version
                 });
 
-            // Fill missing columns if needed
-            if need_fill_missing_columns
-                && let Err(e) = bulk_req
-                    .request
-                    .fill_missing_columns(&region_ctx.version().metadata)
-            {
-                bulk_req.sender.send(Err(e));
-                continue;
+            // Fill missing columns if needed. The batch is checked again as the region
+            // schema may have changed since the request was checked.
+            if need_fill_missing_columns {
+                let metadata = &region_ctx.version().metadata;
+                if let Err(e) = check_bulk_insert_batch(metadata, &bulk_req.request.batch)
+                    .and_then(|_| bulk_req.request.fill_missing_columns(metadata))
+                {
+                    bulk_req.sender.send(Err(e));
+                    continue;
+                }
             }
 
             // Collect requests by region.
             if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
-                return;
+                continue;
             }
         }
     }
@@ -754,7 +762,7 @@ mod tests {
     };
     use store_api::logstore::entry::{Entry, NaiveEntry};
     use store_api::logstore::provider::Provider;
-    use store_api::logstore::{AppendBatchResponse, EntryId, SendableEntryStream, WalIndex};
+    use store_api::logstore::{AppendBatchResponse, EntryId, SendableEntryStream};
     use store_api::region_request::AffectedRows;
     use tokio::sync::oneshot;
 
@@ -824,7 +832,6 @@ mod tests {
             &self,
             _provider: &Provider,
             _entry_id: EntryId,
-            _index: Option<WalIndex>,
         ) -> LogStoreResult<SendableEntryStream<'static, Entry, Self::Error>> {
             Ok(Box::pin(stream::empty()))
         }

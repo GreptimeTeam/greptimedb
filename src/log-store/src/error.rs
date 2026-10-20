@@ -267,39 +267,6 @@ pub enum Error {
         error: tokio::sync::oneshot::error::RecvError,
     },
 
-    #[snafu(display("Failed to wait for result of DumpIndex"))]
-    WaitDumpIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: tokio::sync::oneshot::error::RecvError,
-    },
-
-    #[snafu(display("Failed to create writer"))]
-    CreateWriter {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to write index"))]
-    WriteIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to read index, path: {path}"))]
-    ReadIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-        path: String,
-    },
-
     #[snafu(display(
         "The length of meta if exceeded the limit: {}, actual: {}",
         limit,
@@ -435,6 +402,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to fetch a segment of WAL object, path: {}", path))]
+    WalSegmentFetch {
+        path: String,
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid WAL object, path: {}", path))]
     InvalidWalObject {
         path: String,
@@ -456,6 +432,37 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Object store WAL prefix {} on {} does not hold the history of region {}: {}. \
+         If the WAL was moved, stop the instance, copy every object under the prefix from the \
+         old location to this one and start again. If the old WAL is lost, start once with \
+         `[wal].accept_missing_history = true`, which opens the region without its writes that \
+         were not flushed, and turn the option off again once the instance has written to the WAL",
+        prefix,
+        storage,
+        region_id,
+        reason
+    ))]
+    MissingWalHistory {
+        region_id: RegionId,
+        prefix: String,
+        /// The storage the prefix is read from, as configured.
+        storage: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Object store WAL gave up its start object {} after refusing a region without its history, and accepts nothing more until it opens again",
+        path
+    ))]
+    WalStartWithdrawn {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Object store WAL log store is stopped"))]
     ObjectStoreWalStopped {
         #[snafu(implicit)]
@@ -464,6 +471,15 @@ pub enum Error {
 
     #[snafu(display("Object store WAL operation failed"))]
     ObjectStoreWal {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Object store WAL rejects appends until the object store accepts its acknowledged backlog"
+    ))]
+    ObjectStoreWalFailing {
         source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
@@ -501,6 +517,7 @@ impl ErrorExt for Error {
             | OverrideCompactedEntry { .. }
             | InvalidWalObjectStore { .. }
             | MismatchedWalPrefix { .. }
+            | MissingWalHistory { .. }
             | MismatchedWalRegion { .. }
             | IncompleteWalEntry { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
@@ -516,9 +533,10 @@ impl ErrorExt for Error {
             | DiscontinuousLogIndex { .. }
             | OrderedBatchProducerStopped { .. }
             | WaitProduceResultReceiver { .. }
-            | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. }
-            | ObjectStoreWalStopped { .. } => StatusCode::Internal,
+            | ObjectStoreWalStopped { .. }
+            | WalStartWithdrawn { .. }
+            | WalSegmentFetch { .. } => StatusCode::Internal,
 
             CorruptedWalObject { .. }
             | WalObjectConflict { .. }
@@ -528,12 +546,10 @@ impl ErrorExt for Error {
 
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
+            ObjectStoreWalFailing { .. } => StatusCode::StorageUnavailable,
 
             // Object store related errors
-            CreateWriter { .. }
-            | WriteIndex { .. }
-            | ReadIndex { .. }
-            | WalObjectStore { .. }
+            WalObjectStore { .. }
             | StaleWalObject { .. }
             | UnconfirmedWalEpochStart { .. }
             | Io { .. } => StatusCode::StorageUnavailable,
@@ -562,10 +578,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateWriter { error, .. }
-            | WriteIndex { error, .. }
-            | ReadIndex { error, .. }
-            | WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
+            WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
             ObjectStoreWal { source, .. } => source.retry_hint(),
             Io { error, .. } => retry_hint_from_io_error(error),
             FetchEntry { .. }
@@ -573,7 +586,8 @@ impl ErrorExt for Error {
             | AddEntryLogBatch { .. }
             | WalObjectSequenceUnsettled { .. }
             | StaleWalObject { .. }
-            | UnconfirmedWalEpochStart { .. } => RetryHint::Retryable,
+            | UnconfirmedWalEpochStart { .. }
+            | ObjectStoreWalFailing { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

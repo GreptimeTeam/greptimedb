@@ -97,7 +97,7 @@ pub trait QueryEngine: Send + Sync {
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
 
     /// Create a [`QueryEngineContext`].
-    fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext;
+    fn engine_context(&self, query_ctx: QueryContextRef) -> Result<QueryEngineContext>;
 
     /// Retrieve the query engine state [`QueryEngineState`]
     fn engine_state(&self) -> &QueryEngineState;

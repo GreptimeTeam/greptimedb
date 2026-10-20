@@ -46,8 +46,9 @@ use crate::read::range_cache::{
 };
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, compute_parallel_channel_size,
-    scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
+    MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream,
+    compute_parallel_channel_size, scan_flat_file_ranges, scan_flat_mem_ranges,
+    should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
@@ -106,10 +107,9 @@ impl SeqScan {
     )]
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
+        let ctx = QueryScanContext::default();
         let streams = (0..self.properties.partitions.len())
-            .map(|partition: usize| {
-                self.scan_partition(&QueryScanContext::default(), &metrics_set, partition)
-            })
+            .map(|partition: usize| self.scan_partition(&ctx, &metrics_set, partition))
             .collect::<Result<Vec<_>, _>>()?;
 
         let aggr_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
@@ -505,6 +505,9 @@ impl SeqScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
         // Check max file count limit for all partitions since we scan them in parallel.
         let total_max_files: usize = self
             .properties
@@ -662,8 +665,6 @@ pub(crate) async fn build_flat_sources(
         return Ok(None);
     }
 
-    let split_batch_size = should_split_flat_batches_for_merge(stream_ctx, range_meta);
-    let should_split = split_batch_size.is_some();
     sources.reserve(num_indices);
     let mut ordered_sources = Vec::with_capacity(num_indices);
     ordered_sources.resize_with(num_indices, || None);
@@ -736,6 +737,20 @@ pub(crate) async fn build_flat_sources(
             ordered_sources[position] = Some(stream);
         }
     }
+
+    // Queries merge one range at a time; compaction merges sources from all ranges.
+    let needs_merge =
+        ordered_sources.iter().flatten().count() > 1 || (compaction && stream_ctx.ranges.len() > 1);
+    let split_batch_size = if needs_merge {
+        should_split_flat_batches_for_merge(stream_ctx, range_meta).filter(|rows_per_series| {
+            // Compaction writes every merged batch out, so splitting short series
+            // would hand the SST writer and indexer one tiny batch per series.
+            !compaction || *rows_per_series >= MIN_COMPACTION_SPLIT_ROWS
+        })
+    } else {
+        None
+    };
+    let should_split = split_batch_size.is_some();
 
     for stream in ordered_sources.into_iter().flatten() {
         if should_split {

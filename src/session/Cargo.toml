@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+enterprise = []
+
 [lints]
 workspace = true
 
@@ -26,6 +29,9 @@ derive_more.workspace = true
 snafu.workspace = true
 sql.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+prost.workspace = true
 
 [package.metadata.cargo-shear]
 # `common-error` is required by `common-macro`'s `stack_trace_debug`: the

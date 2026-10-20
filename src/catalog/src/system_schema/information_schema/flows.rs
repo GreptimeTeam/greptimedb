@@ -50,7 +50,8 @@ use crate::error::{
     Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::{FLOWS, Predicates};
-use crate::system_schema::information_schema::InformationTable;
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{InformationSchemaTableScope, InformationTable};
 use crate::system_schema::utils;
 
 const INIT_CAPACITY: usize = 42;
@@ -195,6 +196,12 @@ impl InformationSchemaFlows {
 }
 
 impl InformationTable for InformationSchemaFlows {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaFlows {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_FLOW_TABLE_ID
     }

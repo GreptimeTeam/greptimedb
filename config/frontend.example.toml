@@ -11,10 +11,6 @@ default_column_prefix = "greptime"
 ## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
 #+ auto_create_table = true
 
-## Enables experimental Parquet COPY DATABASE using shared Metric physical scans.
-## Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation.
-#+ experimental_metric_export = false
-
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
@@ -310,6 +306,13 @@ enable = true
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Estimated memory budget for cached trace service/operation keys per frontend,
+## shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.
+## Defaults to 1/128 of the host or pod memory limit, with a minimum of 32MiB.
+## Uses 32MiB if memory detection is unavailable.
+## Excludes cache and allocator overhead; shared table names are charged per entry.
+## @toml2docs:none-default="Auto"
+#+ trace_aux_cache_size = "32MiB"
 ## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
 ## resource attributes, so metrics-only services reach the semantic graph.
 experimental_enable_resource_info = false
@@ -367,7 +370,8 @@ allow_query_fallback = false
 ## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
 ## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
-## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
+## This pool applies to operators on this frontend. Datanodes use their own query
+## pools for local operators and internal series merges during table scans.
 ## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
@@ -394,6 +398,18 @@ memory_pool_size = "50%"
 ## Ignored unless mode is "custom".
 #+ experimental_spill_compression = "uncompressed"
 # --- End spill-to-disk ---
+
+## Retry retryable distributed write failures.
+## Backoff grows exponentially, with jitter to spread concurrent retries.
+[write_retry]
+## Maximum retries after the initial write attempt. Set to 0 to disable retries.
+max_retries = 3
+## Initial backoff before jitter is applied. Must be positive.
+initial_backoff = "1500ms"
+## Maximum backoff before jitter is applied. Must be at least initial_backoff.
+max_backoff = "10s"
+## Backoff multiplier. Must be finite and at least 1.
+backoff_multiplier = 2.0
 
 ## Datanode options.
 [datanode]
@@ -466,7 +482,9 @@ enable = true
 
 ## The record type of slow queries. It can be `system_table` or `log`.
 ## If `system_table` is selected, the slow queries will be recorded in a system table `greptime_private.slow_queries`.
-## If `log` is selected, the slow queries will be logged in a log file `greptimedb-slow-queries.*`.
+## If `log` is selected, slow queries are logged to stdout when `logging.append_stdout` is enabled,
+## and to `greptimedb-slow-queries.*` when `logging.enable_file_logging` is enabled and `logging.dir` is nonempty.
+## Slow query logging is independent of `logging.level` and uses `logging.log_format` and the logging retention settings.
 record_type = "system_table"
 
 ## The threshold of slow query. It can be human readable time string, for example: `10s`, `100ms`, `1s`.
@@ -497,6 +515,10 @@ enable_heap_profiling = true
 ## Time to live of the frontend-local pipeline cache. A pipeline created or deleted on
 ## another frontend takes effect on this one after at most this duration.
 cache_ttl = "10s"
+## Allow VRL to access the server environment, filesystem, hostname, local timezone,
+## network, and logs. Default is false. Enable only for trusted pipeline authors.
+## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
+allow_vrl_host_access = false
 
 ## Configuration options for the event recorder.
 [event_recorder]

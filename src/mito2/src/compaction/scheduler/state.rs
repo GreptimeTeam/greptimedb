@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +28,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::CompactionVersion;
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::local::LocalCompaction;
 use crate::compaction::scheduler::planning::CompactionRequest;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -36,8 +37,10 @@ use crate::error::{
 use crate::region::ManifestContextRef;
 use crate::region::version::VersionControlRef;
 use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
-use crate::schedule::{CancellableTaskState, RequestCancelResult};
-use crate::sst::file::FileHandle;
+#[cfg(test)]
+use crate::schedule::CancellableTaskState;
+use crate::schedule::RequestCancelResult;
+use crate::sst::file::{FileHandle, RegionFileId};
 use crate::worker::WorkerListener;
 
 /// Identifies an accepted compaction attempt and keeps its SST reservations alive.
@@ -49,6 +52,10 @@ pub(crate) struct CompactionExecution {
 }
 
 impl CompactionExecution {
+    /// Returns the attempt ID used to reject stale execution notifications.
+    pub(crate) fn plan_id(&self) -> u64 {
+        self.plan_id
+    }
     pub(super) fn new(plan_id: u64, files: CompactingFiles) -> Self {
         Self {
             plan_id,
@@ -67,11 +74,14 @@ impl CompactionExecution {
 }
 
 #[derive(Debug)]
-pub(super) enum CompactionPhase {
+pub(crate) enum CompactionPhase {
+    /// The region is registered but has no compaction in progress.
+    Idle,
     Picking {
         plan_id: u64,
         cancelled: bool,
     },
+    #[cfg(test)]
     Local {
         state: CancellableTaskState,
         execution: CompactionExecution,
@@ -79,6 +89,7 @@ pub(super) enum CompactionPhase {
     Remote {
         execution: CompactionExecution,
     },
+    Units(LocalCompaction),
 }
 
 /// Describes how the current compaction cycle was triggered.
@@ -102,6 +113,17 @@ pub(super) struct ActiveCompaction {
 }
 
 impl ActiveCompaction {
+    /// Creates an empty cycle while retaining the region's scheduling record.
+    fn idle() -> Self {
+        Self {
+            phase: CompactionPhase::Idle,
+            trigger: CompactionTrigger::Automatic,
+            waiters: Vec::new(),
+            automatic_followup_required: false,
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn picking(
         plan_id: u64,
         waiters: Vec<OutputTx>,
@@ -165,16 +187,18 @@ impl ActiveCompaction {
 
     pub(super) fn matches_execution(&self, execution: &CompactionExecution) -> bool {
         match &self.phase {
-            CompactionPhase::Picking { .. } => None,
-            CompactionPhase::Local { execution, .. } | CompactionPhase::Remote { execution } => {
-                Some(execution)
-            }
+            CompactionPhase::Idle | CompactionPhase::Picking { .. } => None,
+            #[cfg(test)]
+            CompactionPhase::Local { execution, .. } => Some(execution),
+            CompactionPhase::Units(_) => None,
+            CompactionPhase::Remote { execution } => Some(execution),
         }
         .is_some_and(|current| current.matches(execution))
     }
 
     pub(super) fn request_cancel(&mut self) -> RequestCancelResult {
         match &mut self.phase {
+            CompactionPhase::Idle => RequestCancelResult::TooLateToCancel,
             CompactionPhase::Picking { cancelled, .. } => {
                 if *cancelled {
                     RequestCancelResult::AlreadyCancelling
@@ -183,7 +207,9 @@ impl ActiveCompaction {
                     RequestCancelResult::CancelIssued
                 }
             }
+            #[cfg(test)]
             CompactionPhase::Local { state, .. } => state.request_cancel(),
+            CompactionPhase::Units(units) => units.request_cancel(),
             CompactionPhase::Remote { .. } => RequestCancelResult::TooLateToCancel,
         }
     }
@@ -197,60 +223,101 @@ impl ActiveCompaction {
 
 /// Owns atomic reservations for every SST selected by a compaction plan.
 #[derive(Debug, Clone)]
-pub(super) struct CompactingFiles {
-    _inner: Arc<CompactingFilesInner>,
+pub(crate) struct CompactingFiles {
+    files: HashMap<RegionFileId, Arc<CompactingFile>>,
 }
 
+/// Keeps an SST reserved until the last shared lease is dropped.
 #[derive(Debug)]
-struct CompactingFilesInner {
-    files: Vec<FileHandle>,
+struct CompactingFile {
+    file: FileHandle,
 }
 
 impl CompactingFiles {
+    /// Reserves both merge inputs and expired files from an accepted picker result.
     pub(super) fn try_new(output: &PickerOutput) -> Option<Self> {
-        let mut seen = HashSet::new();
-        let mut files: Vec<FileHandle> = Vec::new();
-        let selected_files = output
-            .outputs
-            .iter()
-            .flat_map(|output| output.inputs.iter())
-            .chain(output.expired_ssts.iter());
+        Self::try_reserve(
+            output
+                .outputs
+                .iter()
+                .flat_map(|o| &o.inputs)
+                .chain(&output.expired_ssts),
+        )
+    }
+
+    /// Reserves distinct inputs, releasing acquired leases if any input is already busy.
+    fn try_reserve<'a>(selected_files: impl IntoIterator<Item = &'a FileHandle>) -> Option<Self> {
+        let mut files = HashMap::new();
 
         for file in selected_files {
-            if !seen.insert(file.file_id()) {
+            let hash_map::Entry::Vacant(entry) = files.entry(file.file_id()) else {
                 continue;
-            }
+            };
             if !file.try_set_compacting() {
-                for reserved in &files {
-                    reserved.set_compacting(false);
-                }
                 return None;
             }
-            files.push(file.clone());
+            entry.insert(Arc::new(CompactingFile { file: file.clone() }));
         }
 
-        Some(Self {
-            _inner: Arc::new(CompactingFilesInner { files }),
-        })
+        Some(Self { files })
+    }
+
+    /// Clones the shared leases of a dependency group's inputs without briefly releasing any input.
+    /// `self` retains its leases, so an input is released only after every owner, including
+    /// the original collection, drops its lease.
+    /// A delayed remote notifier may retain the same leases across local fallback.
+    /// Indexing keeps splitting proportional to the group's input count.
+    pub(crate) fn for_inputs(&self, inputs: &[FileHandle]) -> Self {
+        Self {
+            files: inputs
+                .iter()
+                .filter_map(|file| {
+                    let id = file.file_id();
+                    self.files.get(&id).map(|lease| (id, lease.clone()))
+                })
+                .collect(),
+        }
     }
 
     #[cfg(test)]
     pub(super) fn empty() -> Self {
         Self {
-            _inner: Arc::new(CompactingFilesInner { files: Vec::new() }),
+            files: HashMap::new(),
         }
     }
 }
 
-impl Drop for CompactingFilesInner {
+impl Drop for CompactingFile {
     fn drop(&mut self) {
-        for file in &self.files {
-            file.set_compacting(false);
-        }
+        self.file.set_compacting(false);
     }
 }
 
-/// Status of running and pending region compaction tasks.
+/// A handed-off DDL batch, retained until each reply has been observed once.
+#[derive(Debug)]
+pub(crate) struct DdlExecution {
+    generation: u64,
+    pending_replies: HashSet<usize>,
+}
+
+impl DdlExecution {
+    /// Tracks a batch's individual replies so duplicate notifications are harmless.
+    pub(crate) fn new(generation: u64, count: usize) -> Self {
+        Self {
+            generation,
+            pending_replies: (0..count).collect(),
+        }
+    }
+
+    /// Returns true only for the last distinct reply of this batch.
+    pub(crate) fn complete(&mut self, generation: u64, request_index: usize) -> bool {
+        self.generation == generation
+            && self.pending_replies.remove(&request_index)
+            && self.pending_replies.is_empty()
+    }
+}
+
+/// Scheduling state retained for the lifetime of a loaded region.
 pub(super) struct CompactionStatus {
     /// Id of the region.
     pub(super) region_id: RegionId,
@@ -271,24 +338,25 @@ pub(super) struct CompactionStatus {
     /// [`crate::request::DdlRequest::Truncate`] and [`crate::request::DdlRequest::EnterStaging`] here. Both must serialize with
     /// compaction so they observe the version after compaction terminates.
     pub(super) pending_ddl_requests: Vec<SenderDdlRequest>,
+    /// DDLs already handed to the worker keep new compaction paused until their replies.
+    pub(crate) executing_ddl: Option<DdlExecution>,
 }
 
 impl CompactionStatus {
-    /// Creates a new picking [CompactionStatus].
+    /// Registers an idle region without starting a compaction cycle.
     pub(super) fn new(
         region_id: RegionId,
         version_control: VersionControlRef,
         access_layer: AccessLayerRef,
-        plan_id: u64,
-        trigger: CompactionTrigger,
     ) -> CompactionStatus {
         CompactionStatus {
             region_id,
             version_control,
             access_layer,
-            active: ActiveCompaction::picking(plan_id, Vec::new(), trigger),
+            active: ActiveCompaction::idle(),
             pending_request: None,
             pending_ddl_requests: Vec::new(),
+            executing_ddl: None,
         }
     }
 
@@ -298,13 +366,24 @@ impl CompactionStatus {
         version_control: VersionControlRef,
         access_layer: AccessLayerRef,
     ) -> Self {
-        Self::new(
-            region_id,
-            version_control,
-            access_layer,
-            0,
-            CompactionTrigger::Automatic,
-        )
+        let mut status = Self::new(region_id, version_control, access_layer);
+        status.active = ActiveCompaction::picking(0, Vec::new(), CompactionTrigger::Automatic);
+        status
+    }
+
+    /// Registration alone does not indicate active work.
+    pub(crate) fn is_compacting(&self) -> bool {
+        !matches!(self.active.phase, CompactionPhase::Idle)
+    }
+
+    /// Both queued and handed-off DDLs prevent new compaction admission.
+    pub(crate) fn has_ddl(&self) -> bool {
+        !self.pending_ddl_requests.is_empty() || self.executing_ddl.is_some()
+    }
+
+    /// Ends the current cycle without losing region or DDL execution state.
+    pub(crate) fn become_idle(&mut self) {
+        self.active = ActiveCompaction::idle();
     }
 
     #[cfg(test)]
@@ -376,10 +455,6 @@ impl CompactionStatus {
         self.active.waiters.extend(waiters);
     }
 
-    pub(super) fn append_waiters(&mut self, waiters: &mut Vec<OutputTx>) {
-        self.active.waiters.append(waiters);
-    }
-
     pub(super) fn set_phase(&mut self, phase: CompactionPhase) {
         self.active.phase = phase;
     }
@@ -395,14 +470,15 @@ impl CompactionStatus {
         }
     }
 
-    pub(super) fn on_failure(mut self, err: Arc<Error>) {
-        for waiter in self.active.waiters.drain(..) {
+    pub(super) fn on_failure(&mut self, err: Arc<Error>) {
+        let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
+        for waiter in active.waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));
         }
 
-        if let Some(pending_compaction) = self.pending_request {
+        if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction
                 .waiter
                 .send(Err(err.clone()).context(CompactRegionSnafu {
@@ -410,7 +486,7 @@ impl CompactionStatus {
                 }));
         }
 
-        for pending_ddl in self.pending_ddl_requests {
+        for pending_ddl in self.pending_ddl_requests.drain(..) {
             pending_ddl
                 .sender
                 .send(Err(err.clone()).context(CompactRegionSnafu {
@@ -420,12 +496,13 @@ impl CompactionStatus {
     }
 
     #[must_use]
-    pub(super) fn on_cancel(mut self) -> Vec<SenderDdlRequest> {
-        for waiter in self.active.waiters.drain(..) {
+    pub(super) fn on_cancel(&mut self) -> Vec<SenderDdlRequest> {
+        let mut active = std::mem::replace(&mut self.active, ActiveCompaction::idle());
+        for waiter in active.waiters.drain(..) {
             waiter.send(CompactionCancelledSnafu.fail());
         }
 
-        if let Some(pending_compaction) = self.pending_request {
+        if let Some(pending_compaction) = self.pending_request.take() {
             pending_compaction.waiter.send(
                 Err(Arc::new(CompactionCancelledSnafu.build())).context(CompactRegionSnafu {
                     region_id: self.region_id,
@@ -476,4 +553,35 @@ pub(super) struct PendingCompaction {
     pub(crate) max_parallelism: usize,
     /// Optional time range that constrains candidate compaction windows.
     pub(crate) time_range: Option<TimestampRange>,
+}
+
+#[cfg(test)]
+mod tests {
+    use store_api::storage::FileId;
+
+    use super::*;
+    use crate::compaction::test_util::new_file_handle;
+
+    #[test]
+    fn test_compaction_unit_input_leases_release_independently() {
+        let x = new_file_handle(FileId::random(), 0, 100, 0);
+        let y = new_file_handle(FileId::random(), 100, 200, 0);
+        let unused = new_file_handle(FileId::random(), 200, 300, 0);
+        let reserved = CompactingFiles::try_reserve([&x, &y, &x, &unused]).unwrap();
+        let first = reserved.for_inputs(&[x.clone(), x.clone()]);
+        let second = reserved.for_inputs(std::slice::from_ref(&y));
+        drop(reserved);
+        assert!(x.compacting() && y.compacting());
+        assert!(
+            !unused.compacting(),
+            "unit leases must not retain unrelated inputs"
+        );
+        drop(first);
+        assert!(!x.compacting() && y.compacting());
+        let notification = second.clone();
+        drop(second);
+        assert!(y.compacting());
+        drop(notification);
+        assert!(!y.compacting());
+    }
 }

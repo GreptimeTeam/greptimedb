@@ -231,6 +231,13 @@ pub enum Error {
         source: servers::error::Error,
     },
 
+    #[snafu(display("Invalid Prometheus remote read schema: {detail}"))]
+    InvalidPromRemoteReadSchema {
+        detail: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to create logical plan for prometheus query"))]
     PromStoreRemoteQueryPlan {
         #[snafu(implicit)]
@@ -323,6 +330,13 @@ pub enum Error {
         name: String,
     },
 
+    #[snafu(display("Invalid write retry config: {}", reason))]
+    InvalidWriteRetryConfig {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid tls config"))]
     InvalidTlsConfig {
         #[snafu(source)]
@@ -387,11 +401,13 @@ impl ErrorExt for Error {
             | Error::SchemaExists { .. }
             | Error::ColumnNotFound { .. }
             | Error::AmbiguousValueColumn { .. }
+            | Error::InvalidPromRemoteReadSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::IllegalAuthConfig { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. }
-            | Error::InvalidTlsConfig { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidTlsConfig { .. }
+            | Error::InvalidWriteRetryConfig { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

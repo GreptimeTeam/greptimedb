@@ -79,13 +79,13 @@ fn open_request(table_dir: String) -> RegionOpenRequest {
     }
 }
 
-async fn new_engine(env: &mut TestEnv) -> (MitoEngine, Arc<ObjectStoreLogStore>) {
+pub(crate) async fn new_engine(env: &mut TestEnv) -> (MitoEngine, Arc<ObjectStoreLogStore>) {
     env.create_engine_with_object_store_wal(MitoConfig::default(), &wal_config())
         .await
 }
 
 /// Creates a region with object store WAL options and returns its table dir and row schema.
-async fn create_region(
+pub(crate) async fn create_region(
     engine: &MitoEngine,
     region_id: RegionId,
 ) -> (String, Vec<api::v1::ColumnSchema>) {
@@ -147,7 +147,7 @@ async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
 /// Returns the ids of the entries the store still hands out for `region_id`.
 async fn stored_entry_ids(log_store: &ObjectStoreLogStore, region_id: RegionId) -> Vec<EntryId> {
     log_store
-        .read(&object_store_provider(region_id), 0, None)
+        .read(&object_store_provider(region_id), 0)
         .await
         .unwrap()
         .try_collect::<Vec<_>>()

@@ -43,7 +43,10 @@ use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::information_schema::Predicates;
-use crate::system_schema::information_schema::{COLUMNS, InformationTable};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    COLUMNS, InformationSchemaTableScope, InformationTable,
+};
 
 #[derive(Debug)]
 pub(super) struct InformationSchemaColumns {
@@ -160,6 +163,12 @@ impl InformationSchemaColumns {
 }
 
 impl InformationTable for InformationSchemaColumns {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaColumns {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_COLUMNS_TABLE_ID
     }

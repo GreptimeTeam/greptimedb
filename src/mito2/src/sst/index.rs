@@ -74,6 +74,7 @@ use crate::sst::file::{
     ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, RegionFileId, RegionIndexId,
 };
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
@@ -160,6 +161,8 @@ pub struct IndexOutput {
     pub inverted_index: InvertedIndexOutput,
     /// Fulltext index output.
     pub fulltext_index: FulltextIndexOutput,
+    /// Columns of `fulltext_index` that use the bloom backend.
+    pub fulltext_bloom_columns: Vec<ColumnId>,
     /// Bloom filter output.
     pub bloom_filter: BloomFilterOutput,
 }
@@ -203,6 +206,13 @@ impl IndexOutput {
         map.into_iter()
             .map(|(column_id, created_indexes)| ColumnIndexMetadata {
                 column_id,
+                fulltext_bloom_version: if self.fulltext_index.is_available()
+                    && self.fulltext_bloom_columns.contains(&column_id)
+                {
+                    FULLTEXT_BLOOM_VERSION
+                } else {
+                    0
+                },
                 created_indexes,
             })
             .collect::<Vec<_>>()
@@ -256,6 +266,13 @@ pub struct Indexer {
 }
 
 impl Indexer {
+    /// Returns true if no index creator is active.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inverted_indexer.is_none()
+            && self.fulltext_indexer.is_none()
+            && self.bloom_filter_indexer.is_none()
+    }
+
     /// Wraps real creators for update-only benchmarks without a Puffin output.
     #[cfg(feature = "testing")]
     pub fn for_bench(
@@ -411,11 +428,7 @@ impl IndexerBuilder for IndexerBuilderImpl {
         indexer.prepare_dense_pk_decoder(&self.metadata);
         indexer.intermediate_manager = Some(self.intermediate_manager.clone());
 
-        let has_any_indexer = indexer.inverted_indexer.is_some()
-            || indexer.fulltext_indexer.is_some()
-            || indexer.bloom_filter_indexer.is_some();
-
-        if !has_any_indexer {
+        if indexer.is_empty() {
             indexer.abort().await;
             return Indexer::default();
         }
@@ -830,6 +843,11 @@ impl IndexBuildTask {
             .indexer_builder
             .build(region_file_id, new_index_version, row_group_size)
             .await;
+        // The build type or index options may leave nothing to build. Return before reading
+        // any row; an empty indexer finishes with no output, which publishes nothing.
+        if indexer.is_empty() {
+            return Ok(IndexBuildOutcome::Finished);
+        }
 
         if let Some(mut parquet_reader) = parquet_reader.take() {
             // TODO(SNC123): optimize index batch

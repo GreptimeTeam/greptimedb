@@ -38,6 +38,7 @@ use crate::access_layer::{
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::reader::CompactionSstReaderBuilder;
+use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
@@ -121,6 +122,70 @@ pub struct CompactionRegion {
     pub max_parallelism: usize,
 
     pub(crate) plugins: Plugins,
+}
+
+/// Execution resources for compaction, without a region-wide SST snapshot.
+///
+/// Inputs are owned by each output or unit so a slow sibling cannot retain
+/// files that another unit has already replaced.
+#[derive(Clone)]
+pub struct CompactionContext {
+    /// Region whose files are being compacted.
+    pub region_id: RegionId,
+    /// Region options including resolved dynamic compaction options.
+    pub region_options: RegionOptions,
+    /// Options from the version used to plan the merge.
+    version_options: RegionOptions,
+    pub(crate) engine_config: Arc<MitoConfig>,
+    region_metadata: RegionMetadataRef,
+    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) access_layer: AccessLayerRef,
+    manifest_ctx: Arc<ManifestContext>,
+    plugins: Plugins,
+}
+
+impl From<&CompactionRegion> for CompactionContext {
+    fn from(region: &CompactionRegion) -> Self {
+        Self {
+            region_id: region.region_id,
+            region_options: region.region_options.clone(),
+            version_options: region.current_version.options.clone(),
+            engine_config: region.engine_config.clone(),
+            region_metadata: region.region_metadata.clone(),
+            cache_manager: region.cache_manager.clone(),
+            access_layer: region.access_layer.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            plugins: region.plugins.clone(),
+        }
+    }
+}
+
+/// Builds a minimal [`CompactionRegion`] for tests that do not touch the access layer.
+#[cfg(test)]
+pub(crate) async fn new_test_compaction_region() -> CompactionRegion {
+    let env = crate::test_util::scheduler_util::SchedulerEnv::new().await;
+    let metadata = crate::test_util::memtable_util::metadata_for_test();
+    let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+    CompactionRegion {
+        region_id: RegionId::new(1, 1),
+        region_options: RegionOptions::default(),
+        engine_config: Arc::new(MitoConfig::default()),
+        region_metadata: metadata.clone(),
+        cache_manager: Arc::new(CacheManager::default()),
+        access_layer: env.access_layer.clone(),
+        manifest_ctx,
+        current_version: CompactionVersion {
+            metadata: metadata.clone(),
+            options: RegionOptions::default(),
+            ssts: Arc::new(SstVersion::new(metadata)),
+            memtable_min_sequence: None,
+            compaction_time_window: None,
+        },
+        file_purger: None,
+        ttl: None,
+        max_parallelism: 1,
+        plugins: Plugins::new(),
+    }
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
@@ -273,9 +338,18 @@ impl CompactionRegion {
 
     /// Fires [`RegionHook::on_sst_files_written`] for the freshly-merged SST
     /// files in `merge_output`. Shared by both compaction paths, it must run
-    /// before [`Compactor::update_manifest`], whose `on_manifest_updated`
-    /// drains the per-region state this hook populates.
+    /// before this unit's [`Compactor::update_manifest`] so its committed edit
+    /// can be associated with the SST metadata reported here.
     pub async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        CompactionContext::from(self)
+            .invoke_sst_hook(merge_output)
+            .await;
+    }
+}
+
+impl CompactionContext {
+    /// Reports this unit's output metadata before publishing its manifest edit.
+    pub(crate) async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
         let Some(hook) = self.plugins.get::<RegionHookRef>() else {
             return;
         };
@@ -318,6 +392,32 @@ impl CompactionRegion {
             .collect();
         hook.on_sst_files_written(self.region_id, &self.region_metadata, &files)
             .await;
+    }
+
+    /// Publishes outputs through the existing manifest validation and hook path.
+    pub(crate) async fn update_manifest(
+        &self,
+        merge_output: MergeOutput,
+    ) -> Result<(RegionEdit, ManifestVersion)> {
+        let edit = RegionEdit {
+            files_to_add: merge_output.files_to_add,
+            files_to_remove: merge_output.files_to_remove,
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+            compaction_time_window: merge_output
+                .compaction_time_window
+                .map(|seconds| Duration::from_secs(seconds as u64)),
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        };
+
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+        let manifest_version = self
+            .manifest_ctx
+            .update_manifest_for_compaction(action_list)
+            .await?;
+
+        Ok((edit, manifest_version))
     }
 }
 
@@ -406,7 +506,7 @@ pub trait Compactor: Send + Sync + 'static {
 pub trait SstMerger: Send + Sync + 'static {
     async fn merge_single_output(
         &self,
-        compaction_region: CompactionRegion,
+        context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)>;
@@ -426,13 +526,13 @@ struct OutputSequenceMetadata {
 /// without allocating a new admission marker. Retaining physical row sequences
 /// does not by itself restore exact-read capability for untrusted inputs.
 fn output_sequence_metadata(
-    region: &CompactionRegion,
+    context: &CompactionContext,
     inputs: &[FileHandle],
 ) -> OutputSequenceMetadata {
-    let exact_sequence_trusted = region.region_options.preserve_row_sequence
+    let exact_sequence_trusted = context.region_options.preserve_row_sequence
         && inputs
             .iter()
-            .all(|f| f.is_effective_target_sequence_trusted(region.region_id));
+            .all(|f| f.is_effective_target_sequence_trusted(context.region_id));
     OutputSequenceMetadata {
         file_sequence: known_max_input_sequence(inputs),
         exact_sequence_trusted,
@@ -456,39 +556,35 @@ fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
 impl SstMerger for DefaultSstMerger {
     async fn merge_single_output(
         &self,
-        compaction_region: CompactionRegion,
+        context: CompactionContext,
         output: CompactionOutput,
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
-        let region_id = compaction_region.region_id;
-        let index_options = compaction_region
-            .current_version
-            .options
-            .index_options
-            .clone();
-        let append_mode = compaction_region.current_version.options.append_mode;
-        let merge_mode = compaction_region.current_version.options.merge_mode();
-        let flat_format = compaction_region
+        let region_id = context.region_id;
+        let index_options = context.version_options.index_options.clone();
+        let append_mode = context.version_options.append_mode;
+        let merge_mode = context.version_options.merge_mode();
+        let flat_format = context
             .region_options
             .sst_format
             .map(|format| format == FormatType::Flat)
-            .unwrap_or(compaction_region.engine_config.default_flat_format);
+            .unwrap_or(context.engine_config.default_flat_format);
 
-        let index_config = compaction_region.engine_config.index.clone();
-        let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
-        let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
-        let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
+        let index_config = context.engine_config.index.clone();
+        let inverted_index_config = context.engine_config.inverted_index.clone();
+        let fulltext_index_config = context.engine_config.fulltext_index.clone();
+        let bloom_filter_index_config = context.engine_config.bloom_filter_index.clone();
 
         let input_file_names = output
             .inputs
             .iter()
             .map(|f| f.file_id().to_string())
             .join(",");
-        let sequence_metadata = output_sequence_metadata(&compaction_region, &output.inputs);
+        let sequence_metadata = output_sequence_metadata(&context, &output.inputs);
         let builder = CompactionSstReaderBuilder {
-            metadata: compaction_region.region_metadata.clone(),
-            sst_layer: compaction_region.access_layer.clone(),
-            cache: compaction_region.cache_manager.clone(),
+            metadata: context.region_metadata.clone(),
+            sst_layer: context.access_layer.clone(),
+            cache: context.cache_manager.clone(),
             inputs: &output.inputs,
             append_mode,
             filter_deleted: output.filter_deleted,
@@ -498,15 +594,15 @@ impl SstMerger for DefaultSstMerger {
         let source = builder.build_flat_sst_reader().await?;
 
         let mut metrics = Metrics::new(WriteType::Compaction);
-        let region_metadata = compaction_region.region_metadata.clone();
-        let sst_infos = compaction_region
+        let region_metadata = context.region_metadata.clone();
+        let sst_infos = context
             .access_layer
             .write_sst(
                 SstWriteRequest {
                     op_type: OperationType::Compact,
                     metadata: region_metadata.clone(),
                     source,
-                    cache_manager: compaction_region.cache_manager.clone(),
+                    cache_manager: context.cache_manager.clone(),
                     // Readers resolve file overrides before merge/dedup. Replacing
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
@@ -629,6 +725,50 @@ impl DefaultCompactor {
     }
 }
 
+impl<M: SstMerger> DefaultCompactor<M> {
+    /// Merges a complete atomic unit. No partial input replacement is returned.
+    pub(crate) async fn merge_unit(
+        &self,
+        context: &CompactionContext,
+        unit: &CompactionUnit,
+    ) -> Result<MergeOutput> {
+        let mut result = MergeOutput {
+            files_to_remove: unit.inputs.iter().map(|f| f.meta_ref().clone()).collect(),
+            compaction_time_window: Some(unit.time_window_size),
+            ..Default::default()
+        };
+        for output in &unit.outputs {
+            if self.cancel_handle.is_cancelled() {
+                return error::CompactionCancelledSnafu.fail();
+            }
+            // Let the writer finish and register its files before observing cancellation.
+            // Dropping it mid-write can lose ownership of already finalized SSTs.
+            let (files, infos) = self
+                .merger
+                .merge_single_output(
+                    context.clone(),
+                    output.clone(),
+                    WriteOptions {
+                        write_buffer_size: context.engine_config.sst_write_buffer_size,
+                        max_file_size: unit.max_file_size,
+                        row_group_size: context.region_options.row_group_size(),
+                        float_field_encoding: context.region_options.float_field_encoding,
+                    },
+                )
+                .await?;
+            if let Some(uncommitted) = &self.uncommitted {
+                uncommitted.track(&infos);
+            }
+            result.files_to_add.extend(files);
+            result.sst_infos.extend(infos);
+        }
+        if self.cancel_handle.is_cancelled() {
+            return error::CompactionCancelledSnafu.fail();
+        }
+        Ok(result)
+    }
+}
+
 #[async_trait::async_trait]
 impl<M: SstMerger> Compactor for DefaultCompactor<M>
 where
@@ -642,6 +782,7 @@ where
         let internal_parallelism = compaction_region.max_parallelism.max(1);
         let compaction_time_window = picker_output.time_window_size;
         let region_id = compaction_region.region_id;
+        let context = CompactionContext::from(compaction_region);
 
         // Build tasks along with their input file metas so we can track which
         // inputs correspond to each task.
@@ -657,11 +798,11 @@ where
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
             };
             let merger = self.merger.clone();
-            let compaction_region = compaction_region.clone();
+            let context = context.clone();
             let uncommitted = self.uncommitted.clone();
             let fut = async move {
                 let result = merger
-                    .merge_single_output(compaction_region, output, write_opts)
+                    .merge_single_output(context, output, write_opts)
                     .await;
                 if let (Some(uncommitted), Ok((_, infos))) = (&uncommitted, &result) {
                     uncommitted.track(infos);
@@ -777,28 +918,9 @@ where
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
     ) -> Result<(RegionEdit, ManifestVersion)> {
-        // Write region edit to manifest.
-        let edit = RegionEdit {
-            files_to_add: merge_output.files_to_add,
-            files_to_remove: merge_output.files_to_remove,
-            // Use current timestamp as the edit timestamp.
-            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
-            compaction_time_window: merge_output
-                .compaction_time_window
-                .map(|seconds| Duration::from_secs(seconds as u64)),
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
-        };
-
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
-        let manifest_version = compaction_region
-            .manifest_ctx
-            .update_manifest_for_compaction(action_list)
-            .await?;
-
-        Ok((edit, manifest_version))
+        CompactionContext::from(compaction_region)
+            .update_manifest(merge_output)
+            .await
     }
 }
 
@@ -812,14 +934,10 @@ mod tests {
     use tokio::time::sleep;
 
     use super::{DefaultCompactor, *};
-    use crate::cache::CacheManager;
     use crate::compaction::picker::PickerOutput;
     use crate::error::Result;
     use crate::sst::file::FileHandle;
     use crate::sst::file_purger::NoopFilePurger;
-    use crate::sst::version::SstVersion;
-    use crate::test_util::memtable_util::metadata_for_test;
-    use crate::test_util::scheduler_util::SchedulerEnv;
 
     fn dummy_file_meta() -> FileMeta {
         FileMeta {
@@ -963,7 +1081,8 @@ mod tests {
             for preserve in [false, true] {
                 region.region_options.preserve_row_sequence = preserve;
                 for (inputs, known_bound, inputs_trusted) in &cases {
-                    let metadata = output_sequence_metadata(&region, inputs);
+                    let metadata =
+                        output_sequence_metadata(&CompactionContext::from(&region), inputs);
                     let trusted = preserve && *inputs_trusted;
                     assert_eq!(trusted, metadata.exact_sequence_trusted);
                     assert_eq!(
@@ -1149,34 +1268,6 @@ mod tests {
         }
     }
 
-    /// Build a minimal [`CompactionRegion`] suitable for tests where the
-    /// [`SstMerger`] is mocked and never touches the access layer.
-    async fn new_test_compaction_region() -> CompactionRegion {
-        let env = SchedulerEnv::new().await;
-        let metadata = metadata_for_test();
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        CompactionRegion {
-            region_id: RegionId::new(1, 1),
-            region_options: RegionOptions::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            region_metadata: metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
-            access_layer: env.access_layer.clone(),
-            manifest_ctx,
-            current_version: CompactionVersion {
-                metadata: metadata.clone(),
-                options: RegionOptions::default(),
-                ssts: Arc::new(SstVersion::new(metadata)),
-                memtable_min_sequence: None,
-                compaction_time_window: None,
-            },
-            file_purger: None,
-            ttl: None,
-            max_parallelism: 1,
-            plugins: Plugins::new(),
-        }
-    }
-
     /// An [`SstMerger`] that returns pre-configured results per call index.
     ///
     /// Call 0 gets `results[0]`, call 1 gets `results[1]`, etc.
@@ -1199,7 +1290,7 @@ mod tests {
     impl SstMerger for MockMerger {
         async fn merge_single_output(
             &self,
-            _compaction_region: CompactionRegion,
+            _context: CompactionContext,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
@@ -1211,6 +1302,56 @@ mod tests {
                 }
                 .fail(),
                 None => panic!("MockMerger: no result configured for call index {idx}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compaction_unit_group_failure_is_atomic() {
+        let context = CompactionContext::from(&new_test_compaction_region().await);
+        let input = new_file_handle(dummy_file_meta());
+        let unit = CompactionUnit::from_picker(PickerOutput {
+            outputs: (0..2)
+                .map(|_| CompactionOutput {
+                    output_level: 1,
+                    inputs: vec![input.clone()],
+                    filter_deleted: false,
+                    output_time_range: None,
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap()
+        .pop()
+        .unwrap();
+        for fail_second in [false, true] {
+            let second = if fail_second {
+                error::InvalidMetaSnafu {
+                    reason: "second output failed",
+                }
+                .fail()
+            } else {
+                Ok(vec![dummy_file_meta(), dummy_file_meta()])
+            };
+            let compactor =
+                DefaultCompactor::with_merger(MockMerger::new(vec![Ok(Vec::new()), second]));
+            let result = compactor.merge_unit(&context, &unit).await;
+            if fail_second {
+                assert!(
+                    result.is_err(),
+                    "cannot publish a successful subset of a dependency group"
+                );
+            } else {
+                let result = result.unwrap();
+                assert_eq!(2, result.files_to_add.len());
+                assert_eq!(
+                    vec![input.meta_ref().file_id],
+                    result
+                        .files_to_remove
+                        .iter()
+                        .map(|f| f.file_id)
+                        .collect::<Vec<_>>()
+                );
             }
         }
     }
@@ -1371,7 +1512,7 @@ mod tests {
     impl SstMerger for BlockingMerger {
         async fn merge_single_output(
             &self,
-            _compaction_region: CompactionRegion,
+            _context: CompactionContext,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
         ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {

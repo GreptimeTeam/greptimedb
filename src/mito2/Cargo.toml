@@ -19,6 +19,7 @@ workspace = true
 api.workspace = true
 aquamarine.workspace = true
 arrow-schema.workspace = true
+arrow-select.workspace = true
 async-channel = "1.9"
 async-stream.workspace = true
 async-trait.workspace = true
@@ -153,3 +154,8 @@ required-features = ["testing"]
 name = "bench_dense_index_update"
 harness = false
 required-features = ["testing"]
+
+[[bench]]
+name = "bench_compaction_merge"
+harness = false
+required-features = ["test"]

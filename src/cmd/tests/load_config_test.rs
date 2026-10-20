@@ -201,7 +201,8 @@ fn test_load_datanode_example_config() {
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Unlimited,
+                    scan_memory_limit: MemoryLimit::Percentage(25),
+                    scan_memory_mode: mito2::config::ScanMemoryMode::Basic,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -440,7 +441,8 @@ fn test_load_standalone_example_config() {
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Unlimited,
+                    scan_memory_limit: MemoryLimit::Percentage(25),
+                    scan_memory_mode: mito2::config::ScanMemoryMode::Basic,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -729,6 +731,29 @@ fn test_example_configs_document_actual_defaults() {
         &[],
     ));
     assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
+#[test]
+fn test_load_trace_aux_cache_size() {
+    let default = FrontendOptions::default().otlp.trace_aux_cache_size;
+    for (setting, size) in [
+        ("", default),
+        ("trace_aux_cache_size = 0", ReadableSize(0)),
+        ("trace_aux_cache_size = \"1MiB\"", ReadableSize::mb(1)),
+    ] {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(config.path(), format!("[otlp]\n{setting}\n")).unwrap();
+
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        for options in [frontend.component, standalone.component.frontend_options()] {
+            assert_eq!(options.otlp.trace_aux_cache_size, size);
+        }
+    }
 }
 
 #[test]

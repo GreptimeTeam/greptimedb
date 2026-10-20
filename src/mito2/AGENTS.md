@@ -38,7 +38,8 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 
 ## Write path
 
-`MitoEngine::handle_request` (`engine.rs`) → worker loop
+`MitoEngine::handle_request` (`engine.rs`), or `handle_batch_put_requests` for the puts
+of one request to several regions (one message per worker) → worker loop
 (`worker/handle_write.rs`) → sequence + WAL assembly (`region_write_ctx.rs`) →
 `wal.rs` → memtable (`memtable/`) → when buffer pressure trips, `flush.rs`
 writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest
@@ -50,6 +51,10 @@ writes SSTs via `access_layer.rs` and appends a `RegionEdit` to the manifest
 immutable `Version` (`region/version.rs`) → scans memtables and Parquet SSTs
 (`sst/parquet.rs`) → merges (`read/`) and dedups by sequence → projected,
 filtered `RecordBatch` stream.
+
+Internal series merges use the query runtime pool forwarded through
+`QueryScanContext`; reader and output-batch accounting uses the separate scan
+memory tracker. Direct scanner callers default to an unbounded operator pool.
 
 ## Public surface
 
@@ -88,6 +93,14 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
+- Loaded regions have resident compaction state, including `Idle` and handed-off
+  DDLs. Publish create/open/catchup results through the worker's `register_region`;
+  only close/drop unregisters them. See `compaction/scheduler/state.rs`.
+- Local compaction units use the snapshot-free `CompactionContext`. Retaining a
+  full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
+- In flat batches, equal `__primary_key` dictionary keys imply the same series, but
+  not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
+  bytes when grouping rows by series.
 
 ## Maintenance contract
 

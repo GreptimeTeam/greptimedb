@@ -16,6 +16,8 @@ pub mod builder;
 mod dashboard;
 mod entity_graph;
 mod export_database;
+#[cfg(feature = "enterprise")]
+mod flow_write;
 mod grpc;
 mod import_packed;
 mod influxdb;
@@ -48,8 +50,10 @@ use catalog::process_manager::{
 use client::OutputData;
 use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
+use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
+use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
@@ -125,7 +129,6 @@ lazy_static! {
 #[derive(Clone)]
 pub struct Instance {
     frontend_peer_addr: String,
-    experimental_metric_export: bool,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
@@ -141,14 +144,23 @@ pub struct Instance {
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
     trace_ingest_chunk_size: usize,
+    trace_aux_cache: otlp::TraceAuxCache,
+    trace_aux_limiter: Option<RequestLimiter>,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
+    #[cfg(feature = "enterprise")]
+    flow_write_registry: Arc<
+        common_grpc::flow_write::FlowWriteRegistry<
+            flow_write::WritePayload,
+            common_grpc::flow_write::Reply,
+        >,
+    >,
 
     // cache for otlp metrics
     // first layer key: db-string
     // key: direct input metric name
     // value: if runs in legacy mode
-    otlp_metrics_table_legacy_cache: DashMap<String, DashMap<String, bool>>,
+    otlp_metrics_table_legacy_cache: Arc<DashMap<String, DashMap<String, bool>>>,
 }
 
 impl Instance {
@@ -279,7 +291,7 @@ impl Instance {
         stmt: &Statement,
         schema_name: String,
     ) -> Option<SlowQueryTimer> {
-        if !stmt.is_readonly() || !self.slow_query_options.enable {
+        if !should_track_statement_process(stmt) || !self.slow_query_options.enable {
             return None;
         }
 
@@ -295,6 +307,21 @@ impl Instance {
 
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+        let query_ctx = if matches!(&stmt, Statement::SetVariables(_)) {
+            query_ctx
+        } else {
+            Arc::new(
+                query_ctx
+                    .query_option_snapshot()
+                    .map_err(|error| {
+                        query::error::InvalidQueryContextExtensionSnafu {
+                            reason: error.to_string(),
+                        }
+                        .build()
+                    })
+                    .context(PlanStatementSnafu)?,
+            )
+        };
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
@@ -318,25 +345,35 @@ impl Instance {
 
             let query_fut = self.exec_statement_with_timeout(
                 stmt,
-                query_ctx,
+                query_ctx.clone(),
                 query_interceptor,
                 timeout_recorder,
             );
 
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            #[cfg(feature = "enterprise")]
+            let result = if query_ctx.channel() == Channel::Internal
+                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
+            {
+                query_fut.await
+            } else {
+                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                    .await
+                    .map_err(|_| error::CancelledSnafu.build())?
+            };
+            #[cfg(not(feature = "enterprise"))]
+            let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+                .map_err(|_| error::CancelledSnafu.build())?;
+            result.map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
         } else {
             self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor, None)
                 .await
@@ -404,14 +441,6 @@ impl Instance {
                     return self
                         .copy_packed_database(arg.clone(), &stmt, query_ctx)
                         .await;
-                }
-                if let Statement::ShowVariables(show) = &stmt
-                    && show
-                        .variable
-                        .to_string()
-                        .eq_ignore_ascii_case("experimental_metric_export")
-                {
-                    return self.show_metric_export_capability();
                 }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(CopyDatabase::To(
                     arg,
@@ -570,6 +599,12 @@ fn fast_legacy_check(
         .iter()
         .filter_map(|name| cache.get(name))
         .collect::<Vec<_>>();
+    CACHE_HIT
+        .with_label_values(&["otlp_metrics_legacy"])
+        .inc_by(hit_cache.len() as u64);
+    CACHE_MISS
+        .with_label_values(&["otlp_metrics_legacy"])
+        .inc_by((names.len() - hit_cache.len()) as u64);
     if !hit_cache.is_empty() {
         let hit_legacy = hit_cache.iter().any(|en| *en.value());
         let hit_prom = hit_cache.iter().any(|en| !*en.value());
@@ -997,24 +1032,19 @@ impl Instance {
             .map(|s| s.to_string())
             .unwrap_or_else(|| plan.display_indent().to_string());
 
-        let plan_is_readonly = is_readonly_plan(&plan);
         let result = if should_track_plan_process(stmt.as_ref(), &plan) {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
-            let slow_query_timer = if plan_is_readonly {
-                self.slow_query_options.enable.then(|| {
-                    SlowQueryTimer::new(
-                        CatalogQueryStatement::Plan(query.clone()),
-                        schema_name.clone(),
-                        self.slow_query_options.threshold,
-                        self.slow_query_options.sample_ratio,
-                        self.slow_query_options.record_type,
-                        self.slow_query_recorder.clone(),
-                    )
-                })
-            } else {
-                None
-            };
+            let slow_query_timer = self.slow_query_options.enable.then(|| {
+                SlowQueryTimer::new(
+                    CatalogQueryStatement::Plan(query.clone()),
+                    schema_name.clone(),
+                    self.slow_query_options.threshold,
+                    self.slow_query_options.sample_ratio,
+                    self.slow_query_options.record_type,
+                    self.slow_query_recorder.clone(),
+                )
+            });
 
             let timeout_recorder = stmt
                 .as_ref()
@@ -1032,20 +1062,30 @@ impl Instance {
 
             let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone(), timeout_recorder);
 
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            #[cfg(feature = "enterprise")]
+            let result = if query_ctx.channel() == Channel::Internal
+                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
+            {
+                query_fut.await
+            } else {
+                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                    .await
+                    .map_err(|_| error::CancelledSnafu.build())?
+            };
+            #[cfg(not(feature = "enterprise"))]
+            let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+                .map_err(|_| error::CancelledSnafu.build())?;
+            result.map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
         } else {
             self.exec_plan_with_timeout(plan, query_ctx.clone(), None)
                 .await
@@ -2015,6 +2055,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct RecordingSlowQueryEventRecorder {
+        queries: std::sync::Mutex<Vec<String>>,
         payloads: std::sync::Mutex<Vec<serde_json::Value>>,
     }
 
@@ -2024,6 +2065,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<SlowQueryEvent>()
                 .expect("expected a slow query event");
+            self.queries.lock().unwrap().push(event.query.clone());
             self.payloads.lock().unwrap().push(event.payload.clone());
         }
 
@@ -2911,10 +2953,7 @@ mod tests {
         let catalog = catalog::memory::MemoryCatalogManager::new_with_table(source);
         let kv = Arc::new(MemoryKvBackend::new());
         let instance = FrontendBuilder::new(
-            FrontendOptions {
-                experimental_metric_export: true,
-                ..Default::default()
-            },
+            FrontendOptions::default(),
             kv.clone(),
             test_cache_registry(kv).unwrap(),
             catalog,
@@ -3294,7 +3333,7 @@ mod tests {
                 false,
             )
             .with_time_index(true),
-            ColumnSchema::new("extra_field", ConcreteDataType::float64_datatype(), false),
+            ColumnSchema::new("extra_field", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
                 greptime_value(),
                 ConcreteDataType::float64_datatype(),
@@ -3305,7 +3344,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as VectorRef,
-                Arc::new(Float64Vector::from_vec(vec![99.0, 99.0, 99.0])) as VectorRef,
+                Arc::new(StringVector::from(vec!["99", "99", "99"])) as VectorRef,
                 Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as VectorRef,
             ],
         )
@@ -3418,12 +3457,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_event_recorder_is_exposed() -> TestResult<()> {
+    async fn test_instance_shared_state() -> TestResult<()> {
         let instance =
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
                 .await?;
 
         let _event_recorder = instance.event_recorder();
+        assert!(Arc::ptr_eq(
+            &instance.otlp_metrics_table_legacy_cache,
+            &instance.clone().otlp_metrics_table_legacy_cache,
+        ));
 
         Ok(())
     }
@@ -3463,7 +3506,7 @@ mod tests {
                 &instance,
                 ctx.clone(),
                 servers::http::jaeger::QueryTraceParams {
-                    service_name: "service".to_string(),
+                    service_name: Some("service".to_string()),
                     ..Default::default()
                 },
             )
@@ -3554,11 +3597,20 @@ mod tests {
             })?;
         let ctx = test_query_ctx(1);
         let handler: PipelineHandlerRef = Arc::new(instance.clone());
+        let hits = CACHE_HIT.with_label_values(&["pipeline_table"]);
+        let misses = CACHE_MISS.with_label_values(&["pipeline_table"]);
+        let before = (hits.get(), misses.get());
 
         handler
             .get_pipeline("pipeline", None, ctx.clone())
             .await
             .unwrap();
+        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 1));
+        handler
+            .get_pipeline("pipeline", None, ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
         assert_permission_denied(
             PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
         );
@@ -3877,11 +3929,15 @@ mod tests {
 
     #[test]
     fn test_fast_legacy_check_is_read_only() {
+        let hits = CACHE_HIT.with_label_values(&["otlp_metrics_legacy"]);
+        let misses = CACHE_MISS.with_label_values(&["otlp_metrics_legacy"]);
+        let before = (hits.get(), misses.get());
         let cache = DashMap::new();
         cache.insert("metric1".to_string(), true);
 
         let names = vec!["metric1".to_string(), "metric2".to_string()];
         assert_eq!(Some(true), fast_legacy_check(&cache, &names).unwrap());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 1));
         assert!(!cache.contains_key("metric2"));
 
         cache_legacy_mode(&cache, &names, true).unwrap();
@@ -3893,6 +3949,9 @@ mod tests {
         cache_incompatible.insert("metric1".to_string(), true);
         cache_incompatible.insert("metric2".to_string(), false);
         assert!(fast_legacy_check(&cache_incompatible, &names).is_err());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
+        assert_eq!(None, fast_legacy_check(&cache, &[]).unwrap());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
     }
 
     #[test]
@@ -3928,6 +3987,52 @@ mod tests {
             &insert_dml_plan()
         ));
         assert!(!should_track_plan_process(None, &insert_dml_plan()));
+    }
+
+    #[tokio::test]
+    async fn test_insert_select_slow_query() -> TestResult<()> {
+        let mut instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        let recorder = Arc::new(RecordingSlowQueryEventRecorder::default());
+        instance.slow_query_recorder = recorder.clone();
+        let sql = "INSERT INTO target SELECT * FROM source";
+
+        for prepared in [false, true] {
+            for (enabled, threshold, should_record) in [
+                (true, Duration::ZERO, true),
+                (false, Duration::ZERO, false),
+                (true, Duration::from_secs(3600), false),
+            ] {
+                instance.slow_query_options.enable = enabled;
+                instance.slow_query_options.threshold = threshold;
+                let query_ctx = test_query_ctx(42);
+                let output = if prepared {
+                    let stmt = parse_one_sql(sql);
+                    let described = instance
+                        .do_describe_inner(stmt.clone(), query_ctx.clone())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    instance
+                        .do_exec_plan_inner(described.logical_plan, Some(stmt), query_ctx)
+                        .await
+                        .unwrap()
+                } else {
+                    execute_one_sql(&instance, sql, query_ctx).await?
+                };
+                assert!(matches!(output.data, OutputData::AffectedRows(0)));
+
+                let queries = std::mem::take(&mut *recorder.queries.lock().unwrap());
+                let expected = if should_record { vec![sql] } else { vec![] };
+                assert_eq!(
+                    queries, expected,
+                    "prepared={prepared}, enabled={enabled}, threshold={threshold:?}"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

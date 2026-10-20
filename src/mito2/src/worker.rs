@@ -44,15 +44,15 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{error, info, warn};
-use futures::future::try_join_all;
+use futures::future::{join_all, try_join_all};
 use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::{Histogram, IntGauge};
 use rand::{Rng, rng};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
-    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+    RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -316,6 +316,40 @@ impl WorkerGroup {
         request: WorkerRequest,
     ) -> Result<()> {
         self.worker(region_id).submit_request(request).await
+    }
+
+    /// Submits the writes of one request, those of each worker in one message, so that the
+    /// worker handles them in one batch. The messages are sent concurrently, so a full worker
+    /// queue holds back no other worker. A write whose worker has stopped receives the error a
+    /// write submitted on its own gets.
+    pub(crate) async fn submit_writes(&self, writes: Vec<SenderWriteRequest>) {
+        let mut writes_by_worker: HashMap<usize, Vec<SenderWriteRequest>> = HashMap::new();
+        for write in writes {
+            let index = region_id_to_index(write.request.region_id, self.workers.len());
+            writes_by_worker.entry(index).or_default().push(write);
+        }
+        join_all(
+            writes_by_worker
+                .into_iter()
+                .map(|(index, writes)| async move {
+                    let worker = &self.workers[index];
+                    let Err(request) = worker
+                        .try_submit_request(WorkerRequest::BatchWrite(writes))
+                        .await
+                    else {
+                        return;
+                    };
+                    let WorkerRequest::BatchWrite(writes) = request else {
+                        unreachable!("the worker returns the request it was given");
+                    };
+                    for write in writes {
+                        write
+                            .sender
+                            .send(WorkerStoppedSnafu { id: worker.id }.fail());
+                    }
+                }),
+        )
+        .await;
     }
 
     /// Returns true if the specific region exists.
@@ -738,9 +772,23 @@ pub(crate) struct RegionWorker {
 impl RegionWorker {
     /// Submits request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
-        ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
+        self.try_submit_request(request)
+            .await
+            .map_err(|_| WorkerStoppedSnafu { id: self.id }.build())
+    }
+
+    /// Submits request to background worker thread, or returns it if the worker is stopped.
+    async fn try_submit_request(
+        &self,
+        request: WorkerRequest,
+    ) -> std::result::Result<(), WorkerRequest> {
+        if !self.is_running() {
+            return Err(request);
+        }
         let request_with_time = WorkerRequestWithTime::new(request);
-        if self.sender.send(request_with_time).await.is_err() {
+        if let Err(mpsc::error::SendError(request_with_time)) =
+            self.sender.send(request_with_time).await
+        {
             warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
@@ -750,7 +798,7 @@ impl RegionWorker {
             if let Some(state) = &self.series_index_task_state {
                 state.stop();
             }
-            return WorkerStoppedSnafu { id: self.id }.fail();
+            return Err(request_with_time.request);
         }
 
         Ok(())
@@ -1010,6 +1058,13 @@ struct RegionWorkerLoop<S> {
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Publishes a loaded region together with its resident compaction state.
+    fn register_region(&mut self, region: MitoRegionRef) {
+        self.compaction_scheduler
+            .register_region(&region.version_control, &region.access_layer);
+        self.regions.insert_region(region);
+    }
+
     /// Starts the worker loop.
     async fn run(&mut self) {
         let init_check_delay = worker_init_check_delay();
@@ -1050,6 +1105,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                             match request_with_time.request {
                                 WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                                WorkerRequest::BatchWrite(sender_reqs) => write_req_buffer.extend(sender_reqs),
                                 WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
                                 WorkerRequest::BulkInserts(bulk_insert) => {
                                     bulk_insert_req_num += 1;
@@ -1103,6 +1159,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                         match request_with_time.request {
                             WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                            WorkerRequest::BatchWrite(sender_reqs) => {
+                                write_req_buffer.extend(sender_reqs)
+                            }
                             WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
                             WorkerRequest::BulkInserts(bulk_insert) => {
                                 bulk_insert_req_num += 1;
@@ -1177,7 +1236,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ) {
         for worker_req in general_requests.drain(..) {
             match worker_req {
-                WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
+                WorkerRequest::Write(_) | WorkerRequest::BatchWrite(_) | WorkerRequest::Ddl(_) => {
                     // These requests are categorized before dispatching general requests.
                     continue;
                 }
@@ -1338,6 +1397,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         match notify {
+            BackgroundNotify::RegionOpened { region, registered } => {
+                self.register_region(region);
+                self.region_count.inc();
+
+                // Finish this opening batch before the worker can process a close/reopen,
+                // without waiting for the background opener to resume after the ACK.
+                let senders = self.opening_regions.remove_sender(region_id);
+                if let Some(state) = &self.series_index_task_state {
+                    state.wake();
+                }
+                let _ = registered.send(());
+                for sender in senders {
+                    sender.send(Ok(0));
+                }
+            }
+            BackgroundNotify::CompactionUnit(req) => {
+                self.handle_compaction_unit(region_id, req).await;
+            }
+            BackgroundNotify::CompactionDdlComplete {
+                generation,
+                request_index,
+            } => {
+                self.compaction_scheduler
+                    .on_ddl_complete(region_id, generation, request_index);
+            }
             BackgroundNotify::CompactionPickFinished(req) => {
                 self.handle_compaction_pick_finished(region_id, req).await
             }
@@ -1360,9 +1444,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
-            }
-            BackgroundNotify::CompactionCancelled(req) => {
-                self.handle_compaction_cancelled(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
@@ -1388,6 +1469,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: oneshot::Sender<SetRegionRoleStateResponse>,
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
+            if matches!(
+                region_role_state,
+                SettableRegionRoleState::Follower | SettableRegionRoleState::DowngradingLeader
+            ) {
+                // Fence writes here: writes the worker handles later see
+                // Downgrading, and earlier ones have finished. This only
+                // changes a writable or staging leader.
+                region.set_role(RegionRole::DowngradingLeader);
+            }
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
@@ -1446,6 +1536,14 @@ impl WorkerListener {
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerListener {
         WorkerListener { listener }
+    }
+
+    /// Notifies the background opener after the worker acknowledges region registration.
+    pub(crate) async fn on_region_open_registered(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_open_registered(_region_id).await;
+        }
     }
 
     /// Flush is finished successfully.
@@ -1553,6 +1651,34 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_compaction_commit_begin(_region_id).await;
+        }
+    }
+
+    /// Exposes a per-unit test gate before merge starts.
+    pub(crate) async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_compaction_unit_merge_begin(_region_id, _plan_id)
+                .await;
+        }
+    }
+
+    /// Exposes a per-unit test gate between manifest commit and worker notification.
+    pub(crate) async fn on_compaction_unit_committed(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_compaction_unit_committed(_region_id, _plan_id)
+                .await;
+        }
+    }
+
+    /// Reports unit visibility to the test listener independently of request completion.
+    pub(crate) fn on_compaction_unit_applied(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_unit_applied(_region_id, _plan_id);
         }
     }
 

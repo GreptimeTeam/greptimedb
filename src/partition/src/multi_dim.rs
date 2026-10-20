@@ -21,8 +21,9 @@ use std::sync::{Arc, RwLock};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow;
-use datatypes::arrow::array::{BooleanArray, BooleanBufferBuilder, RecordBatch};
+use datatypes::arrow::array::{Array, BooleanArray, BooleanBufferBuilder, RecordBatch};
 use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::compute::prep_null_mask_filter;
 use datatypes::arrow::datatypes::Schema;
 use datatypes::prelude::Value;
 use datatypes::vectors::{Helper, VectorRef};
@@ -272,6 +273,9 @@ impl MultiDimPartitionRule {
                     }
                 };
                 let array = match columnar_value_to_boolean_array(col_val, num_rows) {
+                    // A NULL result means the row is not in this region. Masks are merged
+                    // with non-Kleene `or` below, where a NULL would drop the row.
+                    Ok(array) if array.null_count() > 0 => prep_null_mask_filter(&array),
                     Ok(array) => array,
                     Err(e) => {
                         return Some(Err(e));
@@ -975,6 +979,105 @@ mod test_split_record_batch {
 
         let total_rows = result.get(&0).unwrap().selected_rows();
         assert_eq!(total_rows, batch.num_rows());
+    }
+
+    #[test]
+    fn test_comparison_batch_matches_row() {
+        use datatypes::arrow::array::Array;
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        let inputs = [None, Some(4), Some(5), Some(6)];
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)])),
+            vec![Arc::new(Int64Array::from(inputs.to_vec()))],
+        )
+        .unwrap();
+        let mut mismatches = vec![];
+        for op in [
+            RestrictedOp::Eq,
+            RestrictedOp::NotEq,
+            RestrictedOp::Lt,
+            RestrictedOp::LtEq,
+            RestrictedOp::Gt,
+            RestrictedOp::GtEq,
+        ] {
+            for bound in [Value::Null, Value::Int64(5)] {
+                // Both operand orders, since a rule restored without canonicalization may
+                // keep the literal on the left.
+                for expr in [
+                    PartitionExpr::new(col("a"), op.clone(), bound.clone().into()),
+                    PartitionExpr {
+                        lhs: Box::new(bound.clone().into()),
+                        op: op.clone(),
+                        rhs: Box::new(col("a")),
+                    },
+                ] {
+                    let rule = MultiDimPartitionRule::try_new(
+                        vec!["a".to_string()],
+                        vec![1],
+                        vec![expr.clone()],
+                        false,
+                    )
+                    .unwrap();
+                    let by_batch = match expr
+                        .try_as_physical_expr(batch.schema_ref())
+                        .unwrap()
+                        .evaluate(&batch)
+                    {
+                        Ok(by_batch) => {
+                            columnar_value_to_boolean_array(by_batch, batch.num_rows()).unwrap()
+                        }
+                        Err(err) => {
+                            mismatches.push(format!("{expr}: batch error {err}"));
+                            continue;
+                        }
+                    };
+                    for (row, input) in inputs.iter().enumerate() {
+                        let value = input.map_or(Value::Null, Value::Int64);
+                        let by_row = rule.evaluate_expr(&expr, &[value]).unwrap();
+                        let by_batch = by_batch.is_valid(row) && by_batch.value(row);
+                        if by_row != by_batch {
+                            mismatches.push(format!(
+                                "{expr} with a = {input:?}: row {by_row}, batch {by_batch}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn test_split_null_rows_match_row_routing() {
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string()],
+            vec![0, 1],
+            vec![
+                col("host").not_eq(Value::from("a")),
+                col("host").eq(Value::from("a")),
+            ],
+            true,
+        )
+        .unwrap();
+        for hosts in [vec![Some("a"), None, Some("z")], vec![Some("a"), None]] {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
+                vec![Arc::new(StringArray::from(hosts.clone()))],
+            )
+            .unwrap();
+            let by_row = rule.split_record_batch_naive(&batch).unwrap();
+            let by_batch = rule.split_record_batch(&batch).unwrap();
+            for (region, expected) in by_row {
+                let actual = by_batch
+                    .get(&region)
+                    .map(|mask| mask.array().clone())
+                    .unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]));
+                assert_eq!(actual, expected, "{hosts:?}, region {region}");
+            }
+        }
     }
 
     #[test]

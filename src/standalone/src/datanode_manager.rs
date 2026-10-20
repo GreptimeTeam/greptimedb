@@ -30,7 +30,7 @@ use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
@@ -64,12 +64,8 @@ impl RegionInvoker {
     }
 
     async fn handle_inner(&self, request: RegionRequest) -> Result<RegionResponseV1> {
-        let body = request.body.with_context(|| InvalidRegionRequestSnafu {
-            reason: "body not found",
-        })?;
-
         self.region_server
-            .handle(body)
+            .handle_region_request(request)
             .await
             .context(InvokeRegionServerSnafu)
     }
@@ -77,7 +73,17 @@ impl RegionInvoker {
 
 #[async_trait]
 impl Datanode for RegionInvoker {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
+    async fn handle_request(&self, request: Arc<RegionRequest>) -> MetaResult<RegionResponse> {
+        // Local execution consumes the request; standalone does not retain it for retries.
+        let request = Arc::try_unwrap(request)
+            .map_err(|_| {
+                InvalidRegionRequestSnafu {
+                    reason: "local region request has multiple owners",
+                }
+                .build()
+            })
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
         let span = request
             .header
             .as_ref()
