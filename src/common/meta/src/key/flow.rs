@@ -831,6 +831,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_legacy_streaming_flow_metadata_stays_readable_and_droppable() {
+        // A flow created before the streaming executor was removed persisted
+        // `flow_type: streaming` in its options. That metadata must stay readable so
+        // the flow can still be listed and dropped; rejecting the old runtime happens
+        // on the flownode, so nothing here may fail to deserialize the stored options.
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());
+        let flow_id = 10;
+        let mut flow_value = test_flow_info_value("legacy_flow", [(0, 1u64)].into(), vec![1024]);
+        flow_value.options = [("flow_type".to_string(), "streaming".to_string())].into();
+        let flow_routes = vec![(
+            0u32,
+            FlowRouteValue {
+                peer: Peer::empty(1),
+            },
+        )];
+        flow_metadata_manager
+            .create_flow_metadata(flow_id, flow_value.clone(), flow_routes)
+            .await
+            .unwrap();
+
+        let listed = flow_metadata_manager
+            .flow_info_manager()
+            .get(flow_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(listed.options, flow_value.options);
+
+        let names = flow_metadata_manager
+            .flow_name_manager()
+            .flow_names(&flow_value.catalog_name)
+            .await
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].0, "legacy_flow");
+
+        // Dropping a legacy flow only needs the metadata; no runtime is involved.
+        flow_metadata_manager
+            .destroy_flow_metadata(flow_id, &flow_value)
+            .await
+            .unwrap();
+        assert!(mem_kv.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_update_flow_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let flow_metadata_manager = FlowMetadataManager::new(mem_kv.clone());

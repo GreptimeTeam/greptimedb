@@ -2005,8 +2005,8 @@ impl BatchingTask {
 
     /// Generate the create table SQL
     ///
-    /// the auto created table will automatically added a `update_at` Milliseconds DEFAULT now() column in the end
-    /// (for compatibility with flow streaming mode)
+    /// the auto created table will automatically added a `update_at` Milliseconds DEFAULT now() column in the end,
+    /// matching the layout sink tables created by earlier versions already have
     ///
     /// and it will use first timestamp column as time index, all other columns will be added as normal columns and nullable
     async fn gen_create_table_expr(

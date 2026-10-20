@@ -19,7 +19,6 @@ use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_options::memory::MemoryOptions;
 use common_recordbatch::map_dictionary_to_values_data_type;
-use common_stat::get_total_cpu_cores;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use datafusion_expr::logical_plan::Distinct;
 use datafusion_expr::{Expr, LogicalPlan};
@@ -107,31 +106,13 @@ pub(crate) fn output_column_schemas(
     Ok((columns, lineage))
 }
 
-fn default_num_workers() -> usize {
-    get_total_cpu_cores().div_ceil(2)
-}
-
 pub const AUTO_CREATED_PLACEHOLDER_TS_COL: &str = "__ts_placeholder";
 pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FlowConfig {
-    /// Deprecated and ignored. Flow workers have been removed.
-    #[deprecated(note = "flow workers have been removed; this field is ignored")]
-    #[serde(default = "default_num_workers")]
-    pub num_workers: usize,
     pub batching_mode: BatchingModeOptions,
-}
-
-#[allow(deprecated)]
-impl Default for FlowConfig {
-    fn default() -> Self {
-        Self {
-            num_workers: get_total_cpu_cores().div_ceil(2),
-            batching_mode: BatchingModeOptions::default(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -245,8 +245,9 @@ impl Inserter {
             {
                 return Ok(false);
             }
-            // The current Flow cache does not distinguish streaming and batch
-            // flows. Keep all Flow sources on the row-based delivery path.
+            // Every Flow source is served by the batching engine, which needs the
+            // row payload to derive dirty windows. Keep Flow sources on the
+            // row-based delivery path.
             match self.table_flownode_set_cache.get(info.table_id()).await {
                 Ok(None) => {}
                 Ok(Some(flows)) if flows.is_empty() => {}

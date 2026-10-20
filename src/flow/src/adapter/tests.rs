@@ -125,3 +125,13 @@ fn output_column_schemas_normalizes_dictionary_output_type() {
     assert_eq!(output[0].data_type, ConcreteDataType::string_datatype());
     assert_eq!(lineage, vec![Some(0)]);
 }
+
+#[test]
+fn flow_config_ignores_the_removed_num_workers_option() {
+    // `flow.num_workers` belonged to the removed flow workers. Deployments still
+    // carry it in their TOML, so parsing must keep ignoring it instead of failing
+    // the whole config. `FlowConfig` is `#[serde(default)]`, so the unknown key is
+    // skipped and the remaining fields come from the defaults.
+    let config: super::FlowConfig = toml::from_str("num_workers = 4").unwrap();
+    assert_eq!(config, super::FlowConfig::default());
+}

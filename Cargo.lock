@@ -5465,6 +5465,7 @@ dependencies = [
  "table",
  "tokio",
  "tokio-stream",
+ "toml 0.8.23",
  "tonic 0.14.2",
 ]
 
