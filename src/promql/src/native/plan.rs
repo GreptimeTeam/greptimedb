@@ -335,8 +335,12 @@ impl NativeNode {
                 // field.
                 ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
-                // `select_instants` reads one series at a time and holds no cross-series state, so
-                // an interleaved input is enough for it: no ordering check here.
+                // `select_instants` reads one series' complete axis, so the executor collects a
+                // series to its last chunk first: a single buffer closed by `is_last` and keyed by
+                // nothing else. That needs each series' chunks contiguous, which `Contiguous` and
+                // `KeyThenTime` both guarantee; `Interleaved` never reaches it because
+                // `unpack_raw_series` rejects that ordering at the raw-frame boundary. So no check
+                // is needed here.
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;
