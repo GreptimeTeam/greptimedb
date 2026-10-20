@@ -25,6 +25,7 @@ INSERT INTO range_select_projection VALUES
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
 -- SQLNESS REPLACE Dictionary\(UInt32,\s*Utf8\(([^)]*)\)\) Utf8($1)
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT
     ts,
     station,

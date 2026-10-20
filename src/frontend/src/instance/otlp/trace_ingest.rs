@@ -310,7 +310,6 @@ impl TraceFailureMessages {
 enum TraceChunkSchemaState {
     Prepared,
     ReconcilePerChunk,
-    SpanFallbackOnly,
 }
 
 impl TraceChunkSchemaState {
@@ -1132,30 +1131,36 @@ impl Instance {
                 let mut chunk_states = Vec::new();
                 // Convert each chunk once, then retain only its sparse values while
                 // request-wide schema planning runs.
-                for chunk in groups
-                    .into_iter()
-                    .flat_map(|group| chunk_owned(group.spans, self.trace_ingest_chunk_size))
-                {
+                for chunk in chunk_spans_across_groups(groups, self.trace_ingest_chunk_size) {
                     let batch_index = chunks.len();
                     let span_metadata = chunk.iter().map(TraceSpanMetadata::from).collect();
                     let (table_data, batch_schema) =
                         otlp::trace::v1::v1_to_main_table_data_with_schema(chunk)?;
-                    let schema_state = if batch_schema.has_incompatible_logical_types() {
-                        TraceChunkSchemaState::SpanFallbackOnly
-                    } else {
-                        TraceChunkSchemaState::Prepared
-                    };
                     let (schema, rows) = table_data.into_schema_and_rows();
-                    if schema_state == TraceChunkSchemaState::Prepared {
+                    let has_incompatible_logical_types =
+                        batch_schema.has_incompatible_logical_types();
+                    if !has_incompatible_logical_types {
                         request_schema.observe_batch_schema(batch_index, &schema, &batch_schema);
                     }
-                    chunks.push(TraceChunkRetry::try_new(
+                    let retry = TraceChunkRetry::try_new(
                         ingest_ctx.table_name.to_string(),
                         Rows { schema, rows },
                         span_metadata,
                         batch_schema.into_retry_columns(),
-                    )?);
-                    chunk_states.push(schema_state);
+                    )?;
+                    if has_incompatible_logical_types {
+                        // A chunk schema cannot hold raw bytes and JSONB in one column.
+                        // Plan each span on its own so the conflict only affects the
+                        // spans that carry it, not the other columns of the chunk.
+                        for retry in retry.into_single_span_chunks()? {
+                            request_schema.observe_retry_chunk(chunks.len(), &retry)?;
+                            chunks.push(retry);
+                            chunk_states.push(TraceChunkSchemaState::Prepared);
+                        }
+                    } else {
+                        chunks.push(retry);
+                        chunk_states.push(TraceChunkSchemaState::Prepared);
+                    }
                 }
 
                 if !chunks.is_empty() {
@@ -1170,17 +1175,14 @@ impl Instance {
                     .await?;
                 }
             } else {
-                for group in groups {
-                    let chunks = chunk_owned(group.spans, self.trace_ingest_chunk_size);
-                    for chunk in chunks {
-                        self.ingest_trace_chunk(
-                            &ingest_ctx,
-                            chunk,
-                            main_ctx.clone(),
-                            &mut ingest_state,
-                        )
-                        .await?;
-                    }
+                for chunk in chunk_spans_across_groups(groups, self.trace_ingest_chunk_size) {
+                    self.ingest_trace_chunk(
+                        &ingest_ctx,
+                        chunk,
+                        main_ctx.clone(),
+                        &mut ingest_state,
+                    )
+                    .await?;
                 }
             }
 
@@ -1564,18 +1566,6 @@ impl Instance {
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
     ) -> ServerResult<()> {
-        if schema_state == TraceChunkSchemaState::SpanFallbackOnly {
-            Self::push_trace_failure_message(
-                &mut ingest_state.failure_messages,
-                ChunkFailureReaction::RetryPerSpan.as_metric_label(),
-                "incompatible_binary_and_json",
-                "Chunk fallback triggered by incompatible binary and JSON values".to_string(),
-            );
-            return self
-                .ingest_trace_v1_rows_span_by_span(retry, ctx, ingest_state)
-                .await;
-        }
-
         let mut request = retry.to_request()?;
         let _ = Self::prepare_trace_v1_chunk_rewrite(
             request_schema,
@@ -2448,6 +2438,20 @@ fn trace_logical_types_incompatible(
     left_datatype == right_datatype
         || !is_trace_reconcile_candidate_type(left_datatype)
         || !is_trace_reconcile_candidate_type(right_datatype)
+}
+
+/// Chunks the spans of all resource/scope groups together. Every span carries
+/// its own resource and scope attributes, so a chunk may mix groups; chunking per
+/// group instead would turn a collector batch of many small groups into many
+/// tiny inserts, each fanned out to every trace partition.
+fn chunk_spans_across_groups(
+    groups: Vec<TraceSpanGroup>,
+    chunk_size: usize,
+) -> Vec<Vec<TraceSpan>> {
+    chunk_owned(
+        groups.into_iter().flat_map(|group| group.spans).collect(),
+        chunk_size,
+    )
 }
 
 fn chunk_owned<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {

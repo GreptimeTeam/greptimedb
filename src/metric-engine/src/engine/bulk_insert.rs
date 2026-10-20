@@ -16,9 +16,11 @@ use std::collections::HashSet;
 
 use api::v1::{ArrowIpc, SemanticType};
 use bytes::Bytes;
+use common_error::ext::BoxedError;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use datatypes::arrow::record_batch::RecordBatch;
-use snafu::{OptionExt, ensure};
+use mito2::request::check_bulk_insert_batch;
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::{AffectedRows, RegionBulkInsertsRequest, RegionRequest};
@@ -111,6 +113,11 @@ impl MetricEngineInner {
             &batch,
             &logical_metadata,
         )?;
+        // The rewrite below copies columns without checking them, and would encode a
+        // duplicated tag into the primary key twice.
+        check_bulk_insert_batch(&logical_metadata, &batch)
+            .map_err(BoxedError::new)
+            .context(error::MitoWriteOperationSnafu)?;
         let modified_batch = modify_batch_sparse(
             batch.clone(),
             region_id.table_id(),
@@ -305,6 +312,92 @@ mod tests {
             partition_expr_version: None,
             aligned_schema_version: None,
         })
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_rejects_duplicate_tag() {
+        use common_error::status_code::StatusCode;
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let logical_region_id = env.default_logical_region_id();
+
+        let batch = build_logical_batch(0, 2);
+        let mut fields = batch.schema().fields().to_vec();
+        let mut columns = batch.columns().to_vec();
+        fields.push(fields[2].clone());
+        columns.push(columns[2].clone());
+        let batch = RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap();
+        let err = env
+            .metric()
+            .handle_request(
+                logical_region_id,
+                build_bulk_request(logical_region_id, batch, false),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_physical_region_rejects_malformed_primary_key() {
+        use common_error::status_code::StatusCode;
+        use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
+        use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let tag_columns = vec![TagColumnInfo {
+            name: "job".to_string(),
+            index: 2,
+            column_id: 2,
+        }];
+        let batch = modify_batch_sparse(
+            build_logical_batch(0, 2),
+            logical_region_id.table_id(),
+            &tag_columns,
+            &[0, 1],
+        )
+        .unwrap();
+        let primary_key_index = batch.schema().index_of(PRIMARY_KEY_COLUMN_NAME).unwrap();
+        let with_primary_key = |primary_key: Option<ArrayRef>, extra: Option<ArrayRef>| {
+            let mut fields = batch.schema().fields().to_vec();
+            let mut columns = batch.columns().to_vec();
+            fields.remove(primary_key_index);
+            columns.remove(primary_key_index);
+            for array in [primary_key, extra].into_iter().flatten() {
+                fields.push(Arc::new(Field::new(
+                    PRIMARY_KEY_COLUMN_NAME,
+                    array.data_type().clone(),
+                    true,
+                )));
+                columns.push(array);
+            }
+            RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).unwrap()
+        };
+        let encoded = batch.column(primary_key_index).clone();
+        let rejected = [
+            with_primary_key(None, None),
+            with_primary_key(Some(Arc::new(Int64Array::from(vec![1, 2]))), None),
+            with_primary_key(
+                Some(Arc::new(BinaryArray::from_opt_vec(vec![Some(b"a"), None]))),
+                None,
+            ),
+            with_primary_key(Some(encoded.clone()), Some(encoded)),
+        ];
+        for batch in rejected {
+            let err = env
+                .metric()
+                .handle_request(
+                    physical_region_id,
+                    build_bulk_request(physical_region_id, batch, false),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err:?}");
+        }
     }
 
     async fn init_dense_metric_region(env: &TestEnv) -> RegionId {

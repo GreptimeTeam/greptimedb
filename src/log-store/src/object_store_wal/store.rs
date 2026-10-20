@@ -123,8 +123,16 @@ const READ_PREFETCH_DEPTH: usize = 8;
 const READ_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
 /// Bytes recovery reads from the end of an object in one request. The window
 /// holds the trailer and the footer of an object with up to 1364 regions of
-/// 48 bytes each, so a second request for the footer is rare.
+/// 48 bytes each, so a second request for the footer is rare, and usually the
+/// segment of release records, which is the last segment.
 const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
+/// Largest segment of release records that recovery keeps from the bytes it
+/// read for a footer. It keeps them before it knows which objects are on the
+/// chain, so the bound caps what objects off the chain hold until recovery
+/// ends; a larger segment is read again if its object is on the chain. A
+/// release seals its record at once, so a segment usually holds the records of
+/// one or a few regions, 16 bytes each.
+const MAX_KEPT_RELEASE_BYTES: u64 = 4 * 1024;
 
 /// A log store over the immutable WAL objects under one prefix.
 ///
@@ -386,8 +394,10 @@ impl ObjectStoreLogStore {
         METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.inc();
         METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.add(object_len(&[]) as i64);
         // The release records are the only watermarks recorded yet.
-        let writer_reclaim_boundary =
-            catalog.reclaim_boundary(reclaim_boundary, &released_entry_ids);
+        for (&region_id, &entry_id) in &released_entry_ids {
+            catalog.obsolete(region_id, entry_id);
+        }
+        let writer_reclaim_boundary = catalog.reclaim_boundary(reclaim_boundary);
         let catalog = Arc::new(RwLock::new(catalog));
         let obsolete_entry_ids = Arc::new(Mutex::new(released_entry_ids));
         let wal_holes = WalHoles::default();
@@ -702,14 +712,24 @@ fn injected_create_failure(io: &dyn WalObjectIo, object_seq: u64) -> Result<PutR
     })
 }
 
-/// Records the obsolete watermark of `region_id`, which never moves down.
-fn record_obsolete(obsolete_entry_ids: &ObsoleteEntryIds, region_id: RegionId, entry_id: EntryId) {
+/// Records the obsolete watermark of `region_id`, which never moves down, for
+/// reads and in the catalog for the reclaim boundary.
+fn record_obsolete(
+    obsolete_entry_ids: &ObsoleteEntryIds,
+    catalog: &RwLock<ObjectCatalog>,
+    region_id: RegionId,
+    entry_id: EntryId,
+) {
     obsolete_entry_ids
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(region_id)
         .and_modify(|current| *current = (*current).max(entry_id))
         .or_insert(entry_id);
+    catalog
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .obsolete(region_id, entry_id);
 }
 
 fn positive_bytes(bytes: u64, name: &str) -> Result<usize> {
@@ -1122,7 +1142,12 @@ impl LogStore for ObjectStoreLogStore {
             // still queued behind the stop: nothing is assigned an id any
             // more, so the watermark alone is consistent.
             None => {
-                record_obsolete(&self.obsolete_entry_ids, region_id, watermark);
+                record_obsolete(
+                    &self.obsolete_entry_ids,
+                    &self.catalog,
+                    region_id,
+                    watermark,
+                );
                 Ok(())
             }
         }
@@ -2404,7 +2429,12 @@ impl Actor {
         response: oneshot::Sender<Result<()>>,
     ) {
         let result = self.raise_sequence_floor(region_id, entry_id).map(|_| {
-            record_obsolete(&self.obsolete_entry_ids, region_id, watermark);
+            record_obsolete(
+                &self.obsolete_entry_ids,
+                &self.catalog,
+                region_id,
+                watermark,
+            );
         });
         if result.is_ok() {
             self.update_reclaim_boundary();
@@ -2443,7 +2473,7 @@ impl Actor {
         } else {
             self.issued_entry_ids.get(&region_id).copied().unwrap_or(0)
         };
-        record_obsolete(&self.obsolete_entry_ids, region_id, entry_id);
+        record_obsolete(&self.obsolete_entry_ids, &self.catalog, region_id, entry_id);
         self.update_reclaim_boundary();
         self.collect();
         let release = Release {
@@ -2473,17 +2503,11 @@ impl Actor {
     /// Raises the reclaim boundary to what the catalog and the obsolete
     /// watermarks allow.
     fn update_reclaim_boundary(&mut self) {
-        let boundary = {
-            let obsolete_entry_ids = self
-                .obsolete_entry_ids
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            self.catalog
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .reclaim_boundary(self.reclaim_boundary, &obsolete_entry_ids)
-        };
-        self.reclaim_boundary = boundary;
+        self.reclaim_boundary = self
+            .catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reclaim_boundary(self.reclaim_boundary);
     }
 
     /// Starts a collection, which also attempts the deletes that failed since
@@ -3031,11 +3055,13 @@ struct FetchedObjects {
     vanished: Vec<(u64, Error)>,
 }
 
-/// An object as recovery fetched it: its key, header and footer.
+/// An object as recovery fetched it: its key, header and footer, and its
+/// segment of release records when the reads of the footer returned it.
 struct FetchedObject {
     object: ListedObject,
     header: Header,
     footer: Vec<FooterEntry>,
+    releases: Option<Bytes>,
 }
 
 /// Rebuilds the catalog from object headers and footers,
@@ -3048,16 +3074,25 @@ struct FetchedObject {
 /// Only the objects on the chain [`select_chain`] picks are indexed.
 async fn recover(io: &dyn WalObjectIo) -> Result<Recovered> {
     let objects = io.list().await?;
-    let mut recovered = finish_recovery(fetch_footers(io, objects, RECOVERY_CONCURRENCY).await?)?;
-    recovered.released_entry_ids = read_releases(io, &recovered.catalog).await?;
+    let mut fetched = fetch_footers(io, objects, RECOVERY_CONCURRENCY).await?;
+    let releases = fetched
+        .objects
+        .iter_mut()
+        .filter_map(|fetched| Some((fetched.object.object_seq, fetched.releases.take()?)))
+        .collect();
+    let mut recovered = finish_recovery(fetched)?;
+    recovered.released_entry_ids = read_releases(io, &recovered.catalog, releases).await?;
     Ok(recovered)
 }
 
 /// Reads the release records of the indexed objects, which seed the
-/// watermarks of their regions: one range read of the segment of
-/// [`RELEASE_REGION_ID`] per object that holds one. A segment that cannot be
-/// fetched or does not decode fails recovery, whatever `on_corrupted_segment`
-/// says: skipping it would lose the watermarks it seeds.
+/// watermarks of their regions, from the segment of [`RELEASE_REGION_ID`] of
+/// every indexed object that holds one: the bytes in `fetched` by object
+/// sequence, which the reads of the footers returned, or else one range read.
+/// The segments of objects that are not indexed are never decoded. A segment
+/// that cannot be fetched or does not decode fails recovery, whatever
+/// `on_corrupted_segment` says: skipping it would lose the watermarks it
+/// seeds.
 ///
 /// A release record needs no bookkeeping of its own. It is sealed once every
 /// entry it covers was admitted, so it lies in the object holding the last
@@ -3073,6 +3108,7 @@ async fn recover(io: &dyn WalObjectIo) -> Result<Recovered> {
 async fn read_releases(
     io: &dyn WalObjectIo,
     catalog: &ObjectCatalog,
+    mut fetched: HashMap<u64, Bytes>,
 ) -> Result<HashMap<RegionId, EntryId>> {
     let segments = catalog
         .objects_in_order()
@@ -3080,14 +3116,18 @@ async fn read_releases(
             footer
                 .iter()
                 .find(|entry| entry.region_id == RELEASE_REGION_ID)
-                .map(|entry| (object_seq, entry.clone()))
+                .map(|entry| (object_seq, entry.clone(), fetched.remove(&object_seq)))
         })
         .collect::<Vec<_>>();
     let releases = futures::stream::iter(segments)
-        .map(|(object_seq, entry)| async move {
-            let bytes = io
-                .get_range(object_seq, entry.segment_offset, entry.segment_len)
-                .await?;
+        .map(|(object_seq, entry, fetched)| async move {
+            let bytes = match fetched {
+                Some(bytes) => bytes,
+                None => {
+                    io.get_range(object_seq, entry.segment_offset, entry.segment_len)
+                        .await?
+                }
+            };
             decode_segment(&bytes, &entry)
                 .and_then(|records| decode_releases(&records[0].payload))
                 .with_context(|_| InvalidWalObjectSnafu {
@@ -3345,10 +3385,11 @@ async fn fetch_footers(
     let outcomes = futures::stream::iter(objects)
         .map(|object| async move {
             match fetch_footer(io, &object).await {
-                Ok((header, footer)) => Ok(Ok(FetchedObject {
+                Ok((header, footer, releases)) => Ok(Ok(FetchedObject {
                     object,
                     header,
                     footer,
+                    releases,
                 })),
                 Err(error) if is_not_found(&error) => Ok(Err((object.object_seq, error))),
                 Err(error) => Err(error),
@@ -3376,7 +3417,9 @@ fn is_not_found(error: &Error) -> bool {
 /// Reads the header, trailer and footer of `object` and verifies them: the
 /// header must carry the sequence of the key, the trailer must be well formed,
 /// the footer must match the checksum the trailer holds and its segments must
-/// tile the object body.
+/// tile the object body. Also returns a copy of the segment of release records
+/// when the bytes read hold it and it is at most [`MAX_KEPT_RELEASE_BYTES`],
+/// which is not decoded here.
 ///
 /// A short object is read whole. Otherwise the header and a window at the end
 /// of the object are read concurrently, and the footer is read separately only
@@ -3384,7 +3427,7 @@ fn is_not_found(error: &Error) -> bool {
 async fn fetch_footer(
     io: &dyn WalObjectIo,
     object: &ListedObject,
-) -> Result<(Header, Vec<FooterEntry>)> {
+) -> Result<(Header, Vec<FooterEntry>, Option<Bytes>)> {
     let ListedObject {
         object_seq, size, ..
     } = *object;
@@ -3442,7 +3485,18 @@ async fn fetch_footer(
     };
     let footer = decode_footer(&footer, trailer).map_err(invalid)?;
     verify_segment_ranges(&footer, footer_range.start).map_err(invalid)?;
-    Ok((header, footer))
+    // A copy, so the window is not kept until the releases are decoded.
+    let releases = footer
+        .iter()
+        .find(|entry| entry.region_id == RELEASE_REGION_ID)
+        .filter(|entry| {
+            entry.segment_offset >= tail_start as u64 && entry.segment_len <= MAX_KEPT_RELEASE_BYTES
+        })
+        .map(|entry| {
+            let start = entry.segment_offset as usize - tail_start;
+            Bytes::copy_from_slice(&tail[start..start + entry.segment_len as usize])
+        });
+    Ok((header, footer, releases))
 }
 
 /// Verifies the header and trailer of the object `object_seq` of `object_len`
@@ -3968,6 +4022,7 @@ mod tests {
                 object,
                 header: decoded.header,
                 footer: decoded.footer,
+                releases: None,
             });
         }
         finish_recovery(FetchedObjects {
@@ -9168,6 +9223,206 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_store_recovery_takes_release_records_from_the_footer_reads() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (one, two, three) = (region(1), region(2), region(3));
+        let store = open(object_store.clone(), &eager()).await;
+        // Object 1 holds entries of regions one and two, object 2 the release
+        // of region one and object 3 the drop of region three; region two
+        // holds the boundary at object 1.
+        store
+            .append_batch(vec![entry(&store, one, "a1"), entry(&store, two, "b1")])
+            .await
+            .unwrap();
+        store.release_region(&provider(one), one).await.unwrap();
+        store.obsolete_all(&provider(three), three).await.unwrap();
+        store.stop().await.unwrap();
+
+        // Every object is shorter than the tail window, so recovery reads
+        // each one whole, once, and decodes the release records from those
+        // bytes without a range read.
+        let (io, reads) = RecordingIo::over(object_store);
+        let store = open_over(io, &eager()).await;
+        assert_eq!(Some(id(1, 1)), watermark(&store, one));
+        assert_eq!(None, watermark(&store, two));
+        assert_eq!(Some(EntryId::MAX), watermark(&store, three));
+        assert!(reads.lock().unwrap().is_empty());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_reads_a_release_segment_outside_the_tail_window() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // So many release records that their segment starts before the
+        // window at the end of the object.
+        let releases = (1..=5_000)
+            .map(|number| (region(number), id(0, 1)))
+            .collect::<BTreeMap<_, _>>();
+        let record = Record {
+            region_id: RELEASE_REGION_ID,
+            entry_id: id(0, 1),
+            payload: encode_releases(&releases),
+        };
+        put_records(&object_store, 0, &[record]).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = &footer[0];
+        assert!(segment.segment_offset < object.size - RECOVERY_TAIL_WINDOW as u64);
+
+        let store = open_over(io, &eager()).await;
+        for number in [1, 5_000] {
+            assert_eq!(Some(id(0, 1)), watermark(&store, region(number)));
+        }
+        let mut reads = reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(
+            vec![
+                (0, 0, HEADER_LEN as u64),
+                (0, segment.segment_offset, segment.segment_len),
+                (
+                    0,
+                    object.size - RECOVERY_TAIL_WINDOW as u64,
+                    RECOVERY_TAIL_WINDOW as u64
+                ),
+            ],
+            reads
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_takes_a_release_segment_from_the_tail_window() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // A segment longer than the window comes first, so the object is read
+        // as its header and its tail, and the segment of release records, the
+        // last one, lies inside the tail but not at its start.
+        let records = [
+            Record {
+                region_id: region(1),
+                entry_id: id(0, 1),
+                payload: Bytes::from(vec![0; RECOVERY_TAIL_WINDOW * 2]),
+            },
+            Record {
+                region_id: RELEASE_REGION_ID,
+                entry_id: id(0, 1),
+                payload: encode_releases(&BTreeMap::from([(region(2), 7)])),
+            },
+        ];
+        put_records(&object_store, 0, &records).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let tail_start = object.size - RECOVERY_TAIL_WINDOW as u64;
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = footer
+            .iter()
+            .find(|entry| entry.region_id == RELEASE_REGION_ID)
+            .unwrap();
+        assert!(segment.segment_offset > tail_start);
+
+        let store = open_over(io, &eager()).await;
+        assert_eq!(Some(7), watermark(&store, region(2)));
+        let mut reads = reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(
+            vec![
+                (0, 0, HEADER_LEN as u64),
+                (0, tail_start, RECOVERY_TAIL_WINDOW as u64)
+            ],
+            reads
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_reads_a_release_segment_above_the_kept_size_again() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // The object is read whole, but its segment of release records is
+        // larger than recovery keeps.
+        let releases = (1..=300)
+            .map(|number| (region(number), id(0, 1)))
+            .collect::<BTreeMap<_, _>>();
+        let record = Record {
+            region_id: RELEASE_REGION_ID,
+            entry_id: id(0, 1),
+            payload: encode_releases(&releases),
+        };
+        put_records(&object_store, 0, &[record]).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = &footer[0];
+        assert!(object.size <= RECOVERY_TAIL_WINDOW as u64);
+        assert!(segment.segment_len > MAX_KEPT_RELEASE_BYTES);
+
+        let store = open_over(io, &eager()).await;
+        for number in [1, 300] {
+            assert_eq!(Some(id(0, 1)), watermark(&store, region(number)));
+        }
+        assert_eq!(
+            vec![(0, segment.segment_offset, segment.segment_len)],
+            *reads.lock().unwrap()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_decodes_release_records_only_on_the_chain() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        let release_record = |object_seq, number| Record {
+            region_id: RELEASE_REGION_ID,
+            entry_id: id(object_seq, 1),
+            payload: encode_releases(&BTreeMap::from([(region(number), 1)])),
+        };
+        let damage_release_segment = |bytes: &mut Vec<u8>| {
+            let (_, footer) = footer_of(bytes);
+            let segment = footer
+                .iter()
+                .find(|entry| entry.region_id == RELEASE_REGION_ID)
+                .unwrap();
+            let last = segment.segment_offset + segment.segment_len - 1;
+            bytes[last as usize] ^= 1;
+        };
+        // Object 0 holds an entry of region one and the release of region
+        // two. Object 1 releases region three but is off the chain: it links
+        // to an object 0 of another epoch.
+        let entry_record = Record {
+            region_id: region(1),
+            entry_id: id(0, 1),
+            payload: Bytes::from_static(b"a1"),
+        };
+        put_records(&object_store, 0, &[entry_record, release_record(0, 2)]).await;
+        let orphan = Header {
+            object_seq: 1,
+            epoch: 1,
+            prev: Some(ChainLink {
+                object_seq: 0,
+                epoch: 2,
+            }),
+            reclaim_boundary: 0,
+        };
+        put_object_with_header(&io, orphan, &[release_record(1, 3)]).await;
+
+        // A damaged release segment off the chain is never decoded.
+        corrupt_object(&object_store, &io.object_path(1), damage_release_segment).await;
+        let store = open(object_store.clone(), &eager()).await;
+        assert_eq!(Some(1), watermark(&store, region(2)));
+        assert_eq!(None, watermark(&store, region(3)));
+        store.stop().await.unwrap();
+
+        // A damaged release segment on the chain fails recovery.
+        let path = io.object_path(0);
+        corrupt_object(&object_store, &path, damage_release_segment).await;
+        assert_recovery_rejects(&object_store, &path, "checksum mismatch").await;
+    }
+
+    #[tokio::test]
     async fn test_store_carries_the_record_of_a_failed_release() {
         let _serialized = SERIALIZED.lock().await;
         let region_id = region(1);
@@ -9684,6 +9939,266 @@ mod tests {
 
         fn storage(&self) -> String {
             self.inner.storage()
+        }
+    }
+
+    /// Measurements of costs that grow with the catalog or the prefix,
+    /// taken through the store. They are ignored by default and print what
+    /// they measure; run them with `--run-ignored only` and `--no-capture`,
+    /// preferably with `--cargo-profile release`.
+    #[allow(clippy::print_stdout)]
+    mod measurements {
+        use super::*;
+
+        /// Times every watermark update while one object holds a segment of
+        /// each region and the regions are flushed in region id order, so
+        /// each update leaves the next region as the first live segment of
+        /// that object. An update is timed as the caller of `obsolete` sees
+        /// it, which includes the round trip of its command to the actor.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_watermark_updates_over_one_shared_object() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 5_000, 10_000, 20_000] {
+                let store = open_with_one_shared_object(regions).await;
+                let mut pauses = Vec::with_capacity(regions as usize);
+                for number in 1..=regions {
+                    let region_id = region(number);
+                    let started_at = Instant::now();
+                    store
+                        .obsolete(&provider(region_id), region_id, id(1, 1))
+                        .await
+                        .unwrap();
+                    pauses.push(started_at.elapsed());
+                }
+                // The next object carries the boundary past every flushed
+                // object.
+                append(&store, region(regions + 1), "b").await.unwrap();
+                assert_eq!(vec![2], collected_object_seqs(&store).await);
+                print_pauses("watermark updates", regions, pauses);
+                store.stop().await.unwrap();
+            }
+        }
+
+        /// Times the steps the actor takes for each of the same watermark
+        /// updates that depend on the catalog, recording the watermark and
+        /// recomputing the reclaim boundary, without the round trip: the
+        /// store is stopped first and the steps run on its catalog.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_actor_watermark_steps_over_one_shared_object() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 5_000, 10_000, 20_000] {
+                let store = open_with_one_shared_object(regions).await;
+                store.stop().await.unwrap();
+                let mut boundary = 0;
+                let mut pauses = Vec::with_capacity(regions as usize);
+                for number in 1..=regions {
+                    let started_at = Instant::now();
+                    record_obsolete(
+                        &store.obsolete_entry_ids,
+                        &store.catalog,
+                        region(number),
+                        id(1, 1),
+                    );
+                    boundary = store.catalog.read().unwrap().reclaim_boundary(boundary);
+                    pauses.push(started_at.elapsed());
+                }
+                assert_eq!(2, boundary);
+                print_pauses("actor watermark steps", regions, pauses);
+            }
+        }
+
+        /// Opens a store whose object 1 holds one segment of each of
+        /// `regions` regions.
+        async fn open_with_one_shared_object(regions: u32) -> Arc<ObjectStoreLogStore> {
+            let store = open(memory_store(), &eager()).await;
+            let entries = (1..=regions)
+                .map(|number| entry(&store, region(number), "a"))
+                .collect();
+            store.append_batch(entries).await.unwrap();
+            store
+        }
+
+        fn print_pauses(label: &str, regions: u32, mut pauses: Vec<Duration>) {
+            let total = pauses.iter().sum::<Duration>();
+            pauses.sort_unstable();
+            let micros = |pause: Duration| pause.as_secs_f64() * 1e6;
+            println!(
+                "{label}: regions={regions} total_ms={:.3} mean_us={:.3} p50_us={:.3} p99_us={:.3} max_us={:.3}",
+                total.as_secs_f64() * 1e3,
+                micros(total) / pauses.len() as f64,
+                micros(pauses[pauses.len() / 2]),
+                micros(pauses[pauses.len() * 99 / 100]),
+                micros(pauses[pauses.len() - 1]),
+            );
+        }
+
+        /// Times 100 reads of the last ten objects of a region that holds a
+        /// segment in every retained object, and 100 lookups of those objects
+        /// in the catalog alone.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_tail_reads_over_retained_objects() {
+            let _serialized = SERIALIZED.lock().await;
+            let region_id = region(1);
+            for objects in [10_000, 100_000, 1_000_000] {
+                let object_store = memory_store();
+                let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+                futures::stream::iter(0..objects)
+                    .for_each_concurrent(RECOVERY_CONCURRENCY, |object_seq| {
+                        let io = &io;
+                        async move {
+                            let header = Header {
+                                object_seq,
+                                epoch: 1,
+                                prev: object_seq.checked_sub(1).map(|prev| ChainLink {
+                                    object_seq: prev,
+                                    epoch: 1,
+                                }),
+                                reclaim_boundary: 0,
+                            };
+                            let record = Record {
+                                region_id,
+                                entry_id: id(object_seq, 1),
+                                payload: Bytes::from_static(b"a"),
+                            };
+                            put_object_with_header(io, header, &[record]).await;
+                        }
+                    })
+                    .await;
+                let store = open(object_store, &eager()).await;
+                let start = id(objects - 10, 1);
+
+                let started_at = Instant::now();
+                for _ in 0..100 {
+                    assert_eq!(10, read_entries(&store, region_id, start).await.len());
+                }
+                let reads = started_at.elapsed();
+                let started_at = Instant::now();
+                for _ in 0..100 {
+                    let catalog = store.catalog.read().unwrap();
+                    let found = catalog
+                        .objects_for_entry_range(region_id, start, EntryId::MAX)
+                        .unwrap();
+                    assert_eq!(10, found.len());
+                }
+                let lookups = started_at.elapsed();
+                println!(
+                    "tail reads: objects={objects} read_100_ms={:.3} lookup_100_ms={:.3}",
+                    reads.as_secs_f64() * 1e3,
+                    lookups.as_secs_f64() * 1e3,
+                );
+                store.stop().await.unwrap();
+            }
+        }
+
+        /// Object access that counts the reads of whole objects and of byte
+        /// ranges.
+        struct CountingIo {
+            inner: ObjectStoreIo,
+            gets: AtomicUsize,
+            range_gets: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl WalObjectIo for CountingIo {
+            async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+                self.inner.put_if_absent(object_seq, content).await
+            }
+
+            async fn get(&self, object_seq: u64) -> Result<Bytes> {
+                self.gets.fetch_add(1, Ordering::Relaxed);
+                self.inner.get(object_seq).await
+            }
+
+            async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+                self.range_gets.fetch_add(1, Ordering::Relaxed);
+                self.inner.get_range(object_seq, offset, len).await
+            }
+
+            async fn delete(&self, object_seq: u64) -> Result<()> {
+                self.inner.delete(object_seq).await
+            }
+
+            async fn list(&self) -> Result<Vec<ListedObject>> {
+                self.inner.list().await
+            }
+
+            fn object_path(&self, object_seq: u64) -> String {
+                self.inner.object_path(object_seq)
+            }
+
+            fn storage(&self) -> String {
+                self.inner.storage()
+            }
+        }
+
+        /// The object store a measurement of recovery runs on: a fresh root
+        /// in the bucket the `GT_S3_*` variables name when they are set, an
+        /// in-memory store otherwise.
+        fn measured_object_store() -> (ObjectStore, &'static str) {
+            let Ok(bucket) = std::env::var("GT_S3_BUCKET") else {
+                return (memory_store(), "memory");
+            };
+            let variable = |name: &str| std::env::var(name).unwrap();
+            let mut builder = object_store::services::S3::default()
+                .root(&format!("measurements/{}", uuid::Uuid::new_v4()))
+                .bucket(&bucket)
+                .region(&variable("GT_S3_REGION"))
+                .access_key_id(&variable("GT_S3_ACCESS_KEY_ID"))
+                .secret_access_key(&variable("GT_S3_ACCESS_KEY"));
+            if let Ok(endpoint) = std::env::var("GT_S3_ENDPOINT_URL") {
+                builder = builder.endpoint(&endpoint);
+            }
+            (ObjectStore::new(builder).unwrap(), "s3")
+        }
+
+        /// Counts the reads of a recovery over a prefix where every dropped
+        /// region left its release record in an object of its own, while one
+        /// region still holds the boundary at the object of the first
+        /// entries, and times the recovery.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_recovery_of_dropped_regions() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 4_000] {
+                let (object_store, storage) = measured_object_store();
+                let store = open(object_store.clone(), &eager()).await;
+                let entries = (1..=regions + 1)
+                    .map(|number| entry(&store, region(number), "a"))
+                    .collect();
+                store.append_batch(entries).await.unwrap();
+                for number in 1..=regions {
+                    let region_id = region(number);
+                    store
+                        .obsolete_all(&provider(region_id), region_id)
+                        .await
+                        .unwrap();
+                }
+                store.stop().await.unwrap();
+
+                let io = Arc::new(CountingIo {
+                    inner: ObjectStoreIo::new(object_store, PREFIX).unwrap(),
+                    gets: AtomicUsize::new(0),
+                    range_gets: AtomicUsize::new(0),
+                });
+                let objects = io.list().await.unwrap().len();
+                let started_at = Instant::now();
+                let store = open_over(io.clone(), &eager()).await;
+                let elapsed = started_at.elapsed();
+                for number in 1..=regions {
+                    assert_eq!(Some(EntryId::MAX), watermark(&store, region(number)));
+                }
+                assert_eq!(None, watermark(&store, region(regions + 1)));
+                println!(
+                    "recovery of dropped regions: storage={storage} regions={regions} objects={objects} gets={} range_gets={} recovery_ms={:.3}",
+                    io.gets.load(Ordering::Relaxed),
+                    io.range_gets.load(Ordering::Relaxed),
+                    elapsed.as_secs_f64() * 1e3,
+                );
+                store.stop().await.unwrap();
+            }
         }
     }
 

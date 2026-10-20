@@ -267,6 +267,13 @@ pub struct Indexer {
 }
 
 impl Indexer {
+    /// Returns true if no index creator is active.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inverted_indexer.is_none()
+            && self.fulltext_indexer.is_none()
+            && self.bloom_filter_indexer.is_none()
+    }
+
     /// Wraps real creators for update-only benchmarks without a Puffin output.
     #[cfg(feature = "testing")]
     pub fn for_bench(
@@ -342,13 +349,6 @@ impl Indexer {
         self.do_abort().await;
 
         self.flush_mem_metrics();
-    }
-
-    /// Returns true if no index will be created.
-    pub fn is_empty(&self) -> bool {
-        self.inverted_indexer.is_none()
-            && self.fulltext_indexer.is_none()
-            && self.bloom_filter_indexer.is_none()
     }
 
     fn flush_mem_metrics(&mut self) {
@@ -429,11 +429,7 @@ impl IndexerBuilder for IndexerBuilderImpl {
         indexer.prepare_dense_pk_decoder(&self.metadata);
         indexer.intermediate_manager = Some(self.intermediate_manager.clone());
 
-        let has_any_indexer = indexer.inverted_indexer.is_some()
-            || indexer.fulltext_indexer.is_some()
-            || indexer.bloom_filter_indexer.is_some();
-
-        if !has_any_indexer {
+        if indexer.is_empty() {
             indexer.abort().await;
             return Indexer::default();
         }
@@ -957,6 +953,8 @@ impl IndexBuildTask {
             .indexer_builder
             .build(region_file_id, new_index_version, row_group_size)
             .await;
+        // The build type or index options may leave nothing to build. Return before reading
+        // any row; an empty indexer finishes with no output, which publishes nothing.
         if indexer.is_empty() {
             return Ok(ControlFlow::Break(self.aborted("No index to build")));
         }
