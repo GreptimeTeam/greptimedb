@@ -66,9 +66,15 @@ The easiest thing to get wrong here. Both exist; only one runs.
   here" from "no more input": dropping it leaves a series open, and a child that
   merges regions must recompute finality globally rather than pass a region-local
   flag through.
-- **Raw-frame labels are schema-dependent.** A raw series frame carries an opaque
-  primary key plus the schema metadata describing how to decode it, so never decode
-  the key without the schema you actually received.
+- **Raw-frame labels come from the binding, not the schema.** A raw series frame
+  carries an opaque encoded primary key while its schema metadata describes only
+  the format: `greptime.series.layout`, `.content`, `.labels` and `.time`, plus
+  the producer ordering the adapter adds. Nothing in that metadata binds the key
+  to a decode — the frame decoder compares those format keys and the field list,
+  and never a label identity. `unpack_raw_series` therefore requires a
+  caller-supplied `RawLabelSource`: decode with the source that was actually bound
+  when the stream was produced, because the frame schema does not replace that
+  binding. The metadata describes format, not label identity.
 - **A wrong label binding is silently wrong, not an error.** Storage validates the
   binding it is given (metadata identity, tag-ness, name matches, no duplicates)
   but cannot tell whether that set is the one the query meant, and the metric name
@@ -97,5 +103,7 @@ structural, not bugs: closing them is what turns the pieces below into a path.
   `RegionScanExec::try_to_series_scan` therefore returns `None` against it.
   `SeriesScanExec::children()` is empty, so wrapping a `RegionScanExec` before
   partition preparation leaves `ParallelizeScan` unable to assign partitions. A
-  raw scan needs both: an override on the scanner and a child the partitioner can
-  see.
+  raw scan needs that scanner-side override, and either of two routes past the
+  partition problem: give the partitioner a child it can see, or convert to the
+  native leaf only after partition preparation — the second is the contract
+  `RegionScanExec::try_to_series_scan` documents.
