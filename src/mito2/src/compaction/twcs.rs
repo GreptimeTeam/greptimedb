@@ -71,6 +71,12 @@ struct WindowPickContext<'a> {
     phase: PickPhase,
 }
 
+struct WindowOutputContext {
+    active_window: Option<i64>,
+    time_window_size: Option<i64>,
+    max_outputs: Option<usize>,
+}
+
 /// A mixed L0/L1 compaction may rewrite at most this many L1 rows per L0 row.
 const MAX_L1_L0_ROW_RATIO: usize = 2;
 
@@ -119,13 +125,17 @@ pub struct TwcsPicker {
 }
 
 impl TwcsPicker {
-    async fn build_output_with_time_range(
+    async fn build_output(
         &self,
         region_id: RegionId,
         time_windows: BTreeMap<i64, Window>,
-        active_window: Option<i64>,
-        time_window_size: Option<i64>,
+        context: WindowOutputContext,
     ) -> Result<Vec<CompactionOutput>> {
+        let WindowOutputContext {
+            active_window,
+            time_window_size,
+            max_outputs,
+        } = context;
         let mut output = vec![];
         let windows = time_windows
             .values()
@@ -145,6 +155,8 @@ impl TwcsPicker {
             .map(|window| window.time_window)
             .collect::<Vec<_>>();
         let time_windows = Arc::new(time_windows);
+        // Enumerating all LastNonNull seeds must not increase the number of
+        // concurrently planned windows along with the output limit.
         let chunk_size = self.max_background_tasks.unwrap_or(windows.len()).max(1);
         let mut selected_windows = HashSet::new();
         'phases: for phase in PICK_PHASES {
@@ -198,12 +210,12 @@ impl TwcsPicker {
                         output_time_range: None, // we do not enforce output time range in twcs compactions.
                     });
 
-                    if let Some(max_background_tasks) = self.max_background_tasks
-                        && output.len() >= max_background_tasks
+                    if let Some(max_outputs) = max_outputs
+                        && output.len() >= max_outputs
                     {
                         debug!(
-                            "Region ({:?}) compaction task size larger than max background tasks({}), remaining tasks discarded",
-                            region_id, max_background_tasks
+                            "Region ({:?}) compaction output limit ({}) reached, remaining candidates discarded",
+                            region_id, max_outputs
                         );
                         break 'phases;
                     }
@@ -772,6 +784,17 @@ fn log_pick_result(
 #[async_trait::async_trait]
 impl Picker for TwcsPicker {
     async fn pick(&self, compaction_region: &CompactionRegion) -> Result<Option<PickerOutput>> {
+        self.pick_with_output_limit(compaction_region, self.max_background_tasks)
+            .await
+    }
+}
+
+impl TwcsPicker {
+    pub(crate) async fn pick_with_output_limit(
+        &self,
+        compaction_region: &CompactionRegion,
+        max_outputs: Option<usize>,
+    ) -> Result<Option<PickerOutput>> {
         let region_id = compaction_region.region_id;
         let picker = self.clone();
         let compaction_region = compaction_region.clone();
@@ -835,7 +858,15 @@ impl Picker for TwcsPicker {
             .context(JoinSnafu)?;
 
         let outputs = self
-            .build_output_with_time_range(region_id, windows, active_window, Some(time_window_size))
+            .build_output(
+                region_id,
+                windows,
+                WindowOutputContext {
+                    active_window,
+                    time_window_size: Some(time_window_size),
+                    max_outputs,
+                },
+            )
             .await?;
 
         if outputs.is_empty() && expired_ssts.is_empty() {
@@ -1042,7 +1073,8 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::test_util::{
-        new_file_handle, new_file_handle_with_sequence, new_file_handle_with_size_and_sequence,
+        compaction_region_with_ssts, new_file_handle, new_file_handle_with_sequence,
+        new_file_handle_with_size_and_sequence,
         new_file_handle_with_size_sequence_and_primary_key_range,
     };
     use crate::config::MitoConfig;
@@ -1051,6 +1083,27 @@ mod tests {
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    impl TwcsPicker {
+        async fn build_output_with_time_range(
+            &self,
+            region_id: RegionId,
+            time_windows: BTreeMap<i64, Window>,
+            active_window: Option<i64>,
+            time_window_size: Option<i64>,
+        ) -> Result<Vec<CompactionOutput>> {
+            self.build_output(
+                region_id,
+                time_windows,
+                WindowOutputContext {
+                    active_window,
+                    time_window_size,
+                    max_outputs: self.max_background_tasks,
+                },
+            )
+            .await
+        }
+    }
 
     #[test]
     fn test_valid_max_input_files_env_overrides_default() {
@@ -1061,40 +1114,6 @@ mod tests {
     fn test_invalid_max_input_files_env_falls_back_to_default() {
         for env_value in [None, Some(""), Some("invalid"), Some("0"), Some("1")] {
             assert_eq!(16, parse_max_input_files(env_value));
-        }
-    }
-
-    async fn compaction_region_with_ssts(
-        files: impl IntoIterator<Item = FileMeta>,
-        ttl: Duration,
-    ) -> CompactionRegion {
-        let env = SchedulerEnv::new().await;
-        let metadata = metadata_for_test();
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        let mut ssts = SstVersion::new();
-        ssts.add_files(
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-            files.into_iter(),
-        );
-
-        CompactionRegion {
-            region_id: metadata.region_id,
-            region_options: RegionOptions::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            region_metadata: metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
-            access_layer: env.access_layer,
-            manifest_ctx,
-            current_version: CompactionVersion {
-                metadata,
-                options: RegionOptions::default(),
-                ssts: Arc::new(ssts),
-                compaction_time_window: None,
-            },
-            file_purger: None,
-            ttl: Some(ttl.into()),
-            max_parallelism: 1,
-            plugins: Plugins::new(),
         }
     }
 
@@ -1259,6 +1278,7 @@ mod tests {
                 metadata,
                 options: RegionOptions::default(),
                 ssts: Arc::new(ssts),
+                memtable_min_sequence: None,
                 compaction_time_window: None,
             },
             file_purger: None,

@@ -360,6 +360,7 @@ impl RegionWriteCtx {
             self.next_sequence = sequence;
         }
         bulk.sequence = self.next_sequence;
+        bulk.min_sequence = self.next_sequence;
         if !skip_wal {
             let entry = match BulkWalEntry::try_from(&bulk) {
                 Ok(entry) => entry,
@@ -653,6 +654,7 @@ mod tests {
             usize::from(!bulk_skip_wal)
         );
         assert_eq!(ctx.bulk_parts[0].sequence, 7);
+        assert_eq!(ctx.bulk_parts[0].min_sequence, 7);
         let sequences: Vec<_> = ctx.wal_entry.mutations.iter().map(|m| m.sequence).collect();
         assert_eq!(sequences, if skip_wal { vec![3, 6] } else { vec![1, 3, 6] });
         // Check the actual WAL bytes after routing the mutations.
@@ -985,6 +987,7 @@ mod tests {
             max_timestamp: 2,
             min_timestamp: 1,
             sequence: 0,
+            min_sequence: 0,
             timestamp_index: 0,
             raw_data: None,
         }

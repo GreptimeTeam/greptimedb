@@ -21,11 +21,12 @@ use common_time::{TimeToLive, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::last_non_null::LastNonNullPicker;
 use crate::compaction::twcs::TwcsPicker;
 use crate::compaction::window::WindowedCompactionPicker;
 use crate::compaction::{CompactionOutput, SerializedCompactionOutput};
 use crate::error::Result;
-use crate::region::options::CompactionOptions;
+use crate::region::options::{CompactionOptions, MergeMode, RegionOptions};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::file_purger::FilePurger;
 use crate::sst::version::LevelMeta;
@@ -125,11 +126,10 @@ impl PickerOutput {
     }
 }
 
-/// Create a new picker based on the compaction request options and compaction options.
+/// Creates a picker for the request and the region's compaction and merge modes.
 pub fn new_picker(
     compact_request_options: &compact_request::Options,
-    compaction_options: &CompactionOptions,
-    append_mode: bool,
+    region_options: &RegionOptions,
     max_background_tasks: Option<usize>,
     time_range: Option<TimestampRange>,
 ) -> Arc<dyn Picker> {
@@ -139,20 +139,29 @@ pub fn new_picker(
         } else {
             Some(window.window_seconds)
         };
+        // Strict-window outputs already include every overlapping file segment
+        // within each disjoint, half-open output range, including LastNonNull.
         Arc::new(WindowedCompactionPicker::new(window).with_time_range(time_range)) as Arc<_>
     } else {
-        match compaction_options {
-            CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker {
+        let picker = match &region_options.compaction {
+            CompactionOptions::Twcs(twcs_opts) => TwcsPicker {
                 trigger_file_num: twcs_opts.active_window_trigger_file_num,
                 active_window_l1_merge_trigger: twcs_opts.active_window_l1_merge_trigger,
                 inactive_window_trigger_file_num: twcs_opts.inactive_window_trigger_file_num,
                 inactive_window_l1_merge_trigger: twcs_opts.inactive_window_l1_merge_trigger,
                 time_window_seconds: twcs_opts.time_window_seconds(),
                 max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
-                append_mode,
+                append_mode: region_options.append_mode,
                 max_background_tasks,
                 time_range,
-            }) as Arc<_>,
+            },
+        };
+        if region_options.merge_mode() == MergeMode::LastNonNull {
+            // LastNonNull correctness spans windows and levels, so wrap the seed
+            // picker instead of trusting TWCS's independent windows.
+            Arc::new(LastNonNullPicker::new(picker))
+        } else {
+            Arc::new(picker)
         }
     }
 }

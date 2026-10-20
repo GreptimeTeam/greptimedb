@@ -64,6 +64,32 @@ pub use bulk::part::{
 #[cfg(any(test, feature = "test"))]
 pub use time_partition::filter_record_batch;
 
+/// Groups sequence intervals into ordered, disjoint components. A component must
+/// not be split during a partial merge: an excluded interval could contain an
+/// intermediate row version. Bounds may conservatively include removed rows.
+pub(crate) fn group_by_sequence<T>(
+    mut parts: Vec<T>,
+    bounds: impl Fn(&T) -> (SequenceNumber, SequenceNumber),
+) -> Vec<Vec<T>> {
+    parts.sort_by_key(&bounds);
+    let mut groups: Vec<Vec<T>> = Vec::new();
+    let mut group_max = 0;
+    for part in parts {
+        let (min, max) = bounds(&part);
+        match groups.last_mut() {
+            Some(group) if min <= group_max => {
+                group.push(part);
+                group_max = group_max.max(max);
+            }
+            _ => {
+                groups.push(vec![part]);
+                group_max = max;
+            }
+        }
+    }
+    groups
+}
+
 /// Id for memtables.
 ///
 /// Should be unique under the same region.
@@ -150,6 +176,10 @@ pub struct MemtableStats {
     pub num_ranges: usize,
     /// The maximum sequence number in the memtable.
     pub max_sequence: SequenceNumber,
+    /// Lower bound of the row sequences written to this memtable or range.
+    /// May remain below the actual minimum after deduplication. Zero is conservative
+    /// when a range does not track its minimum; the value is unused for empty memtables.
+    pub min_sequence: SequenceNumber,
     /// Number of estimated timeseries in memtable.
     pub series_count: usize,
 }
@@ -282,6 +312,11 @@ pub trait Memtable: Send + Sync + fmt::Debug {
 
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;
+
+    /// Returns a conservative row-sequence lower bound without computing full statistics.
+    /// Returns zero when write statistics are unavailable. Callers must ignore
+    /// empty memtables when using this bound to constrain compaction.
+    fn min_sequence(&self) -> SequenceNumber;
 
     /// Forks this (immutable) memtable and returns a new mutable memtable with specific memtable `id`.
     ///
