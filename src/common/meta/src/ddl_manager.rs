@@ -247,19 +247,21 @@ pub trait RepartitionProcedureFactory: Send + Sync {
 /// The options for DDL tasks.
 ///
 /// Note: These options may not be utilized by all procedures.
-/// Repartition uses the timeout as an execution budget. Truncate uses it to
-/// limit submission and waiting without cancelling the submitted procedure.
+/// At present, they are specifically applied in `RepartitionProcedure` and truncate tasks.
 #[derive(Debug, Clone, Copy)]
 pub struct DdlOptions {
-    /// Repartition passes this to the procedure as an execution budget.
-    /// Truncate bounds submission and waiting, without passing it to the procedure.
+    /// The timeout will be passed to the procedure.
+    ///
+    /// Note: Each procedure may implement its own timeout handling mechanism.
+    /// For truncate tasks, the timeout bounds submission and waiting rather than procedure execution.
+    /// A timeout does not cancel a submitted procedure.
     pub timeout: Duration,
     /// The flag that controls whether to wait for the procedure to complete.
     ///
-    /// If wait is `true`, the caller waits for completion (success or failure) and receives the result.
+    /// If wait is `true`, the procedure will wait for completion(success or failure) and the result will be returned.
     /// Otherwise, the procedure will be submitted and return the [ProcedureId](common_procedure::ProcedureId) immediately.
     ///
-    /// Other DDL paths do not yet honor these options.
+    /// Note: Except for truncate tasks, the value of `wait` is independent of the `timeout` option. If a procedure ignores the `timeout` and `wait` is set to true, the operation returns until the procedure completes.
     pub wait: bool,
 }
 
@@ -454,13 +456,8 @@ impl DdlManager {
             .context(PersistRepartitionGcRequirementSnafu)?;
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
-        if wait {
-            self.execute_procedure_and_wait(procedure_with_id).await
-        } else {
-            self.submit_procedure(procedure_with_id)
-                .await
-                .map(|p| (p, None))
-        }
+        self.execute_procedure_with_options(procedure_with_id, DdlOptions { wait, timeout })
+            .await
     }
 
     /// Submits and executes an alter table task.
@@ -912,7 +909,7 @@ impl DdlManager {
 
     /// Submits a procedure and optionally waits for completion.
     ///
-    /// The task handler bounds the whole request, including metadata reads.
+    /// The truncate task handler bounds its whole request, including metadata reads.
     /// The manager drives submitted procedures independently of this future.
     async fn execute_procedure_with_options(
         &self,

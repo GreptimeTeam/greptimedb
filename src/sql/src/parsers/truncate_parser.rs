@@ -18,7 +18,7 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidSqlSnafu, InvalidTableNameSnafu, Result, UnexpectedTokenSnafu};
 use crate::parser::ParserContext;
-use crate::parsers::utils::parse_ddl_options;
+use crate::parsers::utils;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
 
@@ -47,7 +47,7 @@ impl ParserContext<'_> {
 
         // if no range is specified, we just truncate the table
         if !have_range {
-            let options = parse_ddl_options(&mut self.parser)?;
+            let options = utils::parse_ddl_options(&mut self.parser)?;
             return Ok(Statement::TruncateTable(
                 TruncateTable::new(table_ident).with_options(options),
             ));
@@ -133,7 +133,7 @@ impl ParserContext<'_> {
             }
         }
 
-        let options = parse_ddl_options(&mut self.parser)?;
+        let options = utils::parse_ddl_options(&mut self.parser)?;
         Ok(Statement::TruncateTable(
             TruncateTable::new_with_ranges(table_ident, time_ranges).with_options(options),
         ))

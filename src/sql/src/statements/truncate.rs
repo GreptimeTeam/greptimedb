@@ -111,7 +111,9 @@ impl Display for TruncateTable {
             )?;
         }
         if !self.options.is_empty() {
-            write!(f, " WITH ({})", self.options.kv_pairs().join(", "))?;
+            f.write_str(" WITH (")?;
+            self.options.write_sql(f, ", ", "", false)?;
+            f.write_str(")")?;
         }
         Ok(())
     }

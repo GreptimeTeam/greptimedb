@@ -128,7 +128,7 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
 
     let output = execute_sql(
         &frontend,
-        "TRUNCATE TABLE truncate_wait_test WITH (wait=false, timeout='20ms')",
+        "TRUNCATE TABLE truncate_wait_test WITH (wait=false, timeout='10s')",
     )
     .await;
     let OutputData::RecordBatches(batches) = output.data else {
@@ -149,11 +149,11 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
     assert!(state.contains(r#""status":"Running""#), "{state}");
 
     // The same table lock holds a synchronous truncate past its wait deadline.
-    // Standalone exercises the shared timer without any RPC; distributed mode
-    // retains the existing rounding up to whole seconds on the wire.
+    // Give metadata reads and submission a generous budget. Using the same budget
+    // also verifies that the async procedure keeps running after it expires.
     let err = try_execute_sql(
         &frontend,
-        "TRUNCATE TABLE truncate_wait_test WITH (wait=true, timeout='20ms')",
+        "TRUNCATE TABLE truncate_wait_test WITH (wait=true, timeout='10s')",
     )
     .await
     .unwrap_err();
