@@ -122,6 +122,19 @@ CREATE TABLE IF NOT EXISTS aggr_optimize_not_count (
 ) PARTITION ON COLUMNS (a, b, c) (a < 'b', a >= 'b',);
 
 -- Case 6: Test average rate (sum/count like)
+-- Populate both partitions on both sides so the join cannot short-circuit on
+-- empty input and omit remote ANALYZE plans depending on execution timing.
+INSERT INTO aggr_optimize_not VALUES
+  ('a', 'b', 'c', 'd', 1752591840000, 10),
+  ('a', 'b', 'c', 'd', 1752591860000, 20),
+  ('c', 'b', 'c', 'd', 1752591840000, 30),
+  ('c', 'b', 'c', 'd', 1752591860000, 40);
+INSERT INTO aggr_optimize_not_count VALUES
+  ('a', 'b', 'c', 'd', 1752591840000, 1),
+  ('a', 'b', 'c', 'd', 1752591860000, 2),
+  ('c', 'b', 'c', 'd', 1752591840000, 3),
+  ('c', 'b', 'c', 'd', 1752591860000, 4);
+
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -138,6 +151,9 @@ tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize_not [2m])) / sum by (a, b, c) (rate(aggr_optimize_not_count [2m]));
 
 -- Case 7: aggregate without sort should be pushed down. This one push down for include all partition columns.
+TRUNCATE TABLE aggr_optimize_not;
+TRUNCATE TABLE aggr_optimize_not_count;
+
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
