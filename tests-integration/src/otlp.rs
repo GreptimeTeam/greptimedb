@@ -741,22 +741,22 @@ mod test {
   PRIMARY KEY ("service_name")
 )
 PARTITION ON COLUMNS ("trace_id") (
-  trace_id < '1',
-  trace_id >= '1' AND trace_id < '2',
-  trace_id >= '2' AND trace_id < '3',
-  trace_id >= '3' AND trace_id < '4',
-  trace_id >= '4' AND trace_id < '5',
-  trace_id >= '5' AND trace_id < '6',
-  trace_id >= '6' AND trace_id < '7',
-  trace_id >= '7' AND trace_id < '8',
-  trace_id >= '8' AND trace_id < '9',
-  trace_id >= '9' AND trace_id < 'a',
-  trace_id >= 'a' AND trace_id < 'b',
-  trace_id >= 'b' AND trace_id < 'c',
-  trace_id >= 'c' AND trace_id < 'd',
-  trace_id >= 'd' AND trace_id < 'e',
-  trace_id >= 'e' AND trace_id < 'f',
-  trace_id >= 'f'
+  "trace_id" < '1',
+  "trace_id" >= '1' AND "trace_id" < '2',
+  "trace_id" >= '2' AND "trace_id" < '3',
+  "trace_id" >= '3' AND "trace_id" < '4',
+  "trace_id" >= '4' AND "trace_id" < '5',
+  "trace_id" >= '5' AND "trace_id" < '6',
+  "trace_id" >= '6' AND "trace_id" < '7',
+  "trace_id" >= '7' AND "trace_id" < '8',
+  "trace_id" >= '8' AND "trace_id" < '9',
+  "trace_id" >= '9' AND "trace_id" < 'a',
+  "trace_id" >= 'a' AND "trace_id" < 'b',
+  "trace_id" >= 'b' AND "trace_id" < 'c',
+  "trace_id" >= 'c' AND "trace_id" < 'd',
+  "trace_id" >= 'd' AND "trace_id" < 'e',
+  "trace_id" >= 'e' AND "trace_id" < 'f',
+  "trace_id" >= 'f'
 )
 ENGINE=mito
 WITH(
