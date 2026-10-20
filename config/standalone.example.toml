@@ -733,8 +733,9 @@ skip_ssl_validation = false
 ##   GREPTIMEDB_STANDALONE__REGION_ENGINE__MITO__GLOBAL_WRITE_BUFFER_REJECT_SIZE="4GB"
 ##   GREPTIMEDB_STANDALONE__REGION_ENGINE__METRIC__FLUSH_METADATA_REGION_INTERVAL="1m"
 ## Such a variable patches only the named engine entry, on top of that entry's own defaults;
-## fields and engine entries it does not mention keep their configured value. Only `mito` and
-## `file` are enabled by default, naming `metric` appends it.
+## fields and engine entries it does not mention keep their configured value. The default
+## configuration lists `mito` and `file`; `metric` is always registered, so naming it only
+## supplies its options rather than enabling the engine.
 ## Note: as with any other array-valued option, once a `[[region_engine]]` entry appears in the
 ## configuration file the whole list comes from the file, and these environment variables for it
 ## are ignored.
