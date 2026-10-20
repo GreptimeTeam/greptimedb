@@ -1249,15 +1249,16 @@ fn encode_batch_write_response(result: BatchRegionResponse<error::Error>) -> Reg
                 } else {
                     StatusCode::PartialFailure
                 } as u32,
-                err_msg: if result.failures.is_empty() {
-                    String::new()
-                } else {
-                    let (index, error) = &result.failures[0];
+                err_msg: if let Some((index, error)) =
+                    result.failures.iter().min_by_key(|(index, _)| *index)
+                {
                     format!(
                         "{} region requests failed; entry {index}: {}",
                         result.failures.len(),
                         error.output_msg()
                     )
+                } else {
+                    String::new()
                 },
                 ..Default::default()
             }),
@@ -2740,6 +2741,29 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.status_code(), StatusCode::RegionNotReady);
+    }
+
+    #[test]
+    fn test_batch_write_summary_uses_first_input_failure() {
+        let first = error::RegionNotFoundSnafu {
+            region_id: RegionId::new(1, 0),
+        }
+        .build();
+        let expected = format!("2 region requests failed; entry 0: {}", first.output_msg());
+        let later = error::RegionBusySnafu {
+            region_id: RegionId::new(1, 1),
+        }
+        .build();
+        let response = encode_batch_write_response(BatchRegionResponse {
+            affected_rows: 0,
+            extensions: HashMap::new(),
+            failures: vec![(1, later), (0, first)],
+        });
+        let status = response.header.unwrap().status.unwrap();
+        assert_eq!(status.status_code, StatusCode::PartialFailure as u32);
+        assert_eq!(status.err_msg, expected);
+        assert_eq!(response.failures[0].request_index, 1);
+        assert_eq!(response.failures[1].request_index, 0);
     }
 
     #[tokio::test]

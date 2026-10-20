@@ -1315,6 +1315,7 @@ mod tests {
 
     #[test]
     fn test_partial_error_preserves_status_and_retry_hint() {
+        let expected_message = "Region request has 2 failed entries; entry 0: first input failed";
         for code in [StatusCode::StorageUnavailable, StatusCode::InvalidArguments] {
             let response = PbRegionResponse {
                 header: Some(ResponseHeader {
@@ -1328,6 +1329,7 @@ mod tests {
                         request_index: 1,
                         status: Some(PbStatus {
                             status_code: StatusCode::Internal as u32,
+                            err_msg: "later input failed".to_string(),
                             ..Default::default()
                         }),
                     },
@@ -1335,8 +1337,8 @@ mod tests {
                         request_index: 0,
                         status: Some(PbStatus {
                             status_code: code as u32,
+                            err_msg: "first input failed".to_string(),
                             retry_hint: RetryHint::NonRetryable.as_str().to_string(),
-                            ..Default::default()
                         }),
                     },
                 ],
@@ -1344,9 +1346,11 @@ mod tests {
             };
             let error = decode_region_response(response, Some(2)).unwrap_err();
             assert_eq!(code, error.status_code());
+            assert_eq!(expected_message, error.to_string());
             assert_eq!(RetryHint::Retryable, error.retry_hint());
             let error: common_meta::error::Error = error.into();
             assert_eq!(code, error.status_code());
+            assert_eq!(expected_message, error.to_string());
             assert_eq!(RetryHint::Retryable, error.retry_hint());
             let common_meta::error::Error::PartialRegion { response } = error else {
                 panic!("expected partial result")
