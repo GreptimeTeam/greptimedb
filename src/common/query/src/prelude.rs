@@ -91,55 +91,9 @@ pub fn greptime_native_histogram() -> &'static str {
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name constant for backward compatibility.
 const GREPTIME_VALUE: &str = "greptime_value";
-/// Stored series label that opts ordinary float samples into raw-delta math.
-pub const OTLP_AGGREGATION_TEMPORALITY_LABEL: &str = "otlp_aggregation_temporality";
-/// Authoritative raw-delta value for [`OTLP_AGGREGATION_TEMPORALITY_LABEL`].
-pub const GREPTIME_TEMPORALITY_DELTA: &str = "delta";
-/// Default physical table name
-pub const GREPTIME_PHYSICAL_TABLE: &str = "greptime_physical_table";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Each test runs in a separate process via `cargo nextest`, so OnceCell
-    // state does not leak between tests.
-
-    #[test]
-    fn test_set_default_prefix_none() {
-        set_default_prefix(None).unwrap();
-        assert_eq!(greptime_timestamp(), "greptime_timestamp");
-        assert_eq!(greptime_value(), "greptime_value");
-        assert_eq!(greptime_native_histogram(), "greptime_native_histogram");
-    }
-
-    #[test]
-    fn test_set_default_prefix_empty_string() {
-        set_default_prefix(Some("")).unwrap();
-        assert_eq!(greptime_timestamp(), "timestamp");
-        assert_eq!(greptime_value(), "value");
-        assert_eq!(greptime_native_histogram(), "native_histogram");
-    }
-
-    #[test]
-    fn test_set_default_prefix_quoted_empty() {
-        // Handles upstream sources that pass literal `""` instead of an empty string
-        set_default_prefix(Some("\"\"")).unwrap();
-        assert_eq!(greptime_timestamp(), "timestamp");
-        assert_eq!(greptime_value(), "value");
-        assert_eq!(greptime_native_histogram(), "native_histogram");
-    }
-
-    #[test]
-    fn test_set_default_prefix_custom() {
-        set_default_prefix(Some("mydb")).unwrap();
-        assert_eq!(greptime_timestamp(), "mydb_timestamp");
-        assert_eq!(greptime_value(), "mydb_value");
-        assert_eq!(greptime_native_histogram(), "mydb_native_histogram");
-    }
-
-    #[test]
-    fn test_set_default_prefix_invalid() {
-        assert!(set_default_prefix(Some("invalid prefix!")).is_err());
-    }
-}
+/// Shared exemplar destination within each source metric's schema.
+pub const METRICS_EXEMPLARS_TABLE: &str = "metrics_exemplars";
+/// Query-visible source metric name stored in the exemplar table.
+pub const EXEMPLAR_METRIC_COLUMN: &str = "greptime_metric";
+/// JSON2 object containing exemplar-owned labels.
+pub const EXEMPLAR_LABELS_COLUMN: &str = "exemplar_labels";

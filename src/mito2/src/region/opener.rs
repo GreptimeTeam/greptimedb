@@ -403,6 +403,7 @@ impl RegionOpener {
             flushed_entry_id,
             region_manifest_options,
             sst_format,
+            options.append_mode,
             &self.stats,
         )
         .await?;
@@ -795,6 +796,10 @@ pub(crate) fn version_builder_from_manifest(
 
 /// Updates region options by persistent options.
 pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
+    options.primary_key_encoding = Some(manifest.metadata.primary_key_encoding);
+    if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+        options.sst_format = Some(FormatType::Flat);
+    }
     // Caller options take precedence over the manifest, except JSON2 always requires flat output.
     let format = options.sst_format.unwrap_or(manifest.sst_format);
     // Older versions allowed JSON2 with primary-key output; recover without rewriting its history.
@@ -1009,9 +1014,7 @@ where
             // columns like the write path, otherwise the memtable rejects the
             // batch. Skips sparse batches as they don't carry tag columns by
             // design.
-            if region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse {
-                part.fill_missing_columns(&region_metadata)?;
-            }
+            part.fill_missing_columns(&region_metadata)?;
             rows_replayed += part.num_rows();
             // During replay, we should adopt the sequence from WAL.
             let bulk_sequence_from_wal = part.sequence;
@@ -1447,6 +1450,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use store_api::codec::PrimaryKeyEncoding;
 
     use arrow_schema::extension::ExtensionType;
     use common_base::readable_size::ReadableSize;
@@ -1625,6 +1629,22 @@ mod tests {
         assert!(supports_open_region_object_storage_requirement(
             &object_store
         ));
+    }
+
+    #[test]
+    fn test_sparse_reopen_uses_persisted_encoding_and_flat_sst() {
+        for supplied in [None, Some(PrimaryKeyEncoding::Dense)] {
+            let mut manifest = build_test_manifest(FormatType::PrimaryKey);
+            Arc::make_mut(&mut manifest.metadata).primary_key_encoding = PrimaryKeyEncoding::Sparse;
+            let mut options = RegionOptions {
+                primary_key_encoding: supplied,
+                sst_format: Some(FormatType::PrimaryKey),
+                ..Default::default()
+            };
+            sanitize_region_options(&manifest, &mut options);
+            assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+            assert_eq!(options.sst_format, Some(FormatType::Flat));
+        }
     }
 
     #[test]

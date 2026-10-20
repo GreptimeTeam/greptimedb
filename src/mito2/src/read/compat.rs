@@ -113,11 +113,15 @@ impl FlatCompatBatch {
 
         if actual.primary_key_encoding == PrimaryKeyEncoding::Sparse && compaction {
             // Special handling for sparse encoding in compaction.
-            return FlatCompatBatch::try_new_compact_sparse(mapper, actual);
+            return FlatCompatBatch::try_new_compact_sparse(mapper, actual, &actual_schema);
         }
 
-        let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, expect_schema, mapper.metadata())?;
+        let (index_or_defaults, fields) = Self::compute_index_and_fields(
+            &actual_schema,
+            expect_schema,
+            mapper.metadata(),
+            &mapper.input_arrow_schema(compaction),
+        )?;
 
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
@@ -132,6 +136,7 @@ impl FlatCompatBatch {
         actual_schema: &[(ColumnId, ConcreteDataType)],
         expect_schema: &[(ColumnId, ConcreteDataType)],
         expect_metadata: &RegionMetadata,
+        expect_arrow_schema: &Schema,
     ) -> Result<(Vec<IndexOrDefault>, Vec<FieldRef>)> {
         // Maps column id to the index and data type in the actual schema.
         let actual_schema_index: HashMap<_, _> = actual_schema
@@ -158,11 +163,21 @@ impl FlatCompatBatch {
                     expect_column.column_id,
                 )));
             } else {
+                // Compaction can rewrite JSON2 into an expanded physical layout.
+                let data_type = if expect_data_type.is_json2() {
+                    expect_arrow_schema
+                        .field_with_name(&expect_column.column_schema.name)
+                        .context(NewRecordBatchSnafu)?
+                        .data_type()
+                        .clone()
+                } else {
+                    expect_data_type.as_arrow_type()
+                };
                 let field = with_field_id(
                     Arc::unwrap_or_clone(column_field.clone()),
                     expect_column.column_id,
                 )
-                .with_data_type(expect_data_type.as_arrow_type());
+                .with_data_type(data_type);
                 fields.push(Arc::new(field))
             };
 
@@ -197,11 +212,11 @@ impl FlatCompatBatch {
                     // `expect_data_type` may be a query-concretized JSON2 type,
                     // while region metadata still carries its unconcretized type.
                     // The default vector must match the target Arrow field above.
-                    Helper::try_into_vector(new_null_array(&expect_data_type.as_arrow_type(), 1))
+                    Helper::try_into_vector(new_null_array(fields.last().unwrap().data_type(), 1))
                         .context(CreateDefaultSnafu {
-                            region_id: expect_metadata.region_id,
-                            column: &expect_column.column_schema.name,
-                        })?
+                        region_id: expect_metadata.region_id,
+                        column: &expect_column.column_schema.name,
+                    })?
                 } else {
                     expect_column
                         .column_schema
@@ -232,32 +247,39 @@ impl FlatCompatBatch {
     fn try_new_compact_sparse(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
+        actual_schema: &[(ColumnId, ConcreteDataType)],
     ) -> Result<Option<Self>> {
         // Currently, we don't support converting sparse encoding back to dense encoding in
         // flat format.
         ensure!(
-            mapper.metadata().primary_key_encoding == PrimaryKeyEncoding::Sparse,
+            mapper.metadata().primary_key_encoding == actual.primary_key_encoding,
             UnsupportedOperationSnafu {
                 err_msg: "Flat format doesn't support converting sparse encoding back to dense encoding"
             }
         );
 
-        // For sparse encoding, we don't need to check the primary keys.
-        // Since this is for compaction, we always read all columns.
-        let actual_schema: Vec<_> = actual
-            .field_columns()
-            .chain([actual.time_index_column()])
-            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
+        // Encoded sparse tags are not materialized during compaction. Preserve
+        // the projected JSON2 types: metadata only describes their logical shape.
+        let actual_schema: Vec<_> = actual_schema
+            .iter()
+            .filter(|(id, _)| actual.column_by_id(*id).unwrap().semantic_type != SemanticType::Tag)
+            .cloned()
             .collect();
         let expect_schema: Vec<_> = mapper
-            .metadata()
-            .field_columns()
-            .chain([mapper.metadata().time_index_column()])
-            .map(|col| (col.column_id, col.column_schema.data_type.clone()))
+            .batch_schema()
+            .iter()
+            .filter(|(id, _)| {
+                mapper.metadata().column_by_id(*id).unwrap().semantic_type != SemanticType::Tag
+            })
+            .cloned()
             .collect();
 
-        let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, &expect_schema, mapper.metadata())?;
+        let (index_or_defaults, fields) = Self::compute_index_and_fields(
+            &actual_schema,
+            &expect_schema,
+            mapper.metadata(),
+            &mapper.input_arrow_schema(true),
+        )?;
 
         let compat_pk = FlatCompatPrimaryKey::default();
 
@@ -670,7 +692,6 @@ mod tests {
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
     };
-    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
@@ -687,7 +708,7 @@ mod tests {
     ) -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         for (id, semantic_type, data_type) in semantic_types {
-            let column_schema = match semantic_type {
+            let mut column_schema = match semantic_type {
                 SemanticType::Tag => {
                     ColumnSchema::new(format!("tag_{id}"), data_type.clone(), true)
                 }
@@ -696,6 +717,11 @@ mod tests {
                 }
                 SemanticType::Timestamp => ColumnSchema::new("ts", data_type.clone(), false),
             };
+            if data_type.is_json2() {
+                column_schema.with_extension_type(
+                    &datatypes::extension::json::Json2ExtensionType::default(),
+                );
+            }
 
             builder.push_column_metadata(ColumnMetadata {
                 column_schema,
@@ -835,10 +861,15 @@ mod tests {
         assert_eq!(expected_batch, result);
     }
 
-    #[test]
-    fn test_flat_compat_batch_uses_projected_json2_type() -> Result<()> {
+    #[rstest::rstest]
+    #[case(PrimaryKeyEncoding::Dense, false)]
+    #[case(PrimaryKeyEncoding::Sparse, true)]
+    fn test_flat_compat_batch_uses_projected_json2_type(
+        #[case] encoding: PrimaryKeyEncoding,
+        #[case] compaction: bool,
+    ) -> Result<()> {
         let json2 = ConcreteDataType::json2(JsonNativeType::object());
-        let actual_metadata = Arc::new(new_metadata(
+        let mut actual_metadata = Arc::new(new_metadata(
             &[
                 (
                     0,
@@ -849,7 +880,7 @@ mod tests {
             ],
             &[],
         ));
-        let expected_metadata = Arc::new(new_metadata(
+        let mut expected_metadata = Arc::new(new_metadata(
             &[
                 (
                     0,
@@ -861,6 +892,8 @@ mod tests {
             ],
             &[],
         ));
+        Arc::make_mut(&mut actual_metadata).primary_key_encoding = encoding;
+        Arc::make_mut(&mut expected_metadata).primary_key_encoding = encoding;
         let read_columns = ReadColumns::new([0, 1, 2])
             .with_json_target_types(BTreeMap::from([(1, JsonNativeType::Variant)]));
         let mapper = FlatProjectionMapper::new_with_read_columns(
@@ -870,7 +903,7 @@ mod tests {
         )?;
         let read_format = FlatReadFormat::new(actual_metadata, read_columns, None, "test", false)?;
 
-        let compat = FlatCompatBatch::try_new(&mapper, &read_format, false)?.unwrap();
+        let compat = FlatCompatBatch::try_new(&mapper, &read_format, compaction)?.unwrap();
         let json_index = mapper
             .batch_schema()
             .iter()
@@ -883,6 +916,10 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            compat.arrow_schema.field(json_index).data_type(),
+            &datatypes::arrow::datatypes::DataType::Binary
+        );
         Ok(())
     }
 

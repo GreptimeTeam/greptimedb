@@ -51,6 +51,7 @@ use crate::semantic::{
     METRIC_TYPE_UPDOWN_COUNTER,
 };
 
+mod exemplars;
 mod prepare;
 mod resource_info;
 
@@ -110,6 +111,8 @@ const MAX_REJECTION_MESSAGE_BYTES: usize = 512;
 /// Result of converting one OTLP metrics request.
 #[derive(Debug)]
 pub struct MetricsConversion {
+    pub exemplars: RowInsertRequests,
+    pub exemplar_rows: usize,
     pub requests: RowInsertRequests,
     /// Row count of `requests`; the resource descriptor is not counted.
     pub rows: usize,
@@ -391,6 +394,7 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_metrics(
     table_writer: &mut MultiTableData,
     metric: &Metric,
@@ -399,6 +403,7 @@ fn encode_metrics(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let name = &metadata.name;
 
@@ -412,6 +417,7 @@ fn encode_metrics(
                     resource_attrs,
                     scope_attrs,
                     metric_ctx,
+                    exemplars,
                 )?;
                 add_accepted_data_points(outcome, gauge.data_points.len())?;
             }
@@ -423,6 +429,7 @@ fn encode_metrics(
                     resource_attrs,
                     scope_attrs,
                     metric_ctx,
+                    exemplars,
                 )?;
                 add_accepted_data_points(outcome, sum.data_points.len())?;
             }
@@ -445,6 +452,7 @@ fn encode_metrics(
                 scope_attrs,
                 metric_ctx,
                 outcome,
+                exemplars,
             )?,
             metric::Data::ExponentialHistogram(hist) => encode_exponential_histogram(
                 table_writer,
@@ -454,6 +462,7 @@ fn encode_metrics(
                 scope_attrs,
                 metric_ctx,
                 outcome,
+                exemplars,
             )?,
         }
     }
@@ -538,6 +547,7 @@ fn append_rejection_message(message: &mut Option<String>, reason: impl FnOnce() 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_exponential_histogram(
     table_writer: &mut MultiTableData,
     metadata: &MetricMetadata,
@@ -546,6 +556,7 @@ fn encode_exponential_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let name = &metadata.name;
     let temporality = match exponential_histogram_gate(histogram) {
@@ -605,6 +616,14 @@ fn encode_exponential_histogram(
             table,
             std::iter::once((column_schema.clone(), Some(value))),
             &mut row,
+        )?;
+        exemplars::append(
+            exemplars,
+            &data_point.exemplars,
+            name,
+            table,
+            &row,
+            metric_ctx,
         )?;
         table.add_row(row);
         add_accepted_data_points(outcome, 1)?;
@@ -1026,6 +1045,7 @@ fn encode_gauge(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -1046,6 +1066,14 @@ fn encode_gauge(
         )?;
 
         write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
+        exemplars::append(
+            exemplars,
+            &data_point.exemplars,
+            name,
+            table,
+            &row,
+            metric_ctx,
+        )?;
         table.add_row(row);
     }
 
@@ -1061,6 +1089,7 @@ fn encode_sum(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let is_delta = matches!(
         AggregationTemporality::try_from(sum.aggregation_temporality),
@@ -1094,6 +1123,14 @@ fn encode_sum(
         } else {
             write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
         }
+        exemplars::append(
+            exemplars,
+            &data_point.exemplars,
+            name,
+            table,
+            &row,
+            metric_ctx,
+        )?;
         table.add_row(row);
     }
 
@@ -1115,6 +1152,7 @@ const HISTOGRAM_LE_COLUMN: &str = "le";
 /// quantile functions on this table.
 /// Delta points retain their temporality tag and interval values. Bucket counts
 /// are prefix-summed within each point, never accumulated across timestamps.
+#[allow(clippy::too_many_arguments)]
 fn encode_histogram(
     table_writer: &mut MultiTableData,
     name: &str,
@@ -1123,6 +1161,7 @@ fn encode_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let normalized_name = name;
 
@@ -1185,7 +1224,23 @@ fn encode_histogram(
             }
             values
         };
-        for (bound, value) in bucket_values {
+        let mut by_bucket = vec![Vec::new(); bucket_values.len()];
+        for exemplar in &data_point.exemplars {
+            let value = exemplars::value(exemplar)?;
+            let bucket = bucket_values
+                .iter()
+                .position(|(bound, _)| {
+                    value <= *bound || (value.is_nan() && *bound == f64::INFINITY)
+                })
+                .ok_or_else(|| {
+                    error::InvalidOtlpMetricInputSnafu {
+                        reason: "exemplar does not belong to an emitted histogram bucket",
+                    }
+                    .build()
+                })?;
+            by_bucket[bucket].push(exemplar);
+        }
+        for ((bound, value), bucket_exemplars) in bucket_values.into_iter().zip(by_bucket) {
             let mut bucket_row = bucket_table.alloc_one_row();
             write_tags_and_timestamp(
                 bucket_table,
@@ -1197,9 +1252,18 @@ fn encode_histogram(
                 metric_ctx,
             )?;
             write_temporality_tag(bucket_table, &mut bucket_row, is_delta)?;
+            // Preserve existing OTLP series identities, including the "inf" bucket.
             row_writer::write_tag(bucket_table, HISTOGRAM_LE_COLUMN, bound, &mut bucket_row)?;
             row_writer::write_f64(bucket_table, greptime_value(), value, &mut bucket_row)?;
 
+            exemplars::append(
+                exemplars,
+                bucket_exemplars,
+                &bucket_table_name,
+                bucket_table,
+                &bucket_row,
+                metric_ctx,
+            )?;
             bucket_table.add_row(bucket_row);
         }
 
@@ -1745,6 +1809,7 @@ mod tests {
             Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
+            &mut Vec::new(),
         )
         .unwrap();
 
@@ -1795,6 +1860,7 @@ mod tests {
             Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
+            &mut Vec::new(),
         )
         .unwrap();
 
@@ -1931,6 +1997,7 @@ mod tests {
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
             &mut outcome,
+            &mut Vec::new(),
         )
         .unwrap();
 

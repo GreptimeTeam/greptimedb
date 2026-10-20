@@ -1576,6 +1576,64 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_storage_failure_retains_other_destination() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        for metric_fails in [false, true] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_partial")
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let ctx = QueryContext::arc();
+            let (failed, retained) = if metric_fails {
+                ("exemplar_partial_total", "metrics_exemplars")
+            } else {
+                ("metrics_exemplars", "exemplar_partial_total")
+            };
+            instance
+                .do_query(
+                    &format!(
+                        "CREATE TABLE {failed} (ts TIMESTAMP TIME INDEX, greptime_value STRING)"
+                    ),
+                    ctx.clone(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+            let mut request = build_sum_request(
+                "exemplar.partial",
+                AggregationTemporality::Cumulative,
+                &[(10, 1)],
+            );
+            let Some(metric::Data::Sum(sum)) =
+                &mut request.resource_metrics[0].scope_metrics[0].metrics[0].data
+            else {
+                unreachable!()
+            };
+            sum.data_points[0].exemplars.push(Exemplar {
+                time_unix_nano: 10_123_456_789,
+                value: Some(exemplar::Value::AsDouble(0.75)),
+                ..Default::default()
+            });
+            assert!(instance.metrics(request, ctx.clone()).await.is_err());
+            let output = instance
+                .do_query(&format!("SELECT COUNT(*) FROM {retained}"), ctx)
+                .await
+                .remove(0)
+                .unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                unreachable!()
+            };
+            let rows = RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap();
+            assert!(rows.contains("| 1        |"), "{retained}: {rows}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     pub async fn test_otlp_on_standalone() {
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_otlp")
             .build()

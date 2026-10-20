@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod options;
+mod progress;
+pub use progress::TrackedWrite;
 #[cfg(test)]
 mod tests;
 
@@ -210,6 +212,7 @@ impl WriteDispatcher {
                     RoutedWrite {
                         peer,
                         request: Arc::new(request),
+                        owners: None,
                     },
                     histogram,
                 )
@@ -363,6 +366,7 @@ struct WriteRetry {
 pub(crate) struct RoutedWrite {
     peer: PeerRef,
     request: Arc<RegionRequest>,
+    owners: Option<Vec<usize>>,
 }
 
 impl WriteRetry {
@@ -544,12 +548,17 @@ impl WriteRetry {
                     err_msg: "Refreshed write has no partition snapshot",
                 })?;
             let requests = partitioner
-                .rebuild_write_requests(request, table_info)
+                .rebuild_tracked_write_requests(request, table_info, write.owners)
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
             rebuilt_requests.extend(requests);
         }
-        self.prepare(rebuilt_requests).await
+        let (requests, owners): (Vec<_>, Vec<_>) = rebuilt_requests.into_iter().unzip();
+        let mut writes = self.prepare(requests).await?;
+        for (write, owners) in writes.iter_mut().zip(owners) {
+            write.owners = owners;
+        }
+        Ok(writes)
     }
 
     async fn prepare(&self, requests: Vec<RegionRequest>) -> Result<Vec<RoutedWrite>> {
@@ -568,6 +577,7 @@ impl WriteRetry {
                 Ok(RoutedWrite {
                     peer: get_peer(&peers, region)?,
                     request: Arc::new(request),
+                    owners: None,
                 })
             })
             .collect()

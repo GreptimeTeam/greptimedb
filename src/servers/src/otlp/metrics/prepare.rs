@@ -56,6 +56,7 @@ struct PreparedPoint {
     resource: usize,
     timestamp: i64,
     rows: Range<usize>,
+    exemplars: Vec<crate::exemplar::Exemplar>,
 }
 
 #[derive(Default)]
@@ -213,6 +214,7 @@ impl PreparedMetrics {
         let invalid_interval =
             !matches!(metric.data, Some(metric::Data::Gauge(_))) && start > timestamp;
         let mut outcome = MetricsIngestOutcome::default();
+        let mut exemplars = Vec::new();
         let encoded = if !exponential && (timestamp > i64::MAX as u64 || invalid_interval) {
             Err(error::InvalidOtlpMetricInputSnafu {
                 reason: "invalid OTLP data-point timestamp or interval",
@@ -227,6 +229,7 @@ impl PreparedMetrics {
                 scope_attrs,
                 ctx,
                 &mut outcome,
+                &mut exemplars,
             )
         };
         if let Err(err) = encoded {
@@ -313,6 +316,7 @@ impl PreparedMetrics {
             resource,
             timestamp: timestamp as i64,
             rows: first_row..self.row_locations.len(),
+            exemplars,
         });
         Ok(true)
     }
@@ -330,6 +334,11 @@ impl PreparedMetrics {
     /// Number of source points that survived payload conversion.
     pub fn num_points(&self) -> usize {
         self.points.len()
+    }
+
+    /// Whether any prepared point emits rows to the shared exemplar table.
+    pub fn has_exemplars(&self) -> bool {
+        self.points.iter().any(|point| !point.exemplars.is_empty())
     }
 
     fn validate_batches(&self) -> Result<()> {
@@ -426,6 +435,7 @@ impl PreparedMetrics {
         let mut semantic_index = SemanticIndex::default();
         let mut resource_info = ResourceInfoData::default();
         let mut resource_times = vec![Vec::new(); self.resources.len()];
+        let mut exemplars = Vec::new();
         for (point, rejection) in std::mem::take(&mut self.points).into_iter().zip(rejections) {
             if let Some(reason) = rejection {
                 let metadata = &self.metrics[point.metric];
@@ -485,6 +495,7 @@ impl PreparedMetrics {
                 }
             }
             add_accepted_data_points(&mut self.outcome, 1)?;
+            exemplars.extend(point.exemplars);
             if !self.resources[point.resource].is_empty() {
                 resource_times[point.resource].push(point.timestamp);
             }
@@ -538,7 +549,10 @@ impl PreparedMetrics {
                 METADATA_QUALITY_DECLARED,
             );
         }
+        let (exemplars, exemplar_rows) = crate::exemplar::into_rows(exemplars)?;
         Ok(MetricsConversion {
+            exemplars,
+            exemplar_rows,
             requests,
             rows,
             semantic_index,
