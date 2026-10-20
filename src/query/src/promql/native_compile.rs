@@ -16,20 +16,24 @@
 //!
 //! This is the front half of the native evaluation model: it reads the parsed statement and writes
 //! down what it means as bound nodes. It runs nothing, and nothing calls it yet, so the subset it
-//! accepts is deliberately one shape:
+//! accepts is deliberately two shapes:
 //!
 //! ```text
+//! <selector>                              e.g. x
 //! <range function>(<selector>[<range>])   e.g. rate(x[5m])
 //! ```
 //!
-//! which becomes `Input` (raw samples) → `Window` (the range function over the statement's grid).
-//! Everything else is a [`DataFusionError::NotImplemented`] that names what was found and quotes
-//! the shape above, because rejecting a query the compiler does not understand is the only honest
-//! alternative to compiling it into something else.
+//! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback)
+//! and `Input` (raw samples) → `Window` (the range function over the statement's grid). A selector
+//! may carry `offset` in either shape and, in the window shape, an `@` anchor. Everything else is a
+//! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
+//! because rejecting a query the compiler does not understand is the only honest alternative to
+//! compiling it into something else.
 //!
-//! The statement's grid and the selector's window are the only numbers derived here; the legality
-//! of the tree is not checked here. [`NativeTree::try_new`] is the single authority on that, so a
-//! node added later cannot be legal in one place and illegal in another.
+//! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
+//! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
+//! single authority on that, so a node added later cannot be legal in one place and illegal in
+//! another.
 
 use std::sync::Arc;
 
@@ -38,17 +42,21 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use promql::native::plan::{
-    BoundInput, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundInput, BoundInstant, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
-use promql_parser::parser::{Call, EvalStmt, Expr as PromExpr, MatrixSelector, Offset};
+use promql_parser::parser::{
+    AtModifier, Call, EvalStmt, Expr as PromExpr, MatrixSelector, Offset, VectorSelector,
+};
 
 use crate::promql::label_values::signed_millis_since_epoch;
 
-/// The one shape this compiler accepts, quoted in every rejection.
-const SUPPORTED: &str = "`<range function>(<selector>[<range>])`, for example `rate(x[5m])`";
+/// The shapes this compiler accepts, quoted in every rejection.
+const SUPPORTED: &str = "a bare selector or `<range function>(<selector>[<range>])`, for example \
+                         `x` or `rate(x[5m])`";
 
-/// Compiles `stmt` into a tree that reads `input` and folds it with the statement's one window.
+/// Compiles `stmt` into a tree that reads `input` and either selects from it or folds it with the
+/// statement's one window.
 ///
 /// `input` is the raw series schema the caller bound from the table, and the caller has to apply the
 /// selector's matchers before binding it: `__field__`, `__schema__` and `__database__` select rows
@@ -75,6 +83,10 @@ pub fn compile(
     input: Arc<SeriesSchema>,
     ordering: SeriesOrdering,
 ) -> Result<NativeTree> {
+    // A bare selector is the other shape: an instant selection over the same raw input.
+    if let PromExpr::VectorSelector(selector) = unparen(&stmt.expr) {
+        return instant_selection(stmt, selector, input, ordering);
+    }
     let PromExpr::Call(Call { func, args }) = unparen(&stmt.expr) else {
         return Err(not_implemented(&format!("the expression `{}`", stmt.expr)));
     };
@@ -107,18 +119,11 @@ pub fn compile(
              series may not interleave",
         ));
     }
-    // An `@`-anchored selector fixes its window instead of following the evaluation grid, which the
-    // native model binds as an absolute millisecond anchor. Resolving `@` into that value is not
-    // part of this subset, so the anchor is refused rather than dropped.
-    if vs.at.is_some() {
-        return Err(not_implemented(&format!(
-            "a call to `{}` over an `@`-anchored selector, whose anchor is not resolved into an \
-             absolute millisecond value yet and so cannot be bound",
-            func.name
-        )));
-    }
+    // An `@` anchor is step-invariant: every step folds the same samples, which the window's
+    // `anchor_ms` tells `RangeEvaluator` to replay over the grid.
     let range_ms = range_millis(range.as_millis())?;
     let offset_ms = selector_offset_ms(&vs.offset)?;
+    let anchor_ms = selector_anchor_ms(&vs.at, stmt)?;
     // The grid is the last thing built: a query refused above, or a window that cannot exist,
     // never pays for a grid nothing would read.
     let output_grid = statement_grid(stmt)?;
@@ -148,11 +153,62 @@ pub fn compile(
                 window: RangeWindow {
                     range_ms,
                     offset_ms,
-                    // Only `@` sets an anchor, and an anchored selector is rejected above.
-                    anchor_ms: None,
+                    anchor_ms,
                 },
                 // The input is raw samples, so it has no grid of its own.
                 input_grid: None,
+                output_grid,
+            },
+        },
+        output,
+    })
+}
+
+/// Compiles a bare selector into an instant selection over the raw input.
+///
+/// The lookback, the offset and the grid are the whole of an instant selection: it reports the last
+/// sample at or before each grid point, within the statement's lookback.
+fn instant_selection(
+    stmt: &EvalStmt,
+    selector: &VectorSelector,
+    input: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
+) -> Result<NativeTree> {
+    // An `@` anchor is bound on a range window, which carries `anchor_ms`; an instant selection has
+    // no such field, so the anchor has nowhere to go. Refusing it is the only alternative to
+    // dropping it, which would silently select around every grid point instead of one anchor.
+    if selector.at.is_some() {
+        return Err(not_implemented(&format!(
+            "the `@`-anchored selector `{selector}`, whose anchor the instant selection node has \
+             no field for: an instant selection binds a lookback, an offset and a grid, while \
+             anchoring is bound on a range window, as in `rate(x[5m] @ 1234)`"
+        )));
+    }
+    let lookback_ms = lookback_millis(stmt.lookback_delta.as_millis())?;
+    let offset_ms = selector_offset_ms(&selector.offset)?;
+    let output_grid = statement_grid(stmt)?;
+
+    // An instant selection reports one value per input field, so the layout is the input's.
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: Arc::clone(&input.fields),
+        eval_grid: Some(Arc::clone(&output_grid)),
+    }));
+
+    // One allocation shared by the binding and the node's output, as in the window shape.
+    let raw = NativeType::Samples(input);
+
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: raw.clone(),
+                    ordering,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms,
+                offset_ms,
                 output_grid,
             },
         },
@@ -197,6 +253,37 @@ fn range_millis(range: u128) -> Result<i64> {
         )));
     }
     Ok(range_ms)
+}
+
+/// The statement's lookback in milliseconds, which is how far back an instant selection reads.
+fn lookback_millis(lookback: u128) -> Result<i64> {
+    millis(lookback).ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "the statement's lookback of {lookback}ms is out of range"
+        ))
+    })
+}
+
+/// The selector's `@` anchor in milliseconds since the Unix epoch, or `None` when it has none.
+///
+/// `start()` and `end()` stay symbolic in the AST, because only the statement knows which evaluation
+/// range they name, so they are resolved against `stmt.start` and `stmt.end` here. The offset is not
+/// folded in: [`RangeWindow`] keeps anchor and offset apart and ends the window at
+/// `anchor_ms - offset_ms` at run time.
+///
+/// An anchor decouples the window's read range from the statement's: it reads
+/// `(anchor_ms - offset_ms - range_ms, anchor_ms - offset_ms]`, which for an anchor like `@ 1234` can
+/// lie entirely outside `[stmt.start - range_ms, stmt.end]`. Whoever binds the scan therefore has to
+/// derive its range from the window's anchor, offset and range rather than from `stmt.start` and
+/// `stmt.end`; a scan bound to the statement alone leaves such a window with no samples, and the
+/// query silently returns empty instead of failing.
+fn selector_anchor_ms(at: &Option<AtModifier>, stmt: &EvalStmt) -> Result<Option<i64>> {
+    match at {
+        None => Ok(None),
+        Some(AtModifier::Start) => Ok(Some(signed_millis_since_epoch(stmt.start)?)),
+        Some(AtModifier::End) => Ok(Some(signed_millis_since_epoch(stmt.end)?)),
+        Some(AtModifier::At(time)) => Ok(Some(signed_millis_since_epoch(*time)?)),
+    }
 }
 
 /// The selector's offset in milliseconds; positive reads earlier samples.
