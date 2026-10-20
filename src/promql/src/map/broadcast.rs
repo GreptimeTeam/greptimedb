@@ -16,13 +16,11 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesSchema};
-use datatypes::series::time::GridRange;
+use datatypes::series::samples::{FieldSpec, Series, SeriesSchema};
+use datatypes::series::time::TimeAxis;
 
 use crate::grid_series::GridSeriesBuilder;
-use crate::map::{
-    ArithmeticOp, Comparison, drop_metric_name, float_sample, series_error, validate_float_series,
-};
+use crate::map::{ArithmeticOp, Comparison, drop_metric_name, float_sample, validate_float_series};
 
 /// A time-varying, unlabelled single-field scalar, with explicit operand direction.
 #[derive(Clone, Copy, Debug)]
@@ -35,11 +33,14 @@ pub enum ScalarSeriesOperand<'a> {
 /// index, and drops the metric name.
 ///
 /// Prometheus scalars exist at every step; a missing scalar point here yields a missing output.
-/// The output is trimmed to its first and last valid rows, and `None` means no valid row. The
-/// scalar must be unlabelled and single-field on the same grid; histogram/mixed/raw inputs are
-/// rejected even outside the overlap. Two unlabelled single-field inputs also evaluate
-/// scalar–scalar operations. Same-labelset merging is left to the caller, as in
-/// [`crate::map::map_math`].
+/// The output covers the valid rows and nothing else, and `None` means there is none. A scalar
+/// point holding no value is a hole in the one result series, not the end of a piece: the axis
+/// names the runs of consecutive valid positions. The scalar must be unlabelled and single-field
+/// on the same grid; histogram/mixed/raw inputs are rejected even outside the overlap. Both
+/// operands may skip positions: only the positions both carry are evaluated, and the two axes are
+/// aligned by intersecting their runs, never by subtracting one axis' first position from the
+/// other's indices. Two unlabelled single-field inputs also evaluate scalar–scalar operations.
+/// Same-labelset merging is left to the caller, as in [`crate::map::map_math`].
 pub fn map_arithmetic_series(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
@@ -55,7 +56,7 @@ pub fn map_arithmetic_series(
 /// Compares against a time-varying scalar. Filter keeps vector values and labels; bool emits
 /// 0/1 and drops the metric name.
 ///
-/// Shares [`map_arithmetic_series`]'s alignment and trimming contract. Each field is compared
+/// Shares [`map_arithmetic_series`]'s alignment and row-keeping contract. Each field is compared
 /// independently; a row is kept where any field passes a filter.
 pub fn map_compare_series(
     schema: &Arc<SeriesSchema>,
@@ -81,50 +82,52 @@ fn map_grid_scalar(
     metric: MetricName,
     calculate: impl Fn(f64, f64, f64) -> Option<f64>,
 ) -> Result<Option<Series>> {
-    let vector_range = validate_float_series(schema, vector)?;
+    let vector_time = validate_float_series(schema, vector)?;
     let (scalar_series, scalar_left) = match scalar {
         ScalarSeriesOperand::Left(s) => (s, true),
         ScalarSeriesOperand::Right(s) => (s, false),
     };
-    let scalar_range = validate_scalar(schema, scalar_series)?;
-    let start = vector_range.start().max(scalar_range.start());
-    let end =
-        (vector_range.start() + vector_range.len()).min(scalar_range.start() + scalar_range.len());
+    let scalar_time = validate_scalar(schema, scalar_series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    if start >= end {
-        return builder.finish(metric);
-    }
-    let len = end - start;
-    let scalar_samples = scalar_series.fields.as_slice()[0]
-        .slice(start - scalar_range.start(), len)
-        .map_err(series_error)?;
-    let fields = vector
+    // The shared runs carry both compact rows, so each operand reads its own field from the row
+    // its own axis assigns to the position. A position only one side carries is missing anyway:
+    // the pairing would be missing, and the builder keeps no row for it.
+    let mut scalar_samples = scalar_series.fields.as_slice()[0].cursor();
+    let mut field_samples = vector
         .fields
         .iter()
-        .map(|field| field.slice(start - vector_range.start(), len))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(series_error)?;
-    let mut fields = fields.iter().map(Samples::iter).collect::<Vec<_>>();
-    let mut row = Vec::with_capacity(fields.len());
-    for (offset, scalar) in scalar_samples.iter().enumerate() {
-        let scalar = float_sample(scalar);
-        row.clear();
-        for field in &mut fields {
-            let sample = float_sample(field.next().expect("sliced to the same length"));
-            row.push(scalar.zip(sample).and_then(|(scalar, sample)| {
-                if scalar_left {
-                    calculate(scalar, sample, sample)
-                } else {
-                    calculate(sample, scalar, sample)
-                }
-            }));
+        .map(|field| field.cursor())
+        .collect::<Vec<_>>();
+    let mut row = Vec::with_capacity(field_samples.len());
+    for pair in vector_time.intersect_runs(scalar_time) {
+        for offset in 0..pair.len {
+            let scalar = float_sample(
+                scalar_samples
+                    .at(pair.other_row + offset)
+                    .expect("the shared run lies inside the scalar axis"),
+            );
+            row.clear();
+            for field in &mut field_samples {
+                let sample = float_sample(
+                    field
+                        .at(pair.row + offset)
+                        .expect("the shared run lies inside the vector axis"),
+                );
+                row.push(scalar.zip(sample).and_then(|(scalar, sample)| {
+                    if scalar_left {
+                        calculate(scalar, sample, sample)
+                    } else {
+                        calculate(sample, scalar, sample)
+                    }
+                }));
+            }
+            builder.push(pair.position + offset, &row)?;
         }
-        builder.push(start + offset, &row)?;
     }
     builder.finish(metric)
 }
 
-fn validate_scalar<'a>(schema: &SeriesSchema, scalar: &'a Series) -> Result<&'a GridRange> {
+fn validate_scalar<'a>(schema: &SeriesSchema, scalar: &'a Series) -> Result<&'a TimeAxis> {
     if scalar.metric.name().is_some() || !scalar.metric.tags().is_empty() {
         return Err(DataFusionError::Execution(
             "grid scalar must be unlabelled".into(),

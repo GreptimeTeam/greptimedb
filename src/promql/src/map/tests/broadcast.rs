@@ -33,13 +33,6 @@ fn scalar(schema: &SeriesSchema, start: usize, samples: Samples) -> Series {
     .unwrap()
 }
 
-fn grid_range(series: &Series) -> (usize, usize) {
-    let TimeAxis::Grid(range) = &series.time else {
-        panic!("lost grid axis")
-    };
-    (range.start(), range.len())
-}
-
 #[test]
 fn time_varying_scalar_aligns_absolute_indices_across_independent_chunks() {
     // The vector covers 7..15 and the scalar 5..16, each chunked at different offsets.
@@ -103,63 +96,56 @@ fn time_varying_scalar_aligns_absolute_indices_across_independent_chunks() {
         ])
         .unwrap(),
     );
-    let output = map_arithmetic_series(
-        &schema,
-        &input,
-        ArithmeticOp::Subtract,
-        ScalarSeriesOperand::Left(&scalar),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(grid_range(&output), (7, 8));
-    assert_floats(
-        output.fields.get(0).unwrap(),
-        &[
-            Some(99.0),
-            Some(198.0),
-            None,
-            None,
-            Some(495.0),
-            Some(594.0),
-            Some(693.0),
-            Some(792.0),
-        ],
+    let output = mapped(
+        map_arithmetic_series(
+            &schema,
+            &input,
+            ArithmeticOp::Subtract,
+            ScalarSeriesOperand::Left(&scalar),
+        )
+        .unwrap(),
     );
-    assert_floats(
-        output.fields.get(1).unwrap(),
-        &[
-            None,
-            Some(180.0),
-            Some(270.0),
-            None,
-            Some(450.0),
-            Some(540.0),
-            Some(630.0),
-            None,
-        ],
+    // The scalar holds no value at grid position 10, so neither field has a result there: that
+    // position is not a row, and the two sides of it form separate runs of one series.
+    assert_eq!(run_ranges(&output), vec![(7, 3), (11, 4)]);
+    assert_eq!(
+        run_floats(&output, 0),
+        vec![
+            ((7, 3), vec![Some(99.0), Some(198.0), None]),
+            (
+                (11, 4),
+                vec![Some(495.0), Some(594.0), Some(693.0), Some(792.0)]
+            ),
+        ]
     );
-    assert_eq!(output.metric.name(), None);
+    assert_eq!(
+        run_floats(&output, 1),
+        vec![
+            ((7, 3), vec![None, Some(180.0), Some(270.0)]),
+            ((11, 4), vec![Some(450.0), Some(540.0), Some(630.0), None]),
+        ]
+    );
+    assert!(output.metric.name().is_none());
     assert_eq!(output.metric.tags(), &input.metric.tags()[1..]);
-    let output = map_arithmetic_series(
-        &schema,
-        &input,
-        ArithmeticOp::Subtract,
-        ScalarSeriesOperand::Right(&scalar),
-    )
-    .unwrap()
-    .unwrap();
-    assert_floats(
-        output.fields.get(0).unwrap(),
-        &[
-            Some(-99.0),
-            Some(-198.0),
-            None,
-            None,
-            Some(-495.0),
-            Some(-594.0),
-            Some(-693.0),
-            Some(-792.0),
-        ],
+    let output = mapped(
+        map_arithmetic_series(
+            &schema,
+            &input,
+            ArithmeticOp::Subtract,
+            ScalarSeriesOperand::Right(&scalar),
+        )
+        .unwrap(),
+    );
+    assert_eq!(run_ranges(&output), vec![(7, 3), (11, 4)]);
+    assert_eq!(
+        run_floats(&output, 0),
+        vec![
+            ((7, 3), vec![Some(-99.0), Some(-198.0), None]),
+            (
+                (11, 4),
+                vec![Some(-495.0), Some(-594.0), Some(-693.0), Some(-792.0)]
+            ),
+        ]
     );
 }
 
@@ -190,31 +176,39 @@ fn time_varying_comparison_keeps_vector_values_and_trims() {
             Some(9.0),
         ]),
     );
-    let output = map_compare_series(
-        &schema,
-        &input,
-        Comparison::Filter(ComparisonOp::Less),
-        ScalarSeriesOperand::Left(&scalar),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(grid_range(&output), (10, 1));
-    assert_floats(output.fields.get(0).unwrap(), &[Some(4.0)]);
-    assert_eq!(output.metric, input.metric);
-    let output = map_compare_series(
-        &schema,
-        &input,
-        Comparison::Bool(ComparisonOp::Equal),
-        ScalarSeriesOperand::Right(&scalar),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(grid_range(&output), (6, 6));
-    assert_floats(
-        output.fields.get(0).unwrap(),
-        &[Some(1.0), None, None, Some(0.0), Some(0.0), Some(0.0)],
+    let output = mapped(
+        map_compare_series(
+            &schema,
+            &input,
+            Comparison::Filter(ComparisonOp::Less),
+            ScalarSeriesOperand::Left(&scalar),
+        )
+        .unwrap(),
     );
-    assert_eq!(output.metric.name(), None);
+    // Only position 10 passes, and it is the whole result: one run, one row.
+    assert_eq!(run_ranges(&output), vec![(10, 1)]);
+    assert_eq!(run_floats(&output, 0), vec![((10, 1), vec![Some(4.0)])]);
+    assert_eq!(output.metric, input.metric);
+    let output = mapped(
+        map_compare_series(
+            &schema,
+            &input,
+            Comparison::Bool(ComparisonOp::Equal),
+            ScalarSeriesOperand::Right(&scalar),
+        )
+        .unwrap(),
+    );
+    // Bool emits at every position where both operands exist. The scalar holds no value at grid
+    // position 7, so that position has no row and ends a run; 8 to 10 follow it.
+    assert_eq!(run_ranges(&output), vec![(6, 1), (9, 3)]);
+    assert_eq!(
+        run_floats(&output, 0),
+        vec![
+            ((6, 1), vec![Some(1.0)]),
+            ((9, 3), vec![Some(0.0), Some(0.0), Some(0.0)]),
+        ]
+    );
+    assert!(output.metric.name().is_none());
 }
 
 #[test]
@@ -254,11 +248,12 @@ fn disjoint_or_missing_overlap_produces_no_series() {
             ScalarSeriesOperand::Right(&scalar),
         )
         .unwrap();
+        // An overlap with no valid scalar point yields no series at all.
         match (output, expected) {
             (None, None) => {}
             (Some(output), Some((range, values))) => {
-                assert_eq!(grid_range(&output), range);
-                assert_floats(output.fields.get(0).unwrap(), &values);
+                assert_eq!(run_ranges(&output), vec![range]);
+                assert_eq!(run_floats(&output, 0), vec![(range, values)]);
             }
             (output, expected) => panic!("{start}: {output:?} != {expected:?}"),
         }
@@ -310,4 +305,129 @@ fn time_varying_scalar_preflight_rejects_unsupported_data_even_outside_overlap()
             .is_err()
         );
     }
+}
+
+/// F: a vector–scalar operation between two sparse operands aligns by shared runs, not by
+/// subtracting first positions, and reports the surviving positions as their own runs.
+///
+/// Vector positions 1, 5 and 9; scalar positions 5 and 9. Only 5 and 9 are evaluated, and the
+/// result's axis names them as two runs with a hole between -- a row offset taken from the first
+/// position would pair 1 with 5 and 5 with 9.
+#[test]
+fn a_vector_scalar_operation_of_sparse_operands_keeps_the_shared_positions() {
+    use crate::grid_series::reference::{
+        Dense, Labels, assert_result_eq, run_ranges, sparse_series,
+    };
+
+    // The vector schema of this module carries the grid; the scalar must sit on the same one.
+    let vector_schema = Arc::new(schema(&["value"]));
+    let scalar_schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: "scalar".into(),
+        }]
+        .into(),
+        eval_grid: vector_schema.eval_grid.clone(),
+    });
+    // The metric of the vector, which these operations keep after dropping `__name__` (the fixture
+    // has none, so it is the vector's own metric).
+    let labels = Labels::from([("host".to_string(), "a".to_string())]);
+    let without_name = crate::grid_series::reference::metric_of(&labels);
+    let points = |values: &[(usize, f64)]| -> crate::grid_series::reference::Points {
+        values
+            .iter()
+            .map(|&(position, value)| (position, f64::to_bits(value)))
+            .collect()
+    };
+    let vector = sparse_series(
+        &vector_schema,
+        &labels,
+        &points(&[(1, 10.0), (5, 50.0), (9, 90.0)]),
+    )
+    .expect("three positions hold a value");
+    let scalar = sparse_series(
+        &scalar_schema,
+        &Labels::new(),
+        &points(&[(5, 2.0), (9, 3.0)]),
+    )
+    .expect("two positions hold a value");
+    assert_eq!(run_ranges(&vector), vec![(1, 1), (5, 1), (9, 1)]);
+    assert_eq!(run_ranges(&scalar), vec![(5, 1), (9, 1)]);
+    assert!(
+        scalar.metric.name().is_none() && scalar.metric.tags().is_empty(),
+        "a grid scalar is unlabelled"
+    );
+
+    let output = map_arithmetic_series(
+        &vector_schema,
+        &vector,
+        ArithmeticOp::Add,
+        ScalarSeriesOperand::Right(&scalar),
+    )
+    .unwrap()
+    .expect("positions 5 and 9 hold both operands");
+    assert_eq!(
+        run_ranges(&output),
+        vec![(5, 1), (9, 1)],
+        "only the shared positions survive, as two runs"
+    );
+    assert_eq!(output.time.len(), 2);
+    // The reference expands over the schema's whole grid, not the span the fixture covers.
+    let points_on_grid = vector_schema
+        .eval_grid
+        .as_ref()
+        .expect("the fixture schema has a grid")
+        .timestamps()
+        .len();
+    let mut expected: Dense = vec![vec![None]; points_on_grid];
+    expected[5] = vec![Some(52.0)];
+    expected[9] = vec![Some(93.0)];
+    assert_result_eq(Some(&output), &expected, &without_name);
+
+    // The scalar on the left: `2 - 50` and `3 - 90`, not the same values as above.
+    let output = map_arithmetic_series(
+        &vector_schema,
+        &vector,
+        ArithmeticOp::Subtract,
+        ScalarSeriesOperand::Left(&scalar),
+    )
+    .unwrap()
+    .expect("positions 5 and 9 hold both operands");
+    let mut expected: Dense = vec![vec![None]; points_on_grid];
+    expected[5] = vec![Some(-48.0)];
+    expected[9] = vec![Some(-87.0)];
+    assert_result_eq(Some(&output), &expected, &without_name);
+
+    // A filter against the scalar keeps the vector value where it passes and drops the rest.
+    let output = map_compare_series(
+        &vector_schema,
+        &vector,
+        Comparison::Filter(ComparisonOp::Greater),
+        ScalarSeriesOperand::Right(&scalar),
+    )
+    .unwrap()
+    .expect("both shared positions pass");
+    assert_eq!(run_ranges(&output), vec![(5, 1), (9, 1)]);
+    let mut expected: Dense = vec![vec![None]; points_on_grid];
+    expected[5] = vec![Some(50.0)];
+    expected[9] = vec![Some(90.0)];
+    assert_result_eq(Some(&output), &expected, &without_name);
+
+    // Too tight a bound: nothing passes, so the operation yields no series at all.
+    let high = sparse_series(
+        &scalar_schema,
+        &Labels::new(),
+        &points(&[(5, 1_000.0), (9, 1_000.0)]),
+    )
+    .expect("two positions hold a value");
+    assert!(
+        map_compare_series(
+            &vector_schema,
+            &vector,
+            Comparison::Filter(ComparisonOp::Greater),
+            ScalarSeriesOperand::Right(&high),
+        )
+        .unwrap()
+        .is_none(),
+        "nothing passes, so there is no result series"
+    );
 }

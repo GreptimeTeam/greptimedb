@@ -34,8 +34,8 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::histogram::HistogramView;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Series, SeriesSchema};
-use datatypes::series::time::TimeAxis;
+use datatypes::series::samples::{DenseSamplesRef, RowCursor, SampleRef, Series, SeriesSchema};
+use datatypes::series::time::{TimeAxis, union_positions};
 
 pub(crate) use aggregate::sum_or_avg;
 pub use aggregate::{HistogramAggregate, aggregate_histograms};
@@ -71,7 +71,7 @@ pub fn evaluate_histograms(
 ) -> Result<Vec<Series>> {
     let mut groups: HashMap<LabelSet, Group<'_>> = HashMap::new();
     for series in series {
-        let range = grid_range(series)?;
+        grid_axis(series)?;
         if let Some(upper_bound) = series
             .metric
             .get(BUCKET_LABEL)
@@ -83,14 +83,14 @@ pub fn evaluate_histograms(
                 .entry(label_set(&metric))
                 .or_insert_with(|| Group::new(metric))
                 .classic
-                .push((upper_bound, series, range));
+                .push((upper_bound, series));
         }
         if has_histograms(series) {
             let metric = series.metric.clone();
             groups
                 .entry(label_set(&metric))
                 .or_insert_with(|| Group::new(metric))
-                .native = Some((series, range));
+                .native = Some(series);
         }
     }
 
@@ -100,18 +100,41 @@ pub fn evaluate_histograms(
     let mut native_buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
     for mut group in groups.into_values() {
-        let ranges = group
+        // One builder serves every group, so each result series starts explicitly.
+        builder.begin_series();
+        // The positions any member carries, merged once: the holes no member holds are never
+        // visited, so a group of sparse series costs its rows and not its envelope.
+        let axes = group
             .classic
             .iter()
-            .map(|member| member.2)
-            .chain(group.native.map(|native| native.1));
-        let start = ranges.clone().map(|range| range.0).min().unwrap_or(0);
-        let end = ranges.map(|range| range.1).max().unwrap_or(0);
-        for point in start..end {
+            .map(|member| &member.1.time)
+            .chain(group.native.map(|native| &native.time));
+        // One forward cursor per member and field. The merged positions only increase, so each
+        // member's rows do too: reading them costs one pass over the field, not a chunk scan per
+        // row. The classic members come first, then the native one.
+        let members = group
+            .classic
+            .iter()
+            .map(|&(_, series)| series)
+            .chain(group.native);
+        let mut cursors: Vec<Vec<RowCursor<'_>>> = members
+            .map(|series| series.fields.iter().map(|field| field.cursor()).collect())
+            .collect();
+        let classic_members = group.classic.len();
+        for point in union_positions(axes) {
             for (field, value) in values.iter_mut().enumerate() {
                 classic_buckets.clear();
-                for &(upper_bound, series, range) in &group.classic {
-                    if let Some(SampleRef::Float(count)) = sample(series, range, field, point) {
+                for (member, &(upper_bound, series)) in group.classic.iter().enumerate() {
+                    let count = series.time.row_of(point).and_then(|row| {
+                        match cursors[member][field]
+                            .at(row)
+                            .expect("a row never goes back")
+                        {
+                            SampleRef::Float(count) => Some(count),
+                            _ => None,
+                        }
+                    });
+                    if let Some(count) = count {
                         classic_buckets.push(classic::Bucket { upper_bound, count });
                     }
                 }
@@ -119,9 +142,13 @@ pub fn evaluate_histograms(
                 // ties with everything, so which of them coalescing keeps and where a NaN
                 // bound lands follow its sort algorithm.
                 go_sort::sort_by(&mut classic_buckets, |a, b| a.upper_bound < b.upper_bound);
-                let native = group.native.and_then(|(series, range)| {
-                    match sample(series, range, field, point) {
-                        Some(SampleRef::Histogram(h)) => Some(h),
+                let native = group.native.and_then(|series| {
+                    let row = series.time.row_of(point)?;
+                    match cursors[classic_members][field]
+                        .at(row)
+                        .expect("a row never goes back")
+                    {
+                        SampleRef::Histogram(h) => Some(h),
                         _ => None,
                     }
                 });
@@ -158,8 +185,8 @@ pub fn evaluate_histograms(
 /// label set when it holds native histograms.
 struct Group<'a> {
     metric: MetricName,
-    classic: Vec<(f64, &'a Series, (usize, usize))>,
-    native: Option<(&'a Series, (usize, usize))>,
+    classic: Vec<(f64, &'a Series)>,
+    native: Option<&'a Series>,
 }
 
 impl Group<'_> {
@@ -172,25 +199,14 @@ impl Group<'_> {
     }
 }
 
-/// The absolute grid range `[start, end)` of `series`.
-fn grid_range(series: &Series) -> Result<(usize, usize)> {
-    let TimeAxis::Grid(range) = &series.time else {
+/// Checks that `series` is addressed on a grid, which is what a position lookup needs.
+fn grid_axis(series: &Series) -> Result<&TimeAxis> {
+    if series.time.grid().is_none() {
         return Err(DataFusionError::Execution(
             "histogram functions require evaluated series".into(),
         ));
-    };
-    Ok((range.start(), range.start() + range.len()))
-}
-
-fn sample(
-    series: &Series,
-    (start, end): (usize, usize),
-    field: usize,
-    point: usize,
-) -> Option<SampleRef<'_>> {
-    (start..end)
-        .contains(&point)
-        .then(|| series.fields.as_slice()[field].sample(point - start))
+    }
+    Ok(&series.time)
 }
 
 fn has_histograms(series: &Series) -> bool {
@@ -213,7 +229,10 @@ pub enum NativeHistogramFunction {
 }
 
 /// Applies `function` to the native histogram samples of `series`; float samples are dropped and
-/// so is `__name__`. The result is `None` when the series has no histogram sample.
+/// so is `__name__`. `None` when the series has no histogram sample.
+///
+/// Histogram samples may leave holes, but the holes only skip positions: the result is one series
+/// over the runs of consecutive positions that hold a value.
 ///
 /// Series that share a label set once their names are dropped must then go through
 /// [`merge_same_labelset`].
@@ -222,14 +241,24 @@ pub fn map_native_histogram(
     schema: &Arc<SeriesSchema>,
     series: &Series,
 ) -> Result<Option<Series>> {
-    let range = grid_range(series)?;
+    grid_axis(series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
-    for point in range.0..range.1 {
+    // One cursor per field, driven by the positions the axis carries: a series of several runs
+    // costs its rows, and the positions it skips are never visited.
+    let mut cursors = series
+        .fields
+        .iter()
+        .map(|field| field.cursor())
+        .collect::<Vec<_>>();
+    for (point, row) in series.time.positions() {
         for (field, value) in values.iter_mut().enumerate() {
-            *value = match sample(series, range, field, point) {
-                Some(SampleRef::Histogram(h)) => Some(function.apply(&h, &mut buckets)?),
+            *value = match cursors[field]
+                .at(row)
+                .expect("the axis and the fields are aligned")
+            {
+                SampleRef::Histogram(h) => Some(function.apply(&h, &mut buckets)?),
                 _ => None,
             };
         }

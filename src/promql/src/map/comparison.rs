@@ -45,15 +45,17 @@ pub enum Comparison {
 /// Compares a vector with a constant scalar, like Prometheus `VectorscalarBinop`.
 ///
 /// Each field is compared independently; a row is kept where any field passes a filter. The
-/// output is trimmed to its first and last kept rows, and `None` means nothing passed. Raw axes
-/// and histogram/mixed inputs share [`crate::map::map_math`]'s rejection contract.
+/// output covers the kept rows and nothing else, and `None` means nothing passed. A filter keeps
+/// a subset of the input's rows, so a passed-over stretch is a hole in the one result series
+/// rather than a piece of its own: the axis names the runs of consecutive kept positions. Raw
+/// axes and histogram/mixed inputs share [`crate::map::map_math`]'s rejection contract.
 pub fn map_compare(
     schema: &Arc<SeriesSchema>,
     series: &Series,
     comparison: Comparison,
     scalar: ScalarOperand,
 ) -> Result<Option<Series>> {
-    let range = validate_float_series(schema, series)?;
+    let time = validate_float_series(schema, series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut fields = series
         .fields
@@ -61,7 +63,9 @@ pub fn map_compare(
         .map(|field| field.iter())
         .collect::<Vec<_>>();
     let mut row = Vec::with_capacity(fields.len());
-    for index in range.start()..range.start() + range.len() {
+    // The axis says which positions hold a row; the field iterators then read them in order, so a
+    // sparse axis costs its rows and nothing for the positions it skips.
+    for (position, _) in time.positions() {
         row.clear();
         for field in &mut fields {
             let sample = float_sample(field.next().expect("validated length"));
@@ -73,7 +77,7 @@ pub fn map_compare(
                 comparison.apply(left, right, sample)
             }));
         }
-        builder.push(index, &row)?;
+        builder.push(position, &row)?;
     }
     let metric = if matches!(comparison, Comparison::Bool(_)) {
         drop_metric_name(&series.metric)?

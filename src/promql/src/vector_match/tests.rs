@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
 use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -27,8 +27,8 @@ use super::{
 };
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
-    Dense, OwnedHistogram, assert_histogram_close, assert_series_eq, golden_cases, mixed_series,
-    random_dense,
+    Dense, OwnedHistogram, Points, assert_histogram_close, assert_result_eq, golden_cases,
+    mixed_series, piece_ranges, random_dense, run_ranges, sparse_series,
 };
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
@@ -123,14 +123,17 @@ fn random_side(rng: &mut StdRng, grid: &Arc<EvalGrid>, fields: usize) -> Side {
         if !seen.insert(labels.clone()) {
             continue;
         }
+        // Each label set starts its own series: only `begin_series` resets the builder.
+        builder.begin_series();
         let values = random_dense(rng, grid.timestamps().len(), fields);
         for (index, row) in values.iter().enumerate() {
             builder.push(index, row).unwrap();
         }
-        if let Some(built) = builder.finish(metric(&labels)).unwrap() {
-            series.push(built);
-            dense.push((labels, values));
-        }
+        // Random rows can hold holes, so the series carries one run per stretch of valued
+        // positions: together they cover exactly those positions, which is what the dense matrix
+        // behind the reference holds.
+        series.extend(builder.finish(metric(&labels)).unwrap());
+        dense.push((labels, values));
     }
     Side {
         schema,
@@ -422,7 +425,9 @@ fn reference_set(
 fn assert_output(actual: Result<Vec<Series>, DataFusionError>, expected: Expected, seed: u64) {
     match (actual, expected) {
         (Ok(actual), Ok(expected)) => {
-            let actual: BTreeMap<Labels, Series> = actual
+            // A result arrives as one piece per run of valued positions; the reference is dense,
+            // so the pieces of each label set are folded back together first.
+            let actual: BTreeMap<Labels, Series> = crate::golden::fold_pieces(actual)
                 .into_iter()
                 .map(|series| (labels_of(&series.metric), series))
                 .collect();
@@ -436,7 +441,7 @@ fn assert_output(actual: Result<Vec<Series>, DataFusionError>, expected: Expecte
                 "seed {seed}"
             );
             for (labels, dense) in &expected {
-                assert_series_eq(actual.get(labels), dense, &metric(labels));
+                assert_result_eq(actual.get(labels), dense, &metric(labels));
             }
         }
         (Err(error), Err(violations)) => assert!(
@@ -573,6 +578,8 @@ fn reports_the_earliest_failing_point() {
     let schema = schema(1, &grid);
     let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
     let mut series = |labels: &[(&str, &str)], points: &[usize]| {
+        // One builder serves every operand series, so each one starts explicitly.
+        builder.begin_series();
         for &point in points {
             builder.push(point, &[Some(point as f64)]).unwrap();
         }
@@ -580,7 +587,10 @@ fn reports_the_earliest_failing_point() {
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        builder.finish(metric(&labels)).unwrap().unwrap()
+        builder
+            .finish(metric(&labels))
+            .unwrap()
+            .expect("each call pushes one run")
     };
     let mut lhs = vec![
         series(&[("__name__", "a"), ("job", "z")], &[0]),
@@ -617,15 +627,18 @@ fn reports_the_earliest_failing_point() {
 /// Values of `series` by grid point, any NaN as the same NaN: Prometheus' NaN payloads depend
 /// on how the Go compiler orders commutative operands.
 fn points_of(series: &Series) -> BTreeMap<usize, u64> {
-    let TimeAxis::Grid(range) = &series.time else {
-        panic!("expected a grid series");
-    };
-    series.fields.as_slice()[0]
-        .iter()
-        .enumerate()
-        .filter_map(|(row, sample)| match sample {
-            SampleRef::Float(value) => Some((range.start() + row, canonical_bits(value))),
-            _ => None,
+    if series.time.grid().is_none() {
+        panic!("expected a grid series, got {:?}", series.time);
+    }
+    let mut cursor = series.fields.as_slice()[0].cursor();
+    series
+        .time
+        .positions()
+        .filter_map(|(point, row)| {
+            match cursor.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Float(value) => Some((point, canonical_bits(value))),
+                _ => None,
+            }
         })
         .collect()
 }
@@ -692,18 +705,19 @@ fn vector_operations_match_prometheus() {
                 .collect();
             match kind {
                 "series" => {
+                    builder.begin_series();
                     for point in 0..points as usize {
                         let value = values.get(&point).map(|bits| f64::from_bits(*bits));
                         builder.push(point, &[value]).unwrap();
                     }
-                    let Some(series) = builder.finish(metric(&labels)).unwrap() else {
-                        continue;
-                    };
-                    if labels.get("__name__").map(String::as_str) == Some("a") {
-                        lhs.push(series);
+                    // A series line can hold holes, so the result carries one run per stretch of
+                    // valued positions, all of them in the one series.
+                    let side = if labels.get("__name__").map(String::as_str) == Some("a") {
+                        &mut lhs
                     } else {
-                        rhs.push(series);
-                    }
+                        &mut rhs
+                    };
+                    side.extend(builder.finish(metric(&labels)).unwrap());
                 }
                 "result" => {
                     let values = values
@@ -761,11 +775,19 @@ fn vector_operations_match_prometheus() {
         };
         match (actual, error) {
             (Ok(actual), None) => {
-                let actual: BTreeMap<Labels, BTreeMap<usize, u64>> = actual
-                    .iter()
-                    .map(|series| (labels_of(&series.metric), points_of(series)))
-                    .collect();
-                assert_close(&actual, &expected, case);
+                // A label set arrives as one piece per run of valued positions; the values of all
+                // its pieces together are the series Prometheus evaluated at those points.
+                let mut folded: BTreeMap<Labels, BTreeMap<usize, u64>> = BTreeMap::new();
+                for series in &actual {
+                    let points = folded.entry(labels_of(&series.metric)).or_default();
+                    for (point, bits) in points_of(series) {
+                        assert!(
+                            points.insert(point, bits).is_none(),
+                            "{case}: {point} handed out twice"
+                        );
+                    }
+                }
+                assert_close(&folded, &expected, case);
                 matched += 1;
             }
             (Err(actual), Some(expected)) => {
@@ -799,12 +821,16 @@ fn colliding_results_fail_by_where_they_collide() {
     let schema = schema(1, &grid);
     let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
     let mut series = |labels: &[(&str, &str)]| {
+        builder.begin_series();
         builder.push(0, &[Some(1.0)]).unwrap();
         let labels = labels
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        builder.finish(metric(&labels)).unwrap().unwrap()
+        builder
+            .finish(metric(&labels))
+            .unwrap()
+            .expect("each call pushes one point")
     };
     let lhs = vec![
         series(&[("__name__", "a"), ("__type__", "counter"), ("job", "x")]),
@@ -1001,48 +1027,57 @@ fn histogram_operators_match_prometheus() {
             (expected, actual) => panic!("{context}: got {actual:?}, expected {expected:?}"),
         };
         let (expected, actual) = expected;
-        let actual: BTreeMap<Labels, Series> = actual
-            .into_iter()
-            .map(|series| (labels_of(&series.metric), series))
-            .collect();
+        // A label set arrives as one piece per run of valued positions, so its pieces are gathered
+        // before comparing: together they must cover exactly the points Prometheus reported.
+        let mut folded: BTreeMap<Labels, Vec<Series>> = BTreeMap::new();
+        for series in actual {
+            folded
+                .entry(labels_of(&series.metric))
+                .or_default()
+                .push(series);
+        }
         assert_eq!(
-            actual.keys().collect::<Vec<_>>(),
+            folded.keys().collect::<Vec<_>>(),
             expected.keys().collect::<Vec<_>>(),
             "{context}"
         );
         let no_histograms = BTreeMap::new();
-        for (labels, series) in &actual {
-            let TimeAxis::Grid(range) = &series.time else {
-                panic!("expected a grid series");
-            };
+        for (labels, pieces) in &folded {
             let floats = &expected[labels];
             let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
-            let mut points = 0;
-            for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
-                let point = range.start() + row;
-                match sample {
-                    SampleRef::Missing => continue,
-                    SampleRef::Float(value) => {
-                        let want = f64::from_bits(floats[&point]);
-                        assert!(
-                            crate::grid_series::reference::close(value, want, 1e-10),
-                            "{context} at {point}: {value} vs {want}"
-                        );
-                    }
-                    SampleRef::Histogram(view) => {
-                        let want = OwnedHistogram::parse(&texts[&point]);
-                        assert_histogram_close(
-                            &FloatHistogram::try_from_view(&view).unwrap(),
-                            &FloatHistogram::try_from_view(&want.view()).unwrap(),
-                            1e-10,
-                            &format!("{context} at {point}"),
-                        );
-                        histograms += 1;
-                    }
+            let mut seen = BTreeSet::new();
+            for series in pieces {
+                if series.time.grid().is_none() {
+                    panic!("expected a grid series, got {:?}", series.time);
                 }
-                points += 1;
+                let mut cursor = series.fields.as_slice()[0].cursor();
+                for (point, row) in series.time.positions() {
+                    let sample = cursor.at(row).expect("the axis and the fields are aligned");
+                    match sample {
+                        SampleRef::Missing => continue,
+                        SampleRef::Float(value) => {
+                            let want = f64::from_bits(floats[&point]);
+                            assert!(
+                                crate::grid_series::reference::close(value, want, 1e-10),
+                                "{context} at {point}: {value} vs {want}"
+                            );
+                        }
+                        SampleRef::Histogram(view) => {
+                            let want = OwnedHistogram::parse(&texts[&point]);
+                            assert_histogram_close(
+                                &FloatHistogram::try_from_view(&view).unwrap(),
+                                &FloatHistogram::try_from_view(&want.view()).unwrap(),
+                                1e-10,
+                                &format!("{context} at {point}"),
+                            );
+                            histograms += 1;
+                        }
+                    }
+                    assert!(seen.insert(point), "{context}: {point} handed out twice");
+                }
             }
-            assert_eq!(points, floats.len() + texts.len(), "{context}");
+            let wanted: BTreeSet<usize> = floats.keys().chain(texts.keys()).copied().collect();
+            assert_eq!(seen, wanted, "{context}");
         }
         matched += 1;
     }
@@ -1096,4 +1131,271 @@ fn colliding_reset_hints_skip_the_pair() {
         let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
         assert_eq!(result.len(), 1, "{op:?}");
     }
+}
+
+/// A binary pairing walks two operands of many single-position runs and still reports every
+/// position exactly once.
+///
+/// The rows of a pairing only increase -- `intersect_runs` merges the two run lists forward and
+/// each shared run carries the row of each side -- which is what lets one cursor per operand serve
+/// every run of the pairing. This pins that order and the values under heavy fragmentation; it
+/// does not measure cost, since a cursor rebuilt per run returns the same values.
+#[test]
+fn a_pairing_reads_many_single_position_runs_once() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 8).unwrap()).unwrap());
+    let schema = Arc::new(schema(1, &grid));
+    let points: Points = (0..8)
+        .step_by(2)
+        .map(|position| (position, f64::to_bits(position as f64)))
+        .collect();
+    let operand = |name: &str, offset: f64| -> Series {
+        let labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+        ]);
+        // Every other position is its own run: eight positions become four one-row runs.
+        let points: Points = points
+            .iter()
+            .map(|(&position, &bits)| (position, (f64::from_bits(bits) + offset).to_bits()))
+            .collect();
+        sparse_series(&schema, &labels, &points).unwrap()
+    };
+    let lhs = operand("a", 0.0);
+    let rhs = operand("b", 100.0);
+    assert_eq!(run_ranges(&lhs), vec![(0, 1), (2, 1), (4, 1), (6, 1)]);
+    assert_eq!(run_ranges(&rhs), vec![(0, 1), (2, 1), (4, 1), (6, 1)]);
+
+    let matching = BinaryMatching {
+        op: BinaryOp::Add,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("job")]),
+        cardinality: Cardinality::OneToOne,
+    };
+    let result = binary_vectors(
+        &matching,
+        &schema,
+        std::slice::from_ref(&lhs),
+        &schema,
+        std::slice::from_ref(&rhs),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(run_ranges(&result[0]), vec![(0, 1), (2, 1), (4, 1), (6, 1)]);
+    let expected: Points = (0..8)
+        .step_by(2)
+        .map(|position| (position, f64::to_bits((2 * position) as f64 + 100.0)))
+        .collect();
+    assert_eq!(points_of(&result[0]), expected);
+}
+
+/// F: a binary operation between two sparse operands evaluates only the shared positions, and its
+/// output's runs are exactly those positions -- never the envelope of the pairing.
+///
+/// LHS carries 1 and 8, RHS carries 8 and 10, so the only shared position is 8. A pairing that
+/// offset one side's rows by its first position would evaluate 1 against 8 and 8 against 10.
+#[test]
+fn a_binary_pairing_of_sparse_operands_keeps_the_shared_positions() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 12).unwrap()).unwrap());
+    let schema = Arc::new(schema(1, &grid));
+    let operand = |name: &str, points: &[(usize, f64)]| -> Series {
+        let labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+        ]);
+        let points: Points = points
+            .iter()
+            .map(|&(position, value)| (position, f64::to_bits(value)))
+            .collect();
+        sparse_series(&schema, &labels, &points).expect("the operand holds a value")
+    };
+    let lhs = operand("l", &[(1, 10.0), (8, 20.0)]);
+    let rhs = operand("r", &[(8, 2.0), (10, 5.0)]);
+    assert_eq!(run_ranges(&lhs), vec![(1, 1), (8, 1)]);
+    assert_eq!(run_ranges(&rhs), vec![(8, 1), (10, 1)]);
+
+    let matching = BinaryMatching {
+        op: BinaryOp::Add,
+        return_bool: false,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+    };
+    let result = binary_vectors(
+        &matching,
+        &schema,
+        std::slice::from_ref(&lhs),
+        &schema,
+        std::slice::from_ref(&rhs),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1, "one matched pair: {result:?}");
+    assert_eq!(
+        run_ranges(&result[0]),
+        vec![(8, 1)],
+        "only position 8 is shared, so the result holds exactly one row"
+    );
+    assert_eq!(result[0].time.len(), 1);
+    let mut expected: Dense = vec![vec![None]; 12];
+    expected[8] = vec![Some(22.0)];
+    // Arithmetic drops the metric name, as Prometheus does.
+    assert_result_eq(
+        Some(&result[0]),
+        &expected,
+        &metric(&Labels::from([("job".to_string(), "x".to_string())])),
+    );
+
+    // A filtered comparison keeps the left value where it holds, at the same positions.
+    let filtered = BinaryMatching {
+        op: BinaryOp::Gt,
+        return_bool: false,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+    };
+    let result = binary_vectors(
+        &filtered,
+        &schema,
+        std::slice::from_ref(&lhs),
+        &schema,
+        std::slice::from_ref(&rhs),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(run_ranges(&result[0]), vec![(8, 1)]);
+    let mut expected: Dense = vec![vec![None]; 12];
+    expected[8] = vec![Some(20.0)];
+    // A filtered comparison keeps the left value and its metric, name included.
+    assert_result_eq(
+        Some(&result[0]),
+        &expected,
+        &metric(&Labels::from([
+            ("__name__".to_string(), "l".to_string()),
+            ("job".to_string(), "x".to_string()),
+        ])),
+    );
+
+    // A `bool` comparison emits 0/1 at every shared position, so the axis is the intersection's.
+    let booled = BinaryMatching {
+        op: BinaryOp::Gt,
+        return_bool: true,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+    };
+    let result = binary_vectors(
+        &booled,
+        &schema,
+        std::slice::from_ref(&lhs),
+        &schema,
+        std::slice::from_ref(&rhs),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(run_ranges(&result[0]), vec![(8, 1)]);
+    let mut expected: Dense = vec![vec![None]; 12];
+    expected[8] = vec![Some(1.0)];
+    assert_result_eq(
+        Some(&result[0]),
+        &expected,
+        &metric(&Labels::from([("job".to_string(), "x".to_string())])),
+    );
+}
+
+/// F: a set operator keeps each series' own positions, so a sparse operand comes back with the
+/// runs it had and a dense one is cut to the sparse side's positions.
+///
+/// `and`: the positions both sides carry. `or`: the union. `unless`: the LHS positions the RHS
+/// does not carry.
+#[test]
+fn set_operators_of_sparse_operands_keep_their_own_positions() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 12).unwrap()).unwrap());
+    let schema = Arc::new(schema(1, &grid));
+    let operand = |name: &str, points: &[(usize, f64)]| -> Series {
+        let labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+        ]);
+        let points: Points = points
+            .iter()
+            .map(|&(position, value)| (position, f64::to_bits(value)))
+            .collect();
+        sparse_series(&schema, &labels, &points).expect("the operand holds a value")
+    };
+    let lhs = operand("l", &[(1, 10.0), (5, 50.0), (9, 90.0)]);
+    let rhs = operand("r", &[(3, 30.0), (5, 55.0)]);
+    assert_eq!(run_ranges(&lhs), vec![(1, 1), (5, 1), (9, 1)]);
+    assert_eq!(run_ranges(&rhs), vec![(3, 1), (5, 1)]);
+    let labels = MatchingLabels::Ignoring(Vec::new());
+    let input = |side: &[Series]| side.to_vec();
+
+    // `and`: only position 5, where both sides hold a value.
+    let result = set_vectors(
+        SetOp::And,
+        &labels,
+        &schema,
+        &input(std::slice::from_ref(&lhs)),
+        &schema,
+        &input(std::slice::from_ref(&rhs)),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1, "an `and` keeps the left side: {result:?}");
+    assert_eq!(run_ranges(&result[0]), vec![(5, 1)]);
+    let mut expected: Dense = vec![vec![None]; 12];
+    expected[5] = vec![Some(50.0)];
+    assert_result_eq(Some(&result[0]), &expected, &lhs.metric);
+
+    // `or`: both sides' positions, each with the value it had.
+    let result = set_vectors(
+        SetOp::Or,
+        &labels,
+        &schema,
+        &input(std::slice::from_ref(&lhs)),
+        &schema,
+        &input(std::slice::from_ref(&rhs)),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 2, "an `or` keeps the series: {result:?}");
+    let mut ranges = piece_ranges(&result);
+    ranges.sort_unstable();
+    assert_eq!(ranges, vec![(1, 1), (3, 1), (5, 1), (9, 1)]);
+    // Results come back by label set, not in input order, so each side is found by its labels.
+    let side = |name: &str| -> Series {
+        result
+            .iter()
+            .find(|series| series.metric.name() == Some(name))
+            .unwrap_or_else(|| panic!("no series {name}: {result:?}"))
+            .clone()
+    };
+    let left = side("l");
+    assert_eq!(
+        left.time.len(),
+        3,
+        "the left side keeps its three rows: {left:?}"
+    );
+    assert_eq!(run_ranges(&left), vec![(1, 1), (5, 1), (9, 1)]);
+    let right = side("r");
+    assert_eq!(
+        right.time.len(),
+        1,
+        "`or` keeps only the right side's positions the left side does not carry: {right:?}"
+    );
+    assert_eq!(run_ranges(&right), vec![(3, 1)]);
+
+    // `unless`: the LHS positions the RHS does not carry, so 5 is dropped.
+    let result = set_vectors(
+        SetOp::Unless,
+        &labels,
+        &schema,
+        &input(std::slice::from_ref(&lhs)),
+        &schema,
+        &input(std::slice::from_ref(&rhs)),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1, "{result:?}");
+    assert_eq!(
+        run_ranges(&result[0]),
+        vec![(1, 1), (9, 1)],
+        "the dropped position costs no row and splits the run"
+    );
+    let mut expected: Dense = vec![vec![None]; 12];
+    expected[1] = vec![Some(10.0)];
+    expected[9] = vec![Some(90.0)];
+    assert_result_eq(Some(&result[0]), &expected, &lhs.metric);
 }

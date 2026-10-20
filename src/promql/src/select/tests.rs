@@ -15,17 +15,23 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use datafusion::arrow::array::Float64Array;
 use datafusion::error::DataFusionError;
-use datatypes::series::samples::{FieldSpec, Series, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 
 use super::{
     Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, natural_less, scalar,
     sort_instant, topk,
 };
-use crate::grid_series::GridSeriesBuilder;
-use crate::grid_series::reference::{Dense, assert_series_eq};
+use crate::golden::fold_pieces;
+use crate::grid_series::reference::{
+    Dense, Labels, Points, assert_pieces_eq, assert_result_eq, piece_ranges, run_ranges,
+    sparse_series,
+};
 
 fn schema(points: u64, fields: usize) -> SeriesSchema {
     SeriesSchema {
@@ -69,12 +75,35 @@ fn dense(points: usize, values: &str) -> Dense {
     dense
 }
 
+/// The `dense` matrix as one trimmed series, `None` when every row is missing.
+///
+/// An *input*, so the holes stay nulls inside one series: the builder would cut them into pieces,
+/// and the operators under test take one series per input.
 fn build(schema: &SeriesSchema, metric: MetricName, dense: &Dense) -> Option<Series> {
-    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
-    for (index, row) in dense.iter().enumerate() {
-        builder.push(index, row).unwrap();
-    }
-    builder.finish(metric).unwrap()
+    let start = dense
+        .iter()
+        .position(|row| row.iter().any(Option::is_some))?;
+    let end = dense
+        .iter()
+        .rposition(|row| row.iter().any(Option::is_some))?
+        + 1;
+    let rows = &dense[start..end];
+    let fields = (0..schema.fields.len())
+        .map(|field| {
+            let values: Float64Array = rows.iter().map(|row| row[field]).collect();
+            Samples::from_float(values)
+        })
+        .collect::<Vec<_>>();
+    let time = GridRange::try_new(schema.eval_grid.clone().unwrap(), start, rows.len()).unwrap();
+    Some(
+        Series::try_new(
+            schema,
+            metric,
+            TimeAxis::Grid(time),
+            SeriesFields::try_from_vec(fields).unwrap(),
+        )
+        .unwrap(),
+    )
 }
 
 fn names(list: &str) -> Vec<Arc<str>> {
@@ -168,7 +197,9 @@ fn select_operators_match_prometheus() {
             other => panic!("unknown case {other}"),
         };
 
-        let actual: BTreeMap<String, Series> = actual
+        // A result arrives as one series over the runs of valued positions; the fixtures pin the
+        // dense values, so each result is expanded over the grid before comparing.
+        let actual: BTreeMap<String, Series> = fold_pieces(actual)
             .into_iter()
             .map(|series| (render(&series.metric), series))
             .collect();
@@ -178,7 +209,7 @@ fn select_operators_match_prometheus() {
             "{case}"
         );
         for (labels, dense) in &expected {
-            assert_series_eq(actual.get(labels), dense, &metric(labels));
+            assert_result_eq(actual.get(labels), dense, &metric(labels));
             checked += 1;
         }
     }
@@ -339,7 +370,209 @@ fn absent_evaluates_fields_independently() {
     let schema = schema(2, 2);
     let input = vec![vec![Some(3.0), None], vec![None, Some(4.0)]];
     let series = vec![build(&schema, metric("__name__=a"), &input).unwrap()];
-    let result = absent(&schema, &series, metric("-")).unwrap();
+    let result = absent(&schema, &series, metric("-"))
+        .unwrap()
+        .expect("both positions are absent in one field");
+    // The two fields take turns holding a value, but a row is kept when either field has one, so
+    // both positions stay in one run; the missing field carries a null there.
+    assert_eq!(piece_ranges(std::slice::from_ref(&result)), vec![(0, 2)]);
     let expected = vec![vec![None, Some(1.0)], vec![Some(1.0), None]];
-    assert_series_eq(result.as_ref(), &expected, &metric("-"));
+    assert_pieces_eq(std::slice::from_ref(&result), &expected, &metric("-"));
+}
+
+/// `absent` and `scalar` read a series of several runs by its positions.
+///
+/// The rows of a sparse input are neither adjacent nor starting where the series says, so an
+/// operator that counted rows from the first position would report presence at the wrong points.
+#[test]
+fn select_operators_read_a_sparse_axis_by_its_positions() {
+    let schema = Arc::new(schema(8, 1));
+    let labels = Labels::from([("host".to_string(), "a".to_string())]);
+    // Positions 1, 2 and 6 hold a value; 0, 3, 4, 5 and 7 hold none.
+    let mut points = Points::new();
+    for position in [1, 2, 6] {
+        points.insert(position, f64::to_bits(1.0));
+    }
+    let sparse = sparse_series(&schema, &labels, &points).unwrap();
+    assert_eq!(sparse.time.len(), 3);
+
+    // `absent` reports 1 at every point nothing is present: the five positions the axis skips.
+    let absent_series = absent(&schema, std::slice::from_ref(&sparse), metric("-"))
+        .unwrap()
+        .expect("the sparse series holds five absent positions");
+    let dense = crate::grid_series::reference::stitch(std::slice::from_ref(&absent_series));
+    assert_eq!(
+        dense
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row[0].is_some())
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>(),
+        vec![0, 3, 4, 5, 7],
+        "absent must hold a value exactly where the sparse series holds none"
+    );
+
+    // `scalar` reads the same sparse rows and reports NaN where nothing is present.
+    let scalar_series = scalar(&schema, std::slice::from_ref(&sparse)).unwrap();
+    assert_eq!(
+        scalar_series.time.len(),
+        8,
+        "a scalar exists at every point"
+    );
+    let mut cursor = scalar_series.fields.as_slice()[0].cursor();
+    let values = scalar_series
+        .time
+        .positions()
+        .map(|(position, row)| {
+            (
+                position,
+                cursor.at(row).expect("the axis and the fields are aligned"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(values[1].1, SampleRef::Float(value) if value == 1.0));
+    assert!(matches!(values[6].1, SampleRef::Float(value) if value == 1.0));
+    assert!(matches!(values[3].1, SampleRef::Float(value) if value.is_nan()));
+}
+
+/// F: `topk` selects a winner sitting in a later run, so its result is a fragmented axis of the
+/// selected positions, not a contiguous piece from the earliest winner.
+///
+/// Three series each carry one position: a=7 at 1, b=9 at 4 and c=2 at 9. `topk` ranks per point,
+/// so each point holds the one candidate its series carries -- and every survivor sits at its own
+/// position, never shifted to the start of an envelope.
+#[test]
+fn topk_keeps_a_winner_sitting_in_a_later_run() {
+    let schema = Arc::new(schema(10, 1));
+    let operand = |name: &str, position: usize, value: f64| -> Series {
+        let labels = Labels::from([("host".to_string(), name.to_string())]);
+        let points = Points::from([(position, f64::to_bits(value))]);
+        sparse_series(&schema, &labels, &points).expect("one position holds a value")
+    };
+    let series = vec![
+        operand("a", 1, 7.0),
+        operand("b", 4, 9.0),
+        operand("c", 9, 2.0),
+    ];
+    for operand in &series {
+        assert_eq!(
+            run_ranges(operand),
+            vec![(operand.time.first_position().expect("one row"), 1)]
+        );
+        assert_eq!(operand.time.len(), 1, "each series carries one row");
+    }
+
+    // `topk(1)` over the empty grouping: at each point the only candidate wins, so all three
+    // series survive, each at its own position.
+    let result = topk(1.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    assert_eq!(result.len(), 3, "one candidate per point: {result:?}");
+    let mut ranges = piece_ranges(&result);
+    ranges.sort_unstable();
+    assert_eq!(
+        ranges,
+        vec![(1, 1), (4, 1), (9, 1)],
+        "every winner sits at its own position, not at the start of an envelope"
+    );
+    let mut expected = vec![vec![None]; 10];
+    expected[4] = vec![Some(9.0)];
+    let middle = result
+        .iter()
+        .find(|series| series.metric.get("host") == Some("b"))
+        .expect("series b wins at position 4")
+        .clone();
+    assert_result_eq(Some(&middle), &expected, &metric("host=b"));
+
+    // `topk(2)` is evaluated per point, and each point holds one candidate, so it selects the
+    // same three series the `k=1` case did.
+    let result = topk(2.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    assert_eq!(result.len(), 3, "one candidate per point: {result:?}");
+    let mut ranges = piece_ranges(&result);
+    ranges.sort_unstable();
+    assert_eq!(ranges, vec![(1, 1), (4, 1), (9, 1)]);
+    for series in &result {
+        assert_eq!(series.time.len(), 1, "one row, one position");
+    }
+}
+
+/// F: `topk` ranks each point on its own, so a winner can sit in a later run, and a tie is broken
+/// by label order rather than by position.
+///
+/// Series `a` holds 5 at 0 and 5 at 6; series `b` holds 5 at 0 and 4 at 6. The two tie at 0, and
+/// the earlier label set wins there; at 6 the larger value wins. So `topk(1)` selects `a` twice, at
+/// two positions with a hole between -- a winner in a later run. `bottomk(1)` flips the second
+/// point to `b`, so the two winners sit in different runs of the two inputs.
+#[test]
+fn topk_breaks_ties_across_a_gap_by_label_order() {
+    let schema = Arc::new(schema(10, 1));
+    let operand = |name: &str, points: &[(usize, f64)]| -> Series {
+        let labels = Labels::from([("host".to_string(), name.to_string())]);
+        let points: Points = points
+            .iter()
+            .map(|&(position, value)| (position, f64::to_bits(value)))
+            .collect();
+        sparse_series(&schema, &labels, &points).expect("the series holds a value")
+    };
+    // Each series carries two positions with a hole between them.
+    let a = operand("a", &[(0, 5.0), (6, 5.0)]);
+    let b = operand("b", &[(0, 5.0), (6, 4.0)]);
+    assert_eq!(run_ranges(&a), vec![(0, 1), (6, 1)]);
+    assert_eq!(run_ranges(&b), vec![(0, 1), (6, 1)]);
+    let series = vec![a, b];
+
+    // `topk(1)`: `a` wins at both points -- the tie at 0 goes to the earlier label set, and 5 beats
+    // 4 at 6. The winner is one series whose two rows are two runs.
+    let result = topk(1.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    assert_eq!(
+        result.len(),
+        1,
+        "one series wins at both points: {result:?}"
+    );
+    assert_eq!(
+        run_ranges(&result[0]),
+        vec![(0, 1), (6, 1)],
+        "the winner keeps the positions it won at, across the gap"
+    );
+    assert_eq!(result[0].time.len(), 2);
+    let mut expected = vec![vec![None]; 10];
+    expected[0] = vec![Some(5.0)];
+    expected[6] = vec![Some(5.0)];
+    assert_result_eq(Some(&result[0]), &expected, &metric("host=a"));
+
+    // `topk(2)`: both series are selected wherever they hold a value.
+    let result = topk(2.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    assert_eq!(result.len(), 2, "both series are selected: {result:?}");
+    let mut all = piece_ranges(&result);
+    all.sort_unstable();
+    assert_eq!(
+        all,
+        vec![(0, 1), (0, 1), (6, 1), (6, 1)],
+        "both series keep both of their positions"
+    );
+    let by_label = |list: &[Series], name: &str| -> Series {
+        list.iter()
+            .find(|series| series.metric.get("host") == Some(name))
+            .unwrap_or_else(|| panic!("no series {name}: {list:?}"))
+            .clone()
+    };
+    let mut second = vec![vec![None]; 10];
+    second[0] = vec![Some(5.0)];
+    second[6] = vec![Some(4.0)];
+    let winner = by_label(&result, "b");
+    assert_result_eq(Some(&winner), &second, &metric("host=b"));
+
+    // `bottomk(1)`: the tie at 0 still goes to `a`, but 4 beats 5 at 6, so `b` wins in the later
+    // run. The two winners sit in different series and at different positions.
+    let result = topk(1.0, false, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    assert_eq!(result.len(), 2, "each series wins one point: {result:?}");
+    let mut ranges = piece_ranges(&result);
+    ranges.sort_unstable();
+    assert_eq!(ranges, vec![(0, 1), (6, 1)]);
+    let mut first = vec![vec![None]; 10];
+    first[0] = vec![Some(5.0)];
+    let smallest = by_label(&result, "a");
+    assert_result_eq(Some(&smallest), &first, &metric("host=a"));
+    let mut last = vec![vec![None]; 10];
+    last[6] = vec![Some(4.0)];
+    let later = by_label(&result, "b");
+    assert_result_eq(Some(&later), &last, &metric("host=b"));
 }

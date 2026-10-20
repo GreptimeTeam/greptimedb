@@ -82,6 +82,57 @@ fn floats(samples: &[Option<f64>]) -> Samples {
     Samples::from_float(Float64Array::from(samples.to_vec()))
 }
 
+/// The `(start, len)` of every run of a mapped result, in grid order.
+///
+/// A mapped result is one series whose axis names the runs of consecutive positions that hold a
+/// value, so this is what the assertions here compare: the positions between two runs hold no row.
+fn run_ranges(result: &Series) -> Vec<(usize, usize)> {
+    if result.time.grid().is_none() {
+        panic!("lost grid axis: {:?}", result.time);
+    }
+    result
+        .time
+        .runs()
+        .map(|run| (run.position, run.len))
+        .collect()
+}
+
+/// The `(start, len)` of one run together with the field-`field` values it carries.
+type RunFloats = Vec<((usize, usize), Vec<Option<f64>>)>;
+
+/// The field-`field` values of `result`, one entry per run, with the run's absolute start.
+fn run_floats(result: &Series, field: usize) -> RunFloats {
+    let samples = &result.fields.as_slice()[field];
+    result
+        .time
+        .runs()
+        .map(|run| {
+            let values = (run.row..run.row + run.len)
+                .map(|row| match samples.sample(row) {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Missing => None,
+                    _ => panic!("unexpected histogram"),
+                })
+                .collect();
+            ((run.position, run.len), values)
+        })
+        .collect()
+}
+
+/// The `(start, len)` of a single-run result's grid range.
+fn span_of(result: &Series) -> (usize, usize) {
+    let range = result
+        .time
+        .as_grid_range()
+        .unwrap_or_else(|| panic!("expected one run, got {:?}", result.time));
+    (range.start(), range.len())
+}
+
+/// The one series a mapping of one input produces, or a panic naming the case.
+fn mapped(result: Option<Series>) -> Series {
+    result.expect("the mapping retained a row")
+}
+
 fn assert_floats(actual: &Samples, expected: &[Option<f64>]) {
     assert_eq!(actual.len(), expected.len());
     for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
@@ -211,14 +262,12 @@ fn short_multifield_slices_keep_absolute_grid_and_labels() {
     ];
     let input = series(&schema, 7, fields);
     let output = map_math(&schema, &input, MathOp::Floor).unwrap().unwrap();
-    let TimeAxis::Grid(range) = &output.time else {
-        panic!("lost grid axis")
-    };
-    assert_eq!((range.start(), range.len()), (7, 3));
-    assert!(Arc::ptr_eq(
-        range.grid(),
-        schema.eval_grid.as_ref().unwrap()
-    ));
+    assert_eq!(span_of(&output), (7, 3));
+    let grid = output
+        .time
+        .grid()
+        .unwrap_or_else(|| panic!("lost grid axis: {:?}", output.time));
+    assert!(Arc::ptr_eq(grid, schema.eval_grid.as_ref().unwrap()));
     assert_eq!(output.time.timestamp(0), Some(4500));
     assert_eq!(output.time.timestamp(2), Some(5500));
     // Prometheus drops the name; main keeps it because its HTTP adapter follows Call arguments.
@@ -267,10 +316,7 @@ fn empty_and_all_missing_ranges_are_not_expanded() {
             MathOp::Round { nearest: 0.0 },
         ] {
             let output = map_math(&schema, &input, op).unwrap().unwrap();
-            let TimeAxis::Grid(range) = &output.time else {
-                panic!("lost grid axis")
-            };
-            assert_eq!((range.start(), range.len()), (start, len));
+            assert_eq!(span_of(&output), (start, len));
             assert_floats(output.fields.get(0).unwrap(), &vec![None; len]);
         }
     }
@@ -484,10 +530,7 @@ fn math_matches_main_udfs_across_float_boundaries() {
         }
         assert_eq!(output.metric.name(), None);
         assert_eq!(output.metric.tags(), &series.metric.tags()[1..]);
-        let TimeAxis::Grid(range) = output.time else {
-            panic!("lost grid axis")
-        };
-        assert_eq!((range.start(), range.len()), (5, input.len()));
+        assert_eq!(span_of(&output), (5, input.len()));
     }
 }
 

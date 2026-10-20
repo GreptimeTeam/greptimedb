@@ -17,6 +17,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
+use datafusion::arrow::array::builder::NullBufferBuilder;
 use datafusion::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray, UInt32Array};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field};
@@ -29,9 +30,10 @@ use datatypes::series::histogram::{
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields,
+    SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -45,9 +47,9 @@ use crate::functions::{
     Changes, CountOverTime, IDelta, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Resets,
 };
 use crate::grid_series::reference::{
-    Dense, GoldenCase, OwnedHistogram, assert_histogram_close, assert_series_eq,
-    assert_series_eq_any_nan, close, expand, golden_cases, labels_of, metric_of, mixed_series,
-    random_dense, special_value,
+    Dense, GoldenCase, Labels, OwnedHistogram, Points, assert_histogram_close, assert_pieces_eq,
+    assert_series_eq, assert_series_eq_any_nan, close, expand, golden_cases, labels_of, metric_of,
+    mixed_series, random_dense, series_of, sparse_series, special_value,
 };
 use crate::grid_series::{GridSample, GridSeriesBuilder};
 use crate::histogram_eval::float_histogram::FloatHistogram;
@@ -198,6 +200,35 @@ fn random_chunks(rng: &mut StdRng, rows: &[Row], fields: usize, host: u64) -> Ve
     chunks
 }
 
+/// The absolute grid position `series` starts at.
+fn grid_start(series: &Series) -> usize {
+    series
+        .time
+        .first_position()
+        .unwrap_or_else(|| panic!("expected a grid series, got {:?}", series.time))
+}
+
+/// How many rows of `series` hold a value in any field.
+fn rows_with_a_value(series: &Series) -> usize {
+    if series.time.grid().is_none() {
+        panic!("expected a grid series, got {:?}", series.time);
+    }
+    // The axis names the rows; a value is counted where a field holds one at that row.
+    let mut cursors: Vec<_> = series.fields.iter().map(|field| field.cursor()).collect();
+    series
+        .time
+        .positions()
+        .filter(|&(_, row)| {
+            cursors.iter_mut().any(|field| {
+                !matches!(
+                    field.at(row).expect("the axis and the fields are aligned"),
+                    SampleRef::Missing
+                )
+            })
+        })
+        .count()
+}
+
 /// Whether every sample of every field is missing.
 fn all_missing(series: &Series) -> bool {
     series.fields.iter().all(|field| {
@@ -206,19 +237,46 @@ fn all_missing(series: &Series) -> bool {
 }
 
 /// Pushes every chunk of one series, keeping what the evaluator hands out on the way.
+///
+/// A push can decide several runs of positions, and one chunk carries one run, so every push is
+/// followed by taking the rest.
 fn collect_chunks(
     evaluator: &mut RangeEvaluator,
     pieces: &[RawSeriesChunk],
 ) -> Vec<EvaluatedChunk> {
-    pieces
-        .iter()
-        .flat_map(|piece| evaluator.push(piece).unwrap())
-        .collect()
+    let mut chunks = Vec::new();
+    for piece in pieces {
+        chunks.extend(evaluator.push(piece).unwrap());
+        drain_chunks(evaluator, &mut chunks);
+    }
+    chunks
 }
 
-/// Folds the chunks of one series back into one series, the way a consumer that keeps every value
+/// Takes every piece the evaluator already holds, without pushing anything more.
+fn drain_chunks(evaluator: &mut RangeEvaluator, chunks: &mut Vec<EvaluatedChunk>) {
+    while let Some(chunk) = evaluator.pull().unwrap() {
+        chunks.push(chunk);
+    }
+}
+
+/// Ingests one complete evaluated series and returns every chunk it produced.
+fn evaluate_series(evaluator: &mut RangeEvaluator, series: &Series) -> Vec<EvaluatedChunk> {
+    let mut chunks: Vec<_> = evaluator
+        .push_series(series, true)
+        .unwrap()
+        .into_iter()
+        .collect();
+    drain_chunks(evaluator, &mut chunks);
+    chunks
+}
+
+/// Folds the chunks of one series into one dense series, the way a consumer that keeps every value
 /// would, and checks the chunk protocol: absolute ranges, never going backwards, all of the same
 /// series, and one closing chunk last.
+///
+/// The result is deliberately dense -- the gaps between chunks become null rows -- because a value
+/// comparison wants one series over the whole span. Row counts must never be read off this: doing
+/// so would hide exactly the allocation this change removes.
 ///
 /// The range check is explicit rather than left to the builder, whose own ordering check only sees
 /// the rows holding a value: a closing chunk with no rows must still start at or after the end of
@@ -230,45 +288,140 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
         .series
         .metric
         .clone();
-    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    let width = chunks[0].series.fields.len();
+    let grid_len = schema.eval_grid.as_ref().unwrap().timestamps().len();
+    let mut rows: Vec<Option<Vec<Option<GridSample>>>> = (0..grid_len).map(|_| None).collect();
     let mut closing = false;
     let mut previous_end = 0;
     for chunk in chunks {
         assert!(!closing, "a chunk follows the closing chunk");
         closing = chunk.is_last;
         assert_eq!(chunk.series.metric, metric, "a chunk changed the series");
-        let range = chunk.range();
-        assert!(
-            range.start() >= previous_end,
-            "chunk range {} goes back before the previous end {previous_end}",
-            range.start()
-        );
-        previous_end = range.start() + range.len();
+        // The chunk says which absolute positions it holds: a chunk of several runs must not be
+        // read as the envelope from its first to its last one.
+        let mut first = None;
+        let mut rows_run: Vec<(usize, usize)> = Vec::new();
+        for (position, row) in chunk.series.time.positions() {
+            first.get_or_insert(position);
+            rows_run.push((position, row));
+        }
+        if let Some(first) = first {
+            assert!(
+                first >= previous_end,
+                "chunk range {first} goes back before the previous end {previous_end}"
+            );
+            let last = rows_run
+                .last()
+                .map(|(position, _)| *position)
+                .unwrap_or(first);
+            previous_end = last + 1;
+        }
+        // One forward cursor per field, driven by the rows the chunk carries.
         let mut fields: Vec<_> = chunk
             .series
             .fields
             .iter()
-            .map(|field| field.iter())
+            .map(|field| field.cursor())
             .collect();
-        for row in 0..range.len() {
-            let values: Vec<_> = fields
+        for (position, row) in rows_run {
+            let values: Vec<Option<GridSample>> = fields
                 .iter_mut()
-                .map(
-                    |field| match field.next().expect("the range length is checked") {
+                .map(|field| {
+                    match field
+                        .at(row)
+                        .expect("the chunk rows are aligned with its fields")
+                    {
                         SampleRef::Missing => None,
                         SampleRef::Float(value) => Some(GridSample::Float(value)),
                         SampleRef::Histogram(view) => Some(GridSample::Histogram(Box::new(
                             FloatHistogram::try_from_view(&view).unwrap(),
                         ))),
-                    },
-                )
+                    }
+                })
                 .collect();
             // Positions only increase across chunks, so an overlap is an error here.
-            builder.push_samples(range.start() + row, &values).unwrap();
+            if values.iter().any(|value| value.is_some()) {
+                assert!(
+                    rows[position].is_none(),
+                    "two chunks hold a value at position {position}"
+                );
+                rows[position] = Some(values);
+            }
         }
     }
     assert!(closing, "the series never closed");
-    builder.finish(metric).unwrap()
+    assert_eq!(
+        width,
+        schema.fields.len(),
+        "the fold changed the field count"
+    );
+    dense_series(&rows, schema.clone(), metric)
+}
+
+/// Builds one series covering every row of `rows`, with a null where no chunk held a value.
+///
+/// This is deliberately not the builder: the builder hands out one piece per run of valued
+/// positions, and a value comparison wants a single dense series. Row counts must never be read
+/// off this -- doing so would hide exactly the allocation this change removes.
+fn dense_series(
+    rows: &[Option<Vec<Option<GridSample>>>],
+    schema: Arc<SeriesSchema>,
+    metric: MetricName,
+) -> Option<Series> {
+    let start = rows.iter().position(Option::is_some)?;
+    let end = rows.iter().rposition(Option::is_some)? + 1;
+    let rows = &rows[start..end];
+    let fields = (0..schema.fields.len())
+        .map(|field| {
+            let mut values = Vec::with_capacity(rows.len());
+            let mut nulls = NullBufferBuilder::new(rows.len());
+            let mut histograms: Option<(HistogramBatchBuilder, Vec<Option<u32>>)> = None;
+            for row in rows {
+                match row.as_ref().and_then(|row| row[field].as_ref()) {
+                    Some(GridSample::Float(value)) => {
+                        values.push(*value);
+                        nulls.append(true);
+                        if let Some((_, indices)) = &mut histograms {
+                            indices.push(None);
+                        }
+                    }
+                    Some(GridSample::Histogram(h)) => {
+                        values.push(0.0);
+                        nulls.append(false);
+                        let (batch, indices) = histograms
+                            .get_or_insert_with(|| (HistogramBatchBuilder::new(), Vec::new()));
+                        while indices.len() < values.len() - 1 {
+                            indices.push(None);
+                        }
+                        indices.push(Some(h.push_to(batch).unwrap()));
+                    }
+                    None => {
+                        values.push(0.0);
+                        nulls.append(false);
+                        if let Some((_, indices)) = &mut histograms {
+                            indices.push(None);
+                        }
+                    }
+                }
+            }
+            let floats = Float64Array::new(values.into(), nulls.finish());
+            match histograms {
+                None => Samples::from_float(floats),
+                Some((batch, indices)) => {
+                    let histograms = HistogramSamples::try_new(
+                        UInt32Array::from(indices),
+                        batch.finish().unwrap(),
+                    )
+                    .unwrap();
+                    Samples::try_from_mixed(floats, histograms).unwrap()
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let grid = schema.eval_grid.clone().expect("the fold is on a grid");
+    let time = GridRange::try_new(grid, start, rows.len()).unwrap();
+    let fields = SeriesFields::try_from_vec(fields).unwrap();
+    Some(Series::try_new(&schema, metric, TimeAxis::Grid(time), fields).unwrap())
 }
 
 fn random_rows(rng: &mut StdRng, fields: usize) -> Vec<Row> {
@@ -834,7 +987,8 @@ fn empty_input_and_series_without_results() {
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
     // A series whose samples all miss the grid still closes, and its closing chunk says the whole
-    // grid was decided: every point is a settled missing value, not a point still waiting.
+    // grid was decided: every point is a settled missing value, not a point still waiting. A
+    // settled point that holds no value is reported by the close itself, not by a row.
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
     let after_grid = chunk(&[(31, vec![Some(1.0)])], 1, 0, true);
     let closed = evaluator
@@ -842,8 +996,12 @@ fn empty_input_and_series_without_results() {
         .unwrap()
         .expect("a series closes");
     assert!(closed.is_last);
-    assert_eq!(closed.range().start(), 0);
-    assert_eq!(closed.range().len(), 4);
+    assert_eq!(chunk_run(&closed).start(), 0);
+    assert_eq!(
+        chunk_run(&closed).len(),
+        0,
+        "no point of the grid holds a value"
+    );
     assert!(all_missing(&closed.series));
     // A series whose only sample is stale does the same: the row is dropped, the points behind it
     // are decided.
@@ -853,16 +1011,19 @@ fn empty_input_and_series_without_results() {
         .unwrap()
         .expect("a series closes");
     assert!(closed.is_last);
-    assert_eq!((closed.range().start(), closed.range().len()), (0, 4));
+    assert_eq!(
+        (chunk_run(&closed).start(), chunk_run(&closed).len()),
+        (0, 0)
+    );
     assert!(all_missing(&closed.series));
     evaluator.finish().unwrap();
 }
 
 /// A push that completes nothing must not hand out a chunk.
 ///
-/// `evaluate` opens the builder's span at the first position it has not handed out yet, even when
-/// this push settled no position, so finishing unconditionally yields a zero-length series rather
-/// than none. Handing that out would report progress the push did not make.
+/// A position that settles to no value is not a row, so a push that settled only such positions
+/// has no run to hand out. Emitting an empty chunk instead would report progress the push did not
+/// make, and a consumer that keys on chunks would see a decision that never happened.
 #[test]
 fn a_push_that_completes_nothing_hands_out_no_chunk() {
     let window = RangeWindow {
@@ -879,13 +1040,31 @@ fn a_push_that_completes_nothing_hands_out_no_chunk() {
         "a push that completed no position must not hand out a chunk"
     );
 
-    // The closing push still hands one out, and it reports every position of the grid.
-    let closed = evaluator
-        .push(&chunk(&[(100, vec![Some(2.0)])], 1, 0, true))
-        .unwrap()
-        .expect("a series closes");
-    assert!(closed.is_last);
-    assert_eq!((closed.range().start(), closed.range().len()), (0, 3));
+    // The closing push hands out the one position of the grid that holds a value, and that same
+    // chunk is the close: nothing follows it. The two positions without a value cost no row.
+    let mut chunks = Vec::new();
+    chunks.extend(
+        evaluator
+            .push(&chunk(&[(100, vec![Some(2.0)])], 1, 0, true))
+            .unwrap(),
+    );
+    drain_chunks(&mut evaluator, &mut chunks);
+    assert_eq!(
+        chunks.len(),
+        1,
+        "one valued position, and it closes the series"
+    );
+    assert_eq!(
+        (chunk_run(&chunks[0]).start(), chunk_run(&chunks[0]).len()),
+        (0, 1)
+    );
+    assert!(chunks[0].is_last);
+    let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
+    assert_eq!(
+        rows_with_a_value(&folded),
+        1,
+        "only the first grid point holds a value"
+    );
     evaluator.finish().unwrap();
 }
 
@@ -906,24 +1085,32 @@ fn a_series_that_ends_early_still_closes() {
         .unwrap()
         .expect("the windows of the first two points are complete");
     assert!(!handed.is_last);
-    assert_eq!((handed.range().start(), handed.range().len()), (0, 2));
+    assert_eq!(
+        (chunk_run(&handed).start(), chunk_run(&handed).len()),
+        (0, 2)
+    );
 
     // The last sample lies past every remaining window, so points 2 to 4 are decided to hold no
-    // value. The closing chunk reports them rather than trimming them away.
+    // value. They cost no row: the close is what reports that they are settled, and it starts
+    // where the last handed-out run ended.
     let last = chunk(&[(45, vec![Some(3.0)])], 1, 0, true);
     let closed = evaluator.push(&last).unwrap().expect("a series closes");
     assert!(closed.is_last);
-    assert_eq!((closed.range().start(), closed.range().len()), (2, 3));
+    assert_eq!(
+        (chunk_run(&closed).start(), chunk_run(&closed).len()),
+        (2, 0)
+    );
     assert!(all_missing(&closed.series));
+    assert_eq!(rows_with_a_value(&closed.series), 0);
 }
 
-/// A chunk that decides only missing positions still has to be handed out before the series ends.
+/// A stretch of decided positions holding no value costs no row, and does not delay the close.
 ///
-/// Without it a consumer cannot tell that those positions are settled: it would keep their
-/// windows open and wait for input that has already been shown to contribute nothing. The values
-/// are all missing, so only the span itself carries the progress.
+/// The positions are settled as soon as the sampler pushes past them, but settling them allocates
+/// nothing: a consumer learns they hold no value from the run that follows them, or from the
+/// close when nothing follows.
 #[test]
-fn a_chunk_of_decided_missing_positions_is_handed_out_before_the_series_ends() {
+fn decided_missing_positions_cost_no_rows_and_do_not_delay_the_close() {
     // `rate` over a one-second window on grid 0,1,2,3,4s.
     let window = RangeWindow {
         range_ms: 1_000,
@@ -947,30 +1134,37 @@ fn a_chunk_of_decided_missing_positions_is_handed_out_before_the_series_ends() {
     );
     let first = evaluator.push(&a).unwrap().expect("point 0 is decided");
     assert!(!first.is_last);
-    assert_eq!((first.range().start(), first.range().len()), (0, 1));
+    assert_eq!((chunk_run(&first).start(), chunk_run(&first).len()), (0, 1));
 
-    // B: the sample at 2s decides that 1s has no window content and 2s has a single sample, so
-    // neither yields a rate. Neither point can change once a sample at 4s arrives: that sample
-    // lies past both windows.
+    // B settles 1s and 2s: neither yields a rate, and neither point can change once a sample at
+    // 4s arrives, since that sample lies past both windows. Nothing is handed out, because a
+    // position holding no value is not a row -- and the series has not ended, so there is no
+    // close to report yet.
     let b = chunk(&[(2_000, vec![Some(3.0)])], 1, 0, false);
-    let second = evaluator
-        .push(&b)
-        .unwrap()
-        .expect("points 1 and 2 are decided, missing or not");
-    assert!(!second.is_last, "the series has not ended");
-    assert_eq!((second.range().start(), second.range().len()), (1, 2));
-    assert!(all_missing(&second.series));
+    assert!(
+        evaluator.push(&b).unwrap().is_none(),
+        "settled positions holding no value are not rows"
+    );
+    assert!(
+        evaluator.pull().unwrap().is_none(),
+        "the series is still open"
+    );
 
-    // C closes the series and reports the rest.
+    // C closes the series. 3s and 4s hold no rate either, so the close carries the progress: it
+    // starts where the last row ended and holds none.
     let c = chunk(&[(4_000, vec![Some(4.0)])], 1, 0, true);
-    let last = evaluator.push(&c).unwrap().expect("a series closes");
+    let mut chunks = vec![first];
+    chunks.extend(evaluator.push(&c).unwrap());
+    drain_chunks(&mut evaluator, &mut chunks);
+    let last = chunks.last().expect("a series always closes");
     assert!(last.is_last);
-    assert_eq!((last.range().start(), last.range().len()), (3, 2));
+    assert_eq!((chunk_run(last).start(), chunk_run(last).len()), (1, 0));
 
-    // Folding the three chunks reproduces the whole grid, so the missing spans cost nothing.
-    let chunks = [first, second, last];
+    // Folding the chunks reproduces the one point that holds a value; the empty stretch cost no
+    // row at any point along the way.
     let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
     assert_eq!(folded.metric, output_metric(RangeFunction::Rate, 0));
+    assert_eq!((grid_start(&folded), rows_with_a_value(&folded)), (0, 1));
 }
 
 /// The closing chunk of a series is labelled like the chunks before it, including the metadata
@@ -994,15 +1188,517 @@ fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
     assert!(!handed.is_last);
     assert_eq!(handed.series.metric.name(), None);
 
-    // The last sample is past every remaining window, so the closing chunk carries decided
-    // missing positions and must still be labelled the same.
+    // The last sample is past every remaining window, so the close reports the settled positions
+    // that hold no value, and it must be labelled the same as the chunk before it.
     let last = chunk(&[(45, vec![Some(5.0)])], 1, 0, true);
-    let closed = evaluator.push(&last).unwrap().expect("a series closes");
+    let mut chunks = vec![handed];
+    chunks.extend(evaluator.push(&last).unwrap());
+    drain_chunks(&mut evaluator, &mut chunks);
+    let closed = chunks.last().expect("a series always closes");
     assert!(closed.is_last);
-    assert!(!closed.range().is_empty());
+    assert_eq!(
+        chunk_run(closed).len(),
+        0,
+        "the settled positions hold no value"
+    );
     assert!(all_missing(&closed.series));
-    assert_eq!(closed.series.metric, handed.series.metric);
+    assert_eq!(closed.series.metric, chunks[0].series.metric);
     assert_eq!(closed.series.metric.name(), None);
+}
+
+/// The single run a chunk holds, for the chunks that are known to cover one.
+fn chunk_run(chunk: &EvaluatedChunk) -> &GridRange {
+    chunk
+        .range()
+        .expect("this chunk was expected to cover a single run")
+}
+
+/// The `(start, len)` of every run of every chunk handed out, in order.
+///
+/// One chunk may carry several runs, separated by stretches holding no value; each is reported on
+/// its own, so a test comparing chunk boundaries always sees the positions that hold a value. A
+/// chunk holding no row at all reports the position it closes at, with a length of zero.
+fn chunk_ranges(chunks: &[EvaluatedChunk]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    for chunk in chunks {
+        ranges.extend(run_ranges_of(chunk));
+    }
+    ranges
+}
+
+/// The `(start, len)` of every run of one chunk, or the empty range it closes at.
+fn run_ranges_of(chunk: &EvaluatedChunk) -> Vec<(usize, usize)> {
+    let runs: Vec<(usize, usize)> = chunk
+        .series
+        .time
+        .runs()
+        .map(|run| (run.position, run.len))
+        .collect();
+    if !runs.is_empty() {
+        return runs;
+    }
+    chunk
+        .range()
+        .map(|range| vec![(range.start(), 0)])
+        .unwrap_or_default()
+}
+
+/// The rows handed out over every chunk of one series.
+fn total_rows(chunks: &[EvaluatedChunk]) -> usize {
+    chunks.iter().map(|chunk| chunk.series.time.len()).sum()
+}
+
+/// A one-millisecond window, so the value at a grid point is the sample sitting exactly on it.
+fn pinpoint(window: RangeWindow) -> RangeEvaluator {
+    probe_evaluator(1, grid(0, 1, 1_000_000), window)
+}
+
+fn one_ms() -> RangeWindow {
+    RangeWindow {
+        range_ms: 1,
+        offset_ms: 0,
+        anchor_ms: None,
+    }
+}
+
+/// Two samples a million positions apart cost two rows: a position holding no value is not a
+/// row, so the empty stretch between them is never materialised.
+#[test]
+fn a_huge_gap_costs_one_row_per_value() {
+    let mut evaluator = pinpoint(one_ms());
+    let rows = [(10, vec![Some(1.0)]), (900_000, vec![Some(2.0)])];
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
+
+    assert_eq!(
+        chunk_ranges(&chunks),
+        vec![(10, 1), (900_000, 1)],
+        "one run per value, each over its own position"
+    );
+    assert_eq!(chunks.len(), 1, "one push decides both values");
+    assert_eq!(total_rows(&chunks), 2, "two values, two rows");
+    for (start, len) in chunk_ranges(&chunks) {
+        let end = start + len;
+        assert!(
+            end <= 11 || start >= 900_000,
+            "run {start}..{end} reaches into the empty stretch"
+        );
+        assert_ne!((start, end), (0, 1_000_000), "no run spans the whole grid");
+    }
+    assert!(chunks.last().unwrap().is_last);
+    evaluator.finish().unwrap();
+}
+
+/// A series whose first value comes late is addressed at that position: nothing is allocated for
+/// the positions before it.
+#[test]
+fn a_very_late_first_value_allocates_nothing_before_it() {
+    let mut evaluator = pinpoint(one_ms());
+    let chunks = collect_chunks(
+        &mut evaluator,
+        &[chunk(&[(999_000, vec![Some(1.0)])], 1, 0, true)],
+    );
+
+    assert_eq!(chunk_ranges(&chunks), vec![(999_000, 1)]);
+    assert_eq!(total_rows(&chunks), 1);
+    assert!(chunks[0].is_last);
+    evaluator.finish().unwrap();
+}
+
+/// A series whose last value comes early closes on the value it has: the positions after it are
+/// settled and hold nothing, which the close reports without a row for any of them.
+#[test]
+fn a_very_early_last_value_closes_without_rows_for_the_rest() {
+    let mut evaluator = pinpoint(one_ms());
+    let first = chunk(&[(0, vec![Some(1.0)])], 1, 0, false);
+    let mut chunks = vec![evaluator.push(&first).unwrap().expect("point 0 is decided")];
+    assert!(!chunks[0].is_last);
+    chunks.extend(
+        evaluator
+            .push(&chunk(&[(5, vec![Some(2.0)])], 1, 0, true))
+            .unwrap(),
+    );
+    drain_chunks(&mut evaluator, &mut chunks);
+
+    assert_eq!(chunk_ranges(&chunks), vec![(0, 1), (5, 1)]);
+    assert_eq!(
+        total_rows(&chunks),
+        2,
+        "the two positions holding a value, and no others"
+    );
+    assert!(chunks.last().unwrap().is_last);
+    evaluator.finish().unwrap();
+}
+
+/// A push that advances over a long blank stretch hands out nothing for it, and a later push still
+/// yields its own value: skipping the stretch loses no sample.
+#[test]
+fn a_blank_stretch_hands_out_nothing_and_loses_the_next_value() {
+    let mut evaluator = pinpoint(one_ms());
+    let mut chunks = Vec::new();
+    chunks.extend(
+        evaluator
+            .push(&chunk(&[(10, vec![Some(1.0)])], 1, 0, false))
+            .unwrap(),
+    );
+    assert_eq!(
+        chunk_ranges(&chunks),
+        vec![(10, 1)],
+        "only the position holding a value is handed out"
+    );
+    assert!(!chunks[0].is_last);
+    assert!(evaluator.pull().unwrap().is_none());
+
+    chunks.extend(
+        evaluator
+            .push(&chunk(&[(900_000, vec![Some(2.0)])], 1, 0, true))
+            .unwrap(),
+    );
+    drain_chunks(&mut evaluator, &mut chunks);
+    assert_eq!(chunk_ranges(&chunks), vec![(10, 1), (900_000, 1)]);
+    assert_eq!(total_rows(&chunks), 2);
+    assert!(chunks.last().unwrap().is_last);
+
+    let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
+    assert_eq!(
+        rows_with_a_value(&folded),
+        2,
+        "the later value reached the consumer"
+    );
+    evaluator.finish().unwrap();
+}
+
+/// A series with no value anywhere still closes, exactly once, on a chunk holding no rows.
+#[test]
+fn a_series_without_any_result_closes_once() {
+    // The only sample lies before the grid, so no window contains it.
+    let mut evaluator = probe_evaluator(1, grid(5, 1, 1_000_000), one_ms());
+    let mut chunks = Vec::new();
+    chunks.extend(
+        evaluator
+            .push(&chunk(&[(0, vec![Some(1.0)])], 1, 0, true))
+            .unwrap(),
+    );
+    drain_chunks(&mut evaluator, &mut chunks);
+
+    assert_eq!(chunks.len(), 1, "a series closes exactly once");
+    assert!(chunks[0].is_last);
+    assert_eq!(chunk_ranges(&chunks), vec![(0, 0)]);
+    assert_eq!(total_rows(&chunks), 0);
+    assert!(evaluator.pull().unwrap().is_none());
+    evaluator.finish().unwrap();
+}
+
+/// A valued prefix followed by an all-empty remainder still closes, and the remainder costs no
+/// row.
+#[test]
+fn a_valued_prefix_and_an_empty_remainder_still_close() {
+    let mut evaluator = pinpoint(one_ms());
+    let mut chunks = vec![
+        evaluator
+            .push(&chunk(&[(3, vec![Some(1.0)])], 1, 0, false))
+            .unwrap()
+            .expect("point 3 is decided"),
+    ];
+    assert_eq!(chunk_ranges(&chunks), vec![(3, 1)]);
+    assert!(!chunks[0].is_last);
+
+    // The last row is stale, so it is dropped and the remainder holds no value at all.
+    let last = chunk(&[(900_000, vec![Some(stale())])], 1, 0, true);
+    chunks.extend(evaluator.push(&last).unwrap());
+    drain_chunks(&mut evaluator, &mut chunks);
+
+    assert_eq!(chunk_ranges(&chunks), vec![(3, 1), (4, 0)]);
+    assert_eq!(total_rows(&chunks), 1, "the remainder holds no rows");
+    assert!(chunks.last().unwrap().is_last);
+    evaluator.finish().unwrap();
+}
+
+/// Folding the chunks of a sparse series gives the same series as folding the same samples with a
+/// row for every position holding no value: a missing position and an uncovered one mean the same
+/// thing to a consumer.
+#[test]
+fn a_sparse_series_folds_like_the_same_data_with_explicit_nulls() {
+    let grid = grid(0, 1_000, 40);
+    let window = RangeWindow {
+        range_ms: 3_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let rows = [
+        (0, vec![Some(1.0)]),
+        (1_000, vec![Some(2.0)]),
+        (2_000, vec![Some(3.0)]),
+        (20_000, vec![Some(4.0)]),
+        (21_000, vec![Some(5.0)]),
+        (39_000, vec![Some(6.0)]),
+    ];
+    let mut evaluator = probe_evaluator(1, grid.clone(), window);
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
+    let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
+
+    let expected = reference(&rows, &grid, window, 1, true, true);
+    let spread = expected.iter().filter(|row| row[0].is_some()).count();
+    assert_eq!(
+        total_rows(&chunks),
+        spread,
+        "a row per position holding a value, and none for the rest"
+    );
+    assert_eq!(
+        expand(&folded),
+        expected,
+        "the sparse result equals the one written as null rows"
+    );
+    evaluator.finish().unwrap();
+}
+
+/// The runs of one evaluated series share the evaluator's retained samples: a window reaching
+/// back across the gap to an earlier run reads both.
+///
+/// This is what makes a sparse inner result usable. Closing the series after its first run, or
+/// promoting each run to a series of its own, would leave the window at 10ms reading 3 alone
+/// instead of 2 + 3.
+#[test]
+fn a_window_reads_across_the_gap_between_runs_of_one_series() {
+    let inner = grid(0, 1, 11);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields,
+        eval_grid: Some(inner),
+    });
+    // One point at 10ms; the window reaches back 11ms, which takes in the point at 0ms.
+    let window = RangeWindow {
+        range_ms: 11,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let mut evaluator =
+        RangeEvaluator::try_new(&schema, grid(10, 1, 1), window, RangeFunction::SumOverTime)
+            .unwrap();
+    let labels = BTreeMap::from([("job".to_string(), "x".to_string())]);
+    let run = |point: usize, value: f64| {
+        mixed_series(
+            &schema,
+            &labels,
+            &Points::from([(point, value.to_bits())]),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    };
+
+    let mut chunks = Vec::new();
+    chunks.extend(evaluator.push_series(&run(0, 2.0), false).unwrap());
+    drain_chunks(&mut evaluator, &mut chunks);
+    assert!(
+        chunks.is_empty(),
+        "the run at 0ms decides no point of the outer grid"
+    );
+    chunks.extend(evaluator.push_series(&run(10, 3.0), true).unwrap());
+    drain_chunks(&mut evaluator, &mut chunks);
+
+    let closed = chunks.last().expect("the series closes");
+    assert!(closed.is_last);
+    assert!(matches!(
+        closed.series.fields.as_slice()[0].sample(0),
+        SampleRef::Float(sum) if sum == 5.0
+    ));
+    evaluator.finish().unwrap();
+}
+
+/// The samples decide the rows, not the input chunking: the same logical data split at different
+/// boundaries folds to the same series over the same number of rows.
+#[test]
+fn raw_chunk_boundaries_do_not_change_the_rows() {
+    let grid = grid(0, 1_000, 40);
+    let window = RangeWindow {
+        range_ms: 2_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let rows = [
+        (0, vec![Some(1.0)]),
+        (1_000, vec![Some(2.0)]),
+        (10_000, vec![Some(3.0)]),
+        (11_000, vec![Some(4.0)]),
+        (30_000, vec![Some(5.0)]),
+    ];
+    let expected = reference(&rows, &grid, window, 1, true, true);
+    let expected_rows = expected.iter().filter(|row| row[0].is_some()).count();
+    let splits: [&[usize]; 4] = [&[], &[2], &[2, 4], &[1, 2, 3, 4]];
+
+    let mut outcomes = Vec::new();
+    for split in splits {
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        let mut evaluator = probe_evaluator(1, grid.clone(), window);
+        for end in split.iter().copied().chain(std::iter::once(rows.len())) {
+            let piece = chunk(&rows[start..end], 1, 0, end == rows.len());
+            chunks.extend(evaluator.push(&piece).unwrap());
+            drain_chunks(&mut evaluator, &mut chunks);
+            start = end;
+        }
+        let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
+        assert_eq!(expand(&folded), expected, "split {split:?} differs");
+        // No run ever spans a position holding no value, whatever the chunking: the rows of a run
+        // are consecutive grid positions, and the positions between two runs are the empty ones.
+        for (start, len) in chunk_ranges(&chunks) {
+            assert!(
+                len <= 3,
+                "split {split:?} handed out {len} rows at once from {start} over a series with no three-value run"
+            );
+        }
+        outcomes.push(total_rows(&chunks));
+        evaluator.finish().unwrap();
+    }
+    // Which chunk a run lands in follows the input boundaries, since a push has to hand its
+    // decided positions out before the next one changes them. What must not depend on chunking is
+    // the number of rows: an empty position never costs one.
+    assert!(
+        outcomes.windows(2).all(|pair| pair[0] == pair[1]),
+        "chunking changed the rows handed out: {outcomes:?}"
+    );
+    assert_eq!(outcomes, vec![expected_rows; outcomes.len()]);
+}
+
+/// Values and nulls alternating: one row per value and one chunk per value, which is what this
+/// design costs for data that never holds two consecutive positions.
+#[test]
+fn alternating_values_and_nulls_hand_out_one_row_per_value() {
+    let mut evaluator = probe_evaluator(1, grid(0, 1, 10), one_ms());
+    let rows: Vec<Row> = (0..10)
+        .map(|index| {
+            let value = (index % 2 == 0).then_some(index as f64 + 1.0);
+            (index, vec![value])
+        })
+        .collect();
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
+
+    assert_eq!(
+        chunk_ranges(&chunks),
+        vec![(0, 1), (2, 1), (4, 1), (6, 1), (8, 1)],
+        "one run per value: five values, five runs"
+    );
+    assert_eq!(
+        chunks.len(),
+        1,
+        "one push decides the whole series, so it arrives as one chunk"
+    );
+    assert_eq!(total_rows(&chunks), 5);
+    assert!(chunks.last().unwrap().is_last);
+    assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+    evaluator.finish().unwrap();
+}
+
+/// Values and nulls alternating over 200,000 positions: 100,000 valued positions cost 100,000
+/// rows, not one per position, and each value is its own run.
+///
+/// The run count is the accepted cost of this design; the row count is what must not regress.
+#[test]
+fn interleaved_values_over_a_long_grid_cost_one_row_per_value() {
+    const GRID: u64 = 200_000;
+    let mut evaluator = probe_evaluator(1, grid(0, 1, GRID), one_ms());
+    let rows: Vec<Row> = (0..GRID)
+        .map(|index| {
+            let value = (index % 2 == 0).then_some(index as f64);
+            (index as i64, vec![value])
+        })
+        .collect();
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
+
+    assert_eq!(
+        total_rows(&chunks),
+        (GRID / 2) as usize,
+        "one row per valued position, never one per position"
+    );
+    assert_eq!(
+        chunks.len(),
+        1,
+        "the whole series is decided by one push, so it arrives as one chunk"
+    );
+    assert!(chunks.last().unwrap().is_last);
+    assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+    let runs: Vec<(usize, usize)> = chunks[0]
+        .series
+        .time
+        .runs()
+        .map(|run| (run.position, run.len))
+        .collect();
+    assert_eq!(
+        runs.len(),
+        (GRID / 2) as usize,
+        "every valued position is its own run"
+    );
+    for (start, len) in runs {
+        assert_eq!(len, 1, "every valued position is its own run");
+        assert_eq!(start % 2, 0, "only even positions hold a value");
+    }
+    evaluator.finish().unwrap();
+}
+
+/// An anchored selector broadcasts one value over every grid point, so every position holds one:
+/// the result is a single contiguous piece, not one piece per position.
+#[test]
+fn an_anchored_replay_stays_one_contiguous_piece() {
+    let window = RangeWindow {
+        range_ms: 10,
+        offset_ms: 0,
+        anchor_ms: Some(5),
+    };
+    for step_invariant in [true, false] {
+        let mut evaluator = if step_invariant {
+            // `Replay::Once`: the first point's result holds at every point.
+            probe_evaluator(1, grid(0, 10, 100), window)
+        } else {
+            // `Replay::EveryPoint`: the first point's window is evaluated at every point.
+            per_point_probe_evaluator(1, grid(0, 10, 100), window)
+        };
+        let chunks = collect_chunks(
+            &mut evaluator,
+            &[chunk(&[(0, vec![Some(1.0)])], 1, 0, true)],
+        );
+        assert_eq!(
+            chunk_ranges(&chunks),
+            vec![(0, 100)],
+            "every position holds a value, so the whole grid is one piece              (step_invariant={step_invariant})"
+        );
+        assert_eq!(total_rows(&chunks), 100);
+        assert!(chunks[0].is_last);
+        evaluator.finish().unwrap();
+    }
+}
+
+/// Fields of one run stay row-aligned: a field with no value at a position another field fills
+/// keeps a null row there. That null is the layout, not a bridged gap.
+#[test]
+fn a_run_keeps_its_fields_aligned_and_nulls_only_the_missing_one() {
+    let mut evaluator = probe_evaluator(2, grid(0, 1, 6), one_ms());
+    let rows = [
+        (0, vec![Some(1.0), None]),
+        (1, vec![None, Some(2.0)]),
+        (2, vec![Some(3.0), Some(4.0)]),
+    ];
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 2, 0, true)]);
+
+    assert_eq!(
+        chunk_ranges(&chunks),
+        vec![(0, 3)],
+        "three positions, one run"
+    );
+    let series = &chunks[0].series;
+    let observed: Vec<Vec<bool>> = (0..3)
+        .map(|row| {
+            series
+                .fields
+                .iter()
+                .map(|field| !matches!(field.sample(row), SampleRef::Missing))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        vec![vec![true, false], vec![false, true], vec![true, true]],
+        "both fields carry a row at every position of the run"
+    );
+    assert!(chunks[0].is_last);
+    evaluator.finish().unwrap();
 }
 
 #[test]
@@ -1413,7 +2109,8 @@ fn nulls_change_the_reset_positions_of_each_field_independently() {
 }
 
 /// A random evaluated series on `grid`; values may carry the stale bit pattern, which computed
-/// input keeps as an ordinary NaN.
+/// input keeps as an ordinary NaN. The rows hold holes, so the series carries one run per stretch
+/// of positions holding a value.
 fn random_evaluated(
     rng: &mut StdRng,
     grid: &Arc<EvalGrid>,
@@ -1444,6 +2141,68 @@ fn random_evaluated(
     (builder.finish(metric(host)).unwrap(), rows)
 }
 
+/// The rows `offset..offset + len` of `series` as a series of its own, on the same axis.
+fn rows_of(schema: &Arc<SeriesSchema>, series: &Series, offset: usize, len: usize) -> Series {
+    let fields = series
+        .fields
+        .iter()
+        .map(|field| {
+            field
+                .slice(offset, len)
+                .expect("the rows lie inside the field")
+        })
+        .collect::<Vec<_>>();
+    Series::try_new(
+        schema,
+        series.metric.clone(),
+        series
+            .time
+            .slice(offset, len)
+            .expect("the rows lie inside the axis"),
+        SeriesFields::try_from_vec(fields).expect("one field per schema field"),
+    )
+    .expect("the slice matches the schema")
+}
+
+/// Delivers one evaluated series the way a stream does -- a prefix now, the closing rows later --
+/// and drains the chunks after each delivery.
+fn deliver_as_a_stream(
+    evaluator: &mut RangeEvaluator,
+    schema: &Arc<SeriesSchema>,
+    series: &Series,
+    rng: &mut StdRng,
+) -> Vec<EvaluatedChunk> {
+    let len = series.time.len();
+    let cut = if len < 2 {
+        len
+    } else {
+        rng.random_range(1..len)
+    };
+    let mut chunks = Vec::new();
+    if cut == len {
+        if let Some(chunk) = evaluator.push_series(series, true).unwrap() {
+            chunks.push(chunk);
+        }
+        drain_chunks(evaluator, &mut chunks);
+        return chunks;
+    }
+    if let Some(chunk) = evaluator
+        .push_series(&rows_of(schema, series, 0, cut), false)
+        .unwrap()
+    {
+        chunks.push(chunk);
+    }
+    drain_chunks(evaluator, &mut chunks);
+    if let Some(chunk) = evaluator
+        .push_series(&rows_of(schema, series, cut, len - cut), true)
+        .unwrap()
+    {
+        chunks.push(chunk);
+    }
+    drain_chunks(evaluator, &mut chunks);
+    chunks
+}
+
 #[test]
 fn subquery_series_match_references() {
     for seed in 0..300 {
@@ -1455,11 +2214,13 @@ fn subquery_series_match_references() {
             continue;
         };
         let inner = Arc::new(EvalGrid::try_new(inner).unwrap());
-        let schema = SeriesSchema {
+        let schema = Arc::new(SeriesSchema {
             fields: raw_schema(fields).fields,
             eval_grid: Some(inner.clone()),
-        };
-        let (Some(series), rows) = random_evaluated(&mut rng, &inner, fields, seed) else {
+        });
+        let (series, rows) = random_evaluated(&mut rng, &inner, fields, seed);
+        // Every row of this draw holds no value, so there is no input series to deliver.
+        let Some(series) = series else {
             continue;
         };
         let mut probe = RangeEvaluator::with_kernel(
@@ -1472,22 +2233,18 @@ fn subquery_series_match_references() {
         )
         .unwrap();
         let expected = reference(&rows, &outer, window, fields, false, true);
-        let evaluated = probe
-            .push_series(&series)
-            .unwrap()
-            .expect("the input closes");
-        assert!(evaluated.is_last);
-        let result = fold_chunks(std::slice::from_ref(&evaluated), probe.output_schema());
+        // The same logical series arrives as a prefix and its closing rows, as a stream delivers
+        // it: the runs of both deliveries are folded together for the comparison.
+        let evaluated = deliver_as_a_stream(&mut probe, &schema, &series, &mut rng);
+        assert!(evaluated.last().expect("the input closes").is_last);
+        let result = fold_chunks(&evaluated, probe.output_schema());
         assert_series_eq(result.as_ref(), &expected, &metric(seed));
         for function in udf_functions() {
             let mut evaluator =
                 RangeEvaluator::try_new(&schema, outer.clone(), window, function).unwrap();
             let expected = udf_reference(function, &rows, &outer, window, fields, false);
-            let evaluated = evaluator
-                .push_series(&series)
-                .unwrap()
-                .expect("the input closes");
-            let result = fold_chunks(std::slice::from_ref(&evaluated), evaluator.output_schema());
+            let evaluated = deliver_as_a_stream(&mut evaluator, &schema, &series, &mut rng);
+            let result = fold_chunks(&evaluated, evaluator.output_schema());
             assert_series_eq(result.as_ref(), &expected, &output_metric(function, seed));
         }
     }
@@ -1535,8 +2292,11 @@ fn rejects_input_of_the_other_kind() {
 
     let mut builder = GridSeriesBuilder::try_new(Arc::new(evaluated)).unwrap();
     builder.push(0, &[Some(1.0)]).unwrap();
-    let series = builder.finish(metric(0)).unwrap().unwrap();
-    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series));
+    let series = builder
+        .finish(metric(0))
+        .unwrap()
+        .expect("one contiguous run");
+    execution_error(probe_evaluator(1, grid(0, 10, 4), window).push_series(&series, true));
 }
 
 /// The range function a golden fixture names, with its constant arguments.
@@ -1781,7 +2541,7 @@ fn waiting_for_a_point_drops_samples_behind_its_window() {
         // report progress on the first point but never on the second.
         if let Some(handed) = evaluator.push(&chunk(&rows, 1, 0, false)).unwrap() {
             assert!(!handed.is_last);
-            assert!(handed.range().start() + handed.range().len() <= 1);
+            assert!(chunk_run(&handed).start() + chunk_run(&handed).len() <= 1);
         }
         assert!(evaluator.fields[0].timestamps.len() <= 100);
     }
@@ -2085,12 +2845,11 @@ fn absent_over_time_is_absent_over_present_over_time() {
                 RangeFunction::PresentOverTime,
             )
             .unwrap();
-            let closed = evaluator
-                .push(&chunk(&rows, 1, host as u64, true))
-                .unwrap()
-                .expect("the series closes");
-            assert!(closed.is_last);
-            present.push(closed.series);
+            let input = chunk(&rows, 1, host as u64, true);
+            let chunks = collect_chunks(&mut evaluator, std::slice::from_ref(&input));
+            let folded =
+                fold_chunks(&chunks, evaluator.output_schema()).expect("every input series closes");
+            present.push(folded);
         }
         let schema = SeriesSchema {
             fields: raw_schema(1).fields,
@@ -2101,7 +2860,9 @@ fn absent_over_time_is_absent_over_present_over_time() {
             let none = MetricName::try_new(None, Vec::new()).unwrap();
             (vec![vec![None]; grid_spec[2] as usize], none)
         });
-        assert_series_eq(actual.as_ref(), &expected, &labels);
+        // `absent` over single-field inputs writes a value at every point where it is absent, so
+        // the one series, expanded over the grid, gives the dense expectation.
+        assert_pieces_eq(actual.as_slice(), &expected, &labels);
         checked += 1;
     }
     assert_eq!(checked, 120);
@@ -2209,15 +2970,17 @@ fn histogram_range_functions_match_prometheus() {
                 "{context}"
             );
             for (labels, series) in &actual {
-                let TimeAxis::Grid(range) = &series.time else {
-                    panic!("expected a grid series");
-                };
+                if series.time.grid().is_none() {
+                    panic!("expected a grid series, got {:?}", series.time);
+                }
                 let floats = &expected[labels];
                 let no_histograms = BTreeMap::new();
                 let texts = case.result_histograms.get(labels).unwrap_or(&no_histograms);
                 let mut points = 0;
-                for (row, sample) in series.fields.as_slice()[0].iter().enumerate() {
-                    let point = range.start() + row;
+                // The axis says where each row sits, so a result of several runs compares right.
+                let mut cursor = series.fields.as_slice()[0].cursor();
+                for (point, row) in series.time.positions() {
+                    let sample = cursor.at(row).expect("the axis and the fields are aligned");
                     match sample {
                         SampleRef::Missing => continue,
                         SampleRef::Float(value) => {
@@ -2276,9 +3039,983 @@ fn evaluated_histograms_drop_counter_reset_hints() {
     };
     let mut evaluator =
         RangeEvaluator::try_new(&schema, grid(10, 10, 1), window, RangeFunction::Resets).unwrap();
-    let result = evaluator.push_series(&series).unwrap().unwrap().series;
+    let mut chunks = evaluate_series(&mut evaluator, &series);
+    assert_eq!(chunks.len(), 1);
+    let result = chunks.pop().unwrap().series;
     assert!(matches!(
         result.fields.as_slice()[0].sample(0),
         SampleRef::Float(resets) if resets == 0.0
     ));
+}
+
+/// A series of `grid` holding no position: the shape of an empty closing chunk.
+fn empty_series(
+    schema: &Arc<SeriesSchema>,
+    grid: &Arc<EvalGrid>,
+    metric: MetricName,
+    at: usize,
+) -> Series {
+    let fields = SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(Vec::<
+        f64,
+    >::new(
+    )))])
+    .unwrap();
+    Series::try_new(
+        schema,
+        metric,
+        TimeAxis::Grid(GridRange::try_new(grid.clone(), at, 0).unwrap()),
+        fields,
+    )
+    .unwrap()
+}
+
+/// The evaluated-input schema of `grid`: the shape an upstream evaluator's chunks declare.
+fn evaluated_schema(grid: &Arc<EvalGrid>) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields.clone(),
+        eval_grid: Some(grid.clone()),
+    })
+}
+
+/// A delivery holding no position decides nothing, so inside a series it is refused: it cannot be
+/// told from a stall, and the caller would wait for a result that is not coming. The same empty
+/// delivery carrying `is_last` is the series' close, and the identity initialises and closes.
+#[test]
+fn an_empty_delivery_closes_only_when_it_is_last() {
+    let outer = grid(0, 10, 4);
+    let schema = evaluated_schema(&outer);
+    let empty = empty_series(&schema, &outer, metric(0), 0);
+
+    let mut mid_series =
+        RangeEvaluator::try_new(&schema, outer.clone(), one_ms(), RangeFunction::SumOverTime)
+            .unwrap();
+    execution_error(mid_series.push_series(&empty, false));
+
+    // The identity never produced a value, so the only chunk it hands out is the empty close.
+    let mut evaluator =
+        RangeEvaluator::try_new(&schema, outer.clone(), one_ms(), RangeFunction::SumOverTime)
+            .unwrap();
+    let closed = evaluator
+        .push_series(&empty, true)
+        .unwrap()
+        .expect("the closing chunk");
+    assert!(closed.is_last);
+    assert!(closed.series.time.is_empty(), "nothing was decided");
+    assert_eq!(
+        closed.series.metric,
+        output_metric(RangeFunction::SumOverTime, 0)
+    );
+    assert!(
+        evaluator.pull().unwrap().is_none(),
+        "the series closed once"
+    );
+    evaluator.finish().unwrap();
+}
+
+/// A valued prefix followed by an empty closing chunk gives the same result as the same data
+/// delivered in one piece: composing streams must not change the answer.
+#[test]
+fn a_valued_prefix_composes_with_an_empty_closing_chunk() {
+    let outer = grid(0, 1_000, 6);
+    let schema = evaluated_schema(&outer);
+    let window = RangeWindow {
+        range_ms: 2_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let points = Points::from([
+        (0, f64::to_bits(1.0)),
+        (1, f64::to_bits(2.0)),
+        (3, f64::to_bits(4.0)),
+    ]);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let valued = series_of(&schema, &labels, &points).expect("three rows");
+
+    // One piece: the whole series closes on its own delivery.
+    let mut whole =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::SumOverTime)
+            .unwrap();
+    let one_piece = evaluate_series(&mut whole, &valued);
+    let expected = fold_chunks(&one_piece, whole.output_schema()).expect("the series completed");
+    whole.finish().unwrap();
+
+    // Composed: the valued rows as a prefix, then the empty chunk that closes the series.
+    let mut composed =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::SumOverTime)
+            .unwrap();
+    let mut chunks = Vec::new();
+    chunks.extend(composed.push_series(&valued, false).unwrap());
+    drain_chunks(&mut composed, &mut chunks);
+    assert!(
+        total_rows(&chunks) > 0,
+        "the valued prefix already decided some points"
+    );
+    assert!(
+        !chunks.last().expect("a chunk").is_last,
+        "the prefix does not close the series"
+    );
+    // The empty close keeps the identity of the series it closes.
+    let empty = empty_series(&schema, &outer, metric_of(&labels), 6);
+    chunks.extend(composed.push_series(&empty, true).unwrap());
+    drain_chunks(&mut composed, &mut chunks);
+    let actual = fold_chunks(&chunks, composed.output_schema()).expect("the series completed");
+    composed.finish().unwrap();
+    assert_eq!(
+        expand(&actual),
+        expand(&expected),
+        "the composed pipeline disagrees with one piece"
+    );
+}
+
+/// The empty closing chunk an evaluator produces is legal input for the next one: a pipeline that
+/// composes two evaluators must not reject its own output.
+#[test]
+fn an_empty_chunk_from_one_evaluator_closes_the_next() {
+    let outer = grid(0, 1_000, 4);
+    // A sample far past the grid closes a series whose every window stays empty, so the only chunk
+    // the evaluator hands out is the empty close.
+    let rows = [(100_000, vec![Some(1.0)])];
+    let mut upstream = probe_evaluator(1, outer.clone(), one_ms());
+    let produced = collect_chunks(&mut upstream, &[chunk(&rows, 1, 0, true)]);
+    upstream.finish().unwrap();
+    let closed = produced.last().expect("the series closes");
+    assert!(closed.is_last);
+    assert!(
+        closed.series.time.is_empty(),
+        "the closing chunk carries no row"
+    );
+
+    let schema = evaluated_schema(&outer);
+    let mut downstream =
+        RangeEvaluator::try_new(&schema, outer.clone(), one_ms(), RangeFunction::SumOverTime)
+            .unwrap();
+    let chunk = downstream
+        .push_series(&closed.series, true)
+        .unwrap()
+        .expect("the downstream series still closes");
+    assert!(chunk.is_last);
+    assert!(chunk.series.time.is_empty());
+    downstream.finish().unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Acceptance: a fragmented result, end to end through the evaluator.
+//
+// These tests pin the observable shape of a sparse result as well as its values: one series per
+// logical output, one row per position that holds a value, and an axis that names where those rows
+// sit. The dense matrices they compare against are built by this module's reference and are never
+// fed back into the evaluator.
+// ---------------------------------------------------------------------------------------------
+
+/// A window of one step over a grid of `step_ms`: the point at `t` reads the sample sitting
+/// exactly on `t`, so a kernel that reports its last sample reports the input value unchanged.
+fn one_step_window(step_ms: i64) -> RangeWindow {
+    RangeWindow {
+        range_ms: step_ms,
+        offset_ms: 0,
+        anchor_ms: None,
+    }
+}
+
+/// A: a million-position grid holding two values, one a long way into the grid.
+///
+/// The span between them costs neither a row nor a field sample: the axis carries two rows and
+/// names two runs, and the shared grid -- one timestamp buffer for every result of the query -- is
+/// what turns a row into an instant.
+#[test]
+fn a_million_position_grid_with_two_values_is_one_series_of_two_rows() {
+    const SPAN: u64 = 1_000_000;
+    let grid = grid(0, 1_000, SPAN);
+    // `last_over_time` over a one-step window reports the sample sitting on the point.
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid.clone(),
+        one_step_window(1_000),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    let rows = [(10_000, vec![Some(1.0)]), (900_000_000, vec![Some(2.0)])];
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
+
+    // One series, not a piece per run: a push hands its decided rows over in one `Series`.
+    assert_eq!(
+        chunks.len(),
+        1,
+        "one push decides the whole series, so it arrives as one chunk, got {}",
+        chunks.len()
+    );
+    let closing = &chunks[0];
+    assert!(
+        closing.is_last,
+        "a one-push series closes on its only chunk"
+    );
+    let series = &closing.series;
+    assert_eq!(
+        run_ranges_of(closing),
+        vec![(10, 1), (900_000, 1)],
+        "two values a million positions apart are two runs"
+    );
+    assert_eq!(
+        series.time.len(),
+        2,
+        "the axis carries two rows, not the span"
+    );
+    assert_eq!(
+        series.fields.len(),
+        1,
+        "the evaluator kept its input's field"
+    );
+    let field = &series.fields.as_slice()[0];
+    assert_eq!(field.len(), 2, "the field holds one sample per carried row");
+    let values = match field.dense() {
+        Some(DenseSamplesRef::Float(values)) => values,
+        _ => panic!("the field is one dense float array"),
+    };
+    assert_eq!(
+        values.len(),
+        2,
+        "the value buffer is sized by the values, not by the span"
+    );
+    assert_eq!(values.values().as_ref(), &[1.0, 2.0]);
+
+    // What the axis does carry is the shared grid: every result of the query addresses rows on it.
+    assert_eq!(
+        series
+            .time
+            .grid()
+            .expect("a grid series")
+            .timestamps()
+            .len(),
+        SPAN as usize,
+        "the grid really holds a million positions"
+    );
+    assert_eq!(
+        series.time.timestamps().len(),
+        2,
+        "the axis hands out two timestamps, not one per grid position"
+    );
+    assert_eq!(series.time.timestamp(0), Some(10_000));
+    assert_eq!(series.time.timestamp(1), Some(900_000_000));
+
+    // The reference: the result expands to a million slots, and exactly the two valued positions
+    // carry anything.
+    let expanded = expand(series);
+    assert_eq!(expanded.len(), SPAN as usize);
+    assert_eq!(
+        expanded.iter().filter(|row| row[0].is_some()).count(),
+        2,
+        "only the two pushed positions hold a value"
+    );
+    assert_eq!(expanded[10], vec![Some(1.0)]);
+    assert_eq!(expanded[900_000], vec![Some(2.0)]);
+    evaluator.finish().unwrap();
+}
+
+/// B: every position valued, so the result is one contiguous run and keeps the fast path: the
+/// axis is a `TimeAxis::Grid`, not a span list of one element.
+#[test]
+fn a_contiguous_result_still_takes_the_single_range_fast_path() {
+    const POINTS: u64 = 8;
+    let grid = grid(0, 1_000, POINTS);
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid.clone(),
+        one_step_window(1_000),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    let rows: Vec<Row> = (0..POINTS)
+        .map(|index| (index as i64 * 1_000, vec![Some(index as f64 + 1.0)]))
+        .collect();
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
+
+    assert_eq!(chunks.len(), 1);
+    let series = &chunks[0].series;
+    let range = series
+        .time
+        .as_grid_range()
+        .unwrap_or_else(|| panic!("a contiguous result is a grid range, got {:?}", series.time));
+    assert_eq!(
+        (range.start(), range.len()),
+        (0, POINTS as usize),
+        "the range starts at the first valued position and covers every position"
+    );
+    assert!(series.time.is_contiguous());
+    assert_eq!(series.time.len(), POINTS as usize);
+    evaluator.finish().unwrap();
+}
+
+/// B: alternating valued and missing positions: one series whose axis names one run per value, and
+/// one delivery for the whole series rather than one per run.
+///
+/// The measured numbers are 8 runs for 16 positions, handed out by 1 chunk.
+#[test]
+fn alternating_values_and_holes_arrive_in_one_delivery_over_many_runs() {
+    const POINTS: usize = 16;
+    let grid = grid(0, 1_000, POINTS as u64);
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid.clone(),
+        one_step_window(1_000),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    // Every even position holds a value, every odd one holds none.
+    let rows: Vec<Row> = (0..POINTS)
+        .map(|index| {
+            let value = (index % 2 == 0).then_some(index as f64);
+            (index as i64 * 1_000, vec![value])
+        })
+        .collect();
+    let chunks = collect_chunks(&mut evaluator, &[chunk(&rows, 1, 0, true)]);
+
+    assert_eq!(chunks.len(), 1, "one push decides the whole series");
+    let series = &chunks[0].series;
+    let runs = run_ranges_of(&chunks[0]);
+    let expected: Vec<(usize, usize)> = (0..POINTS).step_by(2).map(|index| (index, 1)).collect();
+    assert_eq!(
+        runs, expected,
+        "every valued position is its own run, at its own absolute position"
+    );
+    assert_eq!(runs.len(), POINTS / 2, "8 runs over 16 positions");
+    assert!(
+        chunks.len() * 4 <= runs.len(),
+        "deliveries ({}) must stay far below the runs ({}): one delivery per run would be the \
+         envelope strategy this change removes",
+        chunks.len(),
+        runs.len()
+    );
+    assert_eq!(series.time.len(), POINTS / 2, "one row per value");
+    assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+    evaluator.finish().unwrap();
+}
+
+/// B: the same positions delivered as one series with holes and as several pushes of the same
+/// logical series give the same dense result.
+///
+/// A stream hands a series over in pieces, so where the piece boundaries fall must not decide the
+/// answer: only the axis does.
+#[test]
+fn a_series_with_holes_and_the_same_positions_in_several_pushes_expand_alike() {
+    let outer = grid(0, 1_000, 16);
+    let schema = evaluated_schema(&outer);
+    let window = one_step_window(1_000);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let points = Points::from([
+        (0, f64::to_bits(1.0)),
+        (1, f64::to_bits(2.0)),
+        (3, f64::to_bits(4.0)),
+        (8, f64::to_bits(8.0)),
+        (9, f64::to_bits(16.0)),
+        (15, f64::to_bits(32.0)),
+    ]);
+
+    // One series, holes as explicit nulls between the valued positions.
+    let holed = series_of(&schema, &labels, &points).expect("six positions hold a value");
+    assert_eq!(
+        holed.time.len(),
+        16,
+        "the fixture spans the whole grid with nulls"
+    );
+    let mut one_push =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
+            .unwrap();
+    let whole = fold_chunks(
+        &evaluate_series(&mut one_push, &holed),
+        one_push.output_schema(),
+    )
+    .expect("the series completed");
+    one_push.finish().unwrap();
+    let expected = expand(&whole);
+    assert_eq!(
+        expected.iter().filter(|row| row[0].is_some()).count(),
+        6,
+        "the one-piece result carries the six values"
+    );
+
+    // The same positions as a fragmented axis, delivered in three pushes of the one series.
+    let sparse = sparse_series(&schema, &labels, &points).expect("six positions hold a value");
+    assert_eq!(
+        sparse.time.len(),
+        6,
+        "the fragmented fixture carries six rows"
+    );
+    assert_eq!(
+        sparse.time.runs().count(),
+        4,
+        "positions 0-1, 3, 8-9 and 15 are four runs"
+    );
+    let cuts = [1, 3];
+    let mut delivered =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
+            .unwrap();
+    let mut chunks: Vec<EvaluatedChunk> = Vec::new();
+    let mut start = 0;
+    for end in cuts
+        .iter()
+        .copied()
+        .chain(std::iter::once(sparse.time.len()))
+    {
+        let piece = rows_of(&schema, &sparse, start, end - start);
+        chunks.extend(
+            delivered
+                .push_series(&piece, end == sparse.time.len())
+                .unwrap(),
+        );
+        drain_chunks(&mut delivered, &mut chunks);
+        start = end;
+    }
+    assert!(
+        chunks.len() >= 2,
+        "the pushes hand out more than one chunk, got {}",
+        chunks.len()
+    );
+    assert!(chunks.last().expect("a closing chunk").is_last);
+    let several = fold_chunks(&chunks, delivered.output_schema()).expect("the series completed");
+    delivered.finish().unwrap();
+
+    assert_eq!(
+        expand(&several),
+        expected,
+        "where a push ends changed the answer"
+    );
+}
+
+/// E (5): the input chunk boundaries do not change the evaluated rows.
+///
+/// Runs compare only across the variants whose settled axis is genuinely the same: a push settles
+/// the points it decides, so the same logical data split differently may hand a run over as two
+/// adjacent spans. What must not depend on the split is the set of carried positions, which is
+/// what the expanded matrix compares.
+#[test]
+fn input_chunk_boundaries_do_not_change_the_evaluated_rows() {
+    let grid = grid(0, 1_000, 12);
+    let window = one_step_window(1_000);
+    let rows = [
+        (0, vec![Some(1.0)]),
+        (1_000, vec![Some(2.0)]),
+        (3_000, vec![Some(4.0)]),
+        (4_000, vec![Some(8.0)]),
+        (10_000, vec![Some(16.0)]),
+    ];
+    let splits: [&[usize]; 3] = [&[], &[2], &[1, 3, 4]];
+    let mut expanded = Vec::new();
+    let mut covered = Vec::new();
+    for split in splits {
+        let mut evaluator = RangeEvaluator::try_new(
+            &raw_schema(1),
+            grid.clone(),
+            window,
+            RangeFunction::LastOverTime,
+        )
+        .unwrap();
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        for end in split.iter().copied().chain(std::iter::once(rows.len())) {
+            let piece = chunk(&rows[start..end], 1, 0, end == rows.len());
+            chunks.extend(evaluator.push(&piece).unwrap());
+            drain_chunks(&mut evaluator, &mut chunks);
+            start = end;
+        }
+        let folded = fold_chunks(&chunks, evaluator.output_schema()).expect("the series completed");
+        // The split decides how many chunks a run is handed out in, never which positions hold a
+        // value: compare those, and the dense matrix, not the raw span count.
+        let mut positions: Vec<usize> = chunk_ranges(&chunks)
+            .into_iter()
+            .filter(|(_, len)| *len > 0)
+            .flat_map(|(start, len)| start..start + len)
+            .collect();
+        positions.sort_unstable();
+        covered.push(positions);
+        expanded.push(expand(&folded));
+        evaluator.finish().unwrap();
+    }
+    assert_eq!(covered[0], vec![0, 1, 3, 4, 10], "split {:?}", splits[0]);
+    assert_eq!(
+        covered[1], covered[0],
+        "split {:?} moved the valued positions",
+        splits[1]
+    );
+    assert_eq!(
+        covered[2], covered[0],
+        "split {:?} moved the valued positions",
+        splits[2]
+    );
+    assert_eq!(expanded[1], expanded[0], "split {:?}", splits[1]);
+    assert_eq!(expanded[2], expanded[0], "split {:?}", splits[2]);
+    // The one-piece variant's axis is the maximal-run one, so its runs are pinned exactly.
+    assert_eq!(
+        expanded[0]
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row[0].is_some())
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 3, 4, 10]
+    );
+}
+
+/// G: a series hands its rows out before it ends.
+///
+/// The chunks of a prefix arrive with `is_last` still false, and the positions they carry are a
+/// prefix of the positions the whole series ends up holding: a consumer can act on them without
+/// waiting for the last chunk of the input.
+#[test]
+fn a_prefix_hands_out_its_rows_before_the_series_ends() {
+    let grid = grid(0, 1_000, 12);
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid.clone(),
+        one_step_window(1_000),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+
+    let first = evaluator
+        .push(&chunk(
+            &[(0, vec![Some(1.0)]), (1_000, vec![Some(2.0)])],
+            1,
+            0,
+            false,
+        ))
+        .unwrap()
+        .expect("the first push decides positions 0 and 1");
+    assert!(
+        !first.is_last,
+        "the series keeps going, so the prefix chunk does not close it"
+    );
+    let mut chunks = vec![first];
+    drain_chunks(&mut evaluator, &mut chunks);
+    assert_eq!(chunks.len(), 1, "one push hands out one chunk");
+    assert_eq!(
+        run_ranges_of(&chunks[0]),
+        vec![(0, 2)],
+        "the prefix carries exactly the positions it decided"
+    );
+
+    // The closing push: positions 2..11 are decided, and only position 3 holds a value.
+    chunks.extend(
+        evaluator
+            .push(&chunk(&[(3_000, vec![Some(4.0)])], 1, 0, true))
+            .unwrap(),
+    );
+    drain_chunks(&mut evaluator, &mut chunks);
+    let closing = chunks.last().expect("a closing chunk");
+    assert!(closing.is_last, "exactly one chunk closes the series");
+    assert_eq!(
+        closing.range().map(|range| (range.start(), range.len())),
+        Some((3, 1))
+    );
+
+    // The one-piece form of the same input: the prefix must be a prefix of it.
+    let mut one_piece = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid.clone(),
+        one_step_window(1_000),
+        RangeFunction::LastOverTime,
+    )
+    .unwrap();
+    let whole = one_piece
+        .push(&chunk(
+            &[
+                (0, vec![Some(1.0)]),
+                (1_000, vec![Some(2.0)]),
+                (3_000, vec![Some(4.0)]),
+            ],
+            1,
+            0,
+            true,
+        ))
+        .unwrap()
+        .expect("the one push decides the whole series");
+    assert!(whole.is_last);
+    let folded = fold_chunks(&chunks, one_piece.output_schema()).expect("the series completed");
+    assert_eq!(
+        expand(&folded),
+        expand(&whole.series),
+        "the streamed series differs from the one-piece one"
+    );
+
+    let prefix_positions: Vec<usize> = chunks[0]
+        .series
+        .time
+        .positions()
+        .map(|(position, _)| position)
+        .collect();
+    let whole_positions: Vec<usize> = whole
+        .series
+        .time
+        .positions()
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(
+        prefix_positions,
+        vec![0, 1],
+        "the prefix holds the first rows"
+    );
+    assert_eq!(
+        &whole_positions[..prefix_positions.len()],
+        prefix_positions.as_slice(),
+        "the prefix carries the first positions of the whole series"
+    );
+    assert_eq!(whole_positions, vec![0, 1, 3]);
+    assert!(
+        one_piece.pull().unwrap().is_none(),
+        "the series closed once"
+    );
+    one_piece.finish().unwrap();
+    evaluator.finish().unwrap();
+}
+
+/// Sums of field 0 per window, by scanning every row for every grid point: the dense reference of
+/// `sum_over_time`, independent of chunking, cursors and the retained-sample state.
+fn dense_sum_over_time(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Dense {
+    assert_eq!(window.offset_ms, 0, "this reference folds no offset");
+    grid.timestamps()
+        .iter()
+        .map(|&eval_ts| {
+            let inside: Vec<f64> = rows
+                .iter()
+                .filter(|(timestamp, _)| {
+                    *timestamp > eval_ts - window.range_ms && *timestamp <= eval_ts
+                })
+                .filter_map(|(_, values)| values[0])
+                .collect();
+            vec![(!inside.is_empty()).then(|| inside.iter().sum())]
+        })
+        .collect()
+}
+
+/// G: a window at a later run reads the samples of an earlier run of the same series.
+///
+/// The two runs arrive in two deliveries, and the single outer point's window reaches back across
+/// the hole to the first delivery's sample. A run-local read would report 3 + 4 = 7; the window
+/// holds 2 + 3 + 4 = 9.
+#[test]
+fn a_window_at_a_later_run_reads_the_earlier_run() {
+    let inner = grid(0, 1_000, 20);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields.clone(),
+        eval_grid: Some(inner.clone()),
+    });
+    let window = RangeWindow {
+        range_ms: 12_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let outer = grid(11_000, 1_000, 1);
+    let mut evaluator =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::SumOverTime)
+            .unwrap();
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let no_histograms = std::collections::BTreeMap::new();
+    let early = mixed_series(
+        &schema,
+        &labels,
+        &Points::from([(0, f64::to_bits(2.0))]),
+        &no_histograms,
+    )
+    .expect("position 0 holds a value");
+    let late = mixed_series(
+        &schema,
+        &labels,
+        &Points::from([(10, f64::to_bits(3.0)), (11, f64::to_bits(4.0))]),
+        &no_histograms,
+    )
+    .expect("positions 10 and 11 hold values");
+    assert_eq!(early.time.runs().count(), 1);
+    assert_eq!(late.time.runs().count(), 1);
+
+    let mut chunks = evaluator
+        .push_series(&early, false)
+        .unwrap()
+        .into_iter()
+        .collect::<Vec<_>>();
+    drain_chunks(&mut evaluator, &mut chunks);
+    assert!(
+        chunks.is_empty(),
+        "the first run alone decides no point of the one-point outer grid"
+    );
+    chunks.extend(evaluator.push_series(&late, true).unwrap());
+    drain_chunks(&mut evaluator, &mut chunks);
+
+    let closing = chunks.last().expect("the series closes");
+    assert!(closing.is_last, "exactly one chunk closes the series");
+    assert_eq!(
+        closing.series.time.len(),
+        1,
+        "the outer grid holds one point"
+    );
+    let value = match closing.series.fields.as_slice()[0].sample(0) {
+        SampleRef::Float(value) => value,
+        SampleRef::Histogram(_) => panic!("expected one float, got a histogram sample"),
+        SampleRef::Missing => panic!("expected one float, got a missing sample"),
+    };
+    assert_eq!(
+        value, 9.0,
+        "the window reads 2 + 3 + 4 across the hole; a run-local read would report 7"
+    );
+    let rows = [
+        (0, vec![Some(2.0)]),
+        (10_000, vec![Some(3.0)]),
+        (11_000, vec![Some(4.0)]),
+    ];
+    let expected = dense_sum_over_time(&rows, &outer, window);
+    assert_eq!(expand(&closing.series), expected);
+    evaluator.finish().unwrap();
+}
+
+/// G: a fragmented prefix closed by an empty chunk equals the one-piece result.
+///
+/// The prefix carries several runs, so it is a genuinely sparse delivery; the empty chunk only
+/// ends the series. Delivering the same rows in one piece must give the same values.
+#[test]
+fn a_fragmented_prefix_closed_by_an_empty_chunk_equals_one_piece() {
+    let outer = grid(0, 1_000, 8);
+    let schema = evaluated_schema(&outer);
+    let window = one_step_window(1_000);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let points = Points::from([
+        (0, f64::to_bits(1.0)),
+        (1, f64::to_bits(2.0)),
+        (3, f64::to_bits(4.0)),
+        (6, f64::to_bits(8.0)),
+    ]);
+    let sparse = sparse_series(&schema, &labels, &points).expect("four positions hold a value");
+    assert_eq!(sparse.time.len(), 4);
+    assert_eq!(
+        sparse.time.runs().count(),
+        3,
+        "positions 0-1, 3 and 6 are three runs"
+    );
+
+    // One piece: the whole sparse series in one delivery.
+    let mut one_piece =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
+            .unwrap();
+    let whole = fold_chunks(
+        &evaluate_series(&mut one_piece, &sparse),
+        one_piece.output_schema(),
+    )
+    .expect("the series completed");
+    one_piece.finish().unwrap();
+
+    // A prefix, then the empty chunk that closes the series.
+    let mut composed =
+        RangeEvaluator::try_new(&schema, outer.clone(), window, RangeFunction::LastOverTime)
+            .unwrap();
+    let mut chunks = composed
+        .push_series(&sparse, false)
+        .unwrap()
+        .into_iter()
+        .collect::<Vec<_>>();
+    drain_chunks(&mut composed, &mut chunks);
+    assert!(
+        !chunks.is_empty(),
+        "the valued prefix decides some points before the series ends"
+    );
+    assert!(
+        !chunks.last().expect("a prefix chunk").is_last,
+        "the prefix does not close the series"
+    );
+    assert_eq!(
+        chunk_ranges(&chunks),
+        vec![(0, 2), (3, 1), (6, 1)],
+        "the prefix keeps the runs of the rows it decided"
+    );
+    let empty = empty_series(&schema, &outer, metric_of(&labels), 8);
+    chunks.extend(composed.push_series(&empty, true).unwrap());
+    drain_chunks(&mut composed, &mut chunks);
+    let closing = chunks.last().expect("the series closes");
+    assert!(closing.is_last);
+    assert!(
+        closing.series.time.is_empty(),
+        "the empty chunk only closes the series"
+    );
+    assert_eq!(
+        chunks.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "a series closes exactly once"
+    );
+    let streamed = fold_chunks(&chunks, composed.output_schema()).expect("the series completed");
+    assert_eq!(
+        expand(&streamed),
+        expand(&whole),
+        "the composed series disagrees with the one-piece one"
+    );
+    assert_eq!(
+        expand(&streamed)
+            .iter()
+            .filter(|row| row[0].is_some())
+            .count(),
+        4,
+        "the four values survived the composition"
+    );
+    composed.finish().unwrap();
+}
+
+/// G: a series none of whose samples falls into any window produces nothing, so the only chunk it
+/// hands out is the empty closing one.
+#[test]
+fn a_series_outside_every_window_closes_on_an_empty_chunk() {
+    let inner = grid(0, 1_000, 20);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema(1).fields.clone(),
+        eval_grid: Some(inner.clone()),
+    });
+    // The one outer point sits at 0ms and its window looks back one step, so a sample at 15ms
+    // decides nothing.
+    let outer = grid(0, 1_000, 1);
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        outer.clone(),
+        one_step_window(1_000),
+        RangeFunction::SumOverTime,
+    )
+    .unwrap();
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let input = mixed_series(
+        &schema,
+        &labels,
+        &Points::from([(15, f64::to_bits(7.0))]),
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("position 15 holds a value");
+    let chunks = evaluate_series(&mut evaluator, &input);
+
+    assert_eq!(chunks.len(), 1, "the identity hands out one chunk");
+    let closing = &chunks[0];
+    assert!(closing.is_last, "the one chunk closes the series");
+    assert!(
+        closing.series.time.is_empty(),
+        "nothing was decided, so the chunk carries no row: {:?}",
+        closing.series.time
+    );
+    assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+    assert!(
+        evaluator.pull().unwrap().is_none(),
+        "the series closed once and has nothing more"
+    );
+    evaluator.finish().unwrap();
+}
+
+/// G: two evaluators composed -- the first one's chunks fed into the second as its input -- agree
+/// with the dense reference of the same two stages, and with handing the first stage's result to
+/// the second in one piece.
+#[test]
+fn two_composed_evaluators_agree_with_the_dense_reference() {
+    let inner = grid(0, 1_000, 24);
+    let outer = grid(0, 1_000, 24);
+    let inner_window = RangeWindow {
+        range_ms: 3_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let outer_window = RangeWindow {
+        range_ms: 2_000,
+        offset_ms: 0,
+        anchor_ms: None,
+    };
+    let rows = vec![
+        (0, vec![Some(1.0)]),
+        (1_000, vec![Some(2.0)]),
+        (10_000, vec![Some(5.0)]),
+        (11_000, vec![Some(7.0)]),
+        (20_000, vec![Some(11.0)]),
+    ];
+
+    // Stage one, delivered as three raw chunks so that it streams rather than evaluating at once.
+    let mut stage_one = RangeEvaluator::try_new(
+        &raw_schema(1),
+        inner.clone(),
+        inner_window,
+        RangeFunction::SumOverTime,
+    )
+    .unwrap();
+    let mut upstream: Vec<EvaluatedChunk> = Vec::new();
+    let mut start = 0;
+    for end in [2, 4, rows.len()] {
+        let piece = chunk(&rows[start..end], 1, 0, end == rows.len());
+        upstream.extend(stage_one.push(&piece).unwrap());
+        drain_chunks(&mut stage_one, &mut upstream);
+        start = end;
+    }
+    let first = fold_chunks(&upstream, stage_one.output_schema()).expect("stage one completed");
+    let dense_one = dense_sum_over_time(&rows, &inner, inner_window);
+    assert_eq!(
+        expand(&first),
+        dense_one,
+        "stage one disagrees with its reference"
+    );
+    stage_one.finish().unwrap();
+    assert!(
+        upstream.len() >= 2,
+        "stage one handed its rows out in several chunks, got {}",
+        upstream.len()
+    );
+
+    // Stage two composed: every chunk of stage one is a delivery, the last one closing.
+    let input_schema = evaluated_schema(&inner);
+    let mut composed = RangeEvaluator::try_new(
+        &input_schema,
+        outer.clone(),
+        outer_window,
+        RangeFunction::SumOverTime,
+    )
+    .unwrap();
+    let last_index = upstream.len() - 1;
+    let mut chunks: Vec<EvaluatedChunk> = Vec::new();
+    for (index, chunk) in upstream.iter().enumerate() {
+        chunks.extend(
+            composed
+                .push_series(&chunk.series, index == last_index)
+                .unwrap(),
+        );
+        drain_chunks(&mut composed, &mut chunks);
+    }
+    let streamed = fold_chunks(&chunks, composed.output_schema()).expect("the series completed");
+    composed.finish().unwrap();
+
+    // The one-piece form: stage one's result handed to a fresh stage two in a single delivery.
+    let mut one_piece = RangeEvaluator::try_new(
+        &input_schema,
+        outer.clone(),
+        outer_window,
+        RangeFunction::SumOverTime,
+    )
+    .unwrap();
+    let single = fold_chunks(
+        &evaluate_series(&mut one_piece, &first),
+        one_piece.output_schema(),
+    )
+    .expect("the series completed");
+    one_piece.finish().unwrap();
+
+    // The dense reference of both stages: stage one's rows, summed again around each outer point.
+    let stage_one_rows: Vec<Row> = dense_one
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            row[0].map(|value| (inner.timestamps()[index], vec![Some(value)]))
+        })
+        .collect();
+    let expected = dense_sum_over_time(&stage_one_rows, &outer, outer_window);
+    assert_eq!(
+        expand(&streamed),
+        expected,
+        "the composed pipeline disagrees with the dense reference"
+    );
+    assert_eq!(
+        expand(&streamed),
+        expand(&single),
+        "chunking stage one changed the composed answer"
+    );
+    assert_eq!(
+        expand(&streamed)
+            .iter()
+            .filter(|row| row[0].is_some())
+            .count(),
+        expected.iter().filter(|row| row[0].is_some()).count(),
+        "the composition lost or invented a value"
+    );
 }

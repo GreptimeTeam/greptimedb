@@ -12,16 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::Label;
 use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields};
-use datatypes::series::time::{EvalGrid, GridRange, GridSpec};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
 use super::*;
 use crate::golden::{assert_result, cases};
+use crate::grid_series::reference::{Labels, piece_ranges};
 
 const CASES: &str = include_str!("prometheus_cases.txt");
+
+/// A label set as name/value pairs, the way the fixture names one.
+type LabelKey = Vec<(Arc<str>, Arc<str>)>;
+
+/// The valued positions of one label set, by grid index.
+type Positions = Vec<(usize, u64)>;
 
 const OPS: [AggregateOp; 6] = [
     AggregateOp::Sum,
@@ -93,10 +102,48 @@ fn input(
     .unwrap()
 }
 
+/// Every valued position of `pieces`, stitched into one dense vector over the grid.
+///
+/// `aggregate_float` returns one piece per run of consecutive positions that hold a result, so a
+/// group whose values are interrupted arrives as several pieces; the first position and the
+/// value vector are what the assertions here compare.
+fn values_of(pieces: &[Series], field: usize, grid_len: usize) -> (usize, Vec<Option<f64>>) {
+    let mut dense = vec![None; grid_len];
+    for piece in pieces {
+        // The axis says which position each row holds, so a piece of several runs is read at the
+        // positions it carries instead of from its first one onwards.
+        let mut cursor = piece
+            .fields
+            .get(field)
+            .unwrap_or_else(|| panic!("lost field {field}: {:?}", piece.metric))
+            .cursor();
+        for (position, row) in piece.time.positions() {
+            let value = match cursor.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Float(value) => Some(value),
+                SampleRef::Missing => None,
+                _ => panic!("unexpected histogram"),
+            };
+            if value.is_some() {
+                assert!(dense[position].is_none(), "two pieces overlap");
+                dense[position] = value;
+            }
+        }
+    }
+    let first = dense.iter().position(Option::is_some).unwrap_or(0);
+    let last = dense.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+    (first, dense[first..last.max(first)].to_vec())
+}
+
+/// The first position `series` carries and its values, read row by row from the axis.
+///
+/// The axis says which positions the rows hold, so a result of several runs reports its first
+/// carried position and its compact rows, instead of assuming the rows start there and are
+/// adjacent.
 fn values(series: &Series, field: usize) -> (usize, Vec<Option<f64>>) {
-    let TimeAxis::Grid(range) = &series.time else {
-        panic!("lost grid")
-    };
+    let start = series
+        .time
+        .first_position()
+        .unwrap_or_else(|| panic!("lost grid: {:?}", series.time));
     let values = series
         .fields
         .get(field)
@@ -108,7 +155,7 @@ fn values(series: &Series, field: usize) -> (usize, Vec<Option<f64>>) {
             _ => panic!("unexpected histogram"),
         })
         .collect();
-    (range.start(), values)
+    (start, values)
 }
 
 fn grouping<'a>(header: &[String], labels: &'a [&'a str]) -> Grouping<'a> {
@@ -313,33 +360,41 @@ fn fields_are_aggregated_independently() {
             let output = aggregate_float(&multi, &series, op, grouping).unwrap();
             for field in [0, 1] {
                 let expected = aggregate_float(&single, &project(field), op, grouping).unwrap();
-                let expected = expected
-                    .iter()
-                    .map(|s| (s.metric.clone(), values(s, 0)))
-                    .collect::<Vec<_>>();
-                for actual in &output {
-                    let (start, actual_values) = values(actual, field);
-                    let present = actual_values
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, v)| v.map(|v| (start + i, v.to_bits())))
-                        .collect::<Vec<_>>();
-                    let reference = expected
-                        .iter()
-                        .find(|(metric, _)| metric == &actual.metric)
-                        .map_or_else(Vec::new, |(_, (start, v))| {
-                            v.iter()
+                // The multi-field result is cut into pieces where its values are interrupted, so
+                // the comparison is over the dense values of each label set, not over pieces.
+                let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
+                let grouped = |pieces: &[Series], field: usize| {
+                    let mut by_metric: BTreeMap<LabelKey, Positions> = BTreeMap::new();
+                    for piece in pieces {
+                        let same: Vec<Series> = pieces
+                            .iter()
+                            .filter(|other| other.metric == piece.metric)
+                            .cloned()
+                            .collect();
+                        let (start, values) = values_of(&same, field, grid_len);
+                        let mut key: LabelKey = piece
+                            .metric
+                            .tags()
+                            .iter()
+                            .map(|tag| (tag.name.clone(), tag.value.clone()))
+                            .collect();
+                        if let Some(name) = piece.metric.name() {
+                            key.insert(0, (Arc::from("__name__"), Arc::from(name)));
+                        }
+                        by_metric.insert(
+                            key,
+                            values
+                                .into_iter()
                                 .enumerate()
                                 .filter_map(|(i, v)| v.map(|v| (start + i, v.to_bits())))
-                                .collect()
-                        });
-                    assert_eq!(present, reference, "{op:?} {grouping:?} field {field}");
-                }
-                assert!(
-                    expected
-                        .iter()
-                        .all(|(m, _)| output.iter().any(|s| &s.metric == m))
-                );
+                                .collect(),
+                        );
+                    }
+                    by_metric
+                };
+                let actual = grouped(&output, field);
+                let expected = grouped(&expected, 0);
+                assert_eq!(actual, expected, "{op:?} {grouping:?} field {field}");
             }
         }
     }
@@ -389,7 +444,9 @@ fn state_blocks_keep_absolute_indices_across_boundaries_and_gaps() {
         ),
     ];
     let output = aggregate_float(&schema, &inputs, AggregateOp::Sum, Grouping::By(&[])).unwrap();
-    assert_eq!(output.len(), 1);
+    // One group, and its values are interrupted by empty blocks, so it arrives as several pieces
+    // of the same label set. What must hold is the dense values, not the piece count.
+    assert!(output.iter().all(|piece| piece.metric == output[0].metric));
     let mut a = vec![None; 452];
     let mut b = vec![None; 452];
     for i in 60..68 {
@@ -402,8 +459,8 @@ fn state_blocks_keep_absolute_indices_across_boundaries_and_gaps() {
         a[i - 60] = Some(4.0);
         b[i - 60] = Some(6.0);
     }
-    assert_eq!(values(&output[0], 0), (60, a));
-    assert_eq!(values(&output[0], 1), (60, b));
+    assert_eq!(values_of(&output, 0, 512), (60, a));
+    assert_eq!(values_of(&output, 1, 512), (60, b));
 }
 
 #[test]
@@ -634,4 +691,127 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
     raw_schema.eval_grid = None;
     let raw_schema = Arc::new(raw_schema);
     assert!(aggregate_float(&raw_schema, &[], AggregateOp::Sum, Grouping::By(&[])).is_err());
+}
+
+/// Aggregating a series of several runs folds the positions its axis carries, once each.
+///
+/// The rows of a sparse input are not adjacent, so a fold that walked `0..len` and added the
+/// first position would aggregate the holes as if they were the carried rows.
+#[test]
+fn aggregates_fold_a_sparse_axis_by_its_positions() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1000, 8).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let mut points = crate::grid_series::reference::Points::new();
+    for (position, value) in [(1, 1.0), (2, 2.0), (6, 6.0)] {
+        points.insert(position, f64::to_bits(value));
+    }
+    let a = crate::grid_series::reference::sparse_series(
+        &schema,
+        &Labels::from([("host".to_string(), "a".to_string())]),
+        &points,
+    )
+    .unwrap();
+    let mut other = crate::grid_series::reference::Points::new();
+    for (position, value) in [(2, 20.0), (6, 60.0)] {
+        other.insert(position, f64::to_bits(value));
+    }
+    let b = crate::grid_series::reference::sparse_series(
+        &schema,
+        &Labels::from([("host".to_string(), "b".to_string())]),
+        &other,
+    )
+    .unwrap();
+
+    // `By(&[])`: one group over both series, since their `host` labels differ.
+    let pieces = aggregate_float(&schema, &[a, b], AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    // One group, one piece: the group holds a result at positions 1, 2 and 6.
+    let dense = crate::grid_series::reference::stitch(&pieces);
+    let values = dense
+        .iter()
+        .enumerate()
+        .filter_map(|(position, row)| row[0].map(|value| (position, value)))
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![(1, 1.0), (2, 22.0), (6, 66.0)]);
+}
+
+/// F: an aggregation over inputs of several runs folds the carried positions and reports them as
+/// the runs they make up, compared in full against the dense reference.
+///
+/// Series `a` holds 1, 2 and 6; series `b` holds 2 and 6 with a different value. Their sum is 1 at
+/// position 1, 22 at 2 and 66 at 6, and the hole at 3..5 is not a row: the result's runs are
+/// `[(1, 2), (6, 1)]`, not `[(1, 6)]`.
+#[test]
+fn an_aggregation_of_sparse_inputs_is_compared_in_full_against_the_reference() {
+    use crate::grid_series::reference::{
+        Dense, assert_pieces_eq, metric_of, run_ranges, sparse_series, stitch,
+    };
+
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 8).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let points = |values: &[(usize, f64)]| -> crate::grid_series::reference::Points {
+        values
+            .iter()
+            .map(|&(position, value)| (position, f64::to_bits(value)))
+            .collect()
+    };
+    let a = sparse_series(
+        &schema,
+        &Labels::from([("host".to_string(), "a".to_string())]),
+        &points(&[(1, 1.0), (2, 2.0), (6, 6.0)]),
+    )
+    .expect("three positions hold a value");
+    let b = sparse_series(
+        &schema,
+        &Labels::from([("host".to_string(), "b".to_string())]),
+        &points(&[(2, 20.0), (6, 60.0)]),
+    )
+    .expect("two positions hold a value");
+    assert_eq!(run_ranges(&a), vec![(1, 2), (6, 1)]);
+    assert_eq!(run_ranges(&b), vec![(2, 1), (6, 1)]);
+
+    let pieces = aggregate_float(
+        &schema,
+        &[a, b.clone()],
+        AggregateOp::Sum,
+        Grouping::By(&[]),
+    )
+    .expect("both inputs are float series on the grid");
+    let mut expected: Dense = vec![vec![None]; 8];
+    expected[1] = vec![Some(1.0)];
+    expected[2] = vec![Some(22.0)];
+    expected[6] = vec![Some(66.0)];
+    assert_pieces_eq(&pieces, &expected, &metric_of(&Labels::new()));
+    assert_eq!(
+        piece_ranges(&pieces),
+        vec![(1, 2), (6, 1)],
+        "the sum holds exactly the runs that hold a value"
+    );
+    for piece in &pieces {
+        assert_eq!(piece.time.len(), 3, "three rows for three valued positions");
+        for (index, field) in piece.fields.iter().enumerate() {
+            assert_eq!(field.len(), 3, "field {index} is row-aligned");
+        }
+    }
+    assert_eq!(stitch(&pieces), expected);
+
+    // `count` keeps the same axis: two inputs hold something at positions 1, 2 and 6.
+    let counts = aggregate_float(&schema, &[b], AggregateOp::Count, Grouping::By(&[]))
+        .expect("one float input");
+    let mut counted: Dense = vec![vec![None]; 8];
+    counted[2] = vec![Some(1.0)];
+    counted[6] = vec![Some(1.0)];
+    assert_pieces_eq(&counts, &counted, &metric_of(&Labels::new()));
+    assert_eq!(piece_ranges(&counts), vec![(2, 1), (6, 1)]);
 }
