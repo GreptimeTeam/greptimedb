@@ -721,8 +721,10 @@ mod tests {
         let metadata = build_test_binary_test_region_metadata();
         // A tag long enough that the encoded primary key exceeds the 64-byte truncation length.
         let tag = "t".repeat(100);
-        let values: Vec<Vec<u8>> = (0..64)
-            .map(|i| format!("{i:08}").into_bytes().repeat(4 * 1024))
+        // parquet 58 checks the page size limit once per write batch (1024 rows), so
+        // write enough rows to flush several data pages.
+        let values: Vec<Vec<u8>> = (0..3000)
+            .map(|i| format!("{i:08}").into_bytes().repeat(128))
             .collect();
         let batch = new_record_batch_with_binary_values(&tag, &values);
         let mut metrics = Metrics::new(WriteType::Flush);
