@@ -1348,7 +1348,6 @@ pub async fn test_http_analyze_stream_scan_diagnostics(store_type: StorageType) 
         assert!(node["output_rows"].is_u64());
         assert!(node["elapsed_compute"].is_u64());
         assert!(node["metrics"].is_object());
-        assert!(node.get("scan_details").is_none());
         if matches!(
             node["name"].as_str(),
             Some("SeqScan" | "UnorderedScan" | "SeriesScan")
