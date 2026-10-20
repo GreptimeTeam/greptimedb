@@ -262,6 +262,9 @@ impl Samples {
         }
     }
     /// Returns the sample, treating an out-of-range index as missing.
+    ///
+    /// A chunked field walks its descriptors from the start, so reading row after row with this
+    /// costs a scan per row: a sequential reader should use [`Self::cursor`] instead.
     pub fn sample(&self, index: usize) -> SampleRef<'_> {
         if index >= self.len() {
             return SampleRef::Missing;
@@ -310,6 +313,23 @@ impl Samples {
             chunk_index: 0,
             local_index: 0,
             remaining,
+        }
+    }
+    /// A forward reader of this field addressed by compact row; see [`RowCursor`].
+    pub fn cursor(&self) -> RowCursor<'_> {
+        let (chunks, remaining) = match &self.storage {
+            SampleStorage::Chunks(chunks, len) => (Some(chunks.as_ref()), *len),
+            _ => (None, self.len()),
+        };
+        RowCursor {
+            iter: SamplesIter {
+                samples: self,
+                chunks,
+                chunk_index: 0,
+                local_index: 0,
+                remaining,
+            },
+            row: 0,
         }
     }
     /// Return a checked zero-copy slice (across chunks only intersected descriptors are retained).
@@ -531,6 +551,46 @@ impl ExactSizeIterator for SamplesIter<'_> {
     }
 }
 
+/// A forward reader of one field's samples, addressed by compact row.
+///
+/// [`Samples::sample`] rescans the chunk descriptors from the start on every call, so reading a
+/// chunked field with it row by row costs a scan per row. A cursor resumes where it stopped: the
+/// rows asked for must not go backwards, and reading `n` rows in order costs one pass over the
+/// field. That is what every operator walking a [`TimeAxis`](crate::series::time::TimeAxis) needs,
+/// since the axis says which rows exist and the cursor turns them into values.
+///
+/// ```
+/// use arrow::array::Float64Array;
+/// use datatypes::series::samples::{SampleRef, Samples};
+///
+/// let samples = Samples::try_from_chunks(vec![
+///     Samples::from_float(Float64Array::from(vec![1.0, 2.0])),
+///     Samples::from_float(Float64Array::from(vec![3.0])),
+/// ])
+/// .unwrap();
+/// let mut cursor = samples.cursor();
+/// assert!(matches!(cursor.at(2), Some(SampleRef::Float(3.0))));
+/// assert!(cursor.at(0).is_none(), "a cursor never goes back");
+/// ```
+pub struct RowCursor<'a> {
+    iter: SamplesIter<'a>,
+    /// Row the next [`RowCursor::at`] call must start from.
+    row: usize,
+}
+impl<'a> RowCursor<'a> {
+    /// Reads the sample at compact `row`, which must not be behind the previous read.
+    ///
+    /// Returns `None` when the row is behind the cursor's position or past the field's end.
+    pub fn at(&mut self, row: usize) -> Option<SampleRef<'a>> {
+        if row < self.row {
+            return None;
+        }
+        let sample = self.iter.nth(row - self.row)?;
+        self.row = row + 1;
+        Some(sample)
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Fields {
     One(Samples),
@@ -630,18 +690,18 @@ impl Series {
         if fields.iter().any(|f| f.len() != time_len) {
             return invalid("series field length does not match time axis");
         }
-        match (&schema.eval_grid, &time) {
-            (Some(expected), TimeAxis::Grid(range)) if expected.spec() == range.grid().spec() => {}
-            (Some(_), TimeAxis::Grid(_)) => {
+        match (&schema.eval_grid, time.grid()) {
+            (Some(expected), Some(grid)) if expected.spec() == grid.spec() => {}
+            (Some(_), Some(_)) => {
                 return invalid("series grid does not match schema evaluation grid");
             }
-            (Some(_), _) => {
+            (Some(_), None) => {
                 return invalid("explicit series time axis cannot use an evaluation grid");
             }
-            (None, TimeAxis::Grid(_)) => {
+            (None, Some(_)) => {
                 return invalid("grid series requires a schema evaluation grid");
             }
-            (None, TimeAxis::Explicit(_) | TimeAxis::ExplicitChunks(_)) => {}
+            (None, None) => {}
         }
         Ok(Self {
             metric,

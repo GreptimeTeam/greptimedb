@@ -20,7 +20,7 @@ use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
 
 use crate::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
 
-use crate::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+use crate::series::time::{EvalGrid, GridRange, GridRanges, GridSpan, GridSpec, TimeAxis};
 
 fn batch(sum: f64, count: f64, buckets: &[f64]) -> Arc<HistogramBatch> {
     let offsets = if buckets.is_empty() { vec![] } else { vec![0] };
@@ -1305,4 +1305,119 @@ fn short_multifield_series_uses_its_grid_range_and_checks_explicit_chunk_order()
         )
         .is_err()
     );
+}
+
+#[test]
+fn series_accepts_a_sparse_axis_on_its_schema_grid_only() {
+    let spec = GridSpec::try_new(100, 10, 5).unwrap();
+    let schema_grid = Arc::new(EvalGrid::try_new(spec).unwrap());
+    let metric = MetricName::try_new(None, vec![]).unwrap();
+    let schema = SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("value"),
+        }]),
+        eval_grid: Some(schema_grid.clone()),
+    };
+    let values = Samples::from_float(Float64Array::from(vec![1.0, 2.0]));
+    let fields = SeriesFields::one(values.clone());
+    let ranges = || {
+        GridRanges::try_new(
+            Arc::new(EvalGrid::try_new(spec).unwrap()),
+            vec![GridSpan::new(1, 1), GridSpan::new(4, 1)],
+        )
+        .unwrap()
+    };
+
+    let series = Series::try_new(
+        &schema,
+        metric.clone(),
+        TimeAxis::GridRanges(ranges()),
+        fields.clone(),
+    )
+    .unwrap();
+    assert_eq!(series.time.len(), 2);
+    assert_eq!(series.time.grid().map(|grid| grid.spec()), Some(spec));
+
+    // Another grid specification is not interchangeable, however the rows line up.
+    let other = GridRanges::try_new(
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(100, 5, 5).unwrap()).unwrap()),
+        vec![GridSpan::new(1, 1), GridSpan::new(4, 1)],
+    )
+    .unwrap();
+    assert!(
+        Series::try_new(
+            &schema,
+            metric.clone(),
+            TimeAxis::GridRanges(other),
+            fields.clone()
+        )
+        .is_err()
+    );
+
+    // A schema without an evaluation grid cannot carry grid rows at all.
+    let explicit_schema = SeriesSchema {
+        fields: schema.fields.clone(),
+        eval_grid: None,
+    };
+    assert!(
+        Series::try_new(
+            &explicit_schema,
+            metric.clone(),
+            TimeAxis::GridRanges(ranges()),
+            fields.clone()
+        )
+        .is_err()
+    );
+
+    // An empty sparse axis still names its grid, so it is accepted with empty fields.
+    let empty_fields = SeriesFields::one(Samples::from_float(Float64Array::new_null(0)));
+    let empty = GridRanges::empty(schema_grid.clone());
+    assert!(
+        Series::try_new(
+            &schema,
+            metric.clone(),
+            TimeAxis::GridRanges(empty),
+            empty_fields.clone()
+        )
+        .is_ok()
+    );
+    assert!(
+        Series::try_new(
+            &explicit_schema,
+            metric,
+            TimeAxis::GridRanges(GridRanges::empty(Arc::new(
+                EvalGrid::try_new(spec).unwrap()
+            ))),
+            empty_fields.clone()
+        )
+        .is_err()
+    );
+    // Field length still has to match the number of carried rows.
+    assert!(
+        Series::try_new(
+            &schema,
+            MetricName::try_new(None, vec![]).unwrap(),
+            TimeAxis::GridRanges(ranges()),
+            empty_fields
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn row_cursor_reads_a_chunked_field_forward_only() {
+    let samples = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![1.0, 2.0])),
+        Samples::from_float(Float64Array::new_null(1)),
+        Samples::from_float(Float64Array::from(vec![4.0])),
+    ])
+    .unwrap();
+    let mut cursor = samples.cursor();
+    assert!(matches!(cursor.at(0), Some(SampleRef::Float(1.0))));
+    // Skipping rows is allowed: the cursor resumes from its position.
+    assert!(matches!(cursor.at(2), Some(SampleRef::Missing)));
+    assert!(matches!(cursor.at(3), Some(SampleRef::Float(4.0))));
+    assert!(cursor.at(4).is_none());
+    // Going backwards is not a scan: it is refused.
+    assert!(cursor.at(1).is_none());
 }

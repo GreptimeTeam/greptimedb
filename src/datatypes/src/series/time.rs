@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::buffer::ScalarBuffer;
@@ -164,19 +165,329 @@ impl PartialEq for GridRange {
 }
 impl Eq for GridRange {}
 
+/// One contiguous run of positions on a shared evaluation grid.
+///
+/// The span is half-open: it names the absolute grid indices `start..start + len`. A span is
+/// never empty, so `start + len - 1` is always its last position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridSpan {
+    start: usize,
+    len: usize,
+}
+
+// A span is never empty (the checked constructors reject a zero length), so there is no
+// `is_empty` to pair with `len`.
+#[allow(clippy::len_without_is_empty)]
+impl GridSpan {
+    /// Creates a span of `len` positions starting at absolute grid index `start`.
+    ///
+    /// [`GridRanges::try_new`] validates it against its grid; this constructor only records it.
+    pub fn new(start: usize, len: usize) -> Self {
+        Self { start, len }
+    }
+
+    /// Absolute grid index of the first position.
+    pub fn start(&self) -> usize {
+        self.start
+    }
+    /// Number of positions in the span.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// Several ordered, non-overlapping runs of one shared evaluation grid.
+///
+/// The runs are the rows an axis carries: everything outside them holds no value, so an axis over
+/// a few scattered positions costs a few spans instead of a row per empty position. The spans are
+/// strictly increasing and never overlap (`prev.start + prev.len <= next.start`); they may sit
+/// next to each other, and nothing is stored between them.
+///
+/// An axis with no rows is an empty span list that still carries its grid, so a consumer can tell
+/// "nothing here" from "not on a grid".
+#[derive(Clone, Debug)]
+pub struct GridRanges {
+    grid: Arc<EvalGrid>,
+    /// The runs, in absolute grid order; no span is empty.
+    spans: Arc<[GridSpan]>,
+    /// Compact row of each span's first row, parallel to `spans`: prefix sums of the lengths,
+    /// kept so that compact-row lookups need a binary search and not a scan.
+    rows: Arc<[usize]>,
+    /// Number of carried rows, cached so that [`Self::len`] never walks the spans.
+    len: usize,
+}
+
+// `len` is the number of carried rows; "carries no row" is answered by `TimeAxis::is_empty`.
+#[allow(clippy::len_without_is_empty)]
+impl GridRanges {
+    /// Creates a validated list of runs over `grid`.
+    ///
+    /// Rejects an empty span, a span past the end of the grid, spans that are out of order or
+    /// overlap, and any length or index that overflows `usize`.
+    pub fn try_new(grid: Arc<EvalGrid>, spans: Vec<GridSpan>) -> Result<Self> {
+        let grid_len = grid.timestamps().len();
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(spans.len())
+            .map_err(|_| invalid_series("grid span allocation failed"))?;
+        let mut len = 0usize;
+        let mut previous_end: Option<usize> = None;
+        for span in &spans {
+            if span.len == 0 {
+                return invalid("grid spans must not be empty");
+            }
+            let end = span
+                .start
+                .checked_add(span.len)
+                .context(InvalidSeriesSnafu {
+                    reason: "grid span overflow".to_string(),
+                })?;
+            if end > grid_len {
+                return invalid("grid span exceeds its grid");
+            }
+            if previous_end.is_some_and(|previous_end| span.start < previous_end) {
+                return invalid("grid spans must be ordered and must not overlap");
+            }
+            rows.push(len);
+            len = len.checked_add(span.len).context(InvalidSeriesSnafu {
+                reason: "grid span length overflow".to_string(),
+            })?;
+            previous_end = Some(end);
+        }
+        Ok(Self {
+            grid,
+            spans: spans.into(),
+            rows: rows.into(),
+            len,
+        })
+    }
+
+    /// Creates an axis over `grid` that carries no row.
+    pub fn empty(grid: Arc<EvalGrid>) -> Self {
+        Self {
+            grid,
+            spans: Arc::from([]),
+            rows: Arc::from([]),
+            len: 0,
+        }
+    }
+
+    /// Returns the shared grid the spans refer to.
+    pub fn grid(&self) -> &Arc<EvalGrid> {
+        &self.grid
+    }
+
+    /// Returns the number of carried rows, not the distance from the first to the last position.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Maps an absolute grid position to its compact row, or `None` when it holds no row.
+    ///
+    /// Binary search over the span starts: a point lookup never scans.
+    pub fn row_of(&self, position: usize) -> Option<usize> {
+        let index = self
+            .spans
+            .partition_point(|span| span.start <= position)
+            .checked_sub(1)?;
+        let span = self.spans[index];
+        let offset = position - span.start;
+        (offset < span.len).then(|| self.rows[index] + offset)
+    }
+
+    /// Returns the span holding compact row `index`, with the offset of the row inside it.
+    fn span_of(&self, index: usize) -> Option<(GridSpan, usize)> {
+        let span_index = self
+            .rows
+            .partition_point(|&row| row <= index)
+            .checked_sub(1)?;
+        let span = self.spans[span_index];
+        let offset = index - self.rows[span_index];
+        (offset < span.len).then_some((span, offset))
+    }
+
+    /// Returns the span that starts at or after compact row `index`, as an index into `spans`.
+    fn span_index_at(&self, index: usize) -> usize {
+        self.rows
+            .partition_point(|&row| row <= index)
+            .saturating_sub(1)
+    }
+
+    /// The spans covering compact rows `offset..offset + len`, renumbered from zero.
+    fn spans_between(&self, offset: usize, len: usize) -> Vec<GridSpan> {
+        let end = offset + len;
+        let mut sliced = Vec::new();
+        for index in self.span_index_at(offset)..self.spans.len() {
+            let row = self.rows[index];
+            if row >= end {
+                break;
+            }
+            let span = self.spans[index];
+            let from = offset.max(row) - row;
+            let to = (end - row).min(span.len);
+            if from < to {
+                sliced.push(GridSpan::new(span.start + from, to - from));
+            }
+        }
+        sliced
+    }
+
+    /// The absolute position of compact row `offset`, or the position after the last row when
+    /// `offset` is one past the end; `None` when the axis carries no row at all.
+    fn position_at(&self, offset: usize) -> Option<usize> {
+        let last = self.spans.last()?;
+        if offset >= self.len {
+            return Some(last.start + last.len);
+        }
+        let (span, inside) = self.span_of(offset)?;
+        Some(span.start + inside)
+    }
+
+    /// Cuts compact rows `offset..offset + len`, keeping the grid.
+    ///
+    /// The result is a [`TimeAxis::Grid`] when it stays within one span, including every empty
+    /// result over a non-empty axis, and [`TimeAxis::GridRanges`] otherwise.
+    fn slice(&self, offset: usize, len: usize) -> Result<TimeAxis> {
+        if len == 0 {
+            return Ok(match self.position_at(offset) {
+                Some(position) => {
+                    TimeAxis::Grid(GridRange::try_new(self.grid.clone(), position, 0)?)
+                }
+                None => TimeAxis::GridRanges(self.clone()),
+            });
+        }
+        let spans = self.spans_between(offset, len);
+        match spans.as_slice() {
+            [span] => Ok(TimeAxis::Grid(GridRange::try_new(
+                self.grid.clone(),
+                span.start,
+                span.len,
+            )?)),
+            _ => Ok(TimeAxis::GridRanges(Self::try_new(
+                self.grid.clone(),
+                spans,
+            )?)),
+        }
+    }
+}
+
+impl PartialEq for GridRanges {
+    fn eq(&self, other: &Self) -> bool {
+        self.grid.spec == other.grid.spec && self.spans == other.spans && self.len == other.len
+    }
+}
+impl Eq for GridRanges {}
+
 /// A timestamp axis represented as a grid or explicit shared Arrow buffers.
 ///
 /// Checked constructors validate timestamp ordering. Public payloads are validated again by the
 /// downstream series boundary.
+///
+/// Two coordinate conventions meet here, and every method says which one it speaks:
+///
+/// * a **compact row** is an index into the axis and into the fields aligned with it, and it
+///   counts only the rows the axis carries: [`TimeAxis::len`], [`TimeAxis::timestamp`],
+///   [`TimeAxis::slice`] and the row half of [`TimeAxis::positions`] speak compact rows;
+/// * an **absolute grid position** is an index into the shared [`EvalGrid`], holes included;
+///   [`TimeAxis::positions`], [`TimeAxis::row_of`], [`TimeAxis::first_position`] and
+///   [`TimeAxis::last_position`] speak absolute grid positions.
 #[derive(Clone, Debug)]
 pub enum TimeAxis {
     /// A slice of a shared regular evaluation grid.
     Grid(GridRange),
+    /// Several ordered runs of one shared evaluation grid.
+    GridRanges(GridRanges),
     /// An explicit timestamp sequence.
     Explicit(ScalarBuffer<i64>),
     /// Explicit timestamps held in ordered chunks without flattening.
     ExplicitChunks(Arc<[ScalarBuffer<i64>]>),
 }
+
+/// Sequential traversal of an axis, as returned by [`TimeAxis::positions`].
+///
+/// Yields `(absolute grid position, compact row)` pairs in increasing position order, and walks
+/// the runs of a [`TimeAxis::GridRanges`] with one cursor, so a row never costs a scan over the
+/// spans before it.
+pub struct Positions<'a> {
+    source: PositionSource<'a>,
+}
+
+enum PositionSource<'a> {
+    /// A dense grid range: position and row advance together.
+    Grid {
+        start: usize,
+        row: usize,
+        len: usize,
+    },
+    /// Several runs: the cursor is the span index plus the offset inside it.
+    GridRanges {
+        spans: &'a [GridSpan],
+        span: usize,
+        offset: usize,
+        row: usize,
+        len: usize,
+    },
+    /// No grid: a row sits at its own position.
+    Rows { row: usize, len: usize },
+}
+
+impl Iterator for Positions<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        match &mut self.source {
+            PositionSource::Grid { start, row, len } => {
+                if *row >= *len {
+                    return None;
+                }
+                let item = (*start + *row, *row);
+                *row += 1;
+                Some(item)
+            }
+            PositionSource::GridRanges {
+                spans,
+                span,
+                offset,
+                row,
+                len,
+            } => {
+                if *row >= *len {
+                    return None;
+                }
+                loop {
+                    let current = spans.get(*span)?;
+                    if *offset < current.len {
+                        let item = (current.start + *offset, *row);
+                        *offset += 1;
+                        *row += 1;
+                        return Some(item);
+                    }
+                    *span += 1;
+                    *offset = 0;
+                }
+            }
+            PositionSource::Rows { row, len } => {
+                if *row >= *len {
+                    return None;
+                }
+                let item = (*row, *row);
+                *row += 1;
+                Some(item)
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (row, len) = match &self.source {
+            PositionSource::Grid { row, len, .. } => (*row, *len),
+            PositionSource::GridRanges { row, len, .. } => (*row, *len),
+            PositionSource::Rows { row, len } => (*row, *len),
+        };
+        let remaining = len - row;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for Positions<'_> {}
 
 impl TimeAxis {
     /// Validates an explicit, strictly increasing timestamp sequence.
@@ -198,10 +509,27 @@ impl TimeAxis {
         Ok(axis)
     }
 
+    /// Builds an axis over `grid` from the runs `spans`, keeping the single-run fast path.
+    ///
+    /// This is what a producer holding only the rows it decided should use: one span becomes
+    /// [`Self::Grid`], several become [`Self::GridRanges`], and no span becomes an empty
+    /// [`Self::GridRanges`] that still carries the grid. In particular it never fills the
+    /// positions between two spans, which is what keeps a sparse result from costing a row per
+    /// empty position.
+    pub fn from_grid_spans(grid: Arc<EvalGrid>, spans: Vec<GridSpan>) -> Result<Self> {
+        match spans.as_slice() {
+            [] => Ok(Self::GridRanges(GridRanges::empty(grid))),
+            [span] => Ok(Self::Grid(GridRange::try_new(grid, span.start, span.len)?)),
+            _ => Ok(Self::GridRanges(GridRanges::try_new(grid, spans)?)),
+        }
+    }
+
     /// Returns the validated timestamp count.
     pub(crate) fn try_len(&self) -> Result<usize> {
         match self {
             Self::Grid(range) => Ok(range.len()),
+            // `GridRanges` is only reachable through its checked constructor.
+            Self::GridRanges(ranges) => Ok(ranges.len()),
             Self::Explicit(values) => {
                 if values.windows(2).any(|pair| pair[0] >= pair[1]) {
                     return invalid("timestamps must be strictly increasing");
@@ -231,10 +559,13 @@ impl TimeAxis {
         }
     }
 
-    /// Returns the timestamp count.
+    /// Returns the compact row count, not the distance from the first to the last position.
+    ///
+    /// A [`Self::GridRanges`] answers from its cached total and does not walk its spans.
     pub fn len(&self) -> usize {
         match self {
             Self::Grid(range) => range.len,
+            Self::GridRanges(ranges) => ranges.len(),
             Self::Explicit(values) => values.len(),
             Self::ExplicitChunks(chunks) => chunks.iter().map(|chunk| chunk.len()).sum(),
         }
@@ -244,11 +575,15 @@ impl TimeAxis {
         self.len() == 0
     }
 
-    /// Returns a timestamp by checked index.
+    /// Returns a timestamp by compact row index.
     pub fn timestamp(&self, index: usize) -> Option<i64> {
         match self {
-            Self::Grid(range) if index < range.len => {
-                range.grid.timestamps.get(range.start + index).copied()
+            Self::Grid(range) => (index < range.len)
+                .then(|| range.grid.timestamps.get(range.start + index).copied())
+                .flatten(),
+            Self::GridRanges(ranges) => {
+                let (span, offset) = ranges.span_of(index)?;
+                ranges.grid.timestamps.get(span.start + offset).copied()
             }
             Self::Explicit(values) => values.get(index).copied(),
             Self::ExplicitChunks(chunks) => {
@@ -261,11 +596,14 @@ impl TimeAxis {
                 }
                 None
             }
-            _ => None,
         }
     }
 
     /// Returns a zero-copy slice, retaining Arrow owners; chunked axes remain chunked.
+    ///
+    /// `offset` and `len` count compact rows, so the result stays aligned with the fields of the
+    /// series the axis belongs to. A slice that stays within one run of a [`Self::GridRanges`]
+    /// comes back as [`Self::Grid`]; every empty slice keeps the grid it was cut from.
     pub fn slice(&self, offset: usize, len: usize) -> Result<Self> {
         let end = offset.checked_add(len).context(InvalidSeriesSnafu {
             reason: "timestamp slice overflow".to_string(),
@@ -279,6 +617,7 @@ impl TimeAxis {
                 range.start + offset,
                 len,
             )?)),
+            Self::GridRanges(ranges) => ranges.slice(offset, len),
             Self::Explicit(values) => Ok(Self::Explicit(values.slice(offset, len))),
             Self::ExplicitChunks(chunks) => {
                 let mut remain = len;
@@ -302,6 +641,313 @@ impl TimeAxis {
                 Ok(Self::ExplicitChunks(sliced.into()))
             }
         }
+    }
+
+    /// Returns the single contiguous range this axis covers, if it covers exactly one.
+    ///
+    /// [`Self::Grid`] always answers `Some`, including for an empty range that still names the
+    /// position it sits at. A [`Self::GridRanges`] holding several runs, and every explicit axis,
+    /// answer `None`: their rows are not one range, and a caller that assumed one would read the
+    /// holes between them as rows.
+    pub fn as_grid_range(&self) -> Option<&GridRange> {
+        match self {
+            Self::Grid(range) => Some(range),
+            Self::GridRanges(_) | Self::Explicit(_) | Self::ExplicitChunks(_) => None,
+        }
+    }
+
+    /// Returns the evaluation grid the axis is addressed on, if it has one.
+    ///
+    /// Both [`Self::Grid`] and [`Self::GridRanges`] answer `Some`; the explicit axes answer `None`.
+    pub fn grid(&self) -> Option<&Arc<EvalGrid>> {
+        match self {
+            Self::Grid(range) => Some(range.grid()),
+            Self::GridRanges(ranges) => Some(ranges.grid()),
+            Self::Explicit(_) | Self::ExplicitChunks(_) => None,
+        }
+    }
+
+    /// Maps an absolute grid position to its compact row, or `None` when the axis carries no row
+    /// there.
+    ///
+    /// A point lookup: a [`Self::GridRanges`] binary-searches its spans, it does not scan them.
+    /// On an explicit axis a row sits at its own position, so only the length bounds it.
+    pub fn row_of(&self, position: usize) -> Option<usize> {
+        match self {
+            Self::Grid(range) => (position >= range.start
+                && position
+                    .checked_sub(range.start)
+                    .is_some_and(|row| row < range.len))
+            .then(|| position - range.start),
+            Self::GridRanges(ranges) => ranges.row_of(position),
+            Self::Explicit(_) | Self::ExplicitChunks(_) => {
+                (position < self.len()).then_some(position)
+            }
+        }
+    }
+
+    /// Walks the axis once, yielding `(absolute grid position, compact row)` in position order.
+    ///
+    /// This is the traversal every consumer of a grid axis should use: a helper walks the runs of
+    /// a [`Self::GridRanges`] with a single cursor, so a row never rescans the spans before it.
+    /// On an explicit axis there is no grid, so a row sits at its own position.
+    pub fn positions(&self) -> Positions<'_> {
+        let len = self.len();
+        let source = match self {
+            Self::Grid(range) => PositionSource::Grid {
+                start: range.start,
+                row: 0,
+                len,
+            },
+            Self::GridRanges(ranges) => PositionSource::GridRanges {
+                spans: &ranges.spans,
+                span: 0,
+                offset: 0,
+                row: 0,
+                len,
+            },
+            Self::Explicit(_) | Self::ExplicitChunks(_) => PositionSource::Rows { row: 0, len },
+        };
+        Positions { source }
+    }
+
+    /// Returns the absolute grid position of the first carried row.
+    pub fn first_position(&self) -> Option<usize> {
+        match self {
+            Self::Grid(range) => (!range.is_empty()).then_some(range.start),
+            Self::GridRanges(ranges) => ranges.spans.first().map(GridSpan::start),
+            Self::Explicit(_) | Self::ExplicitChunks(_) => (!self.is_empty()).then_some(0),
+        }
+    }
+
+    /// Returns the absolute grid position of the last carried row.
+    pub fn last_position(&self) -> Option<usize> {
+        match self {
+            Self::Grid(range) => (!range.is_empty()).then(|| range.start + range.len - 1),
+            Self::GridRanges(ranges) => ranges.spans.last().map(|span| span.start + span.len - 1),
+            Self::Explicit(_) | Self::ExplicitChunks(_) => self.len().checked_sub(1),
+        }
+    }
+
+    /// Returns whether the carried rows form one run, which is what a fast path can rely on.
+    ///
+    /// A [`Self::GridRanges`] answers `true` only for a single span, so an empty span list reports
+    /// `false`: it names no run, and therefore no position a fast path could start at.
+    pub fn is_contiguous(&self) -> bool {
+        match self {
+            Self::Grid(_) => true,
+            Self::GridRanges(ranges) => ranges.spans.len() == 1,
+            Self::Explicit(_) => true,
+            Self::ExplicitChunks(chunks) => chunks.len() <= 1,
+        }
+    }
+
+    /// Returns the timestamps of the carried rows, in compact-row order.
+    ///
+    /// A single-run grid axis lends its buffer without copying; an axis of several runs, and a
+    /// chunked explicit axis, allocate one array of the carried rows.
+    pub fn timestamps(&self) -> Cow<'_, [i64]> {
+        match self {
+            Self::Grid(range) => {
+                Cow::Borrowed(&range.grid.timestamps()[range.start()..range.start() + range.len()])
+            }
+            Self::GridRanges(ranges) => {
+                let mut timestamps = Vec::with_capacity(ranges.len());
+                for (position, _) in self.positions() {
+                    match ranges.grid.timestamps.get(position) {
+                        Some(timestamp) => timestamps.push(*timestamp),
+                        // Unreachable: the constructor checks every span against the grid.
+                        None => break,
+                    }
+                }
+                Cow::Owned(timestamps)
+            }
+            Self::Explicit(values) => Cow::Borrowed(values),
+            Self::ExplicitChunks(_) => Cow::Owned(
+                (0..self.len())
+                    .filter_map(|row| self.timestamp(row))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Returns one run per stored span of carried rows, as [`GridRun`]s.
+    ///
+    /// One run for a contiguous axis, one per stored span for [`Self::GridRanges`], and none when
+    /// no row is carried. Adjacent stored spans stay two runs, so a run is a maximal run only when
+    /// the axis was built from maximal spans (as the series builder does). A run is where bulk
+    /// work pays off: the rows inside it are consecutive in both coordinates, so its samples can
+    /// be sliced and zipped instead of read one by one.
+    pub fn runs(&self) -> GridRuns<'_> {
+        let (one, spans) = match self {
+            Self::Grid(range) => (
+                Some(GridRun {
+                    position: range.start,
+                    row: 0,
+                    len: range.len,
+                }),
+                &[][..],
+            ),
+            Self::GridRanges(ranges) => (None, &ranges.spans[..]),
+            Self::Explicit(_) | Self::ExplicitChunks(_) => (
+                Some(GridRun {
+                    position: 0,
+                    row: 0,
+                    len: self.len(),
+                }),
+                &[][..],
+            ),
+        };
+        GridRuns {
+            one: one.filter(|run| run.len > 0),
+            spans,
+            span: 0,
+            row: 0,
+        }
+    }
+
+    /// Intersects the carried rows of two axes, yielding one shared run per pair of overlapping
+    /// stored runs as `(first absolute position, row in `self`, row in `other`, length)`.
+    ///
+    /// A single merge pass over the two run lists, so the cost is the number of runs and not their
+    /// product. This is how a pairwise operator aligns two axes: it never builds the dense
+    /// envelope `first_position()..last_position()`, which would visit -- and densify -- the holes,
+    /// and it never re-derives the row of a position by subtracting starts, which is wrong as soon
+    /// as either side skips a row.
+    pub fn intersect_runs<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = GridRunPair> + 'a {
+        let mut lhs = self.runs().peekable();
+        let mut rhs = other.runs().peekable();
+        std::iter::from_fn(move || {
+            loop {
+                let left = *lhs.peek()?;
+                let right = *rhs.peek()?;
+                let start = left.position.max(right.position);
+                let end = (left.position + left.len).min(right.position + right.len);
+                if start >= end {
+                    // No shared position in this pair of runs: drop the one that ends first.
+                    if left.position + left.len <= right.position + right.len {
+                        lhs.next();
+                    } else {
+                        rhs.next();
+                    }
+                    continue;
+                }
+                let len = end - start;
+                let pair = GridRunPair {
+                    position: start,
+                    row: left.row + (start - left.position),
+                    other_row: right.row + (start - right.position),
+                    len,
+                };
+                // Consume the shared piece from both sides, keeping the remainder for the next
+                // round.
+                if left.position + left.len <= end {
+                    lhs.next();
+                }
+                if right.position + right.len <= end {
+                    rhs.next();
+                }
+                return Some(pair);
+            }
+        })
+    }
+}
+
+/// A run of carried rows: `len` rows starting at absolute position `position` and compact
+/// `row`, both of which advance by one per row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridRun {
+    /// Absolute grid position of the run's first row.
+    pub position: usize,
+    /// Compact row of the run's first row.
+    pub row: usize,
+    /// Number of rows in the run; never zero.
+    pub len: usize,
+}
+
+/// A run shared by two axes, with the compact row of each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridRunPair {
+    /// Absolute grid position of the shared run's first row.
+    pub position: usize,
+    /// Compact row of the first shared position in the axis `intersect_runs` was called on.
+    pub row: usize,
+    /// Compact row of the first shared position in the other axis.
+    pub other_row: usize,
+    /// Number of rows in the shared run; never zero.
+    pub len: usize,
+}
+
+/// Lazily produced runs of one axis; see [`TimeAxis::runs`].
+///
+/// A contiguous axis holds its one run inline; a sparse axis walks its spans with a cursor.
+pub struct GridRuns<'a> {
+    one: Option<GridRun>,
+    spans: &'a [GridSpan],
+    span: usize,
+    row: usize,
+}
+
+impl Iterator for GridRuns<'_> {
+    type Item = GridRun;
+
+    fn next(&mut self) -> Option<GridRun> {
+        if let Some(run) = self.one.take() {
+            return Some(run);
+        }
+        let span = *self.spans.get(self.span)?;
+        self.span += 1;
+        let run = GridRun {
+            position: span.start,
+            row: self.row,
+            len: span.len,
+        };
+        self.row += span.len;
+        Some(run)
+    }
+}
+
+/// Walks every position at least one of `axes` carries, once, in increasing order.
+///
+/// A merge over one cursor per axis: each step costs one comparison per axis, and no position is
+/// visited twice. This is how an operator covering several axes (a histogram's bucket series, an
+/// aggregate over an input set) visits the positions that hold something, instead of scanning the
+/// envelope from the earliest to the latest position and densifying every hole in between.
+pub fn union_positions<'a>(axes: impl IntoIterator<Item = &'a TimeAxis>) -> UnionPositions<'a> {
+    let cursors: Vec<Positions<'a>> = axes.into_iter().map(TimeAxis::positions).collect();
+    let pending = vec![None; cursors.len()];
+    UnionPositions { cursors, pending }
+}
+
+/// The positions of several axes, merged; see [`union_positions`].
+pub struct UnionPositions<'a> {
+    cursors: Vec<Positions<'a>>,
+    /// The next `(position, row)` of each cursor, buffered so that it can be peeked without a
+    /// second cursor type.
+    pending: Vec<Option<(usize, usize)>>,
+}
+
+impl Iterator for UnionPositions<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        let mut lowest: Option<usize> = None;
+        for (cursor, pending) in self.cursors.iter_mut().zip(&mut self.pending) {
+            if pending.is_none() {
+                *pending = cursor.next();
+            }
+            if let Some((position, _)) = *pending {
+                lowest = Some(lowest.map_or(position, |lowest| lowest.min(position)));
+            }
+        }
+        let lowest = lowest?;
+        // Every axis standing at this position advances; the others keep their buffered position.
+        for pending in &mut self.pending {
+            if matches!(*pending, Some((position, _)) if position == lowest) {
+                *pending = None;
+            }
+        }
+        Some(lowest)
     }
 }
 
