@@ -1419,7 +1419,6 @@ mod test {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::EmptyRelation;
-    use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
     use futures::FutureExt;
@@ -1824,12 +1823,7 @@ mod test {
             Partitioning::UnknownPartitioning(2)
         ));
 
-        let rebuilt = constructed
-            .replace_children(
-                vec![input],
-                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
-            )
-            .unwrap();
+        let rebuilt = constructed.with_new_children(vec![input]).unwrap();
         assert!(matches!(
             rebuilt.output_partitioning(),
             Partitioning::UnknownPartitioning(2)
