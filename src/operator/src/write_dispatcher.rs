@@ -265,12 +265,13 @@ impl WriteDispatcher {
     async fn send_batch(
         &self,
         peer: PeerRef,
-        request: RegionRequest,
+        mut request: RegionRequest,
         histogram: Option<&Histogram>,
     ) -> Vec<WriteAttempt> {
         if !matches!(&request.body, Some(Body::Inserts(_) | Body::Deletes(_))) {
             return vec![self.send(peer, request, histogram).await];
         }
+        api::region::set_accept_partial_result(request.header.get_or_insert_default());
         let request = Arc::new(request);
         let requester = self.node_manager.datanode(&peer).await;
         let result = {
