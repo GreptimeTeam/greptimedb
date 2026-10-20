@@ -240,6 +240,15 @@ impl WriteRequest {
 
     /// Checks the schema and fill missing columns.
     pub(crate) fn maybe_fill_missing_columns(&mut self, metadata: &RegionMetadata) -> Result<()> {
+        // Removes the columns filled for an older schema, so the request is checked
+        // as sent and filled again for this schema.
+        let num_columns = self.name_to_index.len();
+        if self.rows.schema.len() > num_columns {
+            self.rows.schema.truncate(num_columns);
+            for row in &mut self.rows.rows {
+                row.values.truncate(num_columns);
+            }
+        }
         if let Err(e) = self.check_schema(metadata) {
             if e.is_fill_default() {
                 // TODO(yingwen): Add metrics for this case.
