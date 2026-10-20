@@ -200,6 +200,15 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display(
+        "DDL request timed out after {timeout:?}; a submitted procedure may still be running"
+    ))]
+    DdlTaskTimeout {
+        timeout: std::time::Duration,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to start procedure manager"))]
     StartProcedureManager {
         #[snafu(implicit)]
@@ -1316,6 +1325,9 @@ impl ErrorExt for Error {
             | InvalidRole { .. }
             | EmptyDdlTasks { .. } => StatusCode::InvalidArguments,
 
+            // DeadlineExceeded is treated as unreachable by MetaClient and
+            // retried. A wait timeout must not resubmit a running procedure.
+            DdlTaskTimeout { .. } => StatusCode::Cancelled,
             LoadTlsCertificate { .. } => StatusCode::Internal,
 
             #[cfg(feature = "pg_kvbackend")]

@@ -39,7 +39,9 @@ use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
-use table::requests::{SEMANTIC_PREFIX, validate_semantic_option, validate_table_option};
+use table::requests::{
+    SEMANTIC_PREFIX, VALID_DDL_OPTION_KEYS, validate_semantic_option, validate_table_option,
+};
 
 use crate::error::{
     ConvertToLogicalExpressionSnafu, InvalidSqlSnafu, InvalidTableOptionSnafu, ParseSqlValueSnafu,
@@ -421,6 +423,27 @@ pub fn convert_month_day_nano_to_duration(
     let nanos_remainder = nanos_remainder as u32;
 
     Ok(std::time::Duration::new(adjusted_seconds, nanos_remainder))
+}
+
+/// Parses submission options, accepting only scalar `wait` and `timeout` values.
+pub(crate) fn parse_ddl_options(parser: &mut Parser) -> Result<OptionMap> {
+    let options = parser
+        .parse_options(Keyword::WITH)
+        .context(SyntaxSnafu)?
+        .into_iter()
+        .map(parse_option_string)
+        .map(|option| {
+            let (key, value) = option?;
+            ensure!(
+                VALID_DDL_OPTION_KEYS.contains(&key.as_str()) && value.as_string().is_some(),
+                InvalidSqlSnafu {
+                    msg: format!("invalid DDL option '{key}': '{value}'")
+                }
+            );
+            Ok((key, value))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(OptionMap::new(options))
 }
 
 pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {

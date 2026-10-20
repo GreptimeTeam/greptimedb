@@ -497,7 +497,8 @@ fn gc_timeout_secs(timeout: Option<Duration>) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use api::v1::meta::heartbeat_server::{Heartbeat, HeartbeatServer};
     use api::v1::meta::procedure_service_server::{ProcedureService, ProcedureServiceServer};
@@ -515,13 +516,11 @@ mod tests {
     use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
     use common_meta::rpc::ddl::{
         CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
-        CommentObjectType, CommentOnTask, CreatorGrantIntent, DdlTask, QueryContext,
-        SubmitDdlTaskRequest, TriggerReason,
+        CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest, TriggerReason,
     };
     use common_telemetry::common_error::ext::ErrorExt;
-    use common_telemetry::info;
     use tokio::net::TcpListener;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Notify, mpsc};
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::codec::CompressionEncoding;
     use tonic::{Request, Response, Status};
@@ -613,6 +612,7 @@ mod tests {
     struct MockProcedure {
         delay: Duration,
         request_tx: Option<mpsc::UnboundedSender<Request<DdlTaskRequest>>>,
+        release: Option<Arc<Notify>>,
     }
 
     #[async_trait]
@@ -631,7 +631,11 @@ mod tests {
             if let Some(request_tx) = &self.request_tx {
                 request_tx.send(request).unwrap();
             }
-            tokio::time::sleep(self.delay).await;
+            if let Some(release) = &self.release {
+                release.notified().await;
+            } else {
+                tokio::time::sleep(self.delay).await;
+            }
             Ok(Response::new(DdlTaskResponse {
                 header: Some(ResponseHeader {
                     protocol_version: 0,
@@ -688,6 +692,7 @@ mod tests {
         let procedure = MockProcedure {
             delay: Duration::ZERO,
             request_tx: Some(request_tx),
+            release: None,
         };
         let server = tonic::transport::Server::builder()
             .add_service(
@@ -767,9 +772,12 @@ mod tests {
         let heartbeat = MockHeartbeat {
             leader_addr: addr_str.clone(),
         };
+        let release = Arc::new(Notify::new());
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
         let procedure = MockProcedure {
-            delay: Duration::from_secs(4),
-            request_tx: None,
+            delay: Duration::ZERO,
+            request_tx: Some(request_tx),
+            release: Some(release.clone()),
         };
 
         let server = tonic::transport::Server::builder()
@@ -786,44 +794,74 @@ mod tests {
             .serve_with_incoming(TcpListenerStream::new(listener));
         let server_handle = tokio::spawn(server);
 
-        let mut client = MetaClientBuilder::new(0, Role::Frontend)
-            .enable_heartbeat()
-            .enable_procedure()
-            .build();
-        client.start(&[addr_str.as_str()]).await.unwrap();
-
-        let mut request = SubmitDdlTaskRequest::new(DdlTask::new_comment_on(CommentOnTask {
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
-            object_type: CommentObjectType::Table,
-            object_name: "test_table".to_string(),
-            column_name: None,
-            object_id: None,
-            comment: Some("timeout".to_string()),
-        }));
-        request.timeout = Duration::from_secs(1);
-
-        let now = Instant::now();
-        let err = client
-            .submit_ddl_task(
+        // Exercise production Frontend setup: its DDL channel must not retain
+        // the fixed channel timeout, and each DDL request supplies its deadline.
+        for (default_timeout, request_timeout, should_timeout) in [
+            (Duration::from_secs(10), Duration::from_secs(1), true),
+            (Duration::from_millis(20), Duration::from_secs(2), false),
+        ] {
+            let client = crate::create_meta_client(
+                crate::MetaClientType::Frontend,
+                &crate::MetaClientOptions {
+                    metasrv_addrs: vec![addr_str.clone()],
+                    timeout: Duration::from_millis(100),
+                    ddl_timeout: default_timeout,
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let mut request = SubmitDdlTaskRequest::new(DdlTask::new_truncate_table(
+                "greptime".to_string(),
+                "public".to_string(),
+                "test_table".to_string(),
+                1024,
+                vec![],
+            ));
+            request.timeout = request_timeout;
+            let submission = client.submit_ddl_task(
                 ExecutorContext {
                     query_context: Some(QueryContext::default()),
                     ..Default::default()
                 },
                 request,
-            )
-            .await
-            .unwrap_err();
-        let elapsed = now.elapsed();
-        // The request should be cancelled within 1 second.
-        assert!(elapsed < Duration::from_secs(2));
-        info!("err: {err:?}, code: {}", err.status_code());
-        assert_eq!(err.status_code(), StatusCode::Cancelled);
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("Timeout expired"),
-            "unexpected error: {err_msg}"
-        );
+            );
+            tokio::pin!(submission);
+            let received = tokio::select! {
+                received = request_rx.recv() => received.unwrap(),
+                result = &mut submission => panic!("returned before reaching server: {result:?}"),
+            };
+            assert_eq!(
+                received.get_ref().timeout_secs,
+                request_timeout.as_secs() as u32
+            );
+            let mut expected = Request::new(());
+            expected.set_timeout(request_timeout);
+            assert_eq!(
+                received.metadata().get("grpc-timeout"),
+                expected.metadata().get("grpc-timeout")
+            );
+
+            if should_timeout {
+                let err = tokio::time::timeout(Duration::from_secs(5), submission)
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                assert_eq!(err.status_code(), StatusCode::Cancelled);
+                assert!(err.to_string().contains("Timeout expired"), "{err}");
+            } else {
+                // Remain blocked past both configured defaults, then let the
+                // server reply within the longer per-request deadline.
+                tokio::select! {
+                    result = &mut submission => panic!("configured default cut request short: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {},
+                }
+                release.notify_waiters();
+                submission.await.unwrap();
+            }
+        }
 
         server_handle.abort();
     }

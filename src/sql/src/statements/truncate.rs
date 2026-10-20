@@ -18,11 +18,15 @@ use itertools::Itertools;
 use serde::Serialize;
 use sqlparser::ast::{ObjectName, Visit, VisitMut, Visitor, VisitorMut};
 
+use crate::statements::OptionMap;
+
 /// TRUNCATE TABLE statement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TruncateTable {
     table_name: ObjectName,
     time_ranges: Vec<(sqlparser::ast::Value, sqlparser::ast::Value)>,
+    /// Options for this DDL submission, never persisted as table options.
+    options: OptionMap,
 }
 
 impl Visit for TruncateTable {
@@ -32,6 +36,7 @@ impl Visit for TruncateTable {
             start.visit(visitor)?;
             end.visit(visitor)?;
         }
+        Visit::visit(&self.options, visitor)?;
         ::std::ops::ControlFlow::Continue(())
     }
 }
@@ -43,6 +48,7 @@ impl VisitMut for TruncateTable {
             start.visit(visitor)?;
             end.visit(visitor)?;
         }
+        VisitMut::visit(&mut self.options, visitor)?;
         ::std::ops::ControlFlow::Continue(())
     }
 }
@@ -53,6 +59,7 @@ impl TruncateTable {
         Self {
             table_name,
             time_ranges: Vec::new(),
+            options: OptionMap::default(),
         }
     }
 
@@ -64,7 +71,19 @@ impl TruncateTable {
         Self {
             table_name,
             time_ranges,
+            options: OptionMap::default(),
         }
+    }
+
+    /// Sets the options for this DDL submission.
+    pub fn with_options(mut self, options: OptionMap) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Returns the options for this DDL submission.
+    pub fn options(&self) -> &OptionMap {
+        &self.options
     }
 
     pub fn table_name(&self) -> &ObjectName {
@@ -80,19 +99,21 @@ impl Display for TruncateTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let table_name = self.table_name();
         write!(f, r#"TRUNCATE TABLE {table_name}"#)?;
-        if self.time_ranges.is_empty() {
-            return Ok(());
+        if !self.time_ranges.is_empty() {
+            write!(f, " FILE RANGE ")?;
+            write!(
+                f,
+                "{}",
+                self.time_ranges
+                    .iter()
+                    .map(|(start, end)| format!("({}, {})", start, end))
+                    .join(", ")
+            )?;
         }
-
-        write!(f, " FILE RANGE ")?;
-        write!(
-            f,
-            "{}",
-            self.time_ranges
-                .iter()
-                .map(|(start, end)| format!("({}, {})", start, end))
-                .join(", ")
-        )
+        if !self.options.is_empty() {
+            write!(f, " WITH ({})", self.options.kv_pairs().join(", "))?;
+        }
+        Ok(())
     }
 }
 
