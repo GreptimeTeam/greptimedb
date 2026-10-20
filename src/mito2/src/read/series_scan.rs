@@ -46,6 +46,7 @@ use crate::error::{
     Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
+use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
 use crate::read::scan_region::{ScanInput, StreamContext};
@@ -480,9 +481,6 @@ impl SeriesScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
-        if self.stream_ctx.input.uses_scan_memory_limit() {
-            return Ok(());
-        }
         // Sum the total number of files across all partitions
         let total_files: usize = self
             .properties
@@ -494,6 +492,13 @@ impl SeriesScan {
                 range_meta.indices.len()
             })
             .sum();
+
+        if !self.stream_ctx.input.compaction {
+            SCAN_MAX_CONCURRENT_FILES.observe(total_files as f64);
+        }
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
 
         let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
         if total_files > max_concurrent_files {
