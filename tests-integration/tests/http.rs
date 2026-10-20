@@ -163,6 +163,7 @@ macro_rules! http_tests {
                 test_http_auth,
                 test_sql_api,
                 test_http_analyze_stream_tql,
+                test_http_analyze_stream_scan_diagnostics,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
                 test_promql_over_non_millisecond_physical_tables,
@@ -1335,6 +1336,133 @@ async fn test_sql_format_api() {
         "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(CAST(random() AS STRING)) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;"
     );
 
+    guard.remove_all().await;
+}
+
+pub async fn test_http_analyze_stream_scan_diagnostics(store_type: StorageType) {
+    // Check both levels of JSON: the analyze node schema and the verbose scan
+    // object inside its string-valued `param`.
+    fn scan_details(node: &Value, scans: &mut Vec<Value>) {
+        assert!(node["name"].is_string());
+        assert!(node["param"].is_string());
+        assert!(node["output_rows"].is_u64());
+        assert!(node["elapsed_compute"].is_u64());
+        assert!(node["metrics"].is_object());
+        if matches!(
+            node["name"].as_str(),
+            Some("SeqScan" | "UnorderedScan" | "SeriesScan")
+        ) {
+            let (_, fields) = node["param"].as_str().unwrap().split_once("), ").unwrap();
+            let fields = if fields.starts_with('{') {
+                fields.to_string()
+            } else {
+                format!("{{{fields}}}")
+            };
+            let details: Value = serde_json::from_str(&fields).unwrap();
+            assert_eq!(details["projection"], json!(["reading", "ts"]));
+            assert!(
+                details["filters"]
+                    .as_array()
+                    .is_some_and(|filters| !filters.is_empty())
+            );
+            assert_eq!(details["time_range"], "TimestampRange{[0ms,6000ms)}");
+            assert_eq!(details["file_summary"]["files"], 2);
+            assert_eq!(details["file_summary"]["rows"], 4);
+            assert_eq!(details["file_summary"]["row_groups"], 2);
+            assert_eq!(details["max_part_range"]["files"], 2);
+            assert!(details["max_part_range"].get("identifier").is_none());
+            scans.push(details);
+        }
+        for child in node["children"].as_array().unwrap() {
+            scan_details(child, scans);
+        }
+    }
+    fn assert_verbose(scans: &[Value]) {
+        assert!(!scans.is_empty());
+        for scan in scans {
+            let files = scan["files"].as_array().unwrap();
+            assert_eq!(files.len(), 2);
+            for key in ["rows", "size", "index_size"] {
+                assert_eq!(
+                    scan["file_summary"][key],
+                    files
+                        .iter()
+                        .map(|file| file[key].as_u64().unwrap())
+                        .sum::<u64>()
+                );
+            }
+        }
+    }
+
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "scan_diagnostics").await;
+    let client = TestClient::new(app).await;
+    for sql in [
+        "CREATE TABLE scan_diagnostics (host STRING PRIMARY KEY, reading DOUBLE, ts TIMESTAMP TIME INDEX)",
+        "INSERT INTO scan_diagnostics VALUES ('a', 1, 0), ('b', 2, 3000)",
+        "ADMIN FLUSH_TABLE('scan_diagnostics')",
+        "INSERT INTO scan_diagnostics VALUES ('c', 3, 2000), ('d', 4, 5000)",
+        "ADMIN FLUSH_TABLE('scan_diagnostics')",
+        "INSERT INTO scan_diagnostics VALUES ('outside', 5, 10000)",
+        "ADMIN FLUSH_TABLE('scan_diagnostics')",
+        "INSERT INTO scan_diagnostics VALUES ('mem', 6, 1000)",
+    ] {
+        let response = execute_sql(&client, sql).await;
+        let status = response.status();
+        let body = response.text().await;
+        assert_eq!(status, StatusCode::OK, "{sql}: {body}");
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert!(body.get("error").is_none(), "{body}");
+    }
+    let query = "SELECT reading, ts FROM scan_diagnostics WHERE ts >= 0 AND ts < 6000";
+    let sql = format!("EXPLAIN ANALYZE FORMAT JSON {query}");
+    let response = execute_sql(&client, &sql).await;
+    let status = response.status();
+    let body = response.text().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    let mut explain_scans = vec![];
+    for row in body["output"][0]["records"]["rows"].as_array().unwrap() {
+        if row[0].is_null() {
+            assert_eq!(row[2], "Total rows: 5");
+            continue;
+        }
+        let plan: Value = serde_json::from_str(row[2].as_str().unwrap()).unwrap();
+        scan_details(&plan, &mut explain_scans);
+    }
+    assert!(!explain_scans.is_empty());
+    assert!(explain_scans.iter().all(|scan| scan.get("files").is_none()));
+
+    let sql = format!("EXPLAIN ANALYZE VERBOSE FORMAT JSON {query}");
+    let response = client
+        .post("/v1/sql/analyze/stream?snapshot_interval_ms=100")
+        .header("Accept", "text/event-stream")
+        .form(&BTreeMap::from([("sql", sql)]))
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await;
+    let mut first_scan_seen = false;
+    let mut final_seen = false;
+    for event in body.split("\n\n") {
+        let Some(data) = event.lines().find_map(|line| line.strip_prefix("data: ")) else {
+            continue;
+        };
+        let payload: Value = serde_json::from_str(data).unwrap();
+        let mut scans = vec![];
+        for stage in payload["metrics"].as_array().unwrap() {
+            assert!(stage["stage"].is_u64());
+            assert!(stage["node"].is_u64());
+            scan_details(&stage["plan"], &mut scans);
+        }
+        // Every available scan is checked, including its first appearance. A fast
+        // query may finish before the first periodic snapshot.
+        first_scan_seen |= !scans.is_empty();
+        if payload["state"] == "final" {
+            assert_verbose(&scans);
+            final_seen = true;
+        }
+    }
+    assert!(first_scan_seen && final_seen, "{body}");
     guard.remove_all().await;
 }
 
