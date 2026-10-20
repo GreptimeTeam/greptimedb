@@ -225,10 +225,8 @@ SELECT * FROM missing_inverted_index WHERE host = 'server1' ORDER BY ts;
 
 SELECT * FROM missing_inverted_index WHERE host = 'missing' ORDER BY ts;
 
-+----+-------------+------+
-| ts | indexed_col | host |
-+----+-------------+------+
-+----+-------------+------+
+++
+++
 
 SELECT * FROM missing_inverted_index WHERE indexed_col = 'a' AND host = 'server1' ORDER BY ts;
 
@@ -240,10 +238,8 @@ SELECT * FROM missing_inverted_index WHERE indexed_col = 'a' AND host = 'server1
 
 SELECT * FROM missing_inverted_index WHERE indexed_col = 'b' AND host = 'server1' ORDER BY ts;
 
-+----+-------------+------+
-| ts | indexed_col | host |
-+----+-------------+------+
-+----+-------------+------+
+++
+++
 
 -- New SSTs have both indexes; queries must also retain rows from the old SST.
 INSERT INTO missing_inverted_index VALUES
@@ -310,10 +306,8 @@ SELECT * FROM missing_inverted_index WHERE source = 'legacy' ORDER BY ts;
 
 SELECT * FROM missing_inverted_index WHERE source = 'missing' ORDER BY ts;
 
-+----+-------------+------+--------+
-| ts | indexed_col | host | source |
-+----+-------------+------+--------+
-+----+-------------+------+--------+
+++
+++
 
 SELECT * FROM missing_inverted_index WHERE indexed_col = 'a' AND source = 'legacy' ORDER BY ts;
 
