@@ -16,6 +16,7 @@ mod absent;
 mod empty_metric;
 mod histogram_fold;
 mod instant_manipulate;
+mod native_tree;
 mod normalize;
 mod planner;
 mod range_manipulate;
@@ -41,6 +42,7 @@ pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
 };
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
+pub use native_tree::NativeTreeExec;
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
