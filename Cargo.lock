@@ -2335,6 +2335,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-cache"
+version = "1.4.0-alpha.0"
+dependencies = [
+ "futures",
+ "moka",
+ "prometheus 0.14.0",
+ "tokio",
+]
+
+[[package]]
 name = "common-catalog"
 version = "1.4.0-alpha.0"
 dependencies = [
