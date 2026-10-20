@@ -439,10 +439,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let flush_on_close = request.flush_reason == FlushReason::Closing;
 
-        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
+        let mut index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
+        if self.config.index.build_mode == IndexBuildMode::Sync {
+            // Sync flush builds indexes while writing SSTs, except for encoded bulk parts,
+            // which are uploaded as-is. Build the missing indexes for those files here.
+            let metadata = region.metadata();
+            index_build_file_metas.retain(|meta| {
+                request.unindexed_files.contains(&meta.file_id)
+                    && !meta.is_index_consistent_with_region(&metadata.column_metadatas)
+            });
+        }
 
-        // In async mode, create indexes after flush.
-        if self.config.index.build_mode == IndexBuildMode::Async {
+        if !index_build_file_metas.is_empty() {
             self.handle_rebuild_index(
                 BuildIndexRequest {
                     region_id,

@@ -241,6 +241,15 @@ impl WriteRequest {
 
     /// Checks the schema and fill missing columns.
     pub(crate) fn maybe_fill_missing_columns(&mut self, metadata: &RegionMetadata) -> Result<()> {
+        // Removes the columns filled for an older schema, so the request is checked
+        // as sent and filled again for this schema.
+        let num_columns = self.name_to_index.len();
+        if self.rows.schema.len() > num_columns {
+            self.rows.schema.truncate(num_columns);
+            for row in &mut self.rows.rows {
+                row.values.truncate(num_columns);
+            }
+        }
         if let Err(e) = self.check_schema(metadata) {
             if e.is_fill_default() {
                 // TODO(yingwen): Add metrics for this case.
@@ -758,6 +767,9 @@ pub(crate) enum WorkerRequest {
     /// Write to a region.
     Write(SenderWriteRequest),
 
+    /// Writes of one request to regions of the same worker.
+    BatchWrite(Vec<SenderWriteRequest>),
+
     /// Ddl request to a region.
     Ddl(SenderDdlRequest),
 
@@ -1138,6 +1150,8 @@ pub(crate) struct FlushFinished {
     pub(crate) _timer: HistogramTimer,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
+    /// Files in `edit` written without building their indexes.
+    pub(crate) unindexed_files: Vec<FileId>,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Whether the region is in staging mode.
