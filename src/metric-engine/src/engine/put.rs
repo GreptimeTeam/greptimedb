@@ -67,75 +67,24 @@ impl MetricEngineInner {
         }
     }
 
-    /// Batch write multiple logical regions to the same physical region.
-    ///
-    /// Dispatch region put requests in batch.
-    ///
-    /// Requests may span multiple physical regions. We group them by physical
-    /// region and write sequentially. This method fails fast on validation or
-    /// preparation errors within a group and stops at the first failure.
-    /// Writes in earlier physical-region groups are not rolled back if a later
-    /// group fails.
-    pub async fn put_regions_batch(
-        &self,
-        requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
-    ) -> Result<AffectedRows> {
-        let len = requests.len();
-
-        if len == 0 {
-            return Ok(0);
-        }
-
-        let _timer = MITO_OPERATION_ELAPSED
-            .with_label_values(&["put_batch"])
-            .start_timer();
-
-        // Fast path: single request, no batching overhead
-        if len == 1 {
-            let (region_id, req) = requests.into_iter().next().unwrap();
-            let is_putting_physical_region =
-                self.state.read().unwrap().exist_physical_region(region_id);
-            if is_putting_physical_region {
-                FORBIDDEN_OPERATION_COUNT.inc();
-                return ForbiddenPhysicalWriteSnafu.fail();
-            }
-
-            return self.put_logical_region(region_id, req).await;
-        }
-
-        let mut groups = HashMap::new();
-        for (index, (region_id, request)) in requests.enumerate() {
-            self.group_put_request(&mut groups, index, region_id, request)?;
-        }
-
-        let mut total_affected_rows: AffectedRows = 0;
-        for (physical_region_id, group) in groups {
-            let affected_rows = self
-                .put_regions_batch_single_physical(physical_region_id, group.requests)
-                .await?;
-            total_affected_rows += affected_rows;
-        }
-
-        Ok(total_affected_rows)
-    }
-
     /// Retains every group's outcome instead of returning on the first failure.
-    pub async fn put_regions_batch_with_results(
+    pub async fn put_regions_batch(
         &self,
         requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Vec<PutGroupResult> {
         if requests.is_empty() {
             return Vec::new();
         }
-        if requests.len() == 1 {
-            return vec![PutGroupResult {
-                request_indices: vec![0],
-                result: self.put_regions_batch(requests.into_iter()).await,
-            }];
-        }
         let _timer = MITO_OPERATION_ELAPSED
             .with_label_values(&["put_batch"])
             .start_timer();
+        if requests.len() == 1 {
+            let (region_id, request) = requests.into_iter().next().unwrap();
+            return vec![PutGroupResult {
+                request_indices: vec![0],
+                result: self.put_region(region_id, request).await,
+            }];
+        }
         let mut groups = HashMap::new();
         let mut results = Vec::new();
         for (index, (region_id, request)) in requests.into_iter().enumerate() {
@@ -1053,7 +1002,9 @@ mod tests {
                     },
                 )
             });
-        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+        let results = engine.put_regions_batch(requests.collect()).await;
+        assert_eq!(results.len(), 1);
+        let affected_rows = results.into_iter().next().unwrap().result.unwrap();
         assert_eq!(affected_rows, 6);
         assert_eq!(
             scan_timestamp_values(&engine, logical_region_id).await,
@@ -1428,12 +1379,10 @@ mod tests {
             for ((_, request), skip_wal) in mixed_requests.iter_mut().zip(policies) {
                 request.skip_wal = skip_wal;
             }
-            let err = env
-                .metric()
-                .inner
-                .put_regions_batch(mixed_requests.into_iter())
-                .await
-                .unwrap_err();
+            let results = env.metric().put_regions_batch(mixed_requests).await;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].request_indices, vec![0, 1]);
+            let err = results.into_iter().next().unwrap().result.unwrap_err();
             assert!(err.to_string().contains("inconsistent WAL policy in batch"));
             for logical_region_id in [logical_region_1, logical_region_2] {
                 assert!(
@@ -1444,12 +1393,9 @@ mod tests {
             }
         }
 
-        let affected_rows = env
-            .metric()
-            .inner
-            .put_regions_batch(build_requests().into_iter())
-            .await
-            .unwrap();
+        let results = env.metric().put_regions_batch(build_requests()).await;
+        assert_eq!(results.len(), 1);
+        let affected_rows = results.into_iter().next().unwrap().result.unwrap();
         assert_eq!(affected_rows, 5);
 
         let request = ScanRequest::default();
@@ -1788,11 +1734,9 @@ mod tests {
         ];
 
         // Batch write
-        let affected_rows = engine
-            .inner
-            .put_regions_batch(requests.into_iter())
-            .await
-            .unwrap();
+        let results = engine.put_regions_batch(requests).await;
+        assert_eq!(results.len(), 1);
+        let affected_rows = results.into_iter().next().unwrap().result.unwrap();
         assert_eq!(affected_rows, 10);
 
         // Verify physical region contains data from all logical regions
@@ -1812,72 +1756,6 @@ mod tests {
     async fn test_batch_write_with_partial_failure() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
-        let engine = env.metric();
-
-        let physical_region_id = env.default_physical_region_id();
-        let logical_region_1 = env.default_logical_region_id();
-        let logical_region_2 = RegionId::new(1024, 1);
-        let nonexistent_region = RegionId::new(9999, 9999);
-
-        env.create_logical_region(physical_region_id, logical_region_2)
-            .await;
-
-        // Prepare batch with one invalid region
-        let schema = test_util::row_schema_with_tags(&["job"]);
-        let requests = vec![
-            (
-                logical_region_1,
-                RegionPutRequest {
-                    skip_wal: false,
-                    rows: Rows {
-                        schema: schema.clone(),
-                        rows: test_util::build_rows(1, 3),
-                    },
-                    hint: None,
-                    partition_expr_version: None,
-                },
-            ),
-            (
-                nonexistent_region,
-                RegionPutRequest {
-                    skip_wal: false,
-                    rows: Rows {
-                        schema: schema.clone(),
-                        rows: test_util::build_rows(1, 2),
-                    },
-                    hint: None,
-                    partition_expr_version: None,
-                },
-            ),
-            (
-                logical_region_2,
-                RegionPutRequest {
-                    skip_wal: false,
-                    rows: Rows {
-                        schema: schema.clone(),
-                        rows: test_util::build_rows(1, 5),
-                    },
-                    hint: None,
-                    partition_expr_version: None,
-                },
-            ),
-        ];
-
-        // Batch write
-        let result = engine.inner.put_regions_batch(requests.into_iter()).await;
-        assert!(result.is_err());
-
-        // Invalid region is detected before any write, so the physical region remains empty.
-        // Fail-fast is per physical-region group; cross-group partial success is possible.
-        let request = ScanRequest::default();
-        let stream = env
-            .metric()
-            .scan_to_stream(physical_region_id, request)
-            .await
-            .unwrap();
-        let batches = RecordBatches::try_collect(stream).await.unwrap();
-
-        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
 
         let physical = env.default_physical_region_id();
         let logical = env.default_logical_region_id();
@@ -1903,7 +1781,7 @@ mod tests {
         };
         let mut results = env
             .metric()
-            .put_regions_batch_with_results(vec![
+            .put_regions_batch(vec![
                 (logical, request(0, None)),
                 (RegionId::new(9999, 0), request(1, None)),
                 (other_logical, request(2, Some(1))),
@@ -1939,12 +1817,6 @@ mod tests {
                 expected
             );
         }
-        assert!(
-            env.metric()
-                .put_regions_batch_with_results(vec![])
-                .await
-                .is_empty()
-        );
     }
 
     #[tokio::test]
@@ -1968,11 +1840,10 @@ mod tests {
             },
         )];
 
-        let err = engine
-            .inner
-            .put_regions_batch(requests.into_iter())
-            .await
-            .unwrap_err();
+        let results = engine.put_regions_batch(requests).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].request_indices, vec![0]);
+        let err = results.into_iter().next().unwrap().result.unwrap_err();
 
         assert!(matches!(
             err,
@@ -2016,15 +1887,15 @@ mod tests {
             ),
         ];
 
-        let err = engine
-            .inner
-            .put_regions_batch(requests.into_iter())
-            .await
-            .unwrap_err();
-
+        let mut results = engine.put_regions_batch(requests).await;
+        results.sort_by_key(|group| group.request_indices[0]);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].request_indices, vec![0]);
+        assert_eq!(results[0].result.as_ref().unwrap(), &1);
+        assert_eq!(results[1].request_indices, vec![1]);
         assert!(matches!(
-            err,
-            crate::error::Error::ForbiddenPhysicalWrite { .. }
+            results[1].result,
+            Err(crate::error::Error::ForbiddenPhysicalWrite { .. })
         ));
     }
 
@@ -2051,11 +1922,10 @@ mod tests {
             },
         )];
 
-        let affected_rows = engine
-            .inner
-            .put_regions_batch(requests.into_iter())
-            .await
-            .unwrap();
+        let results = engine.put_regions_batch(requests).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].request_indices, vec![0]);
+        let affected_rows = results.into_iter().next().unwrap().result.unwrap();
         assert_eq!(affected_rows, 5);
     }
 
@@ -2065,15 +1935,7 @@ mod tests {
         env.init_metric_region().await;
         let engine = env.metric();
 
-        // Empty batch should return zero affected rows
-        let requests = vec![];
-        let affected_rows = engine
-            .inner
-            .put_regions_batch(requests.into_iter())
-            .await
-            .unwrap();
-
-        assert_eq!(affected_rows, 0);
+        assert!(engine.put_regions_batch(vec![]).await.is_empty());
     }
 
     #[tokio::test]

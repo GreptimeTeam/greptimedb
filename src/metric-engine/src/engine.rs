@@ -531,22 +531,12 @@ impl MetricEngine {
         self.inner.mito.clone()
     }
 
-    /// Batch put operation for multiple logical regions.
-    /// Requests are grouped by physical region; a failure can leave earlier
-    /// physical-region groups committed.
-    pub async fn put_regions_batch(
-        &self,
-        requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
-    ) -> Result<AffectedRows> {
-        self.inner.put_regions_batch(requests).await
-    }
-
     /// Writes all physical-region groups and retains each group's outcome.
-    pub async fn put_regions_batch_with_results(
+    pub async fn put_regions_batch(
         &self,
         requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Vec<PutGroupResult> {
-        self.inner.put_regions_batch_with_results(requests).await
+        self.inner.put_regions_batch(requests).await
     }
 
     /// Returns all logical regions associated with the physical region.

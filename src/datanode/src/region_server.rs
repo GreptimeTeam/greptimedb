@@ -677,7 +677,7 @@ impl RegionServer {
         ));
         let results = common_runtime::spawn_ingest(async move {
             metric_engine
-                .put_regions_batch_with_results(put_requests)
+                .put_regions_batch(put_requests)
                 .trace(span)
                 .await
         })
@@ -693,18 +693,14 @@ impl RegionServer {
             let result = group
                 .result
                 .map_err(BoxedError::new)
-                .context(HandleRegionRequestSnafu { region_id });
+                .context(HandleRegionRequestSnafu { region_id })
+                .map(RegionResponse::new);
+            record_ingest_result(request_type, group.request_indices.len(), &result);
             match result {
-                Ok(rows) => {
-                    crate::metrics::REGION_CHANGED_ROW_COUNT
-                        .with_label_values(&[request_type])
-                        .inc_by(rows as u64);
-                    response.affected_rows += rows;
+                Ok(result) => {
+                    response.affected_rows += result.affected_rows;
                 }
                 Err(error) => {
-                    crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                        .with_label_values(&[request_type, error.status_code().as_ref()])
-                        .inc_by(group.request_indices.len() as u64);
                     log_batch_write_error(&error, indices[group.request_indices[0]].0);
                     let error = Arc::new(error);
                     response
@@ -1274,7 +1270,11 @@ fn encode_batch_write_response(result: BatchRegionResponse<error::Error>) -> Reg
             .into_iter()
             .map(|(index, error)| RegionRequestFailure {
                 request_index: index as u32,
-                status: Some(api::region::status_from_error(&error)),
+                status: Some(Status {
+                    status_code: error.status_code() as u32,
+                    err_msg: error.output_msg(),
+                    retry_hint: error.retry_hint().as_str().to_string(),
+                }),
             })
             .collect(),
     }
@@ -2874,60 +2874,33 @@ mod tests {
             header: Option<LegacyHeader>,
         }
         let server = mock_region_server();
-        for accept_partial in [false, true] {
-            let mut header = api::v1::region::RegionRequestHeader::default();
-            if accept_partial {
-                header
-                    .query_context
-                    .get_or_insert_with(Default::default)
-                    .extensions
-                    .insert(
-                        api::region::ACCEPT_PARTIAL_RESULT.to_string(),
-                        "true".to_string(),
-                    );
-            }
-            let result = server
-                .handle_region_request(RegionRequestV1 {
-                    header: Some(header),
-                    body: Some(region_request::Body::Inserts(InsertRequests {
-                        requests: [1, 2]
-                            .map(|region_id| InsertRequest {
-                                region_id,
-                                rows: Some(Rows::default()),
-                                ..Default::default()
-                            })
-                            .to_vec(),
-                    })),
-                })
-                .await;
-            if accept_partial {
-                let response = result.unwrap();
-                let legacy = LegacyResponse::decode(response.encode_to_vec().as_slice()).unwrap();
-                // The old header decoder cannot turn unknown 1010 into the original error.
-                assert_eq!(1010, legacy.header.unwrap().status.unwrap().status_code);
-            } else {
-                // Old clients decode tonic metadata, without needing the new response schema.
-                let status: tonic::Status = result.unwrap_err().into();
-                let code = status
-                    .metadata()
-                    .get(common_error::GREPTIME_DB_HEADER_ERROR_CODE)
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .parse::<u32>()
-                    .unwrap();
-                assert_eq!(StatusCode::RegionNotFound as u32, code);
-                assert_eq!(
-                    RetryHint::RetryAfterRouteRefresh.as_str(),
-                    status
-                        .metadata()
-                        .get(common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                );
-            }
-        }
+        let mut header = api::v1::region::RegionRequestHeader::default();
+        header
+            .query_context
+            .get_or_insert_with(Default::default)
+            .extensions
+            .insert(
+                api::region::ACCEPT_PARTIAL_RESULT.to_string(),
+                "true".to_string(),
+            );
+        let response = server
+            .handle_region_request(RegionRequestV1 {
+                header: Some(header),
+                body: Some(region_request::Body::Inserts(InsertRequests {
+                    requests: [1, 2]
+                        .map(|region_id| InsertRequest {
+                            region_id,
+                            rows: Some(Rows::default()),
+                            ..Default::default()
+                        })
+                        .to_vec(),
+                })),
+            })
+            .await
+            .unwrap();
+        let legacy = LegacyResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+        // The old header decoder cannot turn unknown 1010 into the original error.
+        assert_eq!(1010, legacy.header.unwrap().status.unwrap().status_code);
     }
 
     #[tokio::test]

@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 
 use common_base::AffectedRows;
-use common_error::ext::ErrorExt;
 use greptime_proto::v1::region::RegionResponse as RegionResponseV1;
 
 /// Request extension advertising support for per-entry write failures.
@@ -62,14 +61,5 @@ impl RegionResponse {
             extensions: Default::default(),
             metadata,
         }
-    }
-}
-
-/// Encodes an application error using the same semantics as gRPC error metadata.
-pub fn status_from_error(error: &impl ErrorExt) -> crate::v1::Status {
-    crate::v1::Status {
-        status_code: error.status_code() as u32,
-        err_msg: error.output_msg(),
-        retry_hint: error.retry_hint().as_str().to_string(),
     }
 }
