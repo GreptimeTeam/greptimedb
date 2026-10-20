@@ -270,6 +270,13 @@ fn lookback_millis(lookback: u128) -> Result<i64> {
 /// range they name, so they are resolved against `stmt.start` and `stmt.end` here. The offset is not
 /// folded in: [`RangeWindow`] keeps anchor and offset apart and ends the window at
 /// `anchor_ms - offset_ms` at run time.
+///
+/// An anchor decouples the window's read range from the statement's: it reads
+/// `(anchor_ms - offset_ms - range_ms, anchor_ms - offset_ms]`, which for an anchor like `@ 1234` can
+/// lie entirely outside `[stmt.start - range_ms, stmt.end]`. Whoever binds the scan therefore has to
+/// derive its range from the window's anchor, offset and range rather than from `stmt.start` and
+/// `stmt.end`; a scan bound to the statement alone leaves such a window with no samples, and the
+/// query silently returns empty instead of failing.
 fn selector_anchor_ms(at: &Option<AtModifier>, stmt: &EvalStmt) -> Result<Option<i64>> {
     match at {
         None => Ok(None),
