@@ -277,6 +277,30 @@ fn a_parenthesised_selector_binds_as_written() {
     }
 }
 
+/// A parameter the planner folds to a literal is still refused, and that gap is deliberate: the
+/// kernel's constant is a field of the tree, so binding `1 - 0.1` means folding it here rather than
+/// carrying an expression. A refusal is the agreed behaviour for this stage; an answer computed
+/// from the wrong number would not be.
+#[test]
+fn a_parameter_folded_from_an_expression_is_refused() {
+    for query in [
+        "quantile_over_time(1 - 0.1, x[5m])",
+        "quantile_over_time(-(0.9), x[5m])",
+    ] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("number literal"),
+            "`{query}` did not say what the argument has to be: {message}"
+        );
+    }
+}
+
 /// A parameter computed at query time is refused, and the error names it: the tree binds a kernel's
 /// constant, so a quantile that would only exist at run time has no field to go in.
 #[test]
