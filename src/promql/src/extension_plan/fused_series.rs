@@ -61,7 +61,7 @@ use datafusion::physical_plan::{
 };
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
-use datatypes::series::time::EvalGrid;
+use datatypes::series::time::{EvalGrid, TimeAxis};
 use futures::Stream;
 use store_api::region_engine::SendableRawSeriesStream;
 
@@ -865,7 +865,7 @@ fn series_to_record_batch(
     for (position, column) in classification.iter().enumerate() {
         match column {
             OutputColumn::Time => columns.push(Arc::new(TimestampMillisecondArray::new(
-                ScalarBuffer::from(series.time.timestamps().into_owned()),
+                time_column(&series.time),
                 None,
             ))),
             OutputColumn::Field(index) => {
@@ -895,6 +895,18 @@ fn series_to_record_batch(
         }
     }
     Ok(RecordBatch::try_new(output_schema.clone(), columns)?)
+}
+
+/// The timestamps of the rows a chunk carries, sharing the grid's buffer when it can.
+///
+/// A chunk whose rows form one run addresses a slice of the grid, and that slice is lent as it
+/// stands. A chunk of several runs has no single slice to lend, so its carried timestamps are
+/// gathered: only the positions it holds, never the ones it skips.
+fn time_column(time: &TimeAxis) -> ScalarBuffer<i64> {
+    match time.as_grid_range() {
+        Some(range) => range.timestamps(),
+        None => ScalarBuffer::from(time.timestamps().into_owned()),
+    }
 }
 
 /// Converts one evaluated series field into one `Float64` column.
