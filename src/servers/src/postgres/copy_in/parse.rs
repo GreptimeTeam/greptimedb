@@ -224,8 +224,9 @@ fn parse_option_list(cursor: &mut Tokens<'_>, options: &mut CopyOptionSet) -> Pg
             }
             Some(Token::EscapedStringLiteral(s)) => {
                 // E'...' escape-string constants, e.g. DELIMITER E'\t':
-                // process the backslash escapes PostgreSQL defines.
-                let value = CopyOptionValue::String(unescape_pg_string(s));
+                // sqlparser's tokenizer already decoded the escapes, so
+                // the payload is used as-is, like SingleQuotedString.
+                let value = CopyOptionValue::String(s.clone());
                 cursor.next();
                 value
             }
@@ -261,79 +262,6 @@ fn parse_option_list(cursor: &mut Tokens<'_>, options: &mut CopyOptionSet) -> Pg
         }
     }
     Ok(())
-}
-
-/// Processes the backslash escapes of a PostgreSQL `E'...'`
-/// escape-string constant: `\b \f \n \r \t \v \\` octal `\0-\7`
-/// and `\xNN` hex.
-fn unescape_pg_string(raw: &str) -> String {
-    let bytes = raw.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
-            out.push(bytes[i]);
-            i += 1;
-            continue;
-        }
-        match bytes[i + 1] {
-            b'b' => {
-                out.push(0x08);
-                i += 2;
-            }
-            b'f' => {
-                out.push(0x0C);
-                i += 2;
-            }
-            b'n' => {
-                out.push(b'\n');
-                i += 2;
-            }
-            b'r' => {
-                out.push(b'\r');
-                i += 2;
-            }
-            b't' => {
-                out.push(b'\t');
-                i += 2;
-            }
-            b'v' => {
-                out.push(0x0B);
-                i += 2;
-            }
-            b'\\' => {
-                out.push(b'\\');
-                i += 2;
-            }
-            b'x' => {
-                let mut value = 0u32;
-                let mut j = i + 2;
-                while j < bytes.len() && j < i + 4 && bytes[j].is_ascii_hexdigit() {
-                    value = value * 16 + (bytes[j] as char).to_digit(16).unwrap();
-                    j += 1;
-                }
-                out.push(value as u8);
-                i = j;
-            }
-            b'0'..=b'7' => {
-                let mut value = 0u32;
-                let mut j = i + 1;
-                let octal_end = (j + 3).min(bytes.len());
-                while j < octal_end && (b'0'..=b'7').contains(&bytes[j]) {
-                    value = value * 8 + (bytes[j] - b'0') as u32;
-                    j += 1;
-                }
-                out.push(value as u8);
-                i = j;
-            }
-            other => {
-                // Unknown escapes keep the character as-is.
-                out.push(other);
-                i += 2;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -427,13 +355,41 @@ mod tests {
 
     #[test]
     fn test_scan_escaped_string_constants() {
-        // E'\t' as a delimiter: the escape is processed, the tab is legal.
+        // sqlparser's tokenizer already decodes E'...' escapes, so the
+        // payload is used as-is: E'\t' is a tab.
         let mut raw = scan("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')")
             .unwrap()
             .unwrap();
         assert_eq!(
             raw.options.take_single_byte("DELIMITER").unwrap(),
             Some(b'\t')
+        );
+
+        // E'\\' is a single literal backslash (a legal one-byte
+        // delimiter), NOT an escaped backslash-t.
+        let mut raw = scan("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER E'\\\\')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            raw.options.take_single_byte("DELIMITER").unwrap(),
+            Some(b'\\')
+        );
+
+        // E'\\t' decodes to TWO characters — backslash followed by t —
+        // and must be rejected as a multi-character delimiter instead of
+        // being unescaped a second time into a tab.
+        // The scanner leaves option validation to the codec; use the
+        // full resolution path to assert the delimiter rejection.
+        let err = match crate::postgres::copy_in::copy_from_stdin_from_sql(
+            "COPY t FROM STDIN WITH (FORMAT csv, DELIMITER E'\\\\t')",
+        ) {
+            Ok(Some(_)) => panic!("expected the multi-character delimiter to be rejected"),
+            Ok(None) => panic!("expected the statement to scan as copy-in"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("single one-byte character"),
+            "{err}"
         );
     }
 
