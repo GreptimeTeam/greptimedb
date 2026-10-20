@@ -560,6 +560,7 @@ mod tests {
     async fn build_applier_factory(
         prefix: &str,
         rows: BTreeSet<(&'static str, i32, [u64; 2])>,
+        sst_indexed_column_ids: HashSet<ColumnId>,
     ) -> impl Fn(DfExpr) -> BoxFuture<'static, Vec<usize>> {
         let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let table_dir = "table0".to_string();
@@ -577,7 +578,7 @@ mod tests {
             intm_mgr,
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
-            indexed_column_ids.clone(),
+            sst_indexed_column_ids,
         );
 
         for (str_tag, i32_tag, u64_field) in &rows {
@@ -629,6 +630,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_and_query_missing_index() {
+        let rows = BTreeSet::from_iter([("aaa", 1, [1, 2]), ("bbb", 2, [3, 4])]);
+        // The SST predates enabling indexes on tag_i32 and field_u64.
+        let applier_factory = build_applier_factory(
+            "test_create_and_query_missing_index_",
+            rows,
+            HashSet::from([1]),
+        )
+        .await;
+
+        let cases = [
+            (col("tag_i32").eq(lit(1)), vec![0, 1]),
+            (
+                col("tag_i32")
+                    .eq(lit(1))
+                    .and(col("field_u64").eq(lit(1u64))),
+                vec![0, 1],
+            ),
+            (
+                col("tag_str").eq(lit("aaa")).and(col("tag_i32").eq(lit(1))),
+                vec![0],
+            ),
+            (
+                col("tag_str")
+                    .eq(lit("missing"))
+                    .and(col("tag_i32").eq(lit(1))),
+                vec![],
+            ),
+        ];
+        for (expr, expected) in cases {
+            let actual = applier_factory(expr.clone()).await;
+            assert_eq!(actual, expected, "{expr}");
+        }
+    }
+
+    #[tokio::test]
     async fn test_create_and_query_get_key() {
         let rows = BTreeSet::from_iter([
             ("aaa", 1, [1, 2]),
@@ -642,7 +679,12 @@ mod tests {
             ("abc", 3, [9, 10]),
         ]);
 
-        let applier_factory = build_applier_factory("test_create_and_query_get_key_", rows).await;
+        let applier_factory = build_applier_factory(
+            "test_create_and_query_get_key_",
+            rows,
+            HashSet::from([1, 2, 4]),
+        )
+        .await;
 
         let expr = col("tag_str").eq(lit("aaa"));
         let res = applier_factory(expr).await;
@@ -685,7 +727,12 @@ mod tests {
             ("abc", 3, [9, 10]),
         ]);
 
-        let applier_factory = build_applier_factory("test_create_and_query_range_", rows).await;
+        let applier_factory = build_applier_factory(
+            "test_create_and_query_range_",
+            rows,
+            HashSet::from([1, 2, 4]),
+        )
+        .await;
 
         let expr = col("tag_str").between(lit("aaa"), lit("aab"));
         let res = applier_factory(expr).await;
@@ -722,8 +769,12 @@ mod tests {
             ("abc", 3, [9, 10]),
         ]);
 
-        let applier_factory =
-            build_applier_factory("test_create_and_query_comparison_", rows).await;
+        let applier_factory = build_applier_factory(
+            "test_create_and_query_comparison_",
+            rows,
+            HashSet::from([1, 2, 4]),
+        )
+        .await;
 
         let expr = col("tag_str").lt(lit("aab"));
         let res = applier_factory(expr).await;
@@ -804,7 +855,12 @@ mod tests {
             ("abc", 3, [9, 10]),
         ]);
 
-        let applier_factory = build_applier_factory("test_create_and_query_regex_", rows).await;
+        let applier_factory = build_applier_factory(
+            "test_create_and_query_regex_",
+            rows,
+            HashSet::from([1, 2, 4]),
+        )
+        .await;
 
         let expr = binary_expr(col("tag_str"), Operator::RegexMatch, lit(".*"));
         let res = applier_factory(expr).await;

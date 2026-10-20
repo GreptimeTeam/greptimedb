@@ -180,3 +180,145 @@ DROP TABLE test_pk;
 
 Affected Rows: 0
 
+-- The old SST has an inverted index, but not on host.
+CREATE TABLE missing_inverted_index (
+    ts TIMESTAMP TIME INDEX,
+    indexed_col STRING INVERTED INDEX,
+    host STRING
+) WITH ('append_mode' = 'true');
+
+Affected Rows: 0
+
+INSERT INTO missing_inverted_index VALUES
+    (1, 'a', 'server1'),
+    (2, 'b', 'server2');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('missing_inverted_index');
+
++---------------------------------------------+
+| ADMIN FLUSH_TABLE('missing_inverted_index') |
++---------------------------------------------+
+| 0                                           |
++---------------------------------------------+
+
+SELECT * FROM missing_inverted_index WHERE host = 'server1' ORDER BY ts;
+
++-------------------------+-------------+---------+
+| ts                      | indexed_col | host    |
++-------------------------+-------------+---------+
+| 1970-01-01T00:00:00.001 | a           | server1 |
++-------------------------+-------------+---------+
+
+ALTER TABLE missing_inverted_index MODIFY COLUMN host SET INVERTED INDEX;
+
+Affected Rows: 0
+
+SELECT * FROM missing_inverted_index WHERE host = 'server1' ORDER BY ts;
+
++-------------------------+-------------+---------+
+| ts                      | indexed_col | host    |
++-------------------------+-------------+---------+
+| 1970-01-01T00:00:00.001 | a           | server1 |
++-------------------------+-------------+---------+
+
+SELECT * FROM missing_inverted_index WHERE host = 'missing' ORDER BY ts;
+
+++
+++
+
+SELECT * FROM missing_inverted_index WHERE indexed_col = 'a' AND host = 'server1' ORDER BY ts;
+
++-------------------------+-------------+---------+
+| ts                      | indexed_col | host    |
++-------------------------+-------------+---------+
+| 1970-01-01T00:00:00.001 | a           | server1 |
++-------------------------+-------------+---------+
+
+SELECT * FROM missing_inverted_index WHERE indexed_col = 'b' AND host = 'server1' ORDER BY ts;
+
+++
+++
+
+-- New SSTs have both indexes; queries must also retain rows from the old SST.
+INSERT INTO missing_inverted_index VALUES
+    (3, 'a', 'server1'),
+    (4, 'b', 'server2');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('missing_inverted_index');
+
++---------------------------------------------+
+| ADMIN FLUSH_TABLE('missing_inverted_index') |
++---------------------------------------------+
+| 0                                           |
++---------------------------------------------+
+
+SELECT * FROM missing_inverted_index WHERE host = 'server1' ORDER BY ts;
+
++-------------------------+-------------+---------+
+| ts                      | indexed_col | host    |
++-------------------------+-------------+---------+
+| 1970-01-01T00:00:00.001 | a           | server1 |
+| 1970-01-01T00:00:00.003 | a           | server1 |
++-------------------------+-------------+---------+
+
+SELECT * FROM missing_inverted_index WHERE indexed_col = 'a' AND host = 'server1' ORDER BY ts;
+
++-------------------------+-------------+---------+
+| ts                      | indexed_col | host    |
++-------------------------+-------------+---------+
+| 1970-01-01T00:00:00.001 | a           | server1 |
+| 1970-01-01T00:00:00.003 | a           | server1 |
++-------------------------+-------------+---------+
+
+-- SQLNESS ARG restart=true
+SELECT * FROM missing_inverted_index WHERE host = 'server1' ORDER BY ts;
+
++-------------------------+-------------+---------+
+| ts                      | indexed_col | host    |
++-------------------------+-------------+---------+
+| 1970-01-01T00:00:00.001 | a           | server1 |
+| 1970-01-01T00:00:00.003 | a           | server1 |
++-------------------------+-------------+---------+
+
+-- A column absent from old SSTs can still match its default value.
+ALTER TABLE missing_inverted_index ADD COLUMN source STRING DEFAULT 'legacy';
+
+Affected Rows: 0
+
+ALTER TABLE missing_inverted_index MODIFY COLUMN source SET INVERTED INDEX;
+
+Affected Rows: 0
+
+SELECT * FROM missing_inverted_index WHERE source = 'legacy' ORDER BY ts;
+
++-------------------------+-------------+---------+--------+
+| ts                      | indexed_col | host    | source |
++-------------------------+-------------+---------+--------+
+| 1970-01-01T00:00:00.001 | a           | server1 | legacy |
+| 1970-01-01T00:00:00.002 | b           | server2 | legacy |
+| 1970-01-01T00:00:00.003 | a           | server1 | legacy |
+| 1970-01-01T00:00:00.004 | b           | server2 | legacy |
++-------------------------+-------------+---------+--------+
+
+SELECT * FROM missing_inverted_index WHERE source = 'missing' ORDER BY ts;
+
+++
+++
+
+SELECT * FROM missing_inverted_index WHERE indexed_col = 'a' AND source = 'legacy' ORDER BY ts;
+
++-------------------------+-------------+---------+--------+
+| ts                      | indexed_col | host    | source |
++-------------------------+-------------+---------+--------+
+| 1970-01-01T00:00:00.001 | a           | server1 | legacy |
+| 1970-01-01T00:00:00.003 | a           | server1 | legacy |
++-------------------------+-------------+---------+--------+
+
+DROP TABLE missing_inverted_index;
+
+Affected Rows: 0
+
