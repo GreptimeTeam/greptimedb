@@ -156,6 +156,7 @@ mod tests {
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
     use object_store::ObjectStore;
     use parquet::arrow::AsyncArrowWriter;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
