@@ -27,6 +27,7 @@ pub mod map;
 pub mod map_label;
 pub mod map_time;
 mod metrics;
+pub mod native;
 pub mod range_array;
 pub mod range_eval;
 pub mod select;
