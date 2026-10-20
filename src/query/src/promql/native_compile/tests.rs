@@ -269,6 +269,9 @@ fn an_anchor_on_a_window_resolves_to_absolute_milliseconds() {
         ("rate(x[5m] @ 1234)", 1_234_000),
         // A sub-second anchor resolves to the millisecond it names.
         ("rate(x[5m] @ 1.234)", 1_234),
+        // Prometheus allows a pre-epoch anchor: `signed_millis_since_epoch` takes `Err(earlier)`,
+        // where a `duration_since(UNIX_EPOCH).unwrap_or_default()` helper would silently give 0.
+        ("rate(x[5m] @ -1.5)", -1_500),
         // The statement here is UNIX_EPOCH..100s, which is what `start()` and `end()` mean.
         ("rate(x[5m] @ start())", 0),
         ("rate(x[5m] @ end())", 100_000),
@@ -308,11 +311,6 @@ fn end_resolves_to_the_statement_end_not_the_last_grid_point() {
     assert_eq!(
         last_point, 100_000,
         "the test's own grid does not stop before the statement end"
-    );
-    assert_ne!(
-        op.window.anchor_ms,
-        Some(last_point),
-        "`@ end()` bound the last grid point rather than the statement's end"
     );
 }
 
