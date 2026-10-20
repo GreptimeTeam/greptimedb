@@ -30,14 +30,15 @@ use datafusion_execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
-use futures::future::join_all;
+use futures::FutureExt;
+use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
-    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
@@ -548,6 +549,13 @@ pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
 
+/// A response of [`RegionEngine::handle_batch_put_requests`] and the region of each put it
+/// answers for.
+pub type BatchPutResponse = (
+    Vec<RegionId>,
+    BoxFuture<'static, Result<RegionResponse, BoxedError>>,
+);
+
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct RegionStatistic {
@@ -979,6 +987,35 @@ pub trait RegionEngine: Send + Sync {
         }
 
         Ok(join_all(tasks).await)
+    }
+
+    /// Handles the puts of one request into regions of this engine and returns the responses
+    /// to await on their own, each with the region of every put it answers for: two puts to one
+    /// region are two entries.
+    ///
+    /// The default handles each put with [`handle_request`](Self::handle_request) and answers
+    /// each put on its own. An engine that writes several puts together may answer them with
+    /// one response whose affected rows count all of them.
+    fn handle_batch_put_requests(
+        self: Arc<Self>,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<BatchPutResponse>
+    where
+        Self: 'static,
+    {
+        requests
+            .into_iter()
+            .map(|(region_id, request)| {
+                let engine = self.clone();
+                let response = async move {
+                    engine
+                        .handle_request(region_id, RegionRequest::Put(request))
+                        .await
+                }
+                .boxed();
+                (vec![region_id], response)
+            })
+            .collect()
     }
 
     async fn handle_batch_ddl_requests(

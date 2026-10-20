@@ -113,7 +113,6 @@ impl Categorizer {
                 }
                 Commutativity::Commutative
             }
-            // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
@@ -276,6 +275,7 @@ impl Categorizer {
             | Expr::Between(_)
             | Expr::Exists(_)
             | Expr::InList(_)
+            | Expr::Like(_)
             | Expr::Case(_) => Commutativity::Commutative,
             // Annotation collection must not affect distribution. Keep scalar UDFs pushdownable;
             // TODO: Preserve datanode PromQL annotations through plan decoding, return them in
@@ -283,8 +283,7 @@ impl Categorizer {
             Expr::ScalarFunction(_) => Commutativity::Commutative,
             Expr::AggregateFunction(_udaf) => Commutativity::Commutative,
 
-            Expr::Like(_)
-            | Expr::SimilarTo(_)
+            Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
             | Expr::WindowFunction(_)

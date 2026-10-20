@@ -85,6 +85,7 @@ SELECT DISTINCT ON (a) * FROM test ORDER BY a, t DESC;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 
 +-+-+-+
@@ -98,7 +99,7 @@ EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["a"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -110,6 +111,7 @@ EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a, b FROM test ORDER BY a;
 
 +-+-+-+
@@ -123,7 +125,7 @@ EXPLAIN ANALYZE SELECT DISTINCT a, b FROM test ORDER BY a;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["a", "b"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+
@@ -162,6 +164,7 @@ SELECT DISTINCT a, b FROM test ORDER BY a, b;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 
 +-+-+-+
@@ -178,12 +181,12 @@ EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["a"], "filters": ["a <= Int32(10) OR a IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a], aggr=[] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["a"], "filters": ["a > Int32(10)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -195,6 +198,7 @@ EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a, b FROM test ORDER BY a;
 
 +-+-+-+
@@ -211,12 +215,12 @@ EXPLAIN ANALYZE SELECT DISTINCT a, b FROM test ORDER BY a;
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["a", "b"], "filters": ["a <= Int32(10) OR a IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[a@0 as a, b@1 as b], aggr=[] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a, b@1 as b], aggr=[] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["a", "b"], "filters": ["a > Int32(10)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
