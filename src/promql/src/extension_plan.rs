@@ -14,6 +14,7 @@
 
 mod absent;
 mod empty_metric;
+pub mod fused_series;
 mod histogram_fold;
 mod instant_manipulate;
 mod normalize;
