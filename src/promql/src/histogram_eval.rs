@@ -74,11 +74,10 @@ pub fn evaluate_histograms(
     let mut index: HashMap<LabelSet, usize> = HashMap::new();
     let mut groups: Vec<Group<'_>> = Vec::new();
     let mut group_of = |metric: MetricName| {
-        let slot = *index.entry(label_set(&metric)).or_insert_with(|| {
+        *index.entry(label_set(&metric)).or_insert_with(|| {
             groups.push(Group::new(metric));
             groups.len() - 1
-        });
-        slot
+        })
     };
     let mut members: Vec<(usize, Option<f64>, &Series)> = Vec::new();
     for series in series {
