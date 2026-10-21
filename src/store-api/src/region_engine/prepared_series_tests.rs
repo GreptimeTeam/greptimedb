@@ -412,6 +412,25 @@ async fn prepared_source_label_binding_is_available_before_readers_and_matches_c
 
         let reader = source.read_series(0..2).unwrap();
         assert_same_label_source(source.label_source(), reader.label_source());
+        match (explicit, reader.label_decode_spec()) {
+            (true, None) => {}
+            (false, Some(description)) => {
+                assert_eq!(description.version, LABEL_DECODE_VERSION);
+                assert_eq!(description.metric_name, "cpu");
+                assert_eq!(description.encoding, LabelDecodeEncoding::Dense);
+                assert_eq!(description.primary_key.len(), 1);
+                assert_eq!(description.primary_key[0].column_id, 1);
+                assert_eq!(description.primary_key[0].name, "host");
+                assert_eq!(
+                    description.primary_key[0].physical_type,
+                    ConcreteDataType::string_datatype()
+                );
+                assert_eq!(description.logical_tags.len(), 1);
+                assert_eq!(description.logical_tags[0].column_id, 1);
+                assert_eq!(description.logical_tags[0].name, "host");
+            }
+            _ => panic!("unexpected declared label decode description"),
+        }
         assert_eq!(source.polls.load(Ordering::SeqCst), 0);
         let chunks = futures::TryStreamExt::try_collect::<Vec<_>>(reader)
             .await
