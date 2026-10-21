@@ -255,13 +255,28 @@ impl Categorizer {
                 if fused.binding().metric_name.is_none() {
                     return Commutativity::NonCommutative;
                 }
-                // A region holds a subset of the metric's series and no series is split across
-                // regions, so the node may be evaluated there only when every node of its tree
-                // reads one series at a time.
+                // A region evaluates the tree over whatever series its own scan returns, so this
+                // is only answerable when every node of the tree reads one series at a time. An
+                // aggregate or a binary operation would fold or pair across series, and one region
+                // holds only part of them.
                 if reads_across_series(fused.tree().root()) {
                     return Commutativity::NonCommutative;
                 }
 
+                // TEMPORARY, and this is the one thing here that is not proved: the placement is
+                // only correct while each series reaches exactly one region. A region evaluates the
+                // whole tree over the series its scan returns, so a series whose samples are split
+                // across regions is evaluated per fragment, and a range function over a fragment is
+                // not the range function over the series. Nothing checks that a series stays in one
+                // region: the storage partition key is whatever `partition_column_names()` names and
+                // may be a column that varies within one series, and this categorizer runs before
+                // region selection, so it has no selected-region vector to consult either. A single
+                // region deployment satisfies it; a partitioned table over several regions does not,
+                // and would return a wrong answer rather than an error.
+                //
+                // What would make this unconditional is a partition key the label set determines,
+                // checked against the table's physical partition expressions. Until then the
+                // placement is a proof of concept over one region.
                 Commutativity::Commutative
             }
             name if name == SeriesNormalize::name()
