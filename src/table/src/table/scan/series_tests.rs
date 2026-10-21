@@ -707,11 +707,9 @@ async fn native_raw_frame_executes_and_decodes_bound_data() {
         })
         .unwrap();
     assert!(native_bytes > 0);
-    // One series arrives whole in one partition, and `read_key` says which series a row belongs
-    // to, so the leaf declares that as its distribution instead of leaving it unspecified.
     assert!(matches!(
         plan.properties().output_partitioning(),
-        Partitioning::Hash(columns, 1) if columns.len() == 1
+        Partitioning::UnknownPartitioning(1)
     ));
     assert!(plan.properties().output_ordering().is_none());
 }
@@ -1297,7 +1295,7 @@ async fn invalid_partition_and_nonempty_children_are_rejected() {
         .unwrap();
     assert!(matches!(
         plan.properties().output_partitioning(),
-        Partitioning::Hash(columns, 2) if columns.len() == 1
+        Partitioning::UnknownPartitioning(2)
     ));
     assert!(
         plan.execute(1, context())
@@ -1319,7 +1317,7 @@ async fn invalid_partition_and_nonempty_children_are_rejected() {
         .unwrap();
     assert!(matches!(
         changed_plan.properties().output_partitioning(),
-        Partitioning::Hash(columns, 3) if columns.len() == 1
+        Partitioning::UnknownPartitioning(3)
     ));
     assert!(plan.execute(0, context()).is_err());
     assert!(plan.execute(2, context()).is_err());

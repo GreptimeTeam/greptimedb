@@ -594,23 +594,9 @@ impl RegionScanExec {
         let ordering = scanner.raw_series_ordering();
         let arrow_schema = raw_series_frame_schema_with_ordering(&schema, &label_source, ordering)?;
         let partition_count = scanner.properties().num_partitions().max(1);
-        // Every series arrives whole in one partition, and `read_key` is its primary key, so the
-        // key says exactly that: hashing it groups the rows of one series and splits nothing. It
-        // is declared rather than left unspecified because a consumer that holds one window per
-        // series has to be told the series is whole - an optimizer free to round-robin the
-        // partition would hand it two halves of one series, each marked final by its own stream,
-        // and both would answer half the truth without saying so.
-        // The name is the one `raw_series_frame_schema` gives the column.
-        let partitioning = match Column::new_with_schema("read_key", &arrow_schema) {
-            Ok(read_key) => Partitioning::Hash(vec![Arc::new(read_key) as _], partition_count),
-            // The schema this leaf builds always has the column; losing it would mean the frame
-            // schema changed shape, and claiming a distribution over a column that is not there
-            // would be worse than saying nothing.
-            Err(_) => Partitioning::UnknownPartitioning(partition_count),
-        };
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
-            partitioning,
+            Partitioning::UnknownPartitioning(partition_count),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
