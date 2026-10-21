@@ -1489,10 +1489,16 @@ async fn test_series_scan_with_format(flat_format: bool) {
     );
 }
 
-/// Single-source time ranges still need series-sized batches at the cross-range merge.
+/// Cross-range merges split long series but preserve larger batches for short series.
 #[tokio::test]
-async fn test_series_scan_splits_single_source_ranges() {
-    let mut env = TestEnv::with_prefix("test_series_scan_splits_single_source_ranges").await;
+async fn test_series_scan_single_source_range_batches() {
+    for rows_per_series in [16, 49, 50, 64] {
+        check_series_scan_single_source_range_batches(rows_per_series).await;
+    }
+}
+
+async fn check_series_scan_single_source_range_batches(rows_per_series: usize) {
+    let mut env = TestEnv::with_prefix("test_series_scan_single_source_range_batches").await;
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: true,
@@ -1515,9 +1521,16 @@ async fn test_series_scan_splits_single_source_ranges() {
     for start in [0, 3600] {
         let mut rows = Vec::new();
         for key in ["a", "b", "c", "d"] {
-            rows.extend(test_util::build_rows_for_key(key, start, start + 64, 0));
-            expected
-                .extend((0..64).map(|i| (key.to_string(), i as f64, (start + i) as i64 * 1000)));
+            rows.extend(test_util::build_rows_for_key(
+                key,
+                start,
+                start + rows_per_series,
+                0,
+            ));
+            expected.extend(
+                (0..rows_per_series)
+                    .map(|i| (key.to_string(), i as f64, (start + i) as i64 * 1000)),
+            );
         }
         test_util::put_rows(
             &engine,
@@ -1537,7 +1550,7 @@ async fn test_series_scan_splits_single_source_ranges() {
         let expected = if last_row {
             expected
                 .iter()
-                .filter(|(_, _, ts)| *ts == 3_663_000)
+                .filter(|(_, _, ts)| *ts == (3600 + rows_per_series as i64 - 1) * 1000)
                 .cloned()
                 .collect::<Vec<_>>()
         } else {
@@ -1636,8 +1649,12 @@ async fn test_series_scan_splits_single_source_ranges() {
                             })
                             .sum();
                         assert!(batches <= 2, "{display}");
-                    } else {
+                    } else if rows_per_series >= 50 {
                         assert_eq!(0, rows, "{display}");
+                    } else {
+                        // Short series retain batches spanning multiple series instead
+                        // of sending one tiny batch per series through the distributor.
+                        assert!(rows > 0, "{display}");
                     }
                     if with_cache && first_scan {
                         assert!(

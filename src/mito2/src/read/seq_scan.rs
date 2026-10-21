@@ -46,9 +46,9 @@ use crate::read::range_cache::{
 };
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream,
-    compute_parallel_channel_size, scan_flat_file_ranges, scan_flat_mem_ranges,
-    should_split_flat_batches_for_merge,
+    BATCH_SIZE_THRESHOLD, MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList,
+    SplitRecordBatchStream, compute_parallel_channel_size, scan_flat_file_ranges,
+    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
@@ -762,11 +762,15 @@ pub(crate) async fn build_flat_sources(
 
     // SeriesScan also merges range outputs. Split at the source, before deduplication
     // and LastRow selection, so their output batching is preserved by the range cache.
-    let needs_merge = ordered_sources.iter().flatten().count() > 1
-        || read_mode == FlatReadMode::CrossRangeMerge
-        || (compaction && stream_ctx.ranges.len() > 1);
-    let split_batch_size = if needs_merge {
+    let needs_merge =
+        ordered_sources.iter().flatten().count() > 1 || (compaction && stream_ctx.ranges.len() > 1);
+    let split_batch_size = if needs_merge || read_mode == FlatReadMode::CrossRangeMerge {
         should_split_flat_batches_for_merge(stream_ctx, range_meta).filter(|rows_per_series| {
+            // A single-source range only benefits at the downstream merge. Tiny
+            // splits add cache replay, channel and distribution work per batch.
+            if !needs_merge && *rows_per_series < BATCH_SIZE_THRESHOLD as usize {
+                return false;
+            }
             // Compaction writes every merged batch out, so splitting short series
             // would hand the SST writer and indexer one tiny batch per series.
             !compaction || *rows_per_series >= MIN_COMPACTION_SPLIT_ROWS
