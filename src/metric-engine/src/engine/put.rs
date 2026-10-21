@@ -2419,5 +2419,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
+
+        // The lease expires while a logical table ALTER writes the metadata region. The write
+        // is applied, so the cached metadata must not hide it.
+        engine
+            .set_region_role_by_lease(
+                physical_region_id,
+                grant(Instant::now() + Duration::from_secs(10)),
+            )
+            .unwrap();
+        let logical_region_id = env.default_logical_region_id();
+        let metadata = engine.get_metadata(logical_region_id).await.unwrap();
+        assert!(metadata.column_by_name("tag1").is_none());
+        listener.pause_next();
+        let alter = {
+            let engine = engine.clone();
+            let request = RegionRequest::Alter(test_util::alter_logical_region_request(&["tag1"]));
+            tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
+        };
+        listener.wait_appended().await;
+        engine
+            .set_region_role_by_lease(physical_region_id, grant(Instant::now()))
+            .unwrap();
+        listener.resume();
+        let err = alter.await.unwrap().unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+        let metadata = engine.get_metadata(logical_region_id).await.unwrap();
+        assert!(metadata.column_by_name("tag1").is_some());
     }
 }

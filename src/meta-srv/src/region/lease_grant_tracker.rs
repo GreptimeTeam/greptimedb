@@ -60,12 +60,10 @@ impl LeaseGrantTracker {
 
     /// Records that region leases are granted to `datanode_id` now.
     pub fn record_grant(&self, datanode_id: DatanodeId) {
-        let now = Instant::now();
-        self.inner
-            .write()
-            .unwrap()
-            .granted_at
-            .insert(datanode_id, now);
+        let mut inner = self.inner.write().unwrap();
+        // Takes the instant under the lock, so concurrent heartbeats of a datanode cannot
+        // overwrite a later grant with an earlier one.
+        inner.granted_at.insert(datanode_id, Instant::now());
     }
 
     /// Returns when every region lease that any metasrv leader granted to `datanode_id` has

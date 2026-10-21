@@ -197,9 +197,19 @@ impl MetricEngineInner {
         });
 
         // Writes logical regions metadata to metadata region
-        self.metadata_region
+        if let Err(e) = self
+            .metadata_region
             .add_logical_regions(physical_region_id, false, logical_region_columns)
-            .await?;
+            .await
+        {
+            // The metadata may still be written, e.g. when the region lease expires after the
+            // WAL append.
+            self.state
+                .write()
+                .unwrap()
+                .invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
+            return Err(e);
+        }
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
