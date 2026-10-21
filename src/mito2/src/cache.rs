@@ -1022,7 +1022,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::put_range_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -1052,15 +1052,6 @@ impl CacheStrategy {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
                 Some(cache_manager.range_result_memory_limiter())
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
-    }
-
-    pub(crate) fn range_result_cache_size(&self) -> Option<usize> {
-        match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                Some(cache_manager.range_result_cache_size())
             }
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
@@ -1159,6 +1150,7 @@ pub struct CacheManager {
     /// Cache for range scan outputs in flat format.
     range_result_cache: Option<RangeResultCache>,
     /// Configured capacity for range scan outputs in flat format.
+    #[cfg(test)]
     range_result_cache_size: u64,
     /// Shared memory limiter for async range-result cache tasks.
     range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
@@ -1547,7 +1539,7 @@ impl CacheManager {
     }
 
     /// Puts range scan result into cache.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -1567,6 +1559,7 @@ impl CacheManager {
         &self.range_result_memory_limiter
     }
 
+    #[cfg(test)]
     pub(crate) fn range_result_cache_size(&self) -> usize {
         self.range_result_cache_size as usize
     }
@@ -1807,6 +1800,7 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
+            #[cfg(test)]
             range_result_cache_size: self.range_result_cache_size,
             range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
                 self.range_result_cache_size as usize,

@@ -14,6 +14,8 @@
 
 //! Utilities for the partition range scan result cache.
 
+pub(crate) mod shared_range;
+
 use std::future::Future;
 use std::mem;
 use std::sync::Arc;
@@ -29,23 +31,26 @@ use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::scalar_value_to_timestamp;
+#[cfg(any(test, feature = "test"))]
 use futures::TryStreamExt;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use store_api::region_engine::PartitionRange;
 use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector};
 use table::predicate::is_string_timestamp_literal;
-use tokio::sync::{mpsc, oneshot};
 
 use crate::cache::CacheStrategy;
-use crate::cache::range_cache::{RangeCacheDelivery, RangeCacheLookup, RangeCacheWorker};
+use crate::cache::range_cache::{RangeCacheDelivery, RangeCacheLookup};
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::BoxedRecordBatchStream;
+use crate::read::pruner::PartitionPruner;
+use crate::read::range_cache::shared_range::{RangeRead, SharedRange};
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_reader::SeriesRange;
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+use crate::sst::parquet::file_range::PreFilterMode;
 
 const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
 
@@ -70,6 +75,8 @@ pub(crate) struct ScanRequestFingerprint {
     /// range results are never reused for scans with a different (or no) range.
     sequence_range: Option<SequenceRange>,
     stage: RangeScanStage,
+    /// File interpretation and snapshot guards, aligned with the key's row groups.
+    file_reads: Option<Arc<Vec<FileReadFingerprint>>>,
     /// We keep the partition expr version to ensure we won't reuse the fingerprint after we change the partition expr.
     /// We store the version instead of the whole partition expr or partition expr filters.
     partition_expr_version: u64,
@@ -127,9 +134,21 @@ impl ScanRequestFingerprintBuilder {
             merge_mode,
             sequence_range,
             stage: RangeScanStage::Data,
+            file_reads: None,
             partition_expr_version,
         }
     }
+}
+
+/// Inputs affecting a file read's output.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileReadFingerprint {
+    target_schema_version: u64,
+    source_region: RegionId,
+    file_sequence: Option<u64>,
+    preserve_row_sequence: bool,
+    snapshot_sequence: Option<u64>,
+    pre_filter_mode: PreFilterMode,
 }
 
 /// Non-copiable struct of the fingerprint.
@@ -177,6 +196,7 @@ impl ScanRequestFingerprint {
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
             sequence_range: self.sequence_range,
+            file_reads: self.file_reads.clone(),
             stage: self.stage,
             partition_expr_version: self.partition_expr_version,
         }
@@ -191,6 +211,7 @@ impl ScanRequestFingerprint {
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
             sequence_range: self.sequence_range,
+            file_reads: self.file_reads.clone(),
             stage: RangeScanStage::CandidateSeries,
             partition_expr_version: self.partition_expr_version,
         }
@@ -205,6 +226,7 @@ impl ScanRequestFingerprint {
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
             sequence_range: self.sequence_range,
+            file_reads: self.file_reads.clone(),
             stage: RangeScanStage::SeriesData(range),
             partition_expr_version: self.partition_expr_version,
         }
@@ -212,6 +234,10 @@ impl ScanRequestFingerprint {
 
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<SharedScanRequestFingerprint>()
+            + self.file_reads.as_ref().map_or(0, |files| {
+                mem::size_of::<Vec<FileReadFingerprint>>()
+                    + files.capacity() * mem::size_of::<FileReadFingerprint>()
+            })
             + self.inner.read_columns.estimated_size()
             + self.inner.read_column_types.capacity() * mem::size_of::<Option<ConcreteDataType>>()
             + self.inner.filters.capacity() * mem::size_of::<String>()
@@ -236,7 +262,7 @@ impl ScanRequestFingerprint {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RangeScanCacheKey {
     pub(crate) region_id: RegionId,
-    /// Sorted (file_id, row_group_index) pairs that uniquely identify the data this range covers.
+    /// Sorted file/row-group identities for merged results.
     pub(crate) row_groups: Vec<(FileId, i64)>,
     pub(crate) scan: ScanRequestFingerprint,
 }
@@ -256,7 +282,7 @@ impl RangeScanCacheKey {
 }
 
 /// Cached result for one range scan.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct CachedBatchSlice {
     batch: RecordBatch,
     slice_lengths: Vec<usize>,
@@ -270,6 +296,7 @@ impl CachedBatchSlice {
 
 pub(crate) struct RangeScanCacheValue {
     cached_batches: Vec<CachedBatchSlice>,
+    estimated_batch_size: usize,
     /// Precomputed size of all compacted batches.
     estimated_batches_size: usize,
 }
@@ -281,6 +308,7 @@ impl RangeScanCacheValue {
     ) -> Self {
         Self {
             cached_batches,
+            estimated_batch_size: DEFAULT_READ_BATCH_SIZE,
             estimated_batches_size,
         }
     }
@@ -294,39 +322,6 @@ impl RangeScanCacheValue {
                 .map(CachedBatchSlice::metadata_size)
                 .sum::<usize>()
             + self.estimated_batches_size
-    }
-}
-
-/// Row groups and whether all sources are file-only for a partition range.
-pub(crate) struct PartitionRangeRowGroups {
-    /// Sorted (file_id, row_group_index) pairs.
-    pub(crate) row_groups: Vec<(FileId, i64)>,
-    pub(crate) only_file_sources: bool,
-}
-
-/// Collects (file_id, row_group_index) pairs from a partition range's row group indices.
-pub(crate) fn collect_partition_range_row_groups(
-    stream_ctx: &StreamContext,
-    part_range: &PartitionRange,
-) -> PartitionRangeRowGroups {
-    let range_meta = &stream_ctx.ranges[part_range.identifier];
-    let mut row_groups = Vec::new();
-    let mut only_file_sources = true;
-
-    for index in &range_meta.row_group_indices {
-        if stream_ctx.is_file_range_index(*index) {
-            let file_id = stream_ctx.input.file_from_index(*index).file_id().file_id();
-            row_groups.push((file_id, index.row_group_index));
-        } else {
-            only_file_sources = false;
-        }
-    }
-
-    row_groups.sort_unstable_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then(a.1.cmp(&b.1)));
-
-    PartitionRangeRowGroups {
-        row_groups,
-        only_file_sources,
     }
 }
 
@@ -510,19 +505,22 @@ fn implied_from_between(
 pub(crate) fn build_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
+    partition_pruner: Option<&PartitionPruner>,
 ) -> Option<RangeScanCacheKey> {
-    build_range_cache_key_inner(stream_ctx, part_range, None)
+    build_range_cache_key_inner(stream_ctx, part_range, None, partition_pruner)
 }
 
 /// Builds a cache key for a candidate-series partition-range result.
 pub(crate) fn build_candidate_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
+    partition_pruner: &PartitionPruner,
 ) -> Option<RangeScanCacheKey> {
     build_range_cache_key_inner(
         stream_ctx,
         part_range,
         Some(RangeScanStage::CandidateSeries),
+        Some(partition_pruner),
     )
 }
 
@@ -531,11 +529,13 @@ pub(crate) fn build_series_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
     range: SeriesRange,
+    partition_pruner: &PartitionPruner,
 ) -> Option<RangeScanCacheKey> {
     build_range_cache_key_inner(
         stream_ctx,
         part_range,
         Some(RangeScanStage::SeriesData(range)),
+        Some(partition_pruner),
     )
 }
 
@@ -543,6 +543,7 @@ fn build_range_cache_key_inner(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
     stage: Option<RangeScanStage>,
+    partition_pruner: Option<&PartitionPruner>,
 ) -> Option<RangeScanCacheKey> {
     if !stream_ctx.input.cache_strategy.has_range_result_cache() {
         return None;
@@ -560,10 +561,39 @@ fn build_range_cache_key_inner(
         return None;
     }
 
-    let rg = collect_partition_range_row_groups(stream_ctx, part_range);
-    if !rg.only_file_sources || rg.row_groups.is_empty() {
+    let range_meta = &stream_ctx.ranges[part_range.identifier];
+    let mut files = Vec::with_capacity(range_meta.row_group_indices.len());
+    for index in &range_meta.row_group_indices {
+        if !stream_ctx.is_file_range_index(*index) {
+            return None;
+        }
+        let handle = stream_ctx.input.file_from_index(*index);
+        let file = handle.meta_ref();
+        files.push((
+            (handle.file_id().file_id(), index.row_group_index),
+            FileReadFingerprint {
+                target_schema_version: stream_ctx.input.region_metadata().schema_version,
+                source_region: handle.region_id(),
+                file_sequence: file.sequence.map(|sequence| sequence.get()),
+                preserve_row_sequence: file.preserve_row_sequence,
+                snapshot_sequence: stream_ctx.input.snapshot_sequence,
+                pre_filter_mode: partition_pruner.map_or_else(
+                    || stream_ctx.range_pre_filter_mode(part_range),
+                    |pruner| pruner.pre_filter_mode(index.index - stream_ctx.input.num_memtables()),
+                ),
+            },
+        ));
+    }
+    if files.is_empty() {
         return None;
     }
+    files.sort_unstable_by(|a, b| {
+        a.0.0
+            .as_bytes()
+            .cmp(b.0.0.as_bytes())
+            .then(a.0.1.cmp(&b.0.1))
+    });
+    let (row_groups, file_reads): (Vec<_>, Vec<_>) = files.into_iter().unzip();
 
     // If the implied range covers this partition's `FileTimeRange`, drop
     // time-only predicates from the cache key so that queries with different
@@ -571,7 +601,6 @@ fn build_range_cache_key_inner(
     // analyzable time-only predicate or some predicate had an unsupported shape
     // (e.g. `OR`), so we keep the fingerprint unchanged. When `time_filters` is
     // already empty, cloning the fingerprint is equivalent to stripping them.
-    let range_meta = &stream_ctx.ranges[part_range.identifier];
     let (file_min, file_max) = range_meta.time_range;
     let covers = match stream_ctx.input.implied_time_range() {
         // An empty implied range can never cover a non-empty file range, so
@@ -591,7 +620,7 @@ fn build_range_cache_key_inner(
     } else {
         fingerprint.clone()
     };
-    let scan = match stage {
+    let mut scan = match stage {
         Some(RangeScanStage::CandidateSeries) => scan.for_candidate_series(),
         Some(RangeScanStage::SeriesData(assignment)) => scan.for_series_data(assignment),
         Some(RangeScanStage::DataForCrossRangeMerge) => {
@@ -602,11 +631,244 @@ fn build_range_cache_key_inner(
         Some(RangeScanStage::Data) | None => scan,
     };
 
+    scan.file_reads = Some(Arc::new(file_reads));
     Some(RangeScanCacheKey {
         region_id: stream_ctx.input.region_metadata().region_id,
-        row_groups: rg.row_groups,
+        row_groups,
         scan,
     })
+}
+
+/// Cache access for one range, including the SST handles that guard publication.
+pub(crate) struct CachedRangeReader<'a> {
+    pub(crate) stream_ctx: &'a StreamContext,
+    pub(crate) part_range: &'a PartitionRange,
+    pub(crate) key: Option<RangeScanCacheKey>,
+    pub(crate) metrics: &'a PartitionMetrics,
+}
+
+impl CachedRangeReader<'_> {
+    pub(crate) async fn build<F, Fut>(self, build: F) -> Result<(BoxedRecordBatchStream, usize)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
+    {
+        self.build_in_scope(0, build).await
+    }
+
+    pub(crate) async fn build_in_scope<F, Fut>(
+        self,
+        memory_pool_id: usize,
+        build: F,
+    ) -> Result<(BoxedRecordBatchStream, usize)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
+    {
+        let Some(key) = self.key else {
+            return build().await;
+        };
+        let files = self.stream_ctx.ranges[self.part_range.identifier]
+            .row_group_indices
+            .iter()
+            .map(|index| self.stream_ctx.input.file_from_index(*index).clone())
+            .collect();
+        load_shared_range(
+            &self.stream_ctx.input.cache_strategy,
+            key,
+            self.metrics,
+            files,
+            memory_pool_id,
+            build,
+        )
+        .await
+    }
+}
+
+/// Joins an active scan while retaining independently advancing stream cursors.
+#[cfg(any(test, feature = "test"))]
+pub(crate) async fn get_or_load_range_result<F, Fut>(
+    strategy: &CacheStrategy,
+    key: RangeScanCacheKey,
+    part_metrics: &PartitionMetrics,
+    build: F,
+) -> Result<(BoxedRecordBatchStream, usize)>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
+{
+    get_or_load_range_result_in_scope(strategy, key, part_metrics, 0, build).await
+}
+
+/// Isolates active sources that reserve memory from a query-specific pool.
+/// Pool identity affects active sharing only, never completed-result reuse.
+#[cfg(any(test, feature = "test"))]
+pub(crate) async fn get_or_load_range_result_in_scope<F, Fut>(
+    strategy: &CacheStrategy,
+    key: RangeScanCacheKey,
+    part_metrics: &PartitionMetrics,
+    memory_pool_id: usize,
+    build: F,
+) -> Result<(BoxedRecordBatchStream, usize)>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
+{
+    load_shared_range(
+        strategy,
+        key,
+        part_metrics,
+        Vec::new(),
+        memory_pool_id,
+        build,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "range_result_lookup", skip_all)]
+async fn load_shared_range<F, Fut>(
+    strategy: &CacheStrategy,
+    key: RangeScanCacheKey,
+    part_metrics: &PartitionMetrics,
+    files: Vec<crate::sst::file::FileHandle>,
+    memory_pool_id: usize,
+    build: F,
+) -> Result<(BoxedRecordBatchStream, usize)>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>>,
+{
+    let Some(cache) = strategy.range_cache_worker() else {
+        return build().await;
+    };
+    let load = match cache.get_or_load(key.clone(), files, memory_pool_id) {
+        RangeCacheLookup::Hit(value) => {
+            part_metrics.inc_range_cache_hit();
+            crate::metrics::RANGE_CACHE_EVENTS
+                .with_label_values(&["hit"])
+                .inc();
+            record_result_reuse(value.value());
+            let batch_size = value.value().estimated_batch_size;
+            return Ok((cached_flat_range_stream(value), batch_size));
+        }
+        RangeCacheLookup::Loading(load) => load,
+        RangeCacheLookup::Bypass => {
+            part_metrics.inc_range_cache_miss();
+            return build().await;
+        }
+    };
+    part_metrics.inc_range_cache_miss();
+    crate::metrics::RANGE_CACHE_EVENTS
+        .with_label_values(&["miss"])
+        .inc();
+    let cache = cache.clone();
+    let limiter = cache.load_memory.clone();
+    let mut build = Some(build);
+    let mut owner_cursor = None;
+    let (shared, batch_size) = load
+        .result
+        .get_or_try_init(|| async {
+            let builder = build.take().ok_or_else(|| {
+                crate::error::UnexpectedSnafu {
+                    reason: "range scan builder already consumed",
+                }
+                .build()
+            })?;
+            let (source, batch_size) = Box::pin(builder()).await?;
+            crate::metrics::RANGE_CACHE_EVENTS
+                .with_label_values(&["built_sources"])
+                .inc();
+            let shared = SharedRange::new(source, limiter.clone());
+            owner_cursor = shared.subscribe().await;
+            Ok::<_, crate::error::Error>((shared, batch_size))
+        })
+        .await?;
+    let shared = shared.clone();
+    let batch_size = *batch_size;
+    let cursor = match owner_cursor {
+        Some(cursor) => Some(cursor),
+        None => {
+            let cursor = shared.subscribe().await;
+            if cursor.is_some() {
+                crate::metrics::RANGE_CACHE_EVENTS
+                    .with_label_values(&["reused_sources"])
+                    .inc();
+            }
+            cursor
+        }
+    };
+    let Some(mut cursor) = cursor else {
+        // An oversized range has closed admission. This caller has not emitted
+        // any rows, so its original ordinary stream remains a safe fallback.
+        let builder = build.ok_or_else(|| {
+            crate::error::UnexpectedSnafu {
+                reason: "range scan owner lost its initial cursor",
+            }
+            .build()
+        })?;
+        return builder().await;
+    };
+    let strategy = strategy.clone();
+    let metrics = part_metrics.clone();
+    let stream = Box::pin(try_stream! {
+        // Keep the weak registry entry alive until this reader finishes.
+        let load = load;
+        loop {
+            match shared.read(&mut cursor).await {
+                RangeRead::Batch(batch) => yield batch,
+                RangeRead::Failed(error) => {
+                    Err(crate::error::LoadRangeResultSnafu.into_error(error))?;
+                }
+                RangeRead::Finished => {
+                    if let Some(batches) = shared.take_complete_batches().await {
+                        // Finalization owns the registration until publication, so
+                        // a new caller can still join during background compaction.
+                        common_runtime::spawn_query(async move {
+
+                            let bytes = batches.iter().map(|cached| cached.batch.get_array_memory_size()).sum();
+                            let mut value = RangeScanCacheValue::new(batches, bytes);
+                            if let Some(limiter) = strategy.range_result_memory_limiter() {
+                                let mut compacted = CacheConcatState::default();
+                                match compacted.compact_range(&value, limiter).await {
+                                    Ok(()) => value = compacted.finish(),
+                                    Err(error) => {
+                                        warn!(error; "Failed to compact shared range result");
+                                        return;
+                                    }
+                                }
+                            }
+                            value.estimated_batch_size = batch_size;
+                            let bytes = key.estimated_size() + value.estimated_size();
+                            if cache.complete(&load, Arc::new(value)) {
+                                metrics.inc_range_cache_size(bytes);
+                            }
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    Ok((stream, batch_size))
+}
+
+/// Reused output is separate from physical scan/decode counters.
+fn record_result_reuse(value: &RangeScanCacheValue) {
+    let rows: usize = value
+        .cached_batches
+        .iter()
+        .map(|batch| batch.batch.num_rows())
+        .sum();
+    for (event, count) in [
+        ("reused_sources", 1),
+        ("reused_rows", rows),
+        ("reused_batches", value.cached_batches.len()),
+        ("reused_reference_bytes", value.estimated_batches_size),
+    ] {
+        crate::metrics::RANGE_CACHE_EVENTS
+            .with_label_values(&[event])
+            .inc_by(count as u64);
+    }
 }
 
 /// Returns a stream that replays cached record batches.
@@ -625,150 +887,6 @@ pub(crate) fn cached_flat_range_stream(
             }
         }
     })
-}
-
-/// Builds only one decoded result per full cache key. A load must be driven
-/// independently of any caller: merge readers can wait for another stream with
-/// the same key before polling their first stream to completion.
-pub(crate) struct CachedRangeReader<'a> {
-    pub(crate) stream_ctx: &'a StreamContext,
-    pub(crate) part_range: &'a PartitionRange,
-    pub(crate) key: Option<RangeScanCacheKey>,
-    pub(crate) metrics: &'a PartitionMetrics,
-}
-
-impl CachedRangeReader<'_> {
-    pub(crate) async fn build<F, Fut>(self, build: F) -> Result<(BoxedRecordBatchStream, usize)>
-    where
-        F: FnOnce() -> Fut + Clone + Send + 'static,
-        Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>> + Send + 'static,
-    {
-        let Self {
-            stream_ctx,
-            part_range,
-            key,
-            metrics,
-        } = self;
-        let strategy = &stream_ctx.input.cache_strategy;
-        let (Some(key), Some(worker)) = (key, strategy.range_cache_worker()) else {
-            return build().await;
-        };
-        let files = stream_ctx.ranges[part_range.identifier]
-            .row_group_indices
-            .iter()
-            .map(|index| stream_ctx.input.file_from_index(*index).clone())
-            .collect();
-        let loader = build.clone();
-        let load_worker = worker.clone();
-        let load_strategy = strategy.clone();
-        let load_metrics = metrics.clone();
-        let key_size = key.estimated_size();
-        match worker.get_or_load(key, files, async move {
-            let result = async {
-                let (stream, _) = loader().await?;
-                collect_range_result(stream, &load_worker, &load_strategy).await
-            }
-            .await;
-            match result {
-                Ok(Some(value)) => {
-                    load_metrics.inc_range_cache_size(key_size + value.value().estimated_size());
-                    Some(value)
-                }
-                Ok(None) => None,
-                Err(error) => {
-                    warn!(error; "Failed to load range cache; falling back to an uncached scan");
-                    None
-                }
-            }
-        }) {
-            RangeCacheLookup::Hit(value) => {
-                metrics.inc_range_cache_hit();
-                Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE))
-            }
-            RangeCacheLookup::Loading(receiver) => {
-                metrics.inc_range_cache_miss();
-                Ok((
-                    shared_range_stream(receiver, build),
-                    DEFAULT_READ_BATCH_SIZE,
-                ))
-            }
-            RangeCacheLookup::Bypass => {
-                metrics.inc_range_cache_miss();
-                build().await
-            }
-        }
-    }
-}
-
-/// Waiting is lazy, but the producer is independent of every consumer.
-fn shared_range_stream<F, Fut>(
-    mut receiver: tokio::sync::watch::Receiver<Option<Arc<RangeCacheDelivery>>>,
-    build: F,
-) -> BoxedRecordBatchStream
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<(BoxedRecordBatchStream, usize)>> + Send + 'static,
-{
-    Box::pin(try_stream! {
-        let cached = receiver.wait_for(|cached| cached.is_some()).await
-            .ok().and_then(|cached| cached.clone());
-        drop(receiver);
-        let mut stream = if let Some(cached) = cached {
-            cached_flat_range_stream(cached)
-        } else {
-            // A failed/oversized/cancelled fill is never a query result.
-            // Retry once through the ordinary streaming path, not the worker.
-            build().await?.0
-        };
-        while let Some(batch) = stream.try_next().await? {
-            yield batch;
-        }
-    })
-}
-
-/// The load budget covers retained input buffers and completed deliveries. Acquisition
-/// must be nonblocking: waiting with a partially accumulated result deadlocks
-/// when several loads consume all permits. Oversized ranges retain streaming
-/// query semantics by falling back to an uncached scan.
-async fn collect_range_result(
-    mut stream: BoxedRecordBatchStream,
-    worker: &RangeCacheWorker,
-    strategy: &CacheStrategy,
-) -> Result<Option<Arc<RangeCacheDelivery>>> {
-    let mut permit: Option<tokio::sync::OwnedSemaphorePermit> = None;
-    let mut buffer = CacheBatchBuffer::new(strategy);
-    while let Some(batch) = stream.try_next().await? {
-        let Some(next_permit) = worker
-            .load_memory
-            .try_acquire(batch.get_array_memory_size())
-        else {
-            return Ok(None);
-        };
-        if let Some(permit) = &mut permit {
-            permit.merge(next_permit);
-        } else {
-            permit = Some(next_permit);
-        }
-        buffer.push(batch)?;
-    }
-    let Some(value) = buffer.finish().await.transpose()? else {
-        return Ok(None);
-    };
-    let Some(permit) = worker
-        .load_memory
-        .try_resize(permit, value.estimated_size())
-    else {
-        return Ok(None);
-    };
-    Ok(Some(RangeCacheDelivery::new(value, permit)))
-}
-
-enum CacheConcatCommand {
-    Compact(Vec<RecordBatch>),
-    Finish {
-        pending: Vec<RecordBatch>,
-        result_tx: oneshot::Sender<Result<Arc<RangeScanCacheValue>>>,
-    },
 }
 
 #[derive(Default)]
@@ -799,200 +917,64 @@ impl CacheConcatState {
         Ok(())
     }
 
+    async fn compact_range(
+        &mut self,
+        value: &RangeScanCacheValue,
+        limiter: &crate::cache::RangeResultMemoryLimiter,
+    ) -> Result<()> {
+        let mut pending = Vec::new();
+        let mut rows = 0;
+        let mut bytes = 0;
+        for cached in &value.cached_batches {
+            if cached.slice_lengths.len() > 1 {
+                self.compact(mem::take(&mut pending), limiter).await?;
+                self.estimated_size += cached.batch.get_array_memory_size();
+                self.cached_batches.push(cached.clone());
+                rows = 0;
+                bytes = 0;
+                continue;
+            }
+            rows += cached.batch.num_rows();
+            bytes += cached.batch.get_array_memory_size();
+            pending.push(cached.batch.clone());
+            if should_compact_batches(pending.len(), rows, bytes) {
+                self.compact(mem::take(&mut pending), limiter).await?;
+                rows = 0;
+                bytes = 0;
+            }
+        }
+        self.compact(pending, limiter).await
+    }
+
     fn finish(self) -> RangeScanCacheValue {
         RangeScanCacheValue::new(self.cached_batches, self.estimated_size)
     }
 }
 
-fn compact_record_batches(batches: Vec<RecordBatch>) -> Result<CachedBatchSlice> {
-    debug_assert!(!batches.is_empty());
-
-    let slice_lengths = batches.iter().map(RecordBatch::num_rows).collect();
-    build_cached_batch_slice(batches, slice_lengths)
+fn should_compact_batches(batches: usize, rows: usize, bytes: usize) -> bool {
+    batches > 1 && (rows > DEFAULT_READ_BATCH_SIZE || bytes > RANGE_CACHE_COMPACT_THRESHOLD_BYTES)
 }
 
-fn build_cached_batch_slice(
-    batches: Vec<RecordBatch>,
-    slice_lengths: Vec<usize>,
-) -> Result<CachedBatchSlice> {
-    let batch = if batches.len() == 1 {
-        batches.into_iter().next().unwrap()
-    } else {
-        let schema = batches[0].schema();
-        concat_batches(&schema, &batches).context(ComputeArrowSnafu)?
-    };
-
+fn compact_record_batches(mut batches: Vec<RecordBatch>) -> Result<CachedBatchSlice> {
+    debug_assert!(!batches.is_empty());
+    let slice_lengths = batches.iter().map(RecordBatch::num_rows).collect();
+    if batches.len() == 1 {
+        // Arrow's singleton concat aliases its input; a second empty batch lets
+        // the concat kernel copy sliced data without adding a replay boundary.
+        batches.push(batches[0].slice(0, 0));
+    }
+    let batch = concat_batches(&batches[0].schema(), &batches).context(ComputeArrowSnafu)?;
     Ok(CachedBatchSlice {
         batch,
         slice_lengths,
     })
 }
 
-async fn run_cache_concat_task(
-    mut rx: mpsc::UnboundedReceiver<CacheConcatCommand>,
-    limiter: Arc<crate::cache::RangeResultMemoryLimiter>,
-    skip_threshold_bytes: usize,
-) {
-    let mut state = CacheConcatState::default();
-
-    while let Some(cmd) = rx.recv().await {
-        match cmd {
-            CacheConcatCommand::Compact(batches) => {
-                if let Err(err) = state.compact(batches, &limiter).await {
-                    warn!(err; "Failed to compact range cache batches");
-                    return;
-                }
-                // Close the channel to stop further work as soon as the cached
-                // size exceeds the configured cache budget.
-                if state.estimated_size > skip_threshold_bytes {
-                    return;
-                }
-            }
-            CacheConcatCommand::Finish { pending, result_tx } => {
-                let compact_result = state
-                    .compact(pending, &limiter)
-                    .await
-                    .map(|()| state.finish());
-                let result = match compact_result {
-                    Ok(v) => {
-                        let value = Arc::new(v);
-                        Ok(value)
-                    }
-                    Err(e) => {
-                        warn!(e; "Failed to finalize range cache batches");
-
-                        Err(e)
-                    }
-                };
-
-                let _ = result_tx.send(result);
-
-                break;
-            }
-        }
-    }
-}
-
-struct CacheBatchBuffer {
-    buffered_batches: Vec<RecordBatch>,
-    buffered_rows: usize,
-    buffered_size: usize,
-    sender: Option<mpsc::UnboundedSender<CacheConcatCommand>>,
-    /// Kept until concat finishes so abandoning the shared load cancels concat too.
-    concat_task: Option<common_runtime::JoinHandle<()>>,
-}
-
-impl CacheBatchBuffer {
-    fn new(cache_strategy: &CacheStrategy) -> Self {
-        let (sender, concat_task) = cache_strategy
-            .range_result_memory_limiter()
-            .map(|limiter| {
-                let skip_threshold_bytes = cache_strategy.range_result_cache_size().unwrap_or(0);
-                let (tx, rx) = mpsc::unbounded_channel();
-                let task = common_runtime::spawn_query(run_cache_concat_task(
-                    rx,
-                    limiter.clone(),
-                    skip_threshold_bytes,
-                ));
-                (tx, task)
-            })
-            .unzip();
-
-        Self {
-            buffered_batches: Vec::new(),
-            buffered_rows: 0,
-            buffered_size: 0,
-            sender,
-            concat_task,
-        }
-    }
-
-    fn push(&mut self, batch: RecordBatch) -> Result<()> {
-        if self.sender.is_none() {
-            return Ok(());
-        }
-
-        self.buffered_rows += batch.num_rows();
-        self.buffered_size += batch.get_array_memory_size();
-        self.buffered_batches.push(batch);
-
-        if self.buffered_batches.len() > 1
-            && (self.buffered_rows > DEFAULT_READ_BATCH_SIZE
-                || self.buffered_size > RANGE_CACHE_COMPACT_THRESHOLD_BYTES)
-        {
-            self.notify_compact();
-        }
-
-        Ok(())
-    }
-
-    fn notify_compact(&mut self) {
-        if self.buffered_batches.is_empty() || self.sender.is_none() {
-            return;
-        }
-
-        let batches = mem::take(&mut self.buffered_batches);
-        self.buffered_rows = 0;
-        self.buffered_size = 0;
-
-        let Some(sender) = &self.sender else {
-            return;
-        };
-        if sender.send(CacheConcatCommand::Compact(batches)).is_err() {
-            self.sender = None;
-        }
-    }
-
-    async fn finish(mut self) -> Option<Result<Arc<RangeScanCacheValue>>> {
-        let sender = self.sender.take()?;
-        let (result_tx, result_rx) = oneshot::channel();
-        sender
-            .send(CacheConcatCommand::Finish {
-                pending: mem::take(&mut self.buffered_batches),
-                result_tx,
-            })
-            .ok()?;
-        // Keep ownership until the result arrives so cancellation also aborts
-        // concat while it waits for its temporary memory permits.
-        let result = result_rx.await.ok();
-        self.concat_task = None;
-        result
-    }
-}
-
-impl Drop for CacheBatchBuffer {
-    fn drop(&mut self) {
-        // Aborting releases queued batches even while concat waits for a permit.
-        if let Some(task) = &self.concat_task {
-            task.abort();
-        }
-    }
-}
-
-/// Wraps a stream to cache its output for future range cache hits.
-#[cfg(feature = "test")]
-pub(crate) fn cache_flat_range_stream(
-    mut stream: BoxedRecordBatchStream,
-    cache_strategy: CacheStrategy,
-    key: RangeScanCacheKey,
-    part_metrics: PartitionMetrics,
-) -> BoxedRecordBatchStream {
-    Box::pin(try_stream! {
-        let mut buffer = CacheBatchBuffer::new(&cache_strategy);
-        while let Some(batch) = stream.try_next().await? {
-            buffer.push(batch.clone())?;
-            yield batch;
-        }
-
-        if let Some(Ok(value)) = buffer.finish().await {
-            part_metrics.inc_range_cache_size(key.estimated_size() + value.estimated_size());
-            cache_strategy.put_range_result(key, value);
-        }
-    })
-}
-
-/// Creates a `cache_flat_range_stream` with dummy internals for benchmarking.
+/// Benchmarks the production range-result loader with a fresh cache per call.
 ///
+/// A zero capacity disables caching. A nonzero capacity measures cold construction,
+/// including staging and consumption; background compaction may outlive the stream.
+/// It does not measure warm reuse or concurrent load sharing.
 /// This avoids exposing `RangeScanCacheKey`, `ScanRequestFingerprint`, and
 /// `PartitionMetrics` publicly.
 #[cfg(feature = "test")]
@@ -1038,7 +1020,17 @@ pub fn bench_cache_flat_range_stream(
     let part_metrics =
         PartitionMetrics::new(region_id, 0, "bench", Instant::now(), false, &metrics_set);
 
-    cache_flat_range_stream(stream, cache_strategy, key, part_metrics)
+    Box::pin(try_stream! {
+        let (mut stream, _) = get_or_load_range_result(
+            &cache_strategy,
+            key,
+            &part_metrics,
+            || async { Ok((stream, DEFAULT_READ_BATCH_SIZE)) },
+        ).await?;
+        while let Some(batch) = stream.try_next().await? {
+            yield batch;
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1054,14 +1046,13 @@ mod tests {
     use datafusion_expr::{Expr, col, lit};
     use smallvec::smallvec;
     use store_api::storage::{FileId, RegionId};
-    use tokio::sync::watch;
 
     use super::*;
     use crate::cache::CacheManager;
-    use crate::cache::test_util::range_cache_key;
     use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::pruner::Pruner;
     use crate::read::range::{RangeMeta, RowGroupIndex, SourceIndex};
-    use crate::read::scan_region::{PredicateGroup, ScanInput};
+    use crate::read::scan_region::{PredicateGroup, ScanInput, StreamContext};
     use crate::sst::file::FileTimeRange;
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
@@ -1161,7 +1152,7 @@ mod tests {
     #[case(1024 * 1024, true)]
     #[case(1, false)]
     #[tokio::test]
-    async fn shared_range_read_preserves_batches_or_falls_back_on_budget_exhaustion(
+    async fn shared_range_read_preserves_batches_when_admission_budget_is_exhausted(
         #[case] capacity: u64,
         #[case] cached: bool,
     ) {
@@ -1174,7 +1165,7 @@ mod tests {
                 .range_result_cache_size(capacity)
                 .build(),
         ));
-        let key = build_range_cache_key(&ctx, &range).unwrap();
+        let key = build_range_cache_key(&ctx, &range, None).unwrap();
         let (_, metrics) = test_cache_context(&ctx.input.cache_strategy);
         let calls = Arc::new(AtomicUsize::new(0));
         let expected = vec![make_batch(&[1, 2]), make_batch(&[3, 4, 5])];
@@ -1198,164 +1189,27 @@ mod tests {
         .unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(actual, expected);
-        assert_eq!(calls.load(Ordering::Relaxed), if cached { 1 } else { 2 });
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        if cached {
+            wait_cached(&ctx.input.cache_strategy, &key).await;
+        }
         assert_eq!(
             ctx.input.cache_strategy.get_range_result(&key).is_some(),
             cached
         );
-        assert_eq!(
-            ctx.input
-                .cache_strategy
-                .range_cache_worker()
-                .unwrap()
-                .load_memory
-                .available_permits(),
-            (capacity as usize).div_ceil(1024)
-        );
-    }
-
-    fn start_shared_load(
-        strategy: &CacheStrategy,
-        key: RangeScanCacheKey,
-        batches: Vec<RecordBatch>,
-    ) -> watch::Receiver<Option<Arc<RangeCacheDelivery>>> {
-        let worker = strategy.range_cache_worker().unwrap();
-        let loader_worker = worker.clone();
-        let loader_strategy = strategy.clone();
-        let lookup = worker.get_or_load(key, vec![], async move {
-            collect_range_result(
-                Box::pin(futures::stream::iter(batches.into_iter().map(Ok))),
-                &loader_worker,
-                &loader_strategy,
-            )
-            .await
+        let memory = &ctx
+            .input
+            .cache_strategy
+            .range_cache_worker()
             .unwrap()
-        });
-        let RangeCacheLookup::Loading(receiver) = lookup else {
-            panic!("expected a shared load");
-        };
-        receiver
-    }
-
-    async fn wait_for_shared_load(
-        receiver: &mut watch::Receiver<Option<Arc<RangeCacheDelivery>>>,
-    ) -> Option<Arc<RangeCacheDelivery>> {
+            .load_memory;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            receiver
-                .wait_for(|value| value.is_some())
-                .await
-                .ok()
-                .and_then(|value| value.clone())
-        })
-        .await
-        .expect("a shared load must finish or fall back without waiting for consumers")
-    }
-
-    #[tokio::test]
-    async fn completed_load_keeps_memory_until_all_subscribers_release() {
-        let strategy = test_cache_strategy();
-        let worker = strategy.range_cache_worker().unwrap();
-        let capacity = worker.load_memory.available_permits();
-        let (key, _) = test_cache_context(&strategy);
-        let mut first = start_shared_load(&strategy, key.clone(), vec![make_batch(&[1, 2, 3])]);
-        let second = first.clone();
-        drop(wait_for_shared_load(&mut first).await.unwrap());
-
-        // A completed flight no longer counts toward the flight limit, but
-        // unpolled subscribers must still reserve its decoded result memory.
-        assert!(worker.load_memory.available_permits() < capacity);
-        drop(first);
-        assert!(worker.load_memory.available_permits() < capacity);
-        drop(second);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while worker.load_memory.available_permits() != capacity {
+            while memory.available_permits() != (capacity as usize).div_ceil(1024) {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("the last subscriber must release the delivery reservation");
-        assert!(
-            worker.get(&key).is_some(),
-            "the cache still owns the result"
-        );
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    async fn successive_loads_with_slow_consumers_exhaust_delivery_budget(
-        #[values(false, true)] invalidate: bool,
-    ) {
-        let strategy = CacheStrategy::EnableAll(Arc::new(
-            CacheManager::builder()
-                .range_result_cache_size(8192)
-                .build(),
-        ));
-        let worker = strategy.range_cache_worker().unwrap();
-        let capacity = worker.load_memory.available_permits();
-        let mut held_streams = Vec::new();
-        let mut fallbacks = 0;
-
-        // Each flight finishes before the next starts, exceeding the 32-flight
-        // limit cumulatively. Only the delivery budget can bound this backlog.
-        for _ in 0..40 {
-            let file = FileId::random();
-            let key = range_cache_key(&[file]);
-            let expected = vec![make_large_binary_batch(1, 2048)];
-            let mut receiver = start_shared_load(&strategy, key, expected.clone());
-            let shared = wait_for_shared_load(&mut receiver).await.is_some();
-            if invalidate {
-                worker.invalidate_file(file);
-            }
-            let fallback_batches = expected.clone();
-            let stream = shared_range_stream(receiver, move || async move {
-                Ok((
-                    Box::pin(futures::stream::iter(fallback_batches.into_iter().map(Ok)))
-                        as BoxedRecordBatchStream,
-                    DEFAULT_READ_BATCH_SIZE,
-                ))
-            });
-            if shared {
-                held_streams.push(stream);
-            } else {
-                fallbacks += 1;
-                let actual: Vec<_> =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), stream.try_collect())
-                        .await
-                        .expect("fallback must not wait for an unpolled range")
-                        .unwrap();
-                assert_eq!(actual, expected);
-            }
-        }
-
-        assert!(!held_streams.is_empty());
-        assert!(held_streams.len() < 32);
-        assert!(
-            fallbacks > 0,
-            "completed results must not escape the budget"
-        );
-        assert!(worker.load_memory.available_permits() < capacity);
-
-        // Transfer ownership out of watch receivers into actively polled replay
-        // streams, then leave them suspended at their first yield.
-        for stream in &mut held_streams {
-            assert!(stream.try_next().await.unwrap().is_some());
-        }
-        assert!(worker.load_memory.available_permits() < capacity);
-        drop(held_streams);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while worker.load_memory.available_permits() != capacity {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("dropping slow readers must unblock new shared loads");
-
-        let mut retry = start_shared_load(
-            &strategy,
-            range_cache_key(&[FileId::random()]),
-            vec![make_large_binary_batch(1, 2048)],
-        );
-        assert!(wait_for_shared_load(&mut retry).await.is_some());
+        .expect("finalization did not release the source reservation");
     }
 
     #[tokio::test]
@@ -1363,35 +1217,23 @@ mod tests {
         let strategy = test_cache_strategy();
         let worker = strategy.range_cache_worker().unwrap().clone();
         let capacity = worker.load_memory.available_permits();
-        let (key, _) = test_cache_context(&strategy);
-        let loader_worker = worker.clone();
-        let lookup = worker.get_or_load(key.clone(), vec![], async move {
-            let stream = Box::pin(try_stream! {
-                yield make_batch(&[1, 2, 3]);
-                std::future::pending::<()>().await;
-            });
-            collect_range_result(stream, &loader_worker, &strategy)
-                .await
-                .unwrap()
-        });
-        let RangeCacheLookup::Loading(receiver) = lookup else {
-            panic!("expected a shared load");
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while worker.load_memory.available_permits() == capacity {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the partial result must acquire its input reservation");
-        drop(receiver);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while worker.load_memory.available_permits() != capacity {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("cancellation must release the partial result reservation");
+        let (key, metrics) = test_cache_context(&strategy);
+        let (mut stream, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                Ok((
+                    Box::pin(try_stream! {
+                        yield make_batch(&[1, 2, 3]);
+                        std::future::pending::<()>().await;
+                    }) as BoxedRecordBatchStream,
+                    DEFAULT_READ_BATCH_SIZE,
+                ))
+            })
+            .await
+            .unwrap();
+        assert!(stream.try_next().await.unwrap().is_some());
+        assert!(worker.load_memory.available_permits() < capacity);
+        drop(stream);
+        assert_eq!(worker.load_memory.available_permits(), capacity);
         assert!(worker.get(&key).is_none());
     }
 
@@ -1401,7 +1243,7 @@ mod tests {
 
         let (ctx, range) =
             new_stream_context(vec![col("k0").eq(lit("a"))], None, FileTimeRange::default()).await;
-        let key = build_range_cache_key(&ctx, &range).unwrap();
+        let key = build_range_cache_key(&ctx, &range, None).unwrap();
         let (_, metrics) = test_cache_context(&ctx.input.cache_strategy);
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1409,10 +1251,11 @@ mod tests {
         let loader_gate = gate.clone();
         let build = move || async move {
             count.fetch_add(1, Ordering::Relaxed);
-            let _permit = loader_gate.acquire().await.unwrap();
             Ok((
-                Box::pin(futures::stream::iter([Ok(make_batch(&[1, 2, 3]))]))
-                    as BoxedRecordBatchStream,
+                Box::pin(try_stream! {
+                    let _permit = loader_gate.acquire().await.unwrap();
+                    yield make_batch(&[1, 2, 3]);
+                }) as BoxedRecordBatchStream,
                 DEFAULT_READ_BATCH_SIZE,
             ))
         };
@@ -1470,7 +1313,7 @@ mod tests {
         let (stream_ctx, part_range) =
             new_stream_context(filters, query_time_range, partition_time_range).await;
 
-        let key = build_range_cache_key(&stream_ctx, &part_range).unwrap();
+        let key = build_range_cache_key(&stream_ctx, &part_range, None).unwrap();
 
         assert_eq!(
             key.scan.filters(),
@@ -1596,14 +1439,14 @@ mod tests {
         )
         .await;
 
-        let key_a = build_range_cache_key(&ctx_a, &part_a).unwrap();
-        let key_b = build_range_cache_key(&ctx_b, &part_b).unwrap();
+        let key_a = build_range_cache_key(&ctx_a, &part_a, None).unwrap();
+        let key_b = build_range_cache_key(&ctx_b, &part_b, None).unwrap();
         assert_eq!(key_a.scan, key_b.scan);
         assert!(key_a.scan.time_filters().is_empty());
     }
 
     #[tokio::test]
-    async fn scan_stages_have_separate_cache_keys() {
+    async fn test_scan_stages_have_separate_cache_keys() {
         let partition_range = (
             Timestamp::new_millisecond(1000),
             Timestamp::new_millisecond(2000),
@@ -1611,12 +1454,17 @@ mod tests {
         let (ctx, part_range) =
             new_stream_context(vec![col("k0").eq(lit("foo"))], None, partition_range).await;
 
-        let data_key = build_range_cache_key(&ctx, &part_range).unwrap();
-        let candidate_key = build_candidate_range_cache_key(&ctx, &part_range).unwrap();
+        let ctx = Arc::new(ctx);
+        let pruner = Arc::new(crate::read::pruner::Pruner::new(ctx.clone(), 0));
+        let partition = PartitionPruner::new(pruner, std::slice::from_ref(&part_range));
+        let data_key = build_range_cache_key(&ctx, &part_range, None).unwrap();
+        let candidate_key = build_candidate_range_cache_key(&ctx, &part_range, &partition).unwrap();
         let range_0 = SeriesRange::new(0, 2).unwrap();
         let range_1 = SeriesRange::new(1, 2).unwrap();
-        let series_key_0 = build_series_range_cache_key(&ctx, &part_range, range_0).unwrap();
-        let series_key_1 = build_series_range_cache_key(&ctx, &part_range, range_1).unwrap();
+        let series_key_0 =
+            build_series_range_cache_key(&ctx, &part_range, range_0, &partition).unwrap();
+        let series_key_1 =
+            build_series_range_cache_key(&ctx, &part_range, range_1, &partition).unwrap();
 
         let merge_key = data_key.clone().for_cross_range_merge();
         assert_ne!(merge_key, data_key);
@@ -1625,10 +1473,10 @@ mod tests {
         assert_eq!(merge_key.row_groups, data_key.row_groups);
         assert_eq!(merge_key, data_key.clone().for_cross_range_merge());
         assert_ne!(data_key.scan, candidate_key.scan);
-        assert_ne!(data_key.scan, series_key_0.scan);
         assert_ne!(candidate_key.scan, series_key_0.scan);
-        assert_ne!(series_key_0.scan, series_key_1.scan);
         assert_eq!(data_key.row_groups, candidate_key.row_groups);
+        assert_ne!(data_key.scan, series_key_0.scan);
+        assert_ne!(series_key_0.scan, series_key_1.scan);
         assert_eq!(data_key.row_groups, series_key_0.row_groups);
     }
 
@@ -1656,8 +1504,8 @@ mod tests {
         .await;
 
         assert!(ctx_a.input.implied_time_range().is_none());
-        let key_a = build_range_cache_key(&ctx_a, &part_a).unwrap();
-        let key_b = build_range_cache_key(&ctx_b, &part_b).unwrap();
+        let key_a = build_range_cache_key(&ctx_a, &part_a, None).unwrap();
+        let key_b = build_range_cache_key(&ctx_b, &part_b, None).unwrap();
         assert_ne!(key_a.scan, key_b.scan);
         assert_eq!(
             key_a.scan.time_filters(),
@@ -1693,7 +1541,7 @@ mod tests {
             Timestamp::new(2_000_000_000, TimeUnit::Nanosecond),
         );
 
-        let key = build_range_cache_key(&ctx, &part_range).unwrap();
+        let key = build_range_cache_key(&ctx, &part_range, None).unwrap();
         // Empty implied range cannot cover, so time filters stay in the key.
         assert!(!key.scan.time_filters().is_empty());
     }
@@ -1726,7 +1574,7 @@ mod tests {
             Timestamp::new_microsecond(1_000_000),
             Timestamp::new_microsecond(2_000_000),
         );
-        let key = build_range_cache_key(&ctx, &part_range).unwrap();
+        let key = build_range_cache_key(&ctx, &part_range, None).unwrap();
         assert!(key.scan.time_filters().is_empty());
 
         // Not covering: the implied range [1500, 3000)ms excludes the file's
@@ -1745,7 +1593,7 @@ mod tests {
             Timestamp::new_microsecond(1_000_000),
             Timestamp::new_microsecond(2_000_000),
         );
-        let key = build_range_cache_key(&ctx, &part_range).unwrap();
+        let key = build_range_cache_key(&ctx, &part_range, None).unwrap();
         assert!(!key.scan.time_filters().is_empty());
     }
 
@@ -1970,166 +1818,769 @@ mod tests {
             ArrowDataType::Binary,
             false,
         )]));
-        let payload = vec![b'x'; bytes_per_row];
-        let values = (0..rows).map(|_| payload.as_slice()).collect::<Vec<_>>();
+        let payloads: Vec<_> = (0..rows)
+            .map(|i| vec![(i % 256) as u8; bytes_per_row])
+            .collect();
+        let values = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
 
         RecordBatch::try_new(schema, vec![Arc::new(BinaryArray::from_vec(values))]).unwrap()
     }
 
-    #[test]
-    fn compact_record_batches_keeps_original_boundaries() {
-        let batches = vec![make_batch(&[1, 2]), make_batch(&[3]), make_batch(&[4, 5])];
+    fn source_stream(batches: Vec<RecordBatch>) -> BoxedRecordBatchStream {
+        Box::pin(futures::stream::iter(batches.into_iter().map(Ok)))
+    }
 
-        let compacted = compact_record_batches(batches).unwrap();
-
-        assert_eq!(compacted.batch.num_rows(), 5);
-        assert_eq!(compacted.slice_lengths, vec![2, 1, 2]);
+    async fn wait_cached(
+        strategy: &CacheStrategy,
+        key: &RangeScanCacheKey,
+    ) -> Arc<RangeScanCacheValue> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(value) = strategy.get_range_result(key) {
+                    return value;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("range result was not published")
     }
 
     #[tokio::test]
-    async fn cached_flat_range_stream_replays_original_batches() {
-        let value = Arc::new(RangeScanCacheValue::new(
-            vec![CachedBatchSlice {
-                batch: make_batch(&[1, 2, 3]),
-                slice_lengths: vec![2, 1],
-            }],
-            make_batch(&[1, 2, 3]).get_array_memory_size(),
-        ));
+    async fn test_merged_key_covers_files_and_snapshot_independently_of_order() {
+        let (context, range) = new_stream_context(
+            vec![col("k0").eq(lit("a"))],
+            None,
+            (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(10),
+            ),
+        )
+        .await;
+        let mut context = Arc::new(context);
+        let first = build_range_cache_key(&context, &range, None).unwrap();
+        let file = sst_file_handle_with_file_id(FileId::random(), 0, 10);
+        Arc::get_mut(&mut context).unwrap().input.files.push(file);
+        Arc::get_mut(&mut context).unwrap().ranges[0]
+            .indices
+            .push(SourceIndex {
+                index: 1,
+                num_row_groups: 1,
+            });
+        Arc::get_mut(&mut context).unwrap().ranges[0]
+            .row_group_indices
+            .push(RowGroupIndex {
+                index: 1,
+                row_group_index: -1,
+            });
+        let whole = build_range_cache_key(&context, &range, None).unwrap();
+        assert_eq!(whole.row_groups.len(), 2);
+        assert!(
+            whole
+                .row_groups
+                .iter()
+                .any(|(_, row_group)| *row_group == -1)
+        );
+        assert_ne!(first, whole);
+        Arc::get_mut(&mut context).unwrap().ranges[0]
+            .row_group_indices
+            .swap(0, 1);
+        let reordered = build_range_cache_key(&context, &range, None).unwrap();
+        assert_eq!(whole, reordered);
+        Arc::get_mut(&mut context).unwrap().input.snapshot_sequence = Some(42);
+        let snapshot = build_range_cache_key(&context, &range, None).unwrap();
+        assert_ne!(snapshot, reordered);
+        assert_eq!(snapshot.scan.stage, RangeScanStage::Data);
+        let sources = snapshot.scan.file_reads.as_ref().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.snapshot_sequence == Some(42))
+        );
+    }
 
-        let worker = RangeCacheWorker::new(1024 * 1024);
-        let permit = worker
-            .load_memory
-            .try_acquire(value.estimated_size())
-            .unwrap();
-        let delivery = RangeCacheDelivery::new(value, permit);
-        let replayed = cached_flat_range_stream(delivery)
-            .try_collect::<Vec<_>>()
+    fn new_partition_pruner(
+        context: &Arc<StreamContext>,
+        range: &PartitionRange,
+    ) -> Arc<PartitionPruner> {
+        let pruner = Arc::new(Pruner::new(context.clone(), 1));
+        pruner.add_partition_ranges(std::slice::from_ref(range));
+        Arc::new(PartitionPruner::new(pruner, std::slice::from_ref(range)))
+    }
+
+    async fn sst_range_stream(
+        context: &Arc<StreamContext>,
+        range: &PartitionRange,
+        metrics: &PartitionMetrics,
+        partition: Arc<PartitionPruner>,
+        semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> BoxedRecordBatchStream {
+        crate::read::seq_scan::SeqScan::build_flat_partition_range_read(
+            context,
+            range,
+            crate::read::seq_scan::FlatReadMode::Sequential,
+            metrics,
+            partition,
+            semaphore.clone(),
+            semaphore,
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    fn u64_values(batches: &[RecordBatch], name: &str) -> Vec<Option<u64>> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+                    .unwrap()
+                    .iter()
+            })
+            .collect()
+    }
+
+    async fn write_overlapping_sst_files(
+        env: &SchedulerEnv,
+    ) -> (
+        store_api::metadata::RegionMetadataRef,
+        Vec<crate::sst::file::FileHandle>,
+    ) {
+        use datatypes::arrow::array::UInt64Array;
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::WriterProperties;
+        use store_api::region_request::PathType;
+
+        use crate::sst::file::{FileHandle, FileMeta};
+        use crate::sst::parquet::PARQUET_METADATA_KEY;
+        use crate::test_util::sst_util::{
+            new_record_batch_with_custom_sequence, sst_region_metadata,
+        };
+
+        let metadata = Arc::new(sst_region_metadata());
+        let mut files = Vec::new();
+        for sequence in [1, 2] {
+            let props = WriterProperties::builder()
+                .set_key_value_metadata(Some(vec![KeyValue::new(
+                    PARQUET_METADATA_KEY.to_string(),
+                    metadata.to_json().unwrap(),
+                )]))
+                .build();
+            let first = new_record_batch_with_custom_sequence(&["a", "x"], 0, 2, sequence);
+            let mut bytes = Vec::new();
+            let mut writer = ArrowWriter::try_new(&mut bytes, first.schema(), Some(props)).unwrap();
+            for start in [0, 2] {
+                let batch =
+                    new_record_batch_with_custom_sequence(&["a", "x"], start, start + 2, sequence);
+                let mut columns = batch.columns().to_vec();
+                columns[2] = Arc::new(UInt64Array::from(vec![
+                    sequence * 100 + start as u64,
+                    sequence * 100 + start as u64 + 1,
+                ]));
+                writer
+                    .write(&RecordBatch::try_new(batch.schema(), columns).unwrap())
+                    .unwrap();
+                writer.flush().unwrap();
+            }
+            writer.close().unwrap();
+            let file = FileHandle::new(
+                FileMeta {
+                    region_id: metadata.region_id,
+                    file_id: FileId::random(),
+                    time_range: (Timestamp::new_millisecond(0), Timestamp::new_millisecond(3)),
+                    file_size: bytes.len() as u64,
+                    num_rows: 4,
+                    num_row_groups: 2,
+                    preserve_row_sequence: true,
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            );
+            env.access_layer
+                .object_store()
+                .write(&file.file_path("", PathType::Bare), bytes)
+                .await
+                .unwrap();
+            files.push(file);
+        }
+        (metadata, files)
+    }
+
+    #[tokio::test]
+    async fn test_range_cache_keeps_cross_sst_dedup_and_task_membership() {
+        use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+
+        for capacity in [0, 1024, 1024 * 1024] {
+            let env = SchedulerEnv::new().await;
+            let (metadata, files) = write_overlapping_sst_files(&env).await;
+            let strategy = CacheStrategy::EnableAll(Arc::new(
+                CacheManager::builder()
+                    .range_result_cache_size(capacity)
+                    .build(),
+            ));
+            for (case, (max_sequence, last_row)) in [
+                (1, false),
+                (2, false),
+                (1, false),
+                (2, true),
+                (2, false),
+                (1, true),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mapper =
+                    FlatProjectionMapper::new(&metadata, 0..metadata.column_metadatas.len())
+                        .unwrap();
+                let input = ScanInput::builder(env.access_layer.clone(), mapper)
+                    .with_files(files.clone())
+                    .with_cache(strategy.clone())
+                    .with_append_mode(false)
+                    .with_predicate(
+                        PredicateGroup::new(&metadata, &[col("tag_0").eq(lit("a"))]).unwrap(),
+                    )
+                    .with_batch_size(1)
+                    .with_snapshot_sequence(Some(max_sequence))
+                    .with_series_row_selector(
+                        last_row.then_some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                    )
+                    .with_sequence_range(Some(SequenceRange::GtLtEq {
+                        min: 0,
+                        max: max_sequence,
+                    }))
+                    .build();
+                let context = Arc::new(StreamContext::seq_scan_ctx(input));
+                assert_eq!(context.ranges.len(), 1);
+                assert_eq!(context.ranges[0].row_group_indices.len(), 2);
+                let range = context.ranges[0].new_partition_range(0);
+                let (_, metrics) = test_cache_context(&strategy);
+                for run in 0..2 {
+                    let partition = new_partition_pruner(&context, &range);
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+                    let batches = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        let mut stream = sst_range_stream(
+                            &context,
+                            &range,
+                            &metrics,
+                            partition,
+                            Some(semaphore.clone()),
+                        )
+                        .await;
+                        // The first scan at snapshot 2 has no completed cache entry.
+                        if capacity > 0 && case == 1 && run == 0 {
+                            assert!(build_range_cache_key(&context, &range, None).is_some());
+                            let (_, follower_metrics) = test_cache_context(&strategy);
+                            let follower = sst_range_stream(
+                                &context,
+                                &range,
+                                &follower_metrics,
+                                new_partition_pruner(&context, &range),
+                                Some(semaphore.clone()),
+                            )
+                            .await;
+                            let first = stream.try_next().await.unwrap().unwrap();
+                            assert!(first.num_rows() < 4);
+                            drop(stream);
+                            let batches = follower.try_collect::<Vec<_>>().await.unwrap();
+                            assert!(batches.len() > 1);
+                            assert_eq!(batches.first().unwrap(), &first);
+                            assert_eq!(semaphore.available_permits(), 1);
+                            let owner: serde_json::Value =
+                                serde_json::from_str(&format!("{metrics:?}")).unwrap();
+                            let follower: serde_json::Value =
+                                serde_json::from_str(&format!("{follower_metrics:?}")).unwrap();
+                            assert!(owner["metrics"]["num_file_ranges"].as_u64().unwrap() > 0);
+                            assert_eq!(follower["metrics"]["num_file_ranges"], 0);
+                            batches
+                        } else {
+                            stream.try_collect::<Vec<_>>().await.unwrap()
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(
+                        u64_values(&batches, SEQUENCE_COLUMN_NAME)
+                            .iter()
+                            .all(|sequence| *sequence == Some(max_sequence))
+                    );
+                    let values = u64_values(&batches, "field_0")
+                        .into_iter()
+                        .map(Option::unwrap)
+                        .collect::<Vec<_>>();
+                    let expected = if last_row {
+                        vec![max_sequence * 100 + 3]
+                    } else {
+                        (0..4).map(|offset| max_sequence * 100 + offset).collect()
+                    };
+                    assert_eq!(values, expected);
+                }
+                if capacity > 1024 {
+                    let key = build_range_cache_key(&context, &range, None).unwrap();
+                    let value = wait_cached(&strategy, &key).await;
+                    assert!(!value.cached_batches.is_empty());
+                }
+            }
+        }
+    }
+
+    fn range_cache_strategy(capacity: u64) -> CacheStrategy {
+        CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .range_result_cache_size(capacity)
+                .build(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn shared_slices_compact_before_budget_fallback() {
+        for (capacity, count) in [(64 * 1024, 16), (16 * 1024 * 1024, 128)] {
+            let strategy = range_cache_strategy(capacity);
+            let (key, metrics) = test_cache_context(&strategy);
+            let backing = make_large_binary_batch(1024, 256);
+            let mut batches: Vec<_> = (0..count).map(|i| backing.slice(i, 1)).collect();
+            batches.insert(count / 2, backing.slice(count / 2, 0));
+            let input = batches.clone();
+            let (mut owner, _) =
+                get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                    Ok((source_stream(input), 1))
+                })
+                .await
+                .unwrap();
+            let (slow, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                panic!("reader must share sliced source")
+            })
             .await
             .unwrap();
-
-        assert_eq!(replayed.len(), 2);
-        assert_eq!(replayed[0].num_rows(), 2);
-        assert_eq!(replayed[1].num_rows(), 1);
+            for expected in &batches[..count * 3 / 4] {
+                assert_eq!(&owner.try_next().await.unwrap().unwrap(), expected);
+            }
+            let (late, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                panic!("compacted source must still admit readers")
+            })
+            .await
+            .unwrap();
+            drop(owner);
+            assert_eq!(slow.try_collect::<Vec<_>>().await.unwrap(), batches);
+            assert_eq!(late.try_collect::<Vec<_>>().await.unwrap(), batches);
+            let value = wait_cached(&strategy, &key).await;
+            assert!(value.estimated_size() < 64 * 1024);
+            assert_eq!(
+                get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                    panic!("cached result")
+                })
+                .await
+                .unwrap()
+                .0
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+                batches
+            );
+        }
     }
 
     #[tokio::test]
-    async fn dropped_cache_buffer_releases_batches_while_waiting_for_memory() {
+    async fn failed_shared_stream_does_not_poison_a_later_request() {
         let strategy = test_cache_strategy();
+        let (key, metrics) = test_cache_context(&strategy);
+        let (mut failed, _) =
+            get_or_load_range_result_in_scope(&strategy, key.clone(), &metrics, 1, || async {
+                let source = futures::stream::iter(vec![
+                    Ok(make_batch(&[7])),
+                    Err(crate::error::UnexpectedSnafu {
+                        reason: "transient source error",
+                    }
+                    .build()),
+                ]);
+                Ok((Box::pin(source) as BoxedRecordBatchStream, 3))
+            })
+            .await
+            .unwrap();
+        // Keep a second reader alive so the failed generation remains registered.
+        let (mut existing, _) =
+            get_or_load_range_result_in_scope(&strategy, key.clone(), &metrics, 1, || async {
+                panic!("existing reader must share the source")
+            })
+            .await
+            .unwrap();
+        let (other_pool, _) =
+            get_or_load_range_result_in_scope(&strategy, key.clone(), &metrics, 2, || async {
+                Ok((source_stream(vec![make_batch(&[8])]), 1))
+            })
+            .await
+            .unwrap();
+        assert_eq!(failed.try_next().await.unwrap().unwrap(), make_batch(&[7]));
+        let error = failed.try_next().await.unwrap_err();
+        let crate::error::Error::LoadRangeResult { source, .. } = error else {
+            panic!("expected shared source error, got {error:?}");
+        };
+        assert!(
+            matches!(source.as_ref(), crate::error::Error::Unexpected { reason, .. }
+            if reason == "transient source error")
+        );
+        let expected = make_batch(&[1, 2, 3]);
+        let (mut retry, _) =
+            get_or_load_range_result_in_scope(&strategy, key.clone(), &metrics, 1, || async {
+                Ok((
+                    Box::pin(futures::stream::iter([Ok(expected.clone())]))
+                        as BoxedRecordBatchStream,
+                    3,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(retry.try_next().await.unwrap().unwrap(), expected);
+        assert_eq!(
+            existing.try_next().await.unwrap().unwrap(),
+            make_batch(&[7])
+        );
+        let error = existing.try_next().await.unwrap_err();
+        let crate::error::Error::LoadRangeResult { source, .. } = error else {
+            panic!("expected shared source error, got {error:?}");
+        };
+        assert!(
+            matches!(source.as_ref(), crate::error::Error::Unexpected { reason, .. }
+            if reason == "transient source error")
+        );
+        assert_eq!(
+            other_pool.try_collect::<Vec<_>>().await.unwrap(),
+            vec![make_batch(&[8])]
+        );
+        wait_cached(&strategy, &key).await;
+        let (cached, _) =
+            get_or_load_range_result_in_scope(&strategy, key, &metrics, 1, || async {
+                panic!("completed result must be reusable across pools")
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            cached.try_collect::<Vec<_>>().await.unwrap(),
+            vec![make_batch(&[8])]
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_ranges_build_once_before_consumers_poll() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        for enabled in [false, true] {
+            let strategy = range_cache_strategy(if enabled { 1024 * 1024 } else { 0 });
+            let (key, metrics) = test_cache_context(&strategy);
+            let builds = AtomicUsize::new(0);
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let produced = Arc::new(AtomicUsize::new(0));
+            let expected: Vec<_> = (0..32).map(|n| make_batch(&[n])).collect();
+            let mut requests = (0..8)
+                .map(|_| {
+                    Box::pin(get_or_load_range_result(
+                        &strategy,
+                        key.clone(),
+                        &metrics,
+                        || async {
+                            builds.fetch_add(1, Ordering::Relaxed);
+                            let produced = produced.clone();
+                            let gate = gate.clone();
+                            let stream = Box::pin(try_stream! {
+                                gate.acquire().await.unwrap().forget();
+                                for n in 0..32 {
+                                    tokio::task::yield_now().await;
+                                    produced.fetch_add(1, Ordering::Relaxed);
+                                    yield make_batch(&[n]);
+                                }
+                            });
+                            Ok((stream as BoxedRecordBatchStream, 3))
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            // Polling all builders to completion must not require consuming any
+            // returned stream, matching the series distributor's construction order.
+            let streams = tokio::time::timeout(
+                Duration::from_secs(5),
+                futures::future::join_all(&mut requests),
+            )
+            .await
+            .unwrap();
+            assert_eq!(builds.load(Ordering::Relaxed), if enabled { 1 } else { 8 });
+            gate.add_permits(8);
+            let results = futures::future::join_all(
+                streams
+                    .into_iter()
+                    .map(|stream| stream.unwrap().0.try_collect::<Vec<_>>()),
+            )
+            .await;
+            for result in results {
+                assert_eq!(result.unwrap(), expected);
+            }
+            assert_eq!(
+                produced.load(Ordering::Relaxed),
+                if enabled { 32 } else { 256 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_shared_range_keeps_existing_readers_and_declines_new_readers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        let strategy = range_cache_strategy(1024);
+        let (key, metrics) = test_cache_context(&strategy);
+        let expected = vec![
+            make_batch(&[1]),
+            make_batch(&[2, 3]),
+            make_batch(&vec![5; 256]),
+            make_batch(&[4]),
+        ];
+        let input = expected.clone();
+        let (mut owner, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            let source = futures::stream::iter(input.into_iter().map(move |batch| {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok(batch)
+            }));
+            Ok((Box::pin(source) as BoxedRecordBatchStream, 1))
+        })
+        .await
+        .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        let limiter = &strategy.range_cache_worker().unwrap().load_memory;
+        assert_eq!(limiter.available_permits(), 1);
+        assert!(strategy.get_range_result(&key).is_none());
+        let (mut follower, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                panic!("existing follower must share")
+            })
+            .await
+            .unwrap();
+        assert_eq!(owner.try_next().await.unwrap().unwrap(), expected[0]);
+        assert_eq!(owner.try_next().await.unwrap().unwrap(), expected[1]);
+        assert_eq!(owner.try_next().await.unwrap().unwrap(), expected[2]);
+        let (late, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            Ok((source_stream(vec![make_batch(&[9])]), 1))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            late.try_collect::<Vec<_>>().await.unwrap(),
+            vec![make_batch(&[9])]
+        );
+        // The first two batch views share one compacted allocation reservation.
+        assert_eq!(limiter.available_permits(), 0);
+        assert_eq!(follower.try_next().await.unwrap().unwrap(), expected[0]);
+        assert_eq!(limiter.available_permits(), 0);
+        assert_eq!(follower.try_next().await.unwrap().unwrap(), expected[1]);
+        assert_eq!(limiter.available_permits(), 1);
+        assert_eq!(
+            follower.try_collect::<Vec<_>>().await.unwrap(),
+            expected[2..]
+        );
+        assert_eq!(
+            owner.try_collect::<Vec<_>>().await.unwrap(),
+            vec![make_batch(&[4])]
+        );
+        assert!(strategy.get_range_result(&key).is_none());
+        assert_eq!(reads.load(Ordering::Relaxed), 4);
+        assert_eq!(limiter.available_permits(), 1);
+        let (retry, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            Ok((source_stream(vec![]), 1))
+        })
+        .await
+        .unwrap();
+        assert!(retry.try_collect::<Vec<_>>().await.unwrap().is_empty());
+        wait_cached(&strategy, &key).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_reader_releases_unpolled_or_pending_source() {
+        for polled in [false, true] {
+            let strategy = test_cache_strategy();
+            let (key, metrics) = test_cache_context(&strategy);
+            let source_gate = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = source_gate.clone().acquire_owned().await.unwrap();
+            let (mut stream, _) =
+                get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                    let source = Box::pin(try_stream! {
+                        let _permit = permit;
+                        std::future::pending::<()>().await;
+                        yield make_batch(&[1]);
+                    });
+                    Ok((source as BoxedRecordBatchStream, 1))
+                })
+                .await
+                .unwrap();
+            assert_eq!(source_gate.available_permits(), 0);
+            if polled {
+                let next = stream.try_next();
+                tokio::pin!(next);
+                assert!(futures::poll!(&mut next).is_pending());
+            }
+            assert_eq!(source_gate.available_permits(), 0);
+            drop(stream);
+            assert_eq!(source_gate.available_permits(), 1);
+            assert!(strategy.get_range_result(&key).is_none());
+            let (retry, _) = get_or_load_range_result(&strategy, key, &metrics, || async {
+                Ok((source_stream(vec![make_batch(&[2])]), 1))
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                retry.try_collect::<Vec<_>>().await.unwrap(),
+                vec![make_batch(&[2])]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_initial_reader_preserves_followers_and_releases_memory() {
+        let strategy = test_cache_strategy();
+        let (key, metrics) = test_cache_context(&strategy);
+        let limiter = &strategy.range_cache_worker().unwrap().load_memory;
+        let initial = limiter.available_permits();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let producer_gate = gate.clone();
+        let (mut owner, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            let source = Box::pin(try_stream! {
+                yield make_batch(&[1]);
+                producer_gate.notified().await;
+                yield make_batch(&[2]);
+            });
+            Ok((source as BoxedRecordBatchStream, 1))
+        })
+        .await
+        .unwrap();
+        let (mut follower, _) =
+            get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+                panic!("follower must share")
+            })
+            .await
+            .unwrap();
+        assert_eq!(limiter.available_permits(), initial);
+        assert_eq!(owner.try_next().await.unwrap().unwrap(), make_batch(&[1]));
+        assert!(limiter.available_permits() < initial);
+        drop(owner);
+        assert_eq!(
+            follower.try_next().await.unwrap().unwrap(),
+            make_batch(&[1])
+        );
+        gate.notify_one();
+        assert_eq!(
+            follower.try_next().await.unwrap().unwrap(),
+            make_batch(&[2])
+        );
+        // Stop before EOF: unfinished results must not be cached.
+        drop(follower);
+        assert_eq!(limiter.available_permits(), initial);
+        assert!(strategy.get_range_result(&key).is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_stream_does_not_wait_for_cache_compaction() {
+        let strategy = test_cache_strategy();
+        let (key, metrics) = test_cache_context(&strategy);
         let limiter = strategy.range_result_memory_limiter().unwrap();
-        // Take every permit so the concat task blocks before it can compact.
-        let _permit = limiter
+        let permit = limiter
             .acquire(limiter.available_permits() * limiter.permit_bytes())
             .await
             .unwrap();
-        let batch = make_batch(&vec![1; DEFAULT_READ_BATCH_SIZE / 2 + 1]);
-        let weak = Arc::downgrade(batch.column(0));
-        let mut buffer = CacheBatchBuffer::new(&strategy);
-        buffer.push(batch.clone()).unwrap();
-        buffer.push(batch).unwrap();
-        // Both batches were handed to the task instead of staying in the buffer.
-        assert!(buffer.buffered_batches.is_empty());
-
-        // Cancel only once the task is parked on the permit, otherwise the abort
-        // could land on a task that was never polled.
+        let expected = vec![make_batch(&[1]), make_batch(&[2])];
+        let input = expected.clone();
+        let (stream, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            Ok((source_stream(input), 1))
+        })
+        .await
+        .unwrap();
+        assert_eq!(stream.try_collect::<Vec<_>>().await.unwrap(), expected);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while limiter.waited_acquires() == 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("concat task must wait for a memory permit");
-        drop(buffer);
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while weak.upgrade().is_some() {
-                tokio::task::yield_now().await;
-            }
+        .expect("background compaction did not reach its memory wait");
+        assert!(strategy.get_range_result(&key).is_none());
+        let (joined, _) = get_or_load_range_result(&strategy, key.clone(), &metrics, || async {
+            panic!("finalizing scan must remain discoverable")
         })
         .await
-        .expect("cancelled cache work must release input without waiting for a permit");
+        .unwrap();
+        assert_eq!(joined.try_collect::<Vec<_>>().await.unwrap(), expected);
+        drop(permit);
+        wait_cached(&strategy, &key).await;
     }
 
     #[tokio::test]
-    async fn cache_batch_buffer_finishes_pending_batches() {
-        let strategy = test_cache_strategy();
-        let batch = make_batch(&[1, 2, 3]);
-        let expected_size = batch.get_array_memory_size();
-
-        let mut buffer = CacheBatchBuffer::new(&strategy);
-        buffer.push(batch).unwrap();
-
-        let value = buffer.finish().await.unwrap().unwrap();
-        assert_eq!(value.cached_batches.len(), 1);
-        assert_eq!(value.cached_batches[0].slice_lengths, vec![3]);
-        assert_eq!(value.estimated_batches_size, expected_size);
-    }
-
-    #[tokio::test]
-    async fn cache_batch_buffer_compacts_when_rows_exceed_default_batch_size() {
-        let strategy = test_cache_strategy();
-        let batch = make_batch(&vec![1; DEFAULT_READ_BATCH_SIZE / 2 + 1]);
-
-        let mut buffer = CacheBatchBuffer::new(&strategy);
-        buffer.push(batch.clone()).unwrap();
-        buffer.push(batch).unwrap();
-
-        assert_eq!(buffer.buffered_rows, 0);
-        assert!(buffer.buffered_batches.is_empty());
-
-        let value = buffer.finish().await.unwrap().unwrap();
-        assert_eq!(value.cached_batches.len(), 1);
-        assert_eq!(
-            value.cached_batches[0].slice_lengths,
-            vec![
-                DEFAULT_READ_BATCH_SIZE / 2 + 1,
-                DEFAULT_READ_BATCH_SIZE / 2 + 1
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn cache_batch_buffer_compacts_when_buffered_size_exceeds_threshold() {
-        let large_batch = make_large_binary_batch(DEFAULT_READ_BATCH_SIZE, 4096);
-        let strategy = CacheStrategy::EnableAll(Arc::new(
-            CacheManager::builder()
-                .range_result_cache_size((large_batch.get_array_memory_size() * 3) as u64)
-                .build(),
-        ));
-
-        let mut buffer = CacheBatchBuffer::new(&strategy);
-        buffer.push(large_batch.clone()).unwrap();
-
-        assert_eq!(buffer.buffered_rows, large_batch.num_rows());
-        assert_eq!(buffer.buffered_batches.len(), 1);
-
-        buffer.push(large_batch.clone()).unwrap();
-
-        assert_eq!(buffer.buffered_rows, 0);
-        assert!(buffer.buffered_batches.is_empty());
-
-        let value = buffer.finish().await.unwrap().unwrap();
-        assert_eq!(value.cached_batches.len(), 1);
-        assert_eq!(
-            value.cached_batches[0].slice_lengths,
-            vec![large_batch.num_rows(), large_batch.num_rows()]
-        );
-    }
-
-    #[tokio::test]
-    async fn cache_batch_buffer_skips_cache_when_compacted_size_exceeds_limit() {
-        let large_batch = make_large_binary_batch(DEFAULT_READ_BATCH_SIZE / 2 + 1, 4096);
-        // Budget only fits two large batches.
-        let budget = (large_batch.get_array_memory_size() as u64) * 2 + 1;
-        let strategy = CacheStrategy::EnableAll(Arc::new(
-            CacheManager::builder()
-                .range_result_cache_size(budget)
-                .build(),
-        ));
-
-        let mut buffer = CacheBatchBuffer::new(&strategy);
-        for _ in 0..4 {
-            buffer.push(large_batch.clone()).unwrap();
+    async fn test_range_load_compacts_at_thresholds_and_keeps_tail() {
+        let row_batch = make_batch(&vec![1; DEFAULT_READ_BATCH_SIZE / 2 + 1]);
+        // Two batches exceed the byte threshold without reaching the row threshold.
+        let byte_batch = make_large_binary_batch(1024, 4097);
+        assert!(byte_batch.num_rows() * 2 <= DEFAULT_READ_BATCH_SIZE);
+        assert!(byte_batch.get_array_memory_size() * 2 > RANGE_CACHE_COMPACT_THRESHOLD_BYTES);
+        assert!(row_batch.get_array_memory_size() * 2 < RANGE_CACHE_COMPACT_THRESHOLD_BYTES);
+        for batches in [
+            vec![],
+            vec![make_batch(&[1, 2]), make_batch(&[3]), make_batch(&[4, 5])],
+            vec![make_batch(&[1, 2, 3])],
+            vec![row_batch.clone(), row_batch.clone(), row_batch],
+            vec![byte_batch.clone(), byte_batch.clone(), byte_batch],
+        ] {
+            let input_size = batches
+                .iter()
+                .map(RecordBatch::get_array_memory_size)
+                .sum::<usize>();
+            let strategy = range_cache_strategy((input_size * 2).max(1024 * 1024) as u64);
+            let (key, metrics) = test_cache_context(&strategy);
+            let input = batches.clone();
+            let expected_batch_size = 7;
+            let (stream, batch_size) =
+                get_or_load_range_result(&strategy, key.clone(), &metrics, || async move {
+                    Ok((source_stream(input), expected_batch_size))
+                })
+                .await
+                .unwrap();
+            assert_eq!(batch_size, expected_batch_size);
+            assert_eq!(stream.try_collect::<Vec<_>>().await.unwrap(), batches);
+            let value = wait_cached(&strategy, &key).await;
+            let expected_lengths = if batches.is_empty() {
+                vec![]
+            } else if batches.iter().map(RecordBatch::num_rows).sum::<usize>() <= 5 {
+                vec![batches.iter().map(RecordBatch::num_rows).collect()]
+            } else {
+                vec![
+                    vec![batches[0].num_rows(), batches[1].num_rows()],
+                    vec![batches[2].num_rows()],
+                ]
+            };
+            assert_eq!(
+                value
+                    .cached_batches
+                    .iter()
+                    .map(|batch| batch.slice_lengths.clone())
+                    .collect::<Vec<_>>(),
+                expected_lengths
+            );
+            assert_eq!(
+                value.estimated_batches_size,
+                value
+                    .cached_batches
+                    .iter()
+                    .map(|batch| batch.batch.get_array_memory_size())
+                    .sum::<usize>()
+            );
+            let (hit, batch_size) = get_or_load_range_result(&strategy, key, &metrics, || async {
+                panic!("completed range must be reused without rebuilding");
+            })
+            .await
+            .unwrap();
+            assert_eq!(batch_size, expected_batch_size);
+            assert_eq!(hit.try_collect::<Vec<_>>().await.unwrap(), batches);
         }
-        assert!(!matches!(buffer.finish().await, Some(Ok(_))));
     }
 }
