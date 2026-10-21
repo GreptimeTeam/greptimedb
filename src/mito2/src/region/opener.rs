@@ -62,7 +62,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::read::series_candidate::is_sparse_metric_metadata;
-use crate::region::lease::{RegionLeaseRecord, RegionLeaseRecordRef};
+use crate::region::lease::RegionLeaseRecordRef;
 use crate::region::options::RegionOptions;
 use crate::region::version::{Version, VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -346,8 +346,6 @@ impl RegionOpener {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
-        // The region is writable once created, before the metasrv grants it a lease.
-        self.lease = Some(Arc::new(RegionLeaseRecord::created(Instant::now())));
         // Tries to open the region.
         match self.maybe_open(config, wal).await {
             Ok(Some(region)) => {

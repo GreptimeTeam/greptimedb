@@ -139,6 +139,7 @@ mod test {
 
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
     use common_meta::distributed_time_constants::default_distributed_time_constants;
@@ -150,6 +151,7 @@ mod test {
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::rpc::store::BatchGetResponse;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
@@ -549,21 +551,42 @@ mod test {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_handle_records_lease_grant() {
-        let keeper = new_test_keeper();
+    async fn test_handle_records_lease_grant_before_reading_routes() {
+        let region_lease = default_distributed_time_constants().region_lease;
+        let lease_grant_tracker = Arc::new(LeaseGrantTracker::default());
+        let datanode_id = 1;
+        let routes_read = Arc::new(AtomicBool::new(false));
+        let kv = {
+            let lease_grant_tracker = lease_grant_tracker.clone();
+            let routes_read = routes_read.clone();
+            MockKvBackendBuilder::default()
+                .batch_get_fn(Arc::new(move |_| {
+                    // A migration that reads the tracker after the routes change sees this grant.
+                    assert_eq!(
+                        tokio::time::Instant::now() + region_lease,
+                        lease_grant_tracker.lease_expiry(datanode_id, region_lease)
+                    );
+                    routes_read.store(true, Ordering::Relaxed);
+                    Ok(BatchGetResponse { kvs: vec![] })
+                }) as _)
+                .build()
+                .unwrap()
+        };
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(kv)));
         let metasrv = MetasrvBuilder::new().build().await.unwrap();
         let ctx = &mut metasrv.new_ctx();
         let acc = &mut HeartbeatAccumulator::default();
-        let datanode_id = 1;
         acc.stat = Some(Stat {
             id: datanode_id,
+            region_stats: vec![new_empty_region_stat(
+                RegionId::new(10, 1),
+                RegionRole::Leader,
+            )],
             ..Default::default()
         });
-        let region_lease = default_distributed_time_constants().region_lease;
-        let lease_grant_tracker = Arc::new(LeaseGrantTracker::default());
         let handler = RegionLeaseHandler::new(
             region_lease.as_secs(),
-            keeper.table_metadata_manager().clone(),
+            table_metadata_manager,
             Default::default(),
             None,
             lease_grant_tracker.clone(),
@@ -575,10 +598,7 @@ mod test {
             .handle(&HeartbeatRequest::default(), ctx, acc)
             .await
             .unwrap();
+        assert!(routes_read.load(Ordering::Relaxed));
         assert!(acc.region_lease.is_some());
-        assert_eq!(
-            tokio::time::Instant::now() + region_lease,
-            lease_grant_tracker.lease_expiry(datanode_id, region_lease)
-        );
     }
 }

@@ -162,13 +162,12 @@ async fn check_downgrade_while_writing_wal(leader_granted: bool) {
     common_telemetry::init_default_ut_logging();
     let (_env, listener, engine, region_id, column_schemas) =
         create_leased_region("downgrade-while-writing-wal").await;
+    // Without a Leader grant, the created region writes under the node lease it was created
+    // under.
     if leader_granted {
         engine
             .set_region_role_by_lease(region_id, grant(RegionRole::Leader, Instant::now() + LEASE))
             .unwrap();
-    } else {
-        // The created region writes under the node lease until its first grant.
-        engine.renew_node_lease(Instant::now(), LEASE);
     }
 
     listener.pause_next();
@@ -218,9 +217,8 @@ async fn test_downgrading_lease_does_not_extend_leader_deadline() {
     common_telemetry::init_default_ut_logging();
     let (_env, listener, engine, region_id, column_schemas) =
         create_leased_region("downgrading-lease-deadline").await;
-    let leader_deadline = Instant::now() + Duration::from_secs(1);
     engine
-        .set_region_role_by_lease(region_id, grant(RegionRole::Leader, leader_deadline))
+        .set_region_role_by_lease(region_id, grant(RegionRole::Leader, Instant::now() + LEASE))
         .unwrap();
 
     listener.pause_next();
@@ -230,15 +228,17 @@ async fn test_downgrading_lease_does_not_extend_leader_deadline() {
     };
     let write = spawn_put(&engine, region_id, rows);
     listener.wait_appended().await;
-    // The metasrv keeps renewing the lease as DowngradingLeader after the route is marked as
-    // downgrading, but the write is acknowledged only within the last Leader grant.
+    // The Leader deadline passes. The metasrv keeps renewing the lease as DowngradingLeader
+    // after the route is marked as downgrading, which does not extend it.
+    engine
+        .set_region_role_by_lease(region_id, grant(RegionRole::Leader, Instant::now()))
+        .unwrap();
     engine
         .set_region_role_by_lease(
             region_id,
             grant(RegionRole::DowngradingLeader, Instant::now() + LEASE),
         )
         .unwrap();
-    tokio::time::sleep(leader_deadline.saturating_duration_since(Instant::now())).await;
     listener.resume();
     let err = write.await.unwrap().unwrap_err();
     assert_retryable(err, |err| matches!(err, Error::UnacknowledgedWrite { .. }));
@@ -284,7 +284,7 @@ async fn test_downgrading_lease_rejects_writes_after_alter() {
     assert_retryable(err, |err| matches!(err, Error::RegionLeaseExpired { .. }));
 }
 
-/// Creates a region on an engine whose writes need a lease.
+/// Creates a region on an engine whose writes need a lease, under a valid node lease.
 async fn create_leased_region(
     prefix: &str,
 ) -> (
@@ -300,6 +300,7 @@ async fn create_leased_region(
         .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
     engine.require_write_lease();
+    engine.renew_node_lease(Instant::now(), LEASE);
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();

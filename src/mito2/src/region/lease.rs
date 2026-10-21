@@ -22,13 +22,14 @@ use store_api::region_engine::{RegionLeaseGrant, RegionRole};
 
 /// Lease of this node, renewed by every heartbeat response that carries region leases.
 ///
-/// A region created on this node writes under it until the region gets its first grant.
+/// A region created on this node writes under the deadline this lease has at the creation,
+/// until the region gets its first Leader grant.
 #[derive(Debug, Default)]
 pub(crate) struct NodeLease {
     /// Whether writes need a valid lease. Only a datanode the metasrv controls sets it.
     enabled: AtomicBool,
-    /// The latest deadline and the lease it was computed with.
-    renewal: Mutex<Option<(Instant, Duration)>>,
+    /// The latest deadline.
+    deadline: Mutex<Option<Instant>>,
 }
 
 pub(crate) type NodeLeaseRef = Arc<NodeLease>;
@@ -42,24 +43,20 @@ impl NodeLease {
     /// Extends the deadline to `heartbeat_sent_at + lease` if that is later.
     pub(crate) fn renew(&self, heartbeat_sent_at: Instant, lease: Duration) {
         let deadline = heartbeat_sent_at + lease;
-        let mut renewal = self.renewal.lock().unwrap();
-        if renewal.is_none_or(|(current, _)| current < deadline) {
-            *renewal = Some((deadline, lease));
+        let mut current = self.deadline.lock().unwrap();
+        if current.is_none_or(|current| current < deadline) {
+            *current = Some(deadline);
         }
+    }
+
+    /// Returns the latest deadline, or None before any heartbeat response with region leases.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        *self.deadline.lock().unwrap()
     }
 
     /// Returns whether writes need a valid lease.
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
-    }
-
-    /// Returns the deadline of a region created at `created_at` that has no grant yet: the
-    /// node deadline, within one lease of the creation.
-    fn created_region_deadline(&self, created_at: Instant) -> Option<Instant> {
-        self.renewal
-            .lock()
-            .unwrap()
-            .map(|(deadline, lease)| deadline.min(created_at + lease))
     }
 }
 
@@ -77,18 +74,21 @@ struct RegionLeaseState {
     role: Option<RegionRole>,
     /// Deadline of the latest Leader or StagingLeader grant.
     leader_deadline: Option<Instant>,
-    /// When the region was created on this node.
-    created_at: Option<Instant>,
+    /// Deadline of the node lease when the region was created on this node. Only responses
+    /// the metasrv granted before the creation count, so a migration of the region waits past
+    /// it; later responses do not extend it.
+    created_deadline: Option<Instant>,
     /// When the metasrv last demoted the region.
     demoted_at: Option<Instant>,
 }
 
 impl RegionLeaseRecord {
-    /// Returns the record of a region created on this node at `now`.
-    pub(crate) fn created(now: Instant) -> Self {
+    /// Returns the record of a region created on this node while the node lease has
+    /// `node_deadline`.
+    pub(crate) fn created(node_deadline: Option<Instant>) -> Self {
         Self {
             state: Mutex::new(RegionLeaseState {
-                created_at: Some(now),
+                created_deadline: node_deadline,
                 ..Default::default()
             }),
         }
@@ -139,13 +139,9 @@ impl RegionLeaseRecord {
         if check_role && state.role.is_some_and(|role| !role.writable()) {
             return false;
         }
-        // A region created on this node has the node lease as its Leader deadline until its
+        // A region created on this node uses the node lease it was created under until its
         // first Leader grant.
-        let deadline = state.leader_deadline.or_else(|| {
-            state
-                .created_at
-                .and_then(|created_at| node.created_region_deadline(created_at))
-        });
+        let deadline = state.leader_deadline.or(state.created_deadline);
         deadline.is_some_and(|deadline| now < deadline)
     }
 }
@@ -193,31 +189,32 @@ mod tests {
     }
 
     #[test]
-    fn test_created_region_writes_within_one_lease() {
+    fn test_created_region_keeps_node_lease_of_creation() {
         let node = enabled_node_lease();
-        let created_at = Instant::now();
-        let record = RegionLeaseRecord::created(created_at);
         // No heartbeat response has carried region leases yet.
-        assert!(!record.allows_write(&node, created_at));
+        let record = RegionLeaseRecord::created(node.deadline());
+        assert!(!record.allows_write(&node, Instant::now()));
 
-        // The node lease keeps being renewed, but the region uses it only within one lease of
-        // its creation.
-        node.renew(created_at + LEASE, LEASE);
-        assert!(record.allows_write(&node, created_at + LEASE - Duration::from_millis(1)));
-        assert!(!record.allows_write(&node, created_at + LEASE));
+        let sent_at = Instant::now();
+        node.renew(sent_at, LEASE);
+        let record = RegionLeaseRecord::created(node.deadline());
+        // Later responses renew the node lease but not the lease of the created region.
+        node.renew(sent_at + LEASE, LEASE);
+        assert!(record.allows_write(&node, sent_at + LEASE - Duration::from_millis(1)));
+        assert!(!record.allows_write(&node, sent_at + LEASE));
     }
 
     #[test]
     fn test_created_region_acknowledges_after_first_downgrading_grant() {
         let node = enabled_node_lease();
-        let created_at = Instant::now();
-        let record = RegionLeaseRecord::created(created_at);
-        node.renew(created_at, LEASE);
-        let sent_at = created_at + Duration::from_secs(1);
-        assert!(grant(&record, RegionRole::DowngradingLeader, sent_at));
+        let sent_at = Instant::now();
+        node.renew(sent_at, LEASE);
+        let record = RegionLeaseRecord::created(node.deadline());
+        let now = sent_at + Duration::from_secs(1);
+        assert!(grant(&record, RegionRole::DowngradingLeader, now));
 
-        assert!(!record.allows_write(&node, sent_at));
-        assert!(record.allows_ack(&node, sent_at));
-        assert!(!record.allows_ack(&node, created_at + LEASE));
+        assert!(!record.allows_write(&node, now));
+        assert!(record.allows_ack(&node, now));
+        assert!(!record.allows_ack(&node, sent_at + LEASE));
     }
 }

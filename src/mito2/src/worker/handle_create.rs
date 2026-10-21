@@ -14,6 +14,8 @@
 
 //! Handling create request.
 
+use std::sync::Arc;
+
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
@@ -21,6 +23,7 @@ use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::region::lease::RegionLeaseRecord;
 use crate::region::opener::{RegionOpener, check_recovered_region};
 use crate::worker::RegionWorkerLoop;
 
@@ -73,7 +76,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .cache(Some(self.cache_manager.clone()))
         .series_index_store(self.series_index_store.clone())
         .series_index_purger(self.series_index_purger.clone())
-        .hook(self.plugins.get());
+        .hook(self.plugins.get())
+        // The region is writable once created, before the metasrv grants it a lease.
+        .lease(Arc::new(RegionLeaseRecord::created(
+            self.node_lease.deadline(),
+        )));
 
         opener.ensure_region_requirements(requirements)?;
 

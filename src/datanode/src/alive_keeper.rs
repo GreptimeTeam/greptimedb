@@ -910,8 +910,16 @@ mod test {
         );
         assert!(!alive_keeper.is_acceptable(&ctx));
 
-        // A response with region leases renews it, though it grants nothing to the region.
+        // A response with region leases renews it, though it grants nothing to the region. A
+        // region keeps the node lease it was created under, so only a region created after the
+        // response writes under it, until it expires.
         handle_lease_response(&alive_keeper, vec![], 1).await;
+        let err = put_row(&region_server, region_id, &schema)
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+        let region_id = RegionId::new(1024, 2);
+        let schema = create_region(&region_server, region_id).await;
         put_row(&region_server, region_id, &schema).await.unwrap();
         tokio::time::sleep(Duration::from_millis(1100)).await;
         let err = put_row(&region_server, region_id, &schema)
@@ -921,7 +929,7 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn created_region_lease_is_capped_after_creation() {
+    async fn created_region_keeps_node_lease_of_creation() {
         common_telemetry::init_default_ut_logging();
         let mut env = TestEnv::with_prefix("region-alive-keeper-created-lease-cap").await;
         let (region_server, _engine) = lease_region_server(&mut env, None).await;
@@ -935,7 +943,7 @@ mod test {
         put_row(&region_server, region_id, &schema).await.unwrap();
 
         // Responses keep renewing the node lease without granting the region anything. The
-        // region uses the node lease only within one lease of its creation.
+        // region keeps the node lease it was created under.
         while created.elapsed() < lease + Duration::from_millis(200) {
             handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
             tokio::time::sleep(Duration::from_millis(300)).await;
