@@ -819,11 +819,6 @@ auto_flush_interval = "10m"
 ## @toml2docs:none-default="Auto"
 #+ vector_cache_size = "512MB"
 
-## Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
-## If not set, it's default to 1/8 of OS memory.
-## @toml2docs:none-default="Auto"
-#+ page_cache_size = "512MB"
-
 ## Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
 ## @toml2docs:none-default="Auto"
@@ -918,6 +913,18 @@ default_flat_format = true
 
 ## Whether to enable the experimental two-phase mode for eligible metric series scans.
 experimental_series_scan_v2 = false
+
+## The in-memory Parquet page cache options.
+[region_engine.mito.parquet_page]
+## Total capacity of the in-memory Parquet byte-page cache. Zero disables the cache.
+## The legacy top-level page_cache_size option is still accepted. If both are set,
+## their values must be equal.
+content_cache_size = "512MiB"
+
+## Fixed cache byte-block size, not the Parquet file's encoded data-page size.
+## Must be nonzero and fit the cache's u32 entry weight, including entry overhead.
+## No power-of-two restriction. Blocks exceeding capacity are read without retention.
+content_cache_page_size = "64KiB"
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]

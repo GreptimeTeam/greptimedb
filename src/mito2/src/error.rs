@@ -205,6 +205,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to load Parquet page"))]
+    LoadParquetPage {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to write parquet file"))]
     WriteParquet {
         #[snafu(source)]
@@ -1433,7 +1440,9 @@ impl Error {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
             Error::ManifestDeltaNotFound { .. } => true,
-            Error::LoadSstMeta { source, .. } => source.is_object_not_found(),
+            Error::LoadSstMeta { source, .. } | Error::LoadParquetPage { source, .. } => {
+                source.is_object_not_found()
+            }
             _ => false,
         }
     }
@@ -1556,7 +1565,9 @@ impl ErrorExt for Error {
             OpenRegion { source, .. } => source.status_code(),
 
             WriteParquet { .. } => StatusCode::StorageUnavailable,
-            WriteGroup { source, .. } | LoadSstMeta { source, .. } => source.status_code(),
+            WriteGroup { source, .. }
+            | LoadSstMeta { source, .. }
+            | LoadParquetPage { source, .. } => source.status_code(),
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
@@ -1707,6 +1718,7 @@ impl ErrorExt for Error {
 
             OpenRegion { source, .. }
             | LoadSstMeta { source, .. }
+            | LoadParquetPage { source, .. }
             | WriteGroup { source, .. }
             | FlushRegion { source, .. }
             | BuildIndexAsync { source, .. }

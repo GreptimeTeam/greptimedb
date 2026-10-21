@@ -614,7 +614,8 @@ where
         }
     }
 
-    // Deserialize-only fields, invisible in the serialized options.
+    // Fields omitted from serialized options, including the default Parquet
+    // capacity checked separately by test_parquet_page_documented_defaults.
     const SKIP_SERIALIZING: &[&str] = &[
         "storage.access_key_id",
         "storage.secret_access_key",
@@ -624,6 +625,7 @@ where
         "storage.credential_path",
         "storage.credential",
         "region_engine.mito.inverted_index.intermediate_path",
+        "region_engine.mito.parquet_page.content_cache_size",
     ];
 
     let mut errors = Vec::new();
@@ -901,4 +903,113 @@ fn test_load_metric_config_with_removed_sparse_primary_key_encoding() {
         metric.flush_metadata_region_interval,
         Duration::from_secs(30)
     );
+}
+
+#[test]
+fn test_parquet_page_config_in_region_engine_array() {
+    for (mito, expected) in [
+        ("", ReadableSize::mb(512)),
+        ("page_cache_size = '0B'", ReadableSize(0)),
+        ("page_cache_size = '128MiB'", ReadableSize::mb(128)),
+        (
+            "[region_engine.mito.parquet_page]\ncontent_cache_size = '256MiB'",
+            ReadableSize::mb(256),
+        ),
+    ] {
+        let input = format!("[[region_engine]]\n[region_engine.mito]\n{mito}");
+        let mut file = create_named_temp_file();
+        file.write_all(input.as_bytes()).unwrap();
+        let path = Some(file.path().to_str().unwrap());
+        let datanode =
+            DatanodeOptions::load_layered_options(path, "PARQUET_PAGE_CONFIG_DN_TEST").unwrap();
+        let standalone =
+            StandaloneOptions::load_layered_options(path, "PARQUET_PAGE_CONFIG_ST_TEST").unwrap();
+        for engines in [&datanode.region_engine, &standalone.region_engine] {
+            assert_eq!(engines.len(), 1);
+            let RegionEngineConfig::Mito(config) = &engines[0] else {
+                panic!("Expected Mito engine");
+            };
+            assert_eq!(config.parquet_page.content_cache_size, expected);
+            assert_eq!(
+                config.parquet_page.content_cache_page_size,
+                ReadableSize::kb(64)
+            );
+        }
+    }
+}
+
+#[test]
+fn test_parquet_page_documented_defaults() {
+    let defaults = mito2::config::ParquetPageConfig::default();
+    for name in ["datanode.example.toml", "standalone.example.toml"] {
+        let example = std::fs::read_to_string(common_test_util::find_workspace_path(&format!(
+            "config/{name}"
+        )))
+        .unwrap();
+        let value: toml::Value = toml::from_str(&render_example(&example, false)).unwrap();
+        let mito = value["region_engine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|engine| engine.get("mito"))
+            .unwrap();
+        let documented: mito2::config::ParquetPageConfig =
+            mito["parquet_page"].clone().try_into().unwrap();
+        assert_eq!(documented, defaults, "{name}");
+    }
+}
+
+#[test]
+fn test_parquet_page_environment_compatibility_and_file_precedence() {
+    let prefix = "PARQUET_PAGE_ALIAS_TEST";
+    let old = format!("{prefix}__REGION_ENGINE[0]__MITO__PAGE_CACHE_SIZE");
+    let new = format!("{prefix}__REGION_ENGINE[0]__MITO__PARQUET_PAGE__CONTENT_CACHE_SIZE");
+    for (env_key, file_mito) in [
+        (
+            &old,
+            "[region_engine.mito.parquet_page]\ncontent_cache_size = '256MiB'",
+        ),
+        (&new, "page_cache_size = '256MiB'"),
+    ] {
+        temp_env::with_var(env_key, Some("0B"), || {
+            for engines in [
+                DatanodeOptions::load_layered_options(None, prefix)
+                    .unwrap()
+                    .region_engine,
+                StandaloneOptions::load_layered_options(None, prefix)
+                    .unwrap()
+                    .region_engine,
+            ] {
+                let RegionEngineConfig::Mito(config) = &engines[0] else {
+                    panic!("Expected Mito engine")
+                };
+                assert_eq!(config.parquet_page.content_cache_size, ReadableSize(0));
+            }
+            let input = format!("[[region_engine]]\n[region_engine.mito]\n{file_mito}");
+            let mut file = create_named_temp_file();
+            file.write_all(input.as_bytes()).unwrap();
+            let path = Some(file.path().to_str().unwrap());
+            for engines in [
+                DatanodeOptions::load_layered_options(path, prefix)
+                    .unwrap()
+                    .region_engine,
+                StandaloneOptions::load_layered_options(path, prefix)
+                    .unwrap()
+                    .region_engine,
+            ] {
+                assert_eq!(engines.len(), 1);
+                let RegionEngineConfig::Mito(config) = &engines[0] else {
+                    panic!("Expected Mito engine")
+                };
+                assert_eq!(
+                    config.parquet_page.content_cache_size,
+                    ReadableSize::mb(256)
+                );
+            }
+        });
+    }
+    temp_env::with_vars([(&old, Some("0B")), (&new, Some("1GiB"))], || {
+        assert!(DatanodeOptions::load_layered_options(None, prefix).is_err());
+        assert!(StandaloneOptions::load_layered_options(None, prefix).is_err());
+    });
 }
