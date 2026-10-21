@@ -51,9 +51,17 @@ fn eval_stmt(query: &str) -> EvalStmt {
 /// The end is a parameter because a grid stops before an end it does not land on, which is the only
 /// way `end()` and the last grid point can be told apart.
 fn eval_stmt_over(query: &str, end: Duration) -> EvalStmt {
+    eval_stmt_between(query, Duration::ZERO, end)
+}
+
+/// The statement `query` over `UNIX_EPOCH + start..=UNIX_EPOCH + end`, on a 5s grid.
+///
+/// The start is a parameter because a grid that begins off the epoch is the only way to tell a
+/// child grid built from absolute step boundaries from one built from the statement's start.
+fn eval_stmt_between(query: &str, start: Duration, end: Duration) -> EvalStmt {
     EvalStmt {
         expr: promql_parser::parser::parse(query).unwrap(),
-        start: UNIX_EPOCH,
+        start: UNIX_EPOCH + start,
         end: UNIX_EPOCH + end,
         interval: Duration::from_secs(5),
         lookback_delta: Duration::from_secs(5),
@@ -2654,28 +2662,212 @@ fn a_subquery_without_a_step_uses_the_default_interval() {
     );
 }
 
-/// An anchored subquery is refused, and the rejection says what is missing rather than treating the
-/// anchor as unsupported in general: a range selector binds one.
-#[test]
-fn an_anchored_subquery_is_refused() {
-    let error = compile(
-        &eval_stmt("rate(x[5m:1m] @ 1234)"),
-        raw_schema(),
-        SeriesOrdering::KeyThenTime,
+/// The child grid an anchored subquery must declare, derived from its read interval rather than from
+/// the compiler's formula: the samples of `(anchor - offset - range, anchor - offset]` at `step`.
+///
+/// The multiples are found by walking a two-step-wide margin around the interval and keeping the ones
+/// the interval itself contains, so no division and no rounding convention appears here: a wrong
+/// formula in the compiler cannot be reproduced by this helper, which is the whole point of it.
+fn anchored_child_grid(
+    anchor_ms: i64,
+    range_ms: i64,
+    step_ms: i64,
+    offset_ms: i64,
+) -> (i64, i64, u64) {
+    let end = anchor_ms - offset_ms;
+    let start = end - range_ms;
+    let mut first = None;
+    let mut len = 0_u64;
+    for k in (start / step_ms - 2)..=(end / step_ms + 2) {
+        let sample = k * step_ms;
+        if sample <= start || sample > end {
+            continue;
+        }
+        first.get_or_insert(sample);
+        len += 1;
+    }
+    (
+        first.expect("the read interval names no sample at all"),
+        step_ms,
+        len,
     )
-    .expect_err("an anchored subquery compiled, and it should not have");
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "the refusal is not NotImplemented: {error}"
+}
+
+/// An anchored subquery reads one fixed interval instead of one interval per output point, and the
+/// interval is the anchor's: `(anchor - offset - range, anchor - offset]` at the subquery's step.
+///
+/// The expected grid comes from the interval, not from the compiler, and the anchor itself is stated
+/// in the case table even where the query writes `start()` or `end()`, so the two have to agree.
+#[test]
+fn an_anchored_subquery_reads_one_fixed_interval() {
+    // (query, anchor_ms, range_ms, step_ms, offset_ms, statement start_ms, statement end_ms)
+    let cases = [
+        (
+            "rate(x[5m:1m] @ 1234)",
+            1_234_000,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        // `start()` and `end()` are the statement's own bounds, not points of its grid.
+        (
+            "rate(x[5m:1m] @ start())",
+            0,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        (
+            "rate(x[5m:1m] @ end())",
+            100_000,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        // A pre-epoch anchor, which a `duration_since(UNIX_EPOCH).unwrap_or_default()` would make 0.
+        (
+            "rate(x[5m:1m] @ -1.5)",
+            -1_500,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        // The subquery's own offset moves the anchored interval, as it moves an unanchored one, in
+        // either order: the parser allows `@` and `offset` to be written both ways round.
+        (
+            "rate(x[5m:1m] offset 1m @ 1234)",
+            1_234_000,
+            300_000,
+            60_000,
+            60_000,
+            0,
+            100_000,
+        ),
+        (
+            "rate(x[5m:1m] @ 1234 offset 1m)",
+            1_234_000,
+            300_000,
+            60_000,
+            60_000,
+            0,
+            100_000,
+        ),
+        // A step that divides neither the range nor the anchor, so a grid rounded to either would
+        // name different samples.
+        (
+            "rate(x[5m:7s] @ 1234)",
+            1_234_000,
+            300_000,
+            7_000,
+            0,
+            0,
+            100_000,
+        ),
+        // A statement whose end is not a grid point and whose start is off the child step, so neither
+        // `end()` nor the statement's start can stand in for the anchor or for the child grid.
+        (
+            "rate(x[5m:1m] @ end())",
+            103_000,
+            300_000,
+            60_000,
+            0,
+            3_000,
+            103_000,
+        ),
+    ];
+
+    for (query, anchor_ms, range_ms, step_ms, offset_ms, start_ms, end_ms) in cases {
+        let stmt = eval_stmt_between(
+            query,
+            Duration::from_millis(start_ms as u64),
+            Duration::from_millis(end_ms as u64),
+        );
+        let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (input, op) = root_window(&tree);
+
+        assert_eq!(
+            op.window.anchor_ms,
+            Some(anchor_ms),
+            "`{query}` bound the wrong anchor"
+        );
+        assert_eq!(op.window.range_ms, range_ms, "`{query}`: wrong range");
+        assert_eq!(op.window.offset_ms, offset_ms, "`{query}`: wrong offset");
+
+        let expected = anchored_child_grid(anchor_ms, range_ms, step_ms, offset_ms);
+        assert_eq!(
+            child_grid(op),
+            expected,
+            "`{query}` bound the wrong child grid: the interval \
+             ({}, {}] at {step_ms}ms per step holds {expected:?}",
+            anchor_ms - offset_ms - range_ms,
+            anchor_ms - offset_ms
+        );
+        // The inner expression lands on that grid, so the window reads the points it declares.
+        let inner = evaluated(input);
+        assert_eq!(
+            inner.eval_grid.as_ref().unwrap().spec().start_ms,
+            expected.0,
+            "`{query}` evaluated its expression off the declared child grid"
+        );
+        // The statement's grid is untouched: an anchor changes what is read, not what is reported.
+        let out = op.output_grid.spec();
+        assert_eq!(
+            (out.start_ms, out.step_ms),
+            (start_ms, 5_000),
+            "`{query}` moved the output off the statement's grid"
+        );
+        assert_eq!(
+            out.len as i64,
+            (end_ms - start_ms) / 5_000 + 1,
+            "`{query}` changed the statement's grid length"
+        );
+    }
+}
+
+/// An anchored child grid does not depend on the statement at all: the same anchored subquery in two
+/// statements of different spans reads the same interval, while the two report on their own grids.
+#[test]
+fn an_anchored_subquery_grid_ignores_the_statement() {
+    let short = eval_stmt_between(
+        "rate(x[5m:1m] @ 1234)",
+        Duration::ZERO,
+        Duration::from_secs(100),
     );
-    let message = error.to_string();
-    assert!(
-        message.contains("anchored subquery"),
-        "the refusal did not name what it found: {message}"
+    let long = eval_stmt_between(
+        "rate(x[5m:1m] @ 1234)",
+        Duration::from_secs(10),
+        Duration::from_secs(600),
     );
-    assert!(
-        message.contains("anchoring is bound on a range selector"),
-        "the refusal did not say where an anchor does belong: {message}"
+
+    let mut grids = Vec::new();
+    for stmt in [&short, &long] {
+        let tree = compile(stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("an anchored subquery was refused: {error}"));
+        let (_, op) = root_window(&tree);
+        grids.push((child_grid(op), grid_of(tree.root())));
+    }
+
+    let expected_child = anchored_child_grid(1_234_000, 300_000, 60_000, 0);
+    assert_eq!(
+        grids[0].0, expected_child,
+        "the short statement's child grid is wrong"
+    );
+    assert_eq!(
+        grids[1].0, expected_child,
+        "the child grid moved with the statement, so the anchor is not what it reads"
+    );
+    assert_ne!(
+        grids[0].1, grids[1].1,
+        "the two statements have the same output grid, so this case proves nothing"
     );
 }
 
@@ -2789,53 +2981,131 @@ fn a_subquery_composes_with_an_aggregate_and_a_comparison() {
     );
 }
 
-/// The grid a subquery declares has to hold every point its window will read, and that property is
-/// what `BoundWindow::input_grid` means. Pinning the numbers of a formula would pass even if the
-/// formula were wrong in the same way the test was written; this checks the property instead, at
-/// every point of the statement's grid.
+/// The grid a subquery declares has to hold every sample its windows read — and no sample none of
+/// them can read. Both halves are checked here, against an oracle that is the query's own numbers
+/// rather than the compiler's.
+///
+/// Nothing but the grid itself is read from the produced window: the range, the step and the offset
+/// come from the query text (stated again in the case table, so the two can disagree), the read
+/// windows come from the statement's output grid as `p - offset - range < t <= p - offset`, and the
+/// samples are every multiple of the step in such a window. The membership test is the modulo one,
+/// because a grid whose step or phase is wrong still spans the right two bounds: interval
+/// containment is what let a wrong step pass before.
 #[test]
-fn a_subquery_grid_covers_every_read_window() {
-    for query in [
-        "rate(x[5m:1m])",
-        "rate(x[5m:5s])",
-        // A step that divides neither the range nor the statement's step.
-        "rate(x[5m:7s])",
-        "rate(x[1m:7s])",
-        // Offsets in both directions move the whole set of read windows.
-        "rate(x[5m:1m] offset 1m)",
-        "rate(x[5m:1m] offset -1m)",
-        "rate(x[90s:40s] offset 30s)",
-    ] {
-        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+fn a_subquery_grid_holds_every_sample_its_windows_read() {
+    // The statement's end: the start is a column, because a grid that begins off the epoch is the
+    // only way to see a child grid built from the statement's start rather than from the epoch.
+    let end = Duration::from_secs(100);
+
+    // (query, statement start, range_ms, step_ms, offset_ms, some point reads no sample)
+    //
+    // The last flag is asserted rather than assumed: the narrow case below passes trivially if the
+    // compiler refused to bind a window at all, so the test would not notice losing it.
+    let cases = [
+        // A whole-minute step over a five-minute window.
+        ("rate(x[5m:1m])", 0, 300_000, 60_000, 0, false),
+        // A step that divides neither the range nor the statement's 5s step.
+        ("rate(x[5m:7s])", 0, 300_000, 7_000, 0, false),
+        // A step the statement's own step does divide, so the two cannot be confused either.
+        ("rate(x[5m:5s])", 0, 300_000, 5_000, 0, false),
+        // A step that divides neither the range nor the offset.
+        (
+            "rate(x[90s:40s] offset 30s)",
+            0,
+            90_000,
+            40_000,
+            30_000,
+            false,
+        ),
+        // Offsets in both directions move every read window.
+        (
+            "rate(x[5m:1m] offset 1m)",
+            0,
+            300_000,
+            60_000,
+            60_000,
+            false,
+        ),
+        (
+            "rate(x[5m:1m] offset -1m)",
+            0,
+            300_000,
+            60_000,
+            -60_000,
+            false,
+        ),
+        // A window narrower than the child step: some output points read no sample at all, so a
+        // grid that dropped the samples the other points read would still look plausible.
+        ("rate(x[30s:1m])", 0, 30_000, 60_000, 0, true),
+        // A statement whose start is three seconds off the child step, so a grid stepped from the
+        // statement's start would be phase-shifted by exactly that much.
+        ("rate(x[5m:1m])", 3_000, 300_000, 60_000, 0, false),
+        ("rate(x[30s:1m])", 3_000, 30_000, 60_000, 0, true),
+    ];
+
+    for (query, start, range_ms, step_ms, offset_ms, some_points_read_nothing) in cases {
+        let stmt = eval_stmt_between(query, Duration::from_millis(start as u64), end);
+        let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let (_, op) = root_window(&tree);
-        let spec = op
-            .input_grid
-            .as_ref()
-            .expect("a subquery declares its grid")
-            .spec();
-        let child_first = spec.start_ms;
-        let child_last = spec.start_ms + (spec.len as i64 - 1) * spec.step_ms;
 
-        // Every point the window reads lies at `point - offset`, and the window reaches `range` back
-        // from there. The subquery evaluates at multiples of its step, so the points it can supply are
-        // the step boundaries strictly after the earliest read and at or before the latest one.
+        // The grid under test, and the statement's own grid, which is not the subquery's.
+        let (child_start, child_step, child_len) = child_grid(op);
+        let child_last = child_start + (child_len as i64 - 1) * child_step;
         let out = op.output_grid.spec();
-        for index in 0..out.len as i64 {
-            let point = out.start_ms + index * out.step_ms;
-            let read_end = point - op.window.offset_ms;
-            let read_start = read_end - op.window.range_ms;
-            let first_needed = (read_start.div_euclid(spec.step_ms) + 1) * spec.step_ms;
-            let last_needed = read_end.div_euclid(spec.step_ms) * spec.step_ms;
-            if first_needed > last_needed {
-                // The window is narrower than one step, so this point folds nothing; nothing to cover.
-                continue;
-            }
+        let out_last = out.start_ms + (out.len as i64 - 1) * out.step_ms;
+
+        // Every sample a window can read lies in the union of the read windows: strictly after the
+        // earliest window's left end, and no later than the latest window's right one. A grid that
+        // reached before the earliest read would evaluate a sample no window folds.
+        let earliest = out.start_ms - offset_ms - range_ms;
+        let latest = out_last - offset_ms;
+        for index in 0..child_len as i64 {
+            let point = child_start + index * child_step;
             assert!(
-                first_needed >= child_first && last_needed <= child_last,
-                "`{query}`: the window at {point}ms reads {first_needed}..={last_needed}ms, which the \
-                 declared grid {child_first}..={child_last}ms does not cover"
+                point > earliest && point <= latest,
+                "`{query}`: the child grid point {point}ms lies outside the read windows \
+                 {earliest}ms..={latest}ms, where no window can read it"
             );
         }
+
+        let mut every_point_reads = true;
+        let mut samples_checked = 0_usize;
+        for index in 0..out.len as i64 {
+            let point = out.start_ms + index * out.step_ms;
+            let read_start = point - offset_ms - range_ms;
+            let read_end = point - offset_ms;
+            // Every multiple of the step in this window, enumerated two steps wider on each side
+            // and filtered by the window itself: the slack absorbs the difference between
+            // truncating and floor division, so this enumeration assumes no rounding convention.
+            let mut read_anything = false;
+            for k in (read_start / step_ms - 2)..=(read_end / step_ms + 2) {
+                let sample = k * step_ms;
+                if sample <= read_start || sample > read_end {
+                    continue;
+                }
+                read_anything = true;
+                samples_checked += 1;
+                assert!(
+                    sample >= child_start
+                        && sample <= child_last
+                        && (sample - child_start) % child_step == 0,
+                    "`{query}`: the window at {point}ms reads {sample}ms, which is not a point of \
+                     the declared child grid {child_start}ms..={child_last}ms at {child_step}ms per \
+                     step"
+                );
+            }
+            every_point_reads &= read_anything;
+        }
+
+        assert!(
+            samples_checked > 0,
+            "`{query}`: no point of the statement's grid reads a sample, so this case checks nothing"
+        );
+        assert_eq!(
+            every_point_reads, !some_points_read_nothing,
+            "`{query}`: the case table says some point reads no sample, so every point reading one \
+             (or vice versa) means the window is not the one the query wrote"
+        );
     }
 }

@@ -19,36 +19,68 @@
 //! accepts is one recursive rule:
 //!
 //! ```text
-//! <selector>                                        e.g. x
-//! <range function>(<selector>[<range>])             e.g. rate(x[5m])
-//! <range function>(<constant>, <selector>[<range>])   e.g. quantile_over_time(0.9, x[5m])
-//! <range function>(<selector>[<range>], <constant>[, <constant>])
-//!                                                   e.g. predict_linear(x[5m], 1),
-//!                                                        double_exponential_smoothing(x[5m], 0.5, 0.5)
-//! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
-//! <expression> <operator> <constant>                e.g. x * 100, x > bool 0
-//! <constant> <operator> <expression>                e.g. 1 / x, 0 < x
-//! -<expression>                                     e.g. -x
-//! <aggregator> [(by|without)(<labels>)] (<expression>)
-//!                                                   e.g. avg by(job)(rate(x[5m]) * 100)
-//! <aggregator> (<expression>) [(by|without)(<labels>)]
-//!                                                   e.g. count (x) by(job)
-//! quantile(<constant>, <expression>) [(by|without)(<labels>)]
-//!                                                   e.g. quantile(0.9, x) by(job)
+//! <expression>                                     one of, recursively:
+//!   <selector>                                     e.g. x, x offset -5m
+//!   <range function>(<matrix>)                     e.g. rate(x[5m]), rate(x[5m:1m] @ 1234)
+//!   quantile_over_time(<constant>, <matrix>)       e.g. quantile_over_time(0.9, x[5m])
+//!   predict_linear(<matrix>, <constant>)           e.g. predict_linear(x[5m], 300)
+//!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
+//!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
+//!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//!   <expression> <operator> <constant>             e.g. x * 100, x > bool 0
+//!   <constant> <operator> <expression>             e.g. 1 / x, 0 < x
+//!   -<expression>                                  e.g. -x
+//!   <aggregator> [(by|without)(<labels>)] (<expression>)
+//!                                                  e.g. avg by(job)(rate(x[5m]) * 100)
+//!   <aggregator> (<expression>) [(by|without)(<labels>)]
+//!                                                  e.g. count (x) by(job)
+//!   quantile(<constant>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. quantile(0.9, x) by(job)
+//!
+//! <matrix>    <selector>[<range>]<modifiers>       a range selector: raw samples
+//!           | <expression>[<range>:<step>]<modifiers>
+//!                                                  a subquery: <expression> evaluated on a grid;
+//!                                                  the step may be omitted as `[<range>:]`
+//! <modifiers>                                      nothing, `offset <duration>`, `@ <anchor>`, or
+//!                                                  both, in either order — e.g. `x[5m] @ 1234
+//!                                                  offset 1m`
 //! ```
 //!
-//! where `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev` or `stdvar`.
+//! where `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` or
+//! `quantile`, the function names are [`range_signature`]'s and [`math_signature`]'s, and which side
+//! of the matrix a range function's constants go on is [`RangeSignature`]'s: before it for
+//! `quantile_over_time`, after it for `predict_linear` and `double_exponential_smoothing`. A math
+//! function's constants always follow its vector.
 //!
-//! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
-//! `Input` (raw samples) → `Window` (the range function over the statement's grid),
+//! Parentheses are transparent wherever they appear — `rate((x[5m]))` is `rate(x[5m])` — because
+//! they say how a statement was typed rather than what it asks for.
+//!
+//! A subquery's `<expression>` is any shape above, so a subquery nests inside a subquery on a grid
+//! of its own, as in `rate(rate(x[5m:1m])[10m:30s])`; a `<step>` left out means Prometheus's default
+//! evaluation interval, one minute. Its `offset` and its `@` anchor are its own, not the inner
+//! expression's, so `rate(x[5m:1m] @ end() offset 1m)` reads one fixed interval. A `<selector>`
+//! outside a `<matrix>` takes an `offset` and no anchor: the instant shape has no field for one, so
+//! `x @ 100` is refused and `rate(x[5m] @ 100)` is not.
+//!
+//! Those shapes become `Input` (raw samples) → `Instant` (the last sample within the statement's
+//! lookback), `Input` (raw samples) → `Window` (the range function over the statement's grid),
+//! `<expression>` → `Window` whose input is evaluated (the subquery, whose input grid is its own),
 //! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to) and, over
 //! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side),
 //! `Scalar` (that constant) and `Aggregate` (one of the nine aggregators that fold a group's values
-//! into one value per grid point, optionally grouped). A selector may carry
-//! `offset` in either selection shape and, in the window shape, an `@` anchor. Everything else is a
+//! into one value per grid point, optionally grouped). Everything else is a
 //! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
 //! because rejecting a query the compiler does not understand is the only honest alternative to
 //! compiling it into something else.
+//!
+//! What is bound and what is read are two different things. `RangeWindow::anchor_ms` is bound
+//! faithfully, on a range selector and on a subquery alike, so that a tree describes the query it
+//! came from; but nothing executes a tree yet. There is no executor in this repository: `NativeTree`
+//! is named by this module, by `promql::native` and by their tests, and the only readers of
+//! `anchor_ms` are the display and `RangeEvaluator`'s own window arithmetic, which no caller drives
+//! from a tree. So `rate(x[5m] @ 1234)` and `rate(x[5m:1m] @ 1234)` compile to the tree that says
+//! what they mean and neither evaluates to anything yet: making an anchor run is a separate job from
+//! describing it, and binding one here claims only the description.
 //!
 //! Two decisions keep the recursion from growing a branch per query. A constant argument — a
 //! quantile, a rounding step, a clamp bound — is folded out of the statement by [`constant_value`],
@@ -113,20 +145,29 @@ use promql_parser::parser::{
 use crate::promql::label_values::signed_millis_since_epoch;
 
 /// The shapes this compiler accepts, quoted in every rejection.
-const SUPPORTED: &str = "a selector, a range function over a range selector or a subquery — \\
-                         `<range function>(<selector>[<range>])`, with constants before or after \\
-                         the selector as in `quantile_over_time(0.9, x[5m])`, \\
-                         `predict_linear(x[5m], 1)` and \\
-                         `double_exponential_smoothing(x[5m], 0.5, 0.5)`, or \\
-                         `<range function>(<selector>[<range>:<step>])` as in `rate(x[5m:1m])`, \\
-                         where the subquery step may be omitted as in `rate(x[5m:])` — a math \\
-                         function over any of them, a binary operation between one of them and a \\
-                         constant, a negation of one of them, or one of the aggregators that folds a \\
-                         group's values into one value per grid point — `sum`, `avg`, `count`, `min`, \\
-                         `max`, `group`, `stddev`, `stdvar` and `quantile(<constant>, ...)` — over any \\
-                         of them, optionally grouped by `by` or `without`, as in `x`, `rate(x[5m])`, \\
-                         `quantile_over_time(0.9, x[5m])`, `abs(rate(x[5m]))`, `2 / (x + 1)`, `-x`, \\
-                         `avg by(job)(rate(x[5m]) * 100)` or `quantile(0.9, x)`";
+///
+/// It is one sentence of grammar rather than a list of examples, because it is what a refused query
+/// reads: the shapes have to be true of every query the compiler binds, and the examples only show
+/// them. The two matrix shapes and the recursion through them are stated first, because that
+/// recursion is what a reader is most likely to get wrong.
+const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a range function over \
+                         a matrix, where a matrix is `<selector>[<range>]` as in `rate(x[5m])` or \
+                         `<expression>[<range>:<step>]` as in `rate(x[5m:1m])`, with the step \
+                         optionally omitted as `[<range>:]`, where the subquery's `<expression>` \
+                         is any shape here, so a subquery nests on a grid of its own as in \
+                         `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
+                         `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
+                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a binary \
+                         operation between one of them and a constant (`2 / (x + 1)`, \
+                         `x > bool 0`), a negation of one of them (`-x`), or one of the aggregators \
+                         that folds a group's values into one value per grid point — `sum`, `avg`, \
+                         `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
+                         `quantile(<constant>, <expression>)` — over any of them, optionally \
+                         grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; a \
+                         range function's own constants sit where that function takes them, before \
+                         the matrix for `quantile_over_time(0.9, x[5m])` and after it for \
+                         `predict_linear(x[5m], 300)` and \
+                         `double_exponential_smoothing(x[5m], 0.5, 0.1)`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -223,7 +264,7 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
     // would have to know how to run. The fold is checked first so that no shape below has to say
     // what it does with a constant operand.
     if let Some(value) = constant_value(expr) {
-        return scalar_node(context, value);
+        return Ok(scalar_node(context, value));
     }
     match expr {
         // Parentheses group, so they change how a statement was typed rather than what it asks for:
@@ -238,17 +279,19 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
     }
 }
 
-/// Binds `value` as a constant scalar on the statement's grid.
+/// Binds `value` as a constant scalar on the grid of the expression being compiled.
 ///
-/// The grid is the statement's rather than the constant's own: a constant has no timestamps, so the
-/// only positions it can be broadcast over are the ones the statement is evaluated at, and
-/// [`NativeTree::validate`] compares a binary operation's two grids by spec rather than by
-/// allocation.
-fn scalar_node(context: &Context, value: f64) -> Result<NativeNode> {
-    Ok(NativeNode {
+/// The grid is the context's rather than the constant's own: a constant has no timestamps, so the
+/// only positions it can be broadcast over are the ones the expression it sits next to is evaluated
+/// at — the statement's grid, or a subquery's inside one. [`NativeTree::validate`] compares a binary
+/// operation's two grids by spec rather than by allocation.
+///
+/// Nothing here can fail: the grid is the one [`Context`] already carries, so a caller needs no `?`.
+fn scalar_node(context: &Context, value: f64) -> NativeNode {
+    NativeNode {
         expr: NativeExpr::Scalar(BoundScalar { value }),
         output: NativeType::Scalar(Arc::clone(&context.grid)),
-    })
+    }
 }
 
 /// Compiles a negation as the multiplication it is: `-x` is `-1 * x`.
@@ -261,7 +304,7 @@ fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
     // The constant goes on the left, where the minus was: `-x` subtracts nothing, but a reader of
     // the tree should see the same order the query was written in.
     Ok(broadcast(
-        scalar_node(context, -1.0)?,
+        scalar_node(context, -1.0),
         compile_expr(context, operand)?,
         BinaryOp::Mul,
         false,
@@ -554,11 +597,15 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     map_call(context, func.name, op, vector)
 }
 
-/// Binds a range function over the range selector it is given, and the window that selector opens.
+/// Binds a range function over the matrix it is given, and the window that matrix opens.
 ///
-/// The selector's place is the signature's, so the constants on either side of it are read as the
-/// signature says: `quantile_over_time` writes its parameter in front of the selector, while
-/// `predict_linear` and `double_exponential_smoothing` write theirs behind it.
+/// Where the matrix sits is the signature's, not a convention: `quantile_over_time(0.9, x[5m])` writes
+/// its constant before the matrix, while `predict_linear(x[5m], 300)` writes it after, and every other
+/// function reads the matrix first because it has no constants at all. [`RangeSignature::selector_index`]
+/// is that position, and everything else the call wrote is a constant.
+///
+/// The matrix is either shape: a range selector, which reads raw samples, or a subquery, which
+/// evaluates its own expression on a grid of its own.
 fn window_call(
     context: &Context,
     name: &str,
@@ -589,7 +636,7 @@ fn window_call(
         }
         PromExpr::Subquery(subquery) => subquery_window(context, name, function, subquery),
         other => Err(not_implemented(&format!(
-            "a call to `{name}` whose range selector is `{other}`, where it has to be a range \\
+            "a call to `{name}` whose range selector is `{other}`, where it has to be a range \
              selector like `x[5m]` or a subquery like `x[5m:1m]`"
         ))),
     }
@@ -700,6 +747,13 @@ const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
 /// lookback, and the window folds those points rather than raw samples. The inner expression is
 /// compiled against the subquery's grid for the same reason — a selector inside it has to land where
 /// the window will read it.
+///
+/// An `@` anchor makes the subquery step-invariant the way it makes a range selector one: every
+/// output point reads the same interval, `(anchor - offset - range, anchor - offset]`, rather than
+/// one interval of its own. So an anchored subquery's child grid is built for that one interval,
+/// while its output grid is the statement's as before, and the anchor is bound on the window's
+/// `RangeWindow` beside the range and the offset. Nothing reads `anchor_ms` yet — the module
+/// documentation says what that means — so binding it describes the query without running it.
 fn subquery_window(
     context: &Context,
     name: &str,
@@ -713,16 +767,9 @@ fn subquery_window(
         offset,
         at,
     } = subquery;
-    // An anchor pins every output point to one read range instead of one per point. That changes both
-    // what the child grid spans and what the window's anchor field would mean, and neither is settled
-    // here, so the query is refused rather than compiled onto a grid that reads the wrong samples.
-    if at.is_some() {
-        return Err(not_implemented(&format!(
-            "a call to `{name}` over the anchored subquery `{subquery}`, whose anchor changes what the \
-             subquery's own grid spans: a subquery is bound by a range, a step and an offset, while \
-             anchoring is bound on a range selector, as in `rate(x[5m] @ 1234)`"
-        )));
-    }
+    // The anchor is resolved by the same function a range selector's is, so `start()`, `end()` and a
+    // literal — including a negative one — mean the same thing in both shapes.
+    let anchor_ms = selector_anchor_ms(at, context.stmt)?;
     // A subquery evaluates an expression and hands the window one value per grid point per field, so
     // the expression inside it has to be a vector: a scalar has no fields for the window to fold.
     if expr.value_type() != ValueType::Vector {
@@ -750,7 +797,12 @@ fn subquery_window(
         )));
     }
     let offset_ms = selector_offset_ms(offset)?;
-    let child_grid = subquery_grid(&context.grid, range_ms, offset_ms, step_ms)?;
+    // Which interval the inner expression has to cover depends on the anchor: without one it is the
+    // union of every output point's read window, with one it is that single window.
+    let child_grid = match anchor_ms {
+        None => subquery_grid(&context.grid, range_ms, offset_ms, step_ms)?,
+        Some(anchor_ms) => anchored_subquery_grid(anchor_ms, range_ms, offset_ms, step_ms)?,
+    };
     let inner = compile_expr(
         &Context {
             stmt: context.stmt,
@@ -776,8 +828,8 @@ fn subquery_window(
                 window: RangeWindow {
                     range_ms,
                     offset_ms,
-                    // The anchor is refused above, so there is none to bind.
-                    anchor_ms: None,
+                    // Bound, not read: no runtime consumes a tree yet.
+                    anchor_ms,
                 },
                 // The one field that tells this window from a raw one: its input was evaluated on the
                 // subquery's grid rather than read from the scan.
@@ -789,7 +841,7 @@ fn subquery_window(
     })
 }
 
-/// The grid a subquery's inner expression is evaluated on.
+/// The grid a subquery's inner expression is evaluated on when it has no anchor.
 ///
 /// The subquery, evaluated at every point of `output_grid`, reads `(point - offset - range,
 /// point - offset]` sampled at `step`. One grid serves the whole statement, so it spans the union of
@@ -805,20 +857,64 @@ fn subquery_grid(
     let spec = output_grid.spec();
     let start = i128::from(spec.start_ms);
     let last = start + i128::from(spec.len - 1) * i128::from(spec.step_ms);
-    let step = i128::from(step_ms);
     let offset = i128::from(offset_ms);
     // Every read window ends at its point minus the offset, so no sample lies after this bound, and
     // none lies at or before the earliest window's start.
-    let earliest = start - offset - i128::from(range_ms);
-    let grid_start = (earliest.div_euclid(step) + 1) * step;
-    let grid_end = last - offset;
-    // An empty grid cannot be built, and it would not mean the same thing anyway: a subquery whose
-    // every read range ends before its first step boundary names no sample at all.
-    if grid_start > grid_end {
-        return Err(not_implemented(&format!(
+    subquery_read_grid(
+        start - offset - i128::from(range_ms),
+        last - offset,
+        step_ms,
+        format!(
             "the subquery over {range_ms}ms at {step_ms}ms per step, which names no evaluation point \
              in the statement's range"
-        )));
+        ),
+    )
+}
+
+/// The grid an `@`-anchored subquery's inner expression is evaluated on.
+///
+/// An anchor makes the subquery step-invariant: every output point reads the same interval,
+/// `(anchor - offset - range, anchor - offset]`, sampled at `step`. The child grid therefore holds
+/// exactly the samples of that one interval — from the first step boundary strictly after its left end
+/// to the anchor shifted by the offset — and the statement's own grid does not enter into it. The two
+/// bounds are rounded by [`subquery_read_grid`], which an unanchored subquery uses too, so the two
+/// shapes cannot disagree about where a step boundary lies.
+fn anchored_subquery_grid(
+    anchor_ms: i64,
+    range_ms: i64,
+    offset_ms: i64,
+    step_ms: i64,
+) -> Result<Arc<EvalGrid>> {
+    let end = i128::from(anchor_ms) - i128::from(offset_ms);
+    subquery_read_grid(
+        end - i128::from(range_ms),
+        end,
+        step_ms,
+        format!(
+            "the subquery anchored at {anchor_ms}ms over {range_ms}ms at {step_ms}ms per step, which \
+             names no evaluation point in its anchored interval"
+        ),
+    )
+}
+
+/// The samples of the read interval `(earliest, latest]` at `step`, as a grid.
+///
+/// The interval is left-open and right-closed, so its first sample is the step boundary strictly after
+/// `earliest` and its last is the greatest step boundary at or before `latest`. Both are multiples of
+/// `step`, which is what makes them points of one grid. `refusal` says what was refused when the
+/// interval holds no such sample at all.
+fn subquery_read_grid(
+    earliest: i128,
+    latest: i128,
+    step_ms: i64,
+    refusal: String,
+) -> Result<Arc<EvalGrid>> {
+    let step = i128::from(step_ms);
+    let grid_start = (earliest.div_euclid(step) + 1) * step;
+    // An empty grid cannot be built, and it would not mean the same thing anyway: an interval that
+    // ends before its own first step boundary names no sample at all.
+    if grid_start > latest {
+        return Err(not_implemented(&refusal));
     }
     let bound = |what: &str, value: i128| {
         i64::try_from(value).map_err(|_| {
@@ -829,7 +925,7 @@ fn subquery_grid(
     };
     let child = GridSpec::try_from_range(
         bound("first evaluation", grid_start)?,
-        bound("last evaluation", grid_end)?,
+        bound("last evaluation", latest)?,
         step_ms,
     )
     .map_err(|error| DataFusionError::Plan(format!("the subquery's grid is invalid: {error}")))?;
@@ -1233,14 +1329,18 @@ fn arity_error(name: &str, signature: MathSignature, given: usize) -> DataFusion
 /// case — has nowhere to go. It is refused rather than answered from the wrong number, and the
 /// rejection names the expression, because that is what the query has to change.
 ///
+/// `name` is whoever reads the argument: a call's function name, or an aggregator's, since
+/// `quantile(0.9, x)` reads a constant too. The rejection therefore names that and the position
+/// rather than calling everything a call, which would be false for an aggregate.
+///
 /// A quantile outside `[0, 1]` is not refused here: Prometheus binds it and the kernel reports
 /// `-Infinity` below zero and `+Infinity` above one, so refusing it would be this compiler inventing
 /// a rule the query engine does not have.
 fn constant_argument(name: &str, argument: &PromExpr, position: usize) -> Result<f64> {
     constant_value(argument).ok_or_else(|| {
         not_implemented(&format!(
-            "a call to `{name}` whose {} is `{argument}`, where it has to be a constant expression \
-             this compiler folds to a number literal",
+            "`{name}`, whose {} is `{argument}`, where it has to be a constant expression this \
+             compiler folds to a number literal",
             argument_position(position)
         ))
     })
