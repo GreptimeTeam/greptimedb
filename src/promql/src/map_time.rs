@@ -15,17 +15,13 @@
 //! `time()` and the date functions over evaluated series, following Prometheus `funcTime` and
 //! `dateWrapper`.
 
-use std::sync::Arc;
-
-use datafusion::arrow::array::{Array, Float64Array};
+use datafusion::arrow::array::Float64Array;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{
-    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
-};
+use datatypes::series::samples::{Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridRange, TimeAxis};
 
-use crate::grid_series::{GridSeriesBuilder, METADATA_LABELS, external};
+use crate::grid_series::external;
 
 #[cfg(test)]
 mod tests;
@@ -86,86 +82,6 @@ pub fn date_of_eval_time(function: DateFunction, schema: &SeriesSchema) -> Resul
     eval_time_series(schema, |ms| function.apply(ms / 1000))
 }
 
-/// A date function over `series`: each float value is read as Unix seconds and replaced by the
-/// date component, and the metric name is dropped. Missing values stay missing; histogram
-/// samples are dropped, so the result is `None` when no float remains.
-///
-/// A missing value is a hole like any other, but a hole only skips a position: the result is one
-/// series over the runs of consecutive positions that hold a value.
-///
-/// Series that share a label set once their names are dropped must then go through
-/// [`merge_same_labelset`](crate::grid_series::merge_same_labelset).
-pub fn map_date(
-    function: DateFunction,
-    schema: &Arc<SeriesSchema>,
-    series: &Series,
-) -> Result<Option<Series>> {
-    if series.time.grid().is_none() {
-        return Err(DataFusionError::Execution(
-            "date functions require an evaluated series".into(),
-        ));
-    }
-    let mut metric = series.metric.clone();
-    metric.remove_all(&METADATA_LABELS);
-    let map = |seconds: f64| function.of_seconds(seconds);
-
-    // The fast path maps every float in place, so it needs each field to be entirely present: it
-    // keeps the input axis as it is. A hole means the mapped rows are fewer than the axis rows,
-    // so it falls through to the builder, which rebuilds the axis from the rows that survive.
-    let all_floats = series.fields.iter().all(|samples| {
-        samples.segments().iter().all(|segment| {
-            matches!(segment.dense(), Some(DenseSamplesRef::Float(floats)) if floats.null_count() == 0)
-        })
-    });
-    if all_floats {
-        let fields = series
-            .fields
-            .iter()
-            .map(|samples| {
-                let segments = samples
-                    .segments()
-                    .iter()
-                    .map(|segment| {
-                        let Some(DenseSamplesRef::Float(floats)) = segment.dense() else {
-                            unreachable!("checked above");
-                        };
-                        Samples::from_float(floats.unary(map))
-                    })
-                    .collect();
-                Samples::try_from_chunks(segments).map_err(external)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let fields = SeriesFields::try_from_vec(fields).map_err(external)?;
-        let series =
-            Series::try_new(schema, metric, series.time.clone(), fields).map_err(external)?;
-        return Ok(Some(series));
-    }
-
-    // Holes in any field drop rows, so the builder names the positions that survive.
-    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    let mut values = vec![None; series.fields.len()];
-    // The axis names the positions to evaluate and a cursor per field reads them in order, so an
-    // axis of several runs costs its rows and not a scan per row.
-    let mut cursors = series
-        .fields
-        .iter()
-        .map(|samples| samples.cursor())
-        .collect::<Vec<_>>();
-    for (position, row) in series.time.positions() {
-        for (value, samples) in values.iter_mut().zip(&mut cursors) {
-            *value = match samples
-                .at(row)
-                .expect("the axis and the fields are aligned")
-            {
-                SampleRef::Float(seconds) => Some(map(seconds)),
-                SampleRef::Missing | SampleRef::Histogram(_) => None,
-            };
-        }
-        builder.push(position, &values)?;
-    }
-    builder.finish(metric)
-}
-
 fn eval_time_series(schema: &SeriesSchema, value: impl Fn(i64) -> f64) -> Result<Series> {
     let grid = schema.eval_grid.clone().ok_or_else(|| {
         DataFusionError::Execution("time functions require an evaluation grid".into())
@@ -200,7 +116,7 @@ const UNIX_TO_ABSOLUTE: i64 = (1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400) 
 
 impl DateFunction {
     /// The PromQL name of the function.
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::DayOfMonth => "day_of_month",
             Self::DayOfWeek => "day_of_week",

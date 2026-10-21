@@ -83,14 +83,14 @@ pub enum MathOp {
         min: f64,
         max: f64,
     },
-    /// A date function of the value read as Unix seconds, such as `hour(v)`.
-    Date(DateFunction),
     ClampMin {
         min: f64,
     },
     ClampMax {
         max: f64,
     },
+    /// A date function of the value read as Unix seconds, such as `hour(v)`.
+    Date(DateFunction),
 }
 
 /// Float arithmetic between a vector and a scalar, as in Prometheus.
@@ -297,7 +297,6 @@ impl MathOp {
                 }
             }
             Self::Clamp { min, max } => go_max(min, go_min(max, v)),
-            Self::Date(function) => function.of_seconds(v),
             Self::ClampMin { min } => go_max(min, v),
             Self::ClampMax { max } => go_min(max, v),
             Self::Abs => v.abs(),
@@ -305,6 +304,7 @@ impl MathOp {
             Self::Floor => v.floor(),
             Self::Sqrt => v.sqrt(),
             Self::Round { nearest } => Round::round_to_nearest(v, nearest),
+            Self::Date(function) => function.of_seconds(v),
         }
     }
 

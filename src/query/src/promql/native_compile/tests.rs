@@ -429,11 +429,7 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
         ),
         // A date function written without an argument is valid PromQL that reads the evaluation
         // time; there is no input to map, so it is left to the ordinary path.
-        (
-            eval_stmt("hour()"),
-            "hour",
-            "with 0 argument(s), where it takes its vector",
-        ),
+        (eval_stmt("hour()"), "hour", "reads the evaluation time"),
     ];
 
     for (stmt, name, expected) in cases {
