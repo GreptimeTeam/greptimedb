@@ -48,3 +48,19 @@ impl Display for DatanodeEpochKey {
 pub struct DatanodeEpochValue {
     pub node_epoch: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::key::MetadataValue;
+
+    #[test]
+    fn test_frozen_datanode_epoch_record() {
+        let value =
+            include_bytes!("../../../../../tests/compatibility/meta/datanode_epoch/value.json");
+        assert_eq!(DatanodeEpochKey::new(7).to_bytes(), b"__datanode_epoch/7");
+        let decoded = DatanodeEpochValue::try_from_raw_value(value).unwrap();
+        assert_eq!(decoded.node_epoch, 1761091200000);
+        assert_eq!(decoded.try_as_raw_value().unwrap(), value);
+    }
+}

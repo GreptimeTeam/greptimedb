@@ -21,6 +21,14 @@ Frozen objects of the object store WAL are checked byte for byte by the format t
 `log-store`. The SQL runner cannot cover the object store WAL: it owns `wal.provider`. See the
 [fixture notes](wal/object_store/README.md).
 
+## Metadata fixtures
+
+The [datanode epoch record](meta/datanode_epoch/README.md) is checked by `common-meta`:
+
+```shell
+cargo nextest run -p common-meta -E 'test(test_frozen_datanode_epoch_record)'
+```
+
 ## Quick Start
 
 ```shell
