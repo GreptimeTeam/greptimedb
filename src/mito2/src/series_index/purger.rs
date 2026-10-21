@@ -39,9 +39,10 @@ impl IndexFileType {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct PurgeRequest {
     pub(crate) file_id: RegionFileId,
+    pub(crate) objects: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -57,6 +58,13 @@ impl Debug for IndexFilePurger {
 }
 
 impl IndexFilePurger {
+    pub(crate) fn purge_objects(&self, file_id: RegionFileId, objects: Vec<String>) {
+        self.purge(PurgeRequest {
+            file_id,
+            objects: Some(objects),
+        });
+    }
+
     pub(crate) fn purge(&self, request: PurgeRequest) {
         if let Err(error) = self.sender.send(request) {
             let store = self.store.clone();
@@ -87,17 +95,24 @@ pub(crate) async fn run_index_purge_task(
 }
 
 async fn purge_file(store: &ObjectStore, request: PurgeRequest) {
-    let path = series_index_path(request.file_id.region_id(), request.file_id.file_id());
-    match store.delete(&path).await {
-        Ok(()) => {
-            file_operation(IndexFileType::Series, "delete", "success");
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            file_operation(IndexFileType::Series, "delete", "success");
-        }
-        Err(error) => {
-            file_operation(IndexFileType::Series, "delete", "failure");
-            warn!(error; "Failed to delete series index, index_type: {}, path: {}, phase: deletion", IndexFileType::Series.as_str(), path);
+    let objects = request.objects.unwrap_or_else(|| {
+        vec![series_index_path(
+            request.file_id.region_id(),
+            request.file_id.file_id(),
+        )]
+    });
+    for path in objects {
+        match store.delete(&path).await {
+            Ok(()) => {
+                file_operation(IndexFileType::Series, "delete", "success");
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                file_operation(IndexFileType::Series, "delete", "success");
+            }
+            Err(error) => {
+                file_operation(IndexFileType::Series, "delete", "failure");
+                warn!(error; "Failed to delete series index, index_type: {}, path: {}, phase: deletion", IndexFileType::Series.as_str(), path);
+            }
         }
     }
 }
@@ -129,7 +144,10 @@ mod tests {
             let path = series_index_path(file_id.region_id(), file_id.file_id());
             store.write(&path, "index").await.unwrap();
             paths.push(path);
-            purger.purge(PurgeRequest { file_id });
+            purger.purge(PurgeRequest {
+                file_id,
+                objects: None,
+            });
         }
         drop(purger);
         tokio::time::timeout(
@@ -151,7 +169,10 @@ mod tests {
         let file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
         let path = series_index_path(file_id.region_id(), file_id.file_id());
         store.write(&path, "index").await.unwrap();
-        purger.purge(PurgeRequest { file_id });
+        purger.purge(PurgeRequest {
+            file_id,
+            objects: None,
+        });
         tokio::time::timeout(Duration::from_secs(10), async {
             while store.exists(&path).await.unwrap() {
                 tokio::task::yield_now().await;
