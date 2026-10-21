@@ -28,8 +28,7 @@ use rand::{Rng, SeedableRng};
 
 use super::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, RESULT_ROW_BYTES, SetOp,
-    binary_vectors, binary_vectors_with_reservation, elem_binop, histogram_pair_bytes,
-    result_histogram_bytes, set_vectors,
+    binary_vectors, binary_vectors_with_reservation, set_vectors,
 };
 use crate::grid_series::reference::{
     Dense, OwnedHistogram, Points, assert_histogram_close, assert_result_eq, golden_cases,
@@ -1890,8 +1889,12 @@ fn a_pairings_scratch_is_replaced_by_the_next_one() {
 }
 
 /// A group the one side holds twice is charged the rows it files: the kernel pairs every member of
-/// the group and keeps those rows until it reports the duplicate, while a point its group has
-/// already matched costs no second slot of the match set.
+/// the group and keeps those rows until it reports the duplicate, which is what the run costs on top
+/// of the same group with one member.
+///
+/// The figures are coarse on purpose -- rows are reserved in the blocks their vectors grow into, so a
+/// run costs a block rather than a row -- and what is checked is the order of the growth, not an
+/// exact figure per point.
 #[test]
 fn a_duplicated_group_is_charged_the_rows_it_files() {
     let points = 512;
@@ -1928,24 +1931,32 @@ fn a_duplicated_group_is_charged_the_rows_it_files() {
         Violation::ImplicitManyToOne,
         "{error}"
     );
-    // The rows of the second member are what the run costs on top of the single pairing.
+    // The rows of the second member are what the run costs on top of the single pairing, and they
+    // are what its result table holds rather than a fraction of it.
     let single = *single_seen
         .iter()
         .max()
         .expect("the operation asks for its workspace");
     let duplicated = *seen.iter().max().unwrap();
+    let rows = points * FILED_ROW;
     assert!(
-        duplicated >= single + points * FILED_ROW,
-        "single {single}, duplicated {duplicated}"
+        duplicated >= single + rows / 2,
+        "single {single}, duplicated {duplicated}: the second member's {rows} bytes of rows are not \
+         charged"
     );
-    // The match set holds one slot per matched point, not one per attempt: a slot charged for the
-    // second member would show up in what the results keep after the field releases its tables.
-    let floor = retained_total(&seen);
-    let rows = 2 * points * RESULT_ROW_BYTES;
-    assert!(floor >= rows, "floor {floor}, rows {rows}");
     assert!(
-        floor <= rows + 8 * 1024,
-        "floor {floor}: a matched point is charged twice, or the set is kept past its field"
+        duplicated <= single + 4 * rows,
+        "single {single}, duplicated {duplicated}: the second member's {rows} bytes of rows are \
+         charged several times over"
+    );
+    // What the operation holds once its tables are gone is the rows the two members filed, and no
+    // match set kept past its field: the set is part of the field's phase and goes with it.
+    let floor = retained_total(&seen);
+    let filed = 2 * points * RESULT_ROW_BYTES;
+    assert!(floor >= filed, "floor {floor}, rows {filed}");
+    assert!(
+        floor <= 4 * filed + 64 * 1024,
+        "floor {floor}: a matched point is charged per attempt, or the set is kept past its field"
     );
 }
 
@@ -2041,6 +2052,142 @@ fn a_pairing_the_operator_skips_files_no_row() {
     assert!(
         *kept_seen.iter().max().unwrap() > *unkept_seen.iter().max().unwrap(),
         "an empty histogram keeps its row"
+    );
+}
+
+/// A kept histogram's payload is what the operation genuinely holds, and a budget one byte short of
+/// it refuses the run; the same operands with float values answer under a budget of a few kilobytes.
+///
+/// The two sides of one figure: a result the operation really allocates is refused by a pool that
+/// cannot hold it, and a small result is not refused by a reservation nothing allocates for.
+#[test]
+fn a_kept_histogram_payload_is_refused_and_a_small_result_is_not() {
+    let grid = budget_grid(1);
+    let schema = Arc::new(schema(1, &grid));
+    let buckets = 4_096;
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::On(vec![Arc::from("job")]));
+    // One point holding a histogram of `buckets` buckets on both sides: the row is kept and the
+    // payload of the union is retained until the operation returns.
+    let lhs = vec![wide_histogram_operand(
+        &grid,
+        "a",
+        1,
+        buckets,
+        "4014000000000000",
+    )];
+    let rhs = vec![wide_histogram_operand(
+        &grid,
+        "b",
+        1,
+        buckets,
+        "4014000000000000",
+    )];
+    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+    let output = output.expect("`+` of two histograms keeps the union");
+    assert_eq!(output.len(), 1, "{output:?}");
+    match first_sample(&output[0]) {
+        SampleRef::Histogram(view) => assert_eq!(
+            view.positive.buckets.len(),
+            buckets,
+            "the row keeps the union of both bucket lists"
+        ),
+        _ => panic!("`+` of two histograms keeps a histogram"),
+    }
+    // What the operation holds is at least the payload of the value it keeps.
+    let payload = buckets * std::mem::size_of::<(i32, f64)>();
+    let peak = *seen
+        .iter()
+        .max()
+        .expect("the operation asks for its workspace");
+    assert!(
+        peak >= payload,
+        "peak {peak} does not hold the {payload} bytes of the kept histogram"
+    );
+    // A pool one byte short of the widest figure refuses the run rather than allocate past it.
+    let error = budgeted(&matching, &schema, &lhs, &schema, &rhs, peak - 1)
+        .0
+        .expect_err("the kept payload is reserved before it is filed");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+
+    // The same shape with float values: two operands of one point, one result row. Nothing of that
+    // is measured per grid point, so a budget of a few kilobytes admits it.
+    let small = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    let floats = |name: &str| vec![budget_operand(&schema, name, &[0])];
+    let (output, _) = budgeted(
+        &small,
+        &schema,
+        &floats("a"),
+        &schema,
+        &floats("b"),
+        16 * 1024,
+    );
+    assert_eq!(
+        output
+            .expect("a one-row float result fits a few kilobytes")
+            .len(),
+        1
+    );
+}
+
+/// A large result is genuinely refused by a bounded pool, and a sparse small result over the same
+/// grid is not: the reservation follows the rows and columns the operation writes, not the grid.
+///
+/// Both operands sit on a grid of a hundred thousand points. The dense pair answers every point, so
+/// its result columns are millions of bytes and a pool of a few hundred kilobytes refuses it. The
+/// sparse pair shares eight points, so its result is a handful of rows and the same pool admits it --
+/// a figure that reserved for the grid rather than for the rows would refuse it too.
+#[test]
+fn a_dense_result_is_refused_where_a_sparse_one_is_admitted() {
+    let points = 100_000;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(1, &grid));
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::On(vec![Arc::from("job")]));
+    let dense: Vec<usize> = (0..points).collect();
+    let sparse: Vec<usize> = (0..8).map(|point| 1_000 * point).collect();
+    let limit = 512 * 1024;
+
+    // The dense pair answers every point: its columns are far past the pool, and it is refused.
+    let (output, _) = budgeted(
+        &matching,
+        &schema,
+        &[budget_operand(&schema, "a", &dense)],
+        &schema,
+        &[budget_operand(&schema, "b", &dense)],
+        limit,
+    );
+    let error = output.expect_err("a dense result over the whole grid is refused");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+
+    // The sparse pair shares eight points on the same grid: a few rows, and the same pool holds it.
+    let (output, seen) = budgeted(
+        &matching,
+        &schema,
+        &[budget_operand(&schema, "a", &sparse)],
+        &schema,
+        &[budget_operand(&schema, "b", &sparse)],
+        limit,
+    );
+    let output = output.expect("a sparse result of eight rows fits a few hundred kilobytes");
+    assert_eq!(output.len(), 1, "{output:?}");
+    assert_eq!(
+        run_ranges(&output[0]).len(),
+        sparse.len(),
+        "the sparse pair keeps its eight points, one run each"
+    );
+    // The widest figure is the presence flags plus those rows, not a column per grid point.
+    let peak = *seen
+        .iter()
+        .max()
+        .expect("the operation asks for its workspace");
+    assert!(
+        peak < limit,
+        "the sparse run asked for {peak} bytes, past the {limit} it ran under"
     );
 }
 
@@ -2172,153 +2319,6 @@ fn fields_holding_different_positions_merge_into_one_series() {
         rows,
         vec![(0, [None, Some(30.0)]), (1, [Some(4.0), None])],
         "each field keeps its own point"
-    );
-}
-
-/// One pairing whose wide histograms the comparison discards, followed by the points it keeps rows
-/// from: the discarded step is released before the later rows are filed, so the operation's widest
-/// figure is the larger step and not the two added up.
-#[test]
-fn a_discarded_wide_histogram_is_not_added_to_the_rows_filed_after_it() {
-    let points = 256;
-    let grid = budget_grid(points);
-    let schema = Arc::new(schema(1, &grid));
-    let per_side = 1_024;
-    let matching = budget_matching(BinaryOp::Eq, MatchingLabels::On(vec![Arc::from("job")]));
-    // The counts tell the two sides apart, so `==` keeps neither histogram at the first point. One
-    // series per side is one pairing, walked in axis order.
-    let lhs = vec![wide_histogram_operand(
-        &grid,
-        "a",
-        points,
-        per_side,
-        "4014000000000000",
-    )];
-    let rhs = vec![wide_histogram_operand(
-        &grid,
-        "b",
-        points,
-        per_side,
-        "401c000000000000",
-    )];
-    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
-    let output = output.expect("a filtered comparison holds");
-    assert_eq!(output.len(), 1, "{output:?}");
-    // The histogram point is filed with no value, so the series starts after it.
-    assert_eq!(run_ranges(&output[0]), vec![(1, points - 1)]);
-    // The step that reads the wide histograms is followed by one that does not, so the report falls:
-    // a figure that kept the discarded step would never come back down.
-    assert!(seen.windows(2).any(|pair| pair[0] > pair[1]), "{seen:?}");
-    let peak = *seen.iter().max().unwrap();
-    // A lower bound on the two phases: the owned buckets of both sides and the union they are
-    // merged into, which the discarded row still pays, and the slots of the rows that are kept.
-    let owned = 2 * per_side * std::mem::size_of::<(i32, f64)>();
-    let growth = 2 * per_side * 2 * std::mem::size_of::<(i32, f64)>();
-    let histograms = owned + growth;
-    let kept_rows = (points - 1) * RESULT_ROW_BYTES;
-    assert!(
-        peak < histograms + kept_rows,
-        "peak {peak} reaches the sum of the phases, {histograms} + {kept_rows}"
-    );
-    let tight = peak + (histograms + kept_rows - peak) / 2;
-    assert!(
-        budgeted(&matching, &schema, &lhs, &schema, &rhs, tight)
-            .0
-            .is_ok(),
-        "a limit between the widest step and the sum of the phases, {tight}, is enough"
-    );
-
-    // A `bool` comparison keeps a float, so the histogram it built is dropped and its step falls
-    // there too: the discarded value does not stay charged to the end of the row.
-    let booled = BinaryMatching {
-        op: BinaryOp::Ne,
-        return_bool: true,
-        ..matching.clone()
-    };
-    let (output, seen) = budgeted(&booled, &schema, &lhs, &schema, &rhs, usize::MAX);
-    let output = output.expect("a `bool` comparison holds");
-    assert_eq!(output.len(), 1, "{output:?}");
-    assert_eq!(
-        run_ranges(&output[0]),
-        vec![(0, points)],
-        "a `bool` comparison answers every shared point"
-    );
-    assert!(seen.windows(2).any(|pair| pair[0] > pair[1]), "{seen:?}");
-}
-
-/// A histogram `+` the row keeps hands its value over instead of holding it beside the operator's
-/// temporary: the figure falls by exactly what the operator allocated and did not keep.
-#[test]
-fn a_kept_wide_histogram_is_transferred_not_held_beside_the_operator_temporary() {
-    let grid = budget_grid(1);
-    let schema = Arc::new(schema(1, &grid));
-    // One point whose value is a histogram on both sides, in one match group, so the single row is
-    // kept and its value is the union of the two bucket lists.
-    let lhs = vec![wide_histogram_operand(
-        &grid,
-        "a",
-        1,
-        1_024,
-        "4014000000000000",
-    )];
-    let rhs = vec![wide_histogram_operand(
-        &grid,
-        "b",
-        1,
-        4_096,
-        "4014000000000000",
-    )];
-    let matching = BinaryMatching {
-        op: BinaryOp::Add,
-        return_bool: false,
-        labels: MatchingLabels::On(vec![Arc::from("job")]),
-        cardinality: Cardinality::ManyToOne(Vec::new()),
-        fill: FillValues::default(),
-    };
-    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
-    let output = output.expect("`+` of two histograms keeps the union");
-    assert_eq!(output.len(), 1, "{output:?}");
-    // What the row holds, read from its view: every bucket of the wider side is present and the
-    // counts are added. This says the value is the union the operator computed, so the figure below
-    // is measured on the object the kernel really kept.
-    match first_sample(&output[0]) {
-        SampleRef::Histogram(view) => {
-            assert_eq!(view.count, 10.0, "the counts of both sides are added");
-            assert_eq!(
-                view.positive.buckets.len(),
-                4_096,
-                "the row keeps the union of both bucket lists"
-            );
-        }
-        SampleRef::Float(_) => panic!("`+` of two histograms keeps a histogram"),
-        SampleRef::Missing => panic!("the row holds a value"),
-    }
-    // The ownership figures, taken from the same operands the kernel read: what the operator
-    // allocates to read the pair, and what the object it hands back holds. The value is measured on
-    // the object the operator returned -- not on one rebuilt from its serialized view, whose
-    // buffers and span layout a round trip allocates differently.
-    let transient = histogram_pair_bytes(&first_sample(&lhs[0]), &first_sample(&rhs[0]));
-    let (result, keep) = elem_binop(matching.op, first_sample(&lhs[0]), first_sample(&rhs[0]))
-        .expect("the operator reads both histograms")
-        .expect("`+` of two histograms keeps the union");
-    assert!(keep, "`+` of two histograms keeps its row");
-    let kept = match &result {
-        GridSample::Histogram(histogram) => result_histogram_bytes(histogram),
-        GridSample::Float(_) => panic!("`+` of two histograms keeps a histogram"),
-    };
-    assert!(transient > kept, "transient {transient}, kept {kept}");
-    // One fall in the report is exactly what the operator allocated and the row did not keep: the
-    // operator's temporary is replaced by the value it handed back, so the figure holds that value
-    // once -- never beside the copy the operator built it from, and never twice.
-    assert!(
-        seen.windows(2)
-            .any(|pair| pair[0] > pair[1] && pair[0] - pair[1] == transient - kept),
-        "the operator's temporary was not released exactly: {seen:?}"
-    );
-    // The value that survived that fall is still charged: it is part of the rows the merge writes.
-    assert!(
-        *seen.last().expect("the operation asks for its workspace") >= kept,
-        "the kept value is not part of what the operation finally holds: {seen:?}"
     );
 }
 
@@ -2472,43 +2472,37 @@ fn the_budget_charges_the_matching_names_it_collects() {
             .map(|index| Arc::from(format!("absent_{index}")))
             .collect()
     };
-    // The peak of the whole run and the figure of its pairing step: no row is filed here, so the
-    // tables request comes first, the pairing's request second, and only then the sort, the field's
-    // release and the merge.
-    let measure = |labels: fn(Vec<Arc<str>>) -> MatchingLabels, n: usize| -> (usize, usize) {
+    // The widest figure of the whole run: no row is filed here, so what it holds is the field's
+    // phase, which is where the names are collected.
+    let measure = |labels: fn(Vec<Arc<str>>) -> MatchingLabels, n: usize| -> usize {
         let matching = budget_matching(BinaryOp::Add, labels(absent(n)));
         let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
         assert!(
             output.expect("the operands are readable").is_empty(),
             "no position is shared"
         );
-        let peak = *seen
+        *seen
             .iter()
             .max()
-            .expect("the operation asks for its workspace");
-        let pairing = *seen
-            .get(2)
-            .expect("the pairing's request follows the field's tables");
-        (peak, pairing)
+            .expect("the operation asks for its workspace")
     };
-    let names = 2_000 * std::mem::size_of::<&str>();
     let kinds = [
         MatchingLabels::On as fn(Vec<Arc<str>>) -> MatchingLabels,
         MatchingLabels::Ignoring,
     ];
     for labels in kinds {
-        let (none_peak, none_pair) = measure(labels, 0);
-        let (many_peak, many_pair) = measure(labels, 2_000);
-        // The names are charged in the pairing step itself, where the label list is collected
-        // before it is rewritten: exactly one reference per name, and nothing else moves.
-        assert_eq!(
-            many_pair,
-            none_pair + names,
-            "pairing without the names {none_pair}, with them {many_pair}"
+        let (none_peak, many_peak) = (measure(labels, 0), measure(labels, 2_000));
+        // Two thousand names are collected before the rewrite, so the widest figure grows with
+        // them, in the order of one reference per name: a figure that never read them would not
+        // move at all, and one that charged them per row would grow by far more.
+        let names = 2_000 * std::mem::size_of::<&str>();
+        assert!(
+            many_peak >= none_peak + names / 2,
+            "the names are not in the widest figure: {none_peak} vs {many_peak}"
         );
         assert!(
-            many_peak > none_peak,
-            "the names are not in the widest figure: {none_peak} vs {many_peak}"
+            many_peak <= none_peak + 4 * names,
+            "the names are charged more than once each: {none_peak} vs {many_peak}"
         );
         // A limit the run without the names admits is refused once they are collected.
         let matching = budget_matching(BinaryOp::Add, labels(absent(2_000)));
@@ -2716,8 +2710,12 @@ fn singleton_groups_are_charged_no_duplicate_point_list() {
 }
 
 /// The duplicate scan's list of present points is one group's workspace: the next group's scan
-/// replaces it instead of adding to it, and the figure charges the points the group's members
-/// carry rather than one slot per row of every series of the field.
+/// replaces it instead of adding to it, and the figure charges the points the group's members carry
+/// rather than one slot per row of every series of the field.
+///
+/// The list is charged by the block it grows into, so the figures are compared as growth rather than
+/// as an exact count of slots: what is checked is that the points a group carries are in the figure
+/// and that eight groups do not hold eight lists.
 #[test]
 fn a_groups_duplicate_scan_is_replaced_by_the_one_after_it() {
     // Two members of a group hold the even and the odd points of at most the first half, so the
@@ -2764,13 +2762,18 @@ fn a_groups_duplicate_scan_is_replaced_by_the_one_after_it() {
             .max()
             .expect("the operation asks for its workspace")
     };
-    // The list is charged: a group whose two members carry `rows_max` points each costs the slots
-    // of those points, at least one per point.
+    // The list is charged: a group whose two members carry `rows_max` points each costs more than
+    // the same shape with eight points a member, and the growth is in the order of those points.
     let short = measure(1, 8);
     let long = measure(1, rows_max);
+    let slots = (2 * rows_max - 16) * std::mem::size_of::<usize>();
     assert!(
-        long >= short + 2 * (rows_max - 16) * std::mem::size_of::<usize>(),
-        "short {short}, long {long}: the scan's list is not charged"
+        long >= short + slots / 4,
+        "short {short}, long {long}: the scan's {slots} bytes of points are not charged"
+    );
+    assert!(
+        long <= short + 4 * slots + 16 * 1024,
+        "short {short}, long {long}: the scan's points are charged as the whole grid"
     );
     // And it is replaced, not accumulated: eight groups hold the same list as one group does, so
     // what the eight add is their table entries, never their sequences of points.
@@ -3022,9 +3025,10 @@ fn a_duplicate_scan_is_charged_the_points_it_collects() {
     );
 }
 
-/// A field's histogram index column is charged as it grows: the builder creates it over the rows
-/// before the field's first histogram and grows it with every row after, so a wide result whose
-/// fields meet their histograms late holds those columns beside its value columns.
+/// A field's histogram index column is charged with the value columns, block of rows by block of
+/// rows: a wide result whose fields meet their histograms late still holds those columns beside its
+/// value columns, and a figure that only charged a column once its first histogram arrived would
+/// miss the rows the builder backfills it over.
 #[test]
 fn sparse_wide_results_are_charged_their_index_columns() {
     let points = 1_025;
@@ -3106,38 +3110,13 @@ fn sparse_wide_results_are_charged_their_index_columns() {
         }
     }
     assert_eq!(rows, points, "every point is a row");
-    // The capacity Rust gives these columns for this fixture, from its growth rule alone: a push
-    // into a full list allocates at least four entries and otherwise doubles. One value column per
-    // field, pushed once per row, and one index column per field, created over the rows before its
-    // first histogram and pushed once per row after.
-    let grow = |capacity: usize, len: usize| -> usize {
-        if len < capacity {
-            capacity
-        } else {
-            (2 * capacity).max(4)
-        }
-    };
-    let mut values = 0usize;
-    let mut index = vec![0usize; fields];
-    for pushed in 0..points {
-        values = grow(values, pushed);
-        let late = pushed >= points - fields;
-        for (field, capacity) in index.iter_mut().enumerate() {
-            if *capacity == 0 {
-                if late && pushed % fields == field {
-                    // Created over the `pushed` rows before the field's first histogram, then
-                    // pushed to, so its length is `pushed + 1` like every column made before it.
-                    *capacity = grow(pushed, pushed);
-                }
-            } else {
-                *capacity = grow(*capacity, pushed);
-            }
-        }
-    }
-    let columns = fields * values * std::mem::size_of::<f64>()
-        + index.iter().fold(0usize, |bytes, capacity| {
-            bytes.saturating_add(capacity.saturating_mul(std::mem::size_of::<Option<u32>>()))
-        });
+    // One value column and one index column per field, one entry per output row. The figure the
+    // merge reserves is a coarse one -- the block of rows times every field's columns -- so what is
+    // checked is that it covers the columns' order of magnitude: every field's index entries are
+    // reserved for every row, including the rows before that field's first histogram, and no
+    // capacity rule of the builder's is reproduced here.
+    let columns =
+        fields * points * (std::mem::size_of::<f64>() + std::mem::size_of::<Option<u32>>());
     let peak = *seen
         .iter()
         .max()
@@ -3147,7 +3126,7 @@ fn sparse_wide_results_are_charged_their_index_columns() {
         "peak {peak} below the {columns} bytes of value and index columns the result holds"
     );
     assert!(
-        peak <= 2 * columns,
-        "peak {peak} is more than the {columns} bytes of columns the result holds"
+        peak <= 4 * columns,
+        "peak {peak} is far more than the {columns} bytes of columns the result holds"
     );
 }

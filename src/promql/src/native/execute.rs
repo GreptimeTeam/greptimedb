@@ -1240,11 +1240,20 @@ struct BinaryOperand {
 impl BinaryOperand {
     /// The bytes `chunk` would add to what this operand holds, read without retaining it.
     ///
-    /// It is what [`Self::enqueue`] adds for the same chunk: what the chunk holds on its own and the
-    /// room a chunk that closes its series needs in the boundary list. The figure is what a caller
-    /// reserves before it retains the chunk, so the pool admits it before the operand holds it.
+    /// It is what [`Self::enqueue`] adds for the same chunk: what the chunk holds on its own, and the
+    /// one entry a chunk that closes its series records in the boundary list. The boundary list holds
+    /// one `usize` per closed series and is charged one entry at a time as it is written, rather than
+    /// from the capacity it grows to -- following that `Vec`'s first-four-then-double policy would be
+    /// a second copy of it to keep in step, and one entry within a factor of two is the granularity
+    /// the accounting aims at. The figure is what a caller reserves before it retains the chunk, so
+    /// the pool admits it before the operand holds it.
     fn pending(&self, chunk: &EvaluatedChunk) -> usize {
-        operand_chunk_bytes(&chunk.series).saturating_add(self.ends_growth(chunk.is_last))
+        let end = if chunk.is_last {
+            std::mem::size_of::<usize>()
+        } else {
+            0
+        };
+        operand_chunk_bytes(&chunk.series).saturating_add(end)
     }
 
     /// Retains one chunk, folding the estimate it is charged with into what the operand holds.
@@ -1254,27 +1263,16 @@ impl BinaryOperand {
         // in it: an end is charged for before it exists, the same figure `pending` reported.
         self.held = self
             .held
-            .saturating_add(self.ends_growth(closing))
+            .saturating_add(if closing {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            })
             .saturating_add(operand_chunk_bytes(&chunk.series));
         self.series.push(chunk.series);
         if closing {
             self.ends.push(self.series.len());
         }
-    }
-
-    /// The bytes the boundary list grows by when a chunk that ends its series `closing` is recorded
-    /// in it.
-    ///
-    /// The list holds one `usize` per closed logical series and grows by doubling from a first
-    /// allocation of four entries, so a record costs nothing while the capacity it has holds it and
-    /// otherwise costs the new capacity.
-    fn ends_growth(&self, closing: bool) -> usize {
-        let needed = self.ends.len() + 1;
-        if !closing || needed <= self.ends.capacity() {
-            return 0;
-        }
-        let capacity = (2 * self.ends.capacity()).max(4).max(needed);
-        (capacity - self.ends.capacity()) * std::mem::size_of::<usize>()
     }
 
     /// The chunk ranges of the logical series this operand closed, in arrival order.
@@ -1289,38 +1287,35 @@ impl BinaryOperand {
         })
     }
 
-    /// The bytes assembling this operand's chunks into logical series allocates, before it does.
+    /// The bytes assembling this operand's chunks into logical series allocate, before they do.
     ///
     /// One series per closed logical series, on `schema`'s grid, and nothing that copies a sample:
     /// the descriptors the chunks' fields are made of are collected and shared. What is counted is
-    /// therefore metadata only, and every term is what the work holds at its peak: the entry in the
-    /// assembled vector, the field list of the series ([`SeriesFields`] takes a one-field list out of
-    /// its vector and boxes a wider one, so neither copies), and the exactly sized vector
-    /// [`Self::assemble`] collects a field's chunk descriptors into.
+    /// therefore metadata only, and it is a rough figure per field, per segment and per run rather
+    /// than a model of the containers the work builds:
     ///
-    /// A field's descriptors then go through [`Samples::try_from_chunks`], which copies them into a
-    /// vector that grows by doubling -- so it ends at no more than twice the segments it holds, and
-    /// starts from the four slots such a `Vec` allocates first -- and then into the `Arc<[Samples]>`
-    /// it returns, which holds one slot per segment while that vector is still alive. Three slots
-    /// per segment and the four-slot floor cover the two together, and the floor is also what pays
-    /// for the empty result an all-empty field is replaced with.
+    /// - per series, the assembled entry and the field list ([`SeriesFields`] takes a one-field list
+    ///   out of its vector and boxes a wider one, so neither copies);
+    /// - per chunk and field, the descriptor collected out of it;
+    /// - per segment, three descriptors: the one the flatten copies out, the slot the `Arc<[Samples]>`
+    ///   it is copied into holds, and the doubling of the vector it is copied out of;
+    /// - per run the boundary covers, the span [`Self::assemble`] collects and the span and
+    ///   row-offset arrays [`TimeAxis::from_grid_spans`] copies them into.
     ///
-    /// The axis adds the runs the boundary covers, collected into an exactly sized vector, and, from
-    /// two runs on, the span and row-offset arrays [`TimeAxis::from_grid_spans`] copies them into
-    /// while the vectors they came from are alive; a single run becomes a [`GridRange`] and
-    /// allocates neither.
+    /// No term follows how a `Vec` happens to grow -- there is no branch on a capacity here and no
+    /// first-allocation floor -- so a change to the flatten's growth policy cannot make this figure
+    /// wrong. What it is instead is a rough per-field, per-segment and per-run estimate, within a
+    /// small factor of what the assembly holds at its peak, which is the granularity a reservation
+    /// is made at.
     fn assembly_bytes(&self, schema: &SeriesSchema) -> Option<usize> {
         let samples = std::mem::size_of::<Samples>();
         let grids = std::mem::size_of::<GridSpan>();
         let width = schema.fields.len();
-        // The slots a first push allocates, which is the floor every growth of the flatten starts
-        // from: `Vec` grows a non-zero capacity to at least this many elements.
-        let vec_floor = 4usize;
         let mut bytes = 0usize;
         for boundary in self.boundaries() {
             let chunks = &self.series[boundary];
-            // The runs the boundary covers, and the dense segments its fields hold: a chunk's field
-            // can itself be chunked, and flattening it copies one descriptor per segment.
+            // The runs the boundary covers, and the segments its fields hold: a chunk's field can
+            // itself be chunked, and flattening it copies one descriptor per segment.
             let mut runs = 0usize;
             let mut segments = 0usize;
             for chunk in chunks {
@@ -1329,25 +1324,25 @@ impl BinaryOperand {
                     segments = segments.checked_add(field.segments().len())?;
                 }
             }
-            // Per field: the chunks collected into one vector, and the three slots per segment plus
-            // the four-slot floor that the flatten and the `Arc` it is copied into need together.
+            // The descriptors of a field's chunks, the flatten's descriptors and the `Arc` they are
+            // copied into; a field with no segment still builds an empty `Samples`, which is one
+            // descriptor.
             let descriptors = chunks
                 .len()
                 .checked_mul(width)?
-                .checked_add(segments.checked_mul(3)?)?
-                .checked_add(width.checked_mul(vec_floor)?)?;
-            let collected = runs.checked_mul(grids)?;
-            let ranges = if runs > 1 {
-                runs.checked_mul(grids.checked_add(std::mem::size_of::<usize>())?)?
-            } else {
-                0
-            };
+                .checked_add(segments.checked_mul(3)?.checked_add(width)?)?;
+            // The axis: the spans collected, and the span and offset arrays a run layout copies
+            // them into.
+            let axis = runs.checked_mul(
+                grids
+                    .checked_mul(2)?
+                    .checked_add(std::mem::size_of::<usize>())?,
+            )?;
             bytes = bytes
                 .checked_add(std::mem::size_of::<Series>())?
                 .checked_add(width.checked_mul(samples)?)?
                 .checked_add(descriptors.checked_mul(samples)?)?
-                .checked_add(collected)?
-                .checked_add(ranges)?;
+                .checked_add(axis)?;
         }
         Some(bytes)
     }
@@ -1581,10 +1576,12 @@ impl BinaryRuntime {
     /// otherwise be a candidate per chunk on its own side and be paired with every candidate of the
     /// other, which is quadratic in the chunk count of one series rather than in the series count.
     ///
-    /// The kernel requests a conservative live-workspace budget before allocating its matching
-    /// tables, per-point presence arrays and results. The reservation covers the retained chunks,
-    /// the assembled series the kernel reads and that workspace, and resizes as temporary storage is
-    /// released. It keeps covering the returned results until the caller queues them.
+    /// The reservation covers the retained chunks, the assembled series the kernel reads and the
+    /// kernel's own live workspace, and it is what the pool admits before each of them allocates.
+    /// The kernel reports that workspace coarsely -- where a long-lived result buffer grows, once per
+    /// phase of its walk, and in the blocks a growing output buffer is reserved in -- rather than per
+    /// grid point, and the total is resized as a phase's storage is released. It keeps covering the
+    /// returned results until the caller queues them.
     fn compute(&mut self, path: &NodePath, buffer: &mut NodeBuffer) -> Result<Option<Vec<Series>>> {
         // The kernel reads the operands once and drops them, so a second call has nothing to read
         // and nothing left to produce: what it produced the first time is in the node's queue, and

@@ -4794,10 +4794,10 @@ fn a_binary_operand_reserves_what_it_retains() {
     let second =
         evaluated_array_chunk_of(&schema, metric(), 20_000, batch.slice(20_000, 20_000), true);
 
-    // What each chunk holds on its own, and the room the closing chunk's end takes in the operand's
-    // boundary list -- the list is storage the operand keeps, and its first end allocates room for
-    // four.
-    let boundaries = 4 * std::mem::size_of::<usize>();
+    // What each chunk holds on its own, and the entry the closing chunk records in the operand's
+    // boundary list -- the list is storage the operand keeps, and it is charged one entry per closed
+    // series as it is written.
+    let boundaries = std::mem::size_of::<usize>();
     let (first_alone, second_alone) = (
         operand_chunk_bytes(&first.series),
         operand_chunk_bytes(&second.series),
@@ -4836,8 +4836,7 @@ fn a_binary_operand_reserves_what_it_retains() {
     assert_eq!(pool.reserved(), held);
 
     // The figure a caller reserves for before retaining a chunk is the one the operand grows by: the
-    // estimate of the series it carries. The boundary list already has room for its end, so nothing
-    // of that is added.
+    // estimate of the series it carries and the one entry the chunk's end records.
     let own = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
     assert_eq!(
         runtime
@@ -4846,7 +4845,7 @@ fn a_binary_operand_reserves_what_it_retains() {
             .unwrap()
             .pending(&NodePath::root(), 0, &own)
             .unwrap(),
-        operand_chunk_bytes(&own.series),
+        operand_chunk_bytes(&own.series) + std::mem::size_of::<usize>(),
         "the figure reserved for a chunk is not what the operand grows by"
     );
 
@@ -4897,8 +4896,8 @@ fn a_binary_beneath_the_executor_reserves_what_it_retains() {
     let second =
         evaluated_array_chunk_of(&schema, metric(), 2_000, batch.slice(2_000, 2_000), true);
     // What the left operand holds once both chunks are retained: what each chunk holds on its own,
-    // and the boundary list the closing chunk adds its end to.
-    let retained = 4 * std::mem::size_of::<usize>()
+    // and the boundary list the closing chunk adds one entry to.
+    let retained = std::mem::size_of::<usize>()
         + [&first, &second]
             .iter()
             .map(|chunk| operand_chunk_bytes(&chunk.series))
