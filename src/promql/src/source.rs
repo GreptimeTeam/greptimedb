@@ -23,6 +23,7 @@ use std::task::{Context, Poll};
 use common_error::ext::BoxedError;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
@@ -31,17 +32,20 @@ use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSerie
 
 pub use merge::merge_ordered_raw_series;
 
-/// Materializes complete metric labels from a scan-bound raw-series source.
+/// Materializes complete metric labels from a raw-series frame stream.
 ///
-/// The caller supplies an already-bound source. Adjacent-chunk pack/unpack validation remains
-/// the caller's responsibility, and nonadjacent key recurrence is governed by the producer
-/// contract. Explicit labels are retained as supplied; their completeness cannot be inferred
-/// from the schema. No authorization or cross-stream completion is performed here.
+/// The labels are decoded from the stream's own label decode description, so a consumer that holds
+/// only the frame needs no scan-bound binding; a stream that carries complete labels already, and
+/// so declares no description, needs no decoder and is forwarded as supplied. Adjacent-chunk
+/// pack/unpack validation remains the caller's responsibility, and nonadjacent key recurrence is
+/// governed by the producer contract. Explicit labels are retained as supplied; their completeness
+/// cannot be inferred from the schema. No authorization or cross-stream completion is performed
+/// here.
 pub fn materialize_raw_labels(
     source: SendableRawSeriesStream,
 ) -> Result<SendableRawSeriesStream, BoxedError> {
     let schema = Arc::clone(source.schema());
-    let label_source = source.label_source().clone();
+    let decode = source.label_decode_spec().cloned();
     let ordering = source.ordering();
     if schema.eval_grid.is_some() {
         return Err(BoxedError::new(
@@ -59,12 +63,12 @@ pub fn materialize_raw_labels(
             .build(),
         ));
     }
-    let decoder = match &label_source {
-        RawLabelSource::PrimaryKey { .. } => Some(
-            PrimaryKeyLabelDecoder::new(&label_source, LabelProjection::All)
+    let decoder = match &decode {
+        Some(description) => Some(
+            PrimaryKeyLabelDecoder::from_decode_spec(description, LabelProjection::All)
                 .map_err(BoxedError::new)?,
         ),
-        RawLabelSource::Explicit => None,
+        None => None,
     };
 
     Ok(Box::pin(MaterializedRawSeriesStream {
@@ -125,6 +129,12 @@ impl RawSeriesStream for MaterializedRawSeriesStream {
         &self.label_source
     }
 
+    /// Returns `None`: materialized labels are already complete, so this stream declares no label
+    /// decode description and a consumer needs no decoder.
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        None
+    }
+
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
     }
@@ -150,10 +160,18 @@ impl MaterializedRawSeriesStream {
                 }
             }
             (None, Some(metric)) => Some(metric),
-            _ => {
+            (Some(_), Some(_)) => {
                 return Err(BoxedError::new(
                     InvalidSeriesSnafu {
-                        reason: "raw chunk label mode does not match source",
+                        reason: "raw chunk already carries labels but the source describes a key",
+                    }
+                    .build(),
+                ));
+            }
+            (None, None) => {
+                return Err(BoxedError::new(
+                    InvalidSeriesSnafu {
+                        reason: "raw chunk carries no labels and the source describes no key",
                     }
                     .build(),
                 ));

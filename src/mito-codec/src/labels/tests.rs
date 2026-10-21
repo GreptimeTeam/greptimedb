@@ -209,7 +209,7 @@ fn dense_and_sparse_decode_complete_or_projected_labels() {
 }
 
 #[test]
-fn projection_is_bound_to_snapshot_and_distinguishes_missing_and_empty() {
+fn projection_snapshots_its_layout_and_distinguishes_missing_and_empty() {
     let original = metadata(
         &[
             (21, "old", ConcreteDataType::string_datatype()),
@@ -250,7 +250,10 @@ fn projection_is_bound_to_snapshot_and_distinguishes_missing_and_empty() {
     let mut all = PrimaryKeyLabelDecoder::new(&old_source, LabelProjection::All).unwrap();
     drop(old_source);
     drop(original);
-    assert!(weak_metadata.upgrade().is_some());
+    assert!(
+        weak_metadata.upgrade().is_none(),
+        "the decoder keeps its own key layout (ids, positions, types), not the region metadata"
+    );
     assert_eq!(
         decoder.decode(&key).unwrap(),
         DecodedLabels::Projected(vec![Label {
@@ -600,4 +603,110 @@ fn dense_typed_values_keep_exact_integer_string_representation() {
         Value::Int64(9_007_199_254_740_993).to_string(),
         "9007199254740993"
     );
+}
+
+/// One field is enough: the frame schema only carries ordered payload fields and metadata.
+fn frame_series_schema() -> Arc<datatypes::series::samples::SeriesSchema> {
+    Arc::new(datatypes::series::samples::SeriesSchema {
+        fields: vec![datatypes::series::samples::FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: None,
+    })
+}
+
+/// A key-encoded frame's schema describes its own labels: recovering the description from the
+/// schema and decoding with it matches decoding with the original bound source, for both primary
+/// key encodings and both projections.
+#[test]
+fn frame_label_decode_description_decodes_like_the_bound_source() {
+    for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+        let bound = source(
+            string_metadata(encoding),
+            "requests_total",
+            &[(8, "zeta"), (41, "alpha")],
+        );
+        let description = common_query::series_frame::label_decode_spec(&bound)
+            .expect("a primary-key binding describes its key layout");
+        let frame_schema = datatypes::series::frame::raw_series_frame_schema_with_label_decode(
+            &frame_series_schema(),
+            datatypes::series::frame::RawLabelMode::Key,
+            Some(&description),
+        )
+        .unwrap();
+        let recovered = datatypes::series::frame::raw_series_frame_label_decode(&frame_schema)
+            .unwrap()
+            .expect("the frame declares its decode description");
+        assert_eq!(recovered, description);
+
+        let key = encoded(encoding, &values());
+        for projection in [
+            LabelProjection::All,
+            LabelProjection::Only(Arc::from([Arc::<str>::from("alpha")])),
+            LabelProjection::Only(Arc::from([])),
+        ] {
+            let mut direct = PrimaryKeyLabelDecoder::new(&bound, projection.clone()).unwrap();
+            let mut from_frame =
+                PrimaryKeyLabelDecoder::from_decode_spec(&recovered, projection).unwrap();
+            assert_eq!(
+                from_frame.decode(&key).unwrap(),
+                direct.decode(&key).unwrap()
+            );
+        }
+    }
+}
+
+/// A description this revision cannot honour is rejected when a decoder is bound, not decoded
+/// best-effort.
+#[test]
+fn frame_label_decode_description_rejects_unsupported_version() {
+    let bound = source(
+        string_metadata(PrimaryKeyEncoding::Dense),
+        "requests_total",
+        &[(8, "zeta")],
+    );
+    let description = common_query::series_frame::label_decode_spec(&bound).unwrap();
+    let mut future = description.clone();
+    future.version += 1;
+    assert!(PrimaryKeyLabelDecoder::from_decode_spec(&future, LabelProjection::All).is_err());
+
+    // The description must list the column a logical tag reads.
+    let mut unbound = description;
+    unbound.primary_key.retain(|column| column.column_id != 8);
+    assert!(PrimaryKeyLabelDecoder::from_decode_spec(&unbound, LabelProjection::All).is_err());
+}
+
+/// A primary-key column that is not a `Tag` column is rejected when a decoder is bound, because the
+/// layout records no per-column role and decodes every listed key column as a tag.
+///
+/// `RegionMetadata::validate` rejects such metadata, so this snapshot is built without validation to
+/// exercise the check the decoder performs itself.
+#[test]
+fn binding_rejects_a_primary_key_column_that_is_not_a_tag() {
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(7, 1));
+    builder.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
+        semantic_type: SemanticType::Timestamp,
+        column_id: 0,
+    });
+    builder.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new("not_a_tag", ConcreteDataType::string_datatype(), true),
+        semantic_type: SemanticType::Field,
+        column_id: 8,
+    });
+    builder.primary_key(vec![8]);
+    builder.primary_key_encoding(PrimaryKeyEncoding::Sparse);
+    let invalid = Arc::new(builder.build_without_validation().unwrap());
+
+    let bound = source(invalid, "m", &[(8, "not_a_tag")]);
+    let error = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All)
+        .err()
+        .expect("a non-tag primary-key column must be rejected")
+        .to_string();
+    assert!(error.contains("not a tag column"), "{error}");
 }

@@ -3058,3 +3058,530 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     assert!(explicit_decoder.decode(&first).is_err());
     assert!(key_decoder.decode(&nameless).is_err());
 }
+
+/// A dense description carrying the ordered key columns and the logical tags the decoder reads.
+fn dense_description() -> LabelDecodeSpec {
+    LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: "cpu_usage".to_string(),
+        encoding: LabelDecodeEncoding::Dense,
+        primary_key: vec![
+            LabelDecodeColumn {
+                column_id: 1,
+                name: "host".to_string(),
+                physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+            },
+            LabelDecodeColumn {
+                column_id: 2,
+                name: "region".to_string(),
+                physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+            },
+        ],
+        logical_tags: vec![LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        }],
+    }
+}
+
+#[test]
+fn label_decode_description_roundtrips_through_schema_metadata() {
+    let description = dense_description();
+    let key = raw_series_frame_schema_with_label_decode(
+        &test_schema(&["value"]),
+        RawLabelMode::Key,
+        Some(&description),
+    )
+    .unwrap();
+    assert_eq!(
+        raw_series_frame_label_decode(&key).unwrap(),
+        Some(description.clone())
+    );
+    // The description is metadata-only: the column contract is untouched.
+    assert_eq!(
+        key.fields(),
+        raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key)
+            .unwrap()
+            .fields()
+    );
+    assert_eq!(key.metadata().get(LABELS).map(String::as_str), Some("key"));
+}
+
+#[test]
+fn explicit_frames_declare_no_label_decode_description() {
+    let schema = test_schema(&["value"]);
+    let explicit =
+        raw_series_frame_schema_with_label_decode(&schema, RawLabelMode::Explicit, None).unwrap();
+    assert!(explicit.metadata().get(LABEL_DECODE).is_none());
+    assert_eq!(raw_series_frame_label_decode(&explicit).unwrap(), None);
+    // A key frame without a description, or an explicit frame with one, is rejected instead of
+    // being written as a frame the consumer cannot decode.
+    assert!(
+        raw_series_frame_schema_with_label_decode(&schema, RawLabelMode::Key, None).is_err(),
+        "key-encoded frames must describe their labels"
+    );
+    assert!(
+        raw_series_frame_schema_with_label_decode(
+            &schema,
+            RawLabelMode::Explicit,
+            Some(&dense_description())
+        )
+        .is_err(),
+        "explicit frames carry complete labels"
+    );
+}
+
+/// The raw frame's own columns with exactly the supplied metadata map.
+fn schema_with_metadata(metadata: Vec<(String, String)>) -> Schema {
+    let layout = raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key).unwrap();
+    Schema::new_with_metadata(layout.fields().clone(), metadata.into_iter().collect())
+}
+
+/// The four metadata entries every raw frame declares, with the given label mode.
+fn base_metadata(labels: &str) -> Vec<(String, String)> {
+    [
+        ("greptime.series.layout", "v1"),
+        ("greptime.series.content", "raw"),
+        ("greptime.series.labels", labels),
+        ("greptime.series.time", "timestamps"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect()
+}
+
+#[test]
+fn label_decode_description_rejects_inconsistent_bindings() {
+    let schema = test_schema(&["value"]);
+    let mut cases = Vec::new();
+
+    let mut duplicate_column = dense_description();
+    duplicate_column.primary_key[1].column_id = 1;
+    cases.push(("duplicate primary-key column", duplicate_column));
+
+    let mut unbound_tag = dense_description();
+    unbound_tag.logical_tags[0].column_id = 3;
+    cases.push(("logical tag outside the primary key", unbound_tag));
+
+    let mut duplicate_tag = dense_description();
+    let tag = duplicate_tag.logical_tags[0].clone();
+    duplicate_tag.logical_tags.push(tag);
+    cases.push(("duplicate logical tag", duplicate_tag));
+
+    for (label, description) in cases {
+        // Writing is faithful: the description records what the producer declares. Reading is
+        // where a description this revision cannot honour is rejected, so a producer cannot turn a
+        // bad binding into a frame a consumer would decode under silently.
+        let frame = raw_series_frame_schema_with_label_decode(
+            &schema,
+            RawLabelMode::Key,
+            Some(&description),
+        )
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+        // The writer records what the producer declares, so the rejection has to come from the
+        // reader; one assertion covers it, since the frame it reads is the text just written.
+        assert!(
+            raw_series_frame_label_decode(&frame).is_err(),
+            "{label}: an inconsistent description is rejected when read"
+        );
+    }
+}
+
+/// A frame declaring no label mode has no label layout to describe. The rest of the parse and
+/// validation rejections (unknown version, missing/unknown/wrongly typed fields, malformed JSON,
+/// and mode and description disagreeing in either direction) are pinned case for case by
+/// [`raw_series_label_decode_metadata_fixture`], so they are not re-asserted here.
+#[test]
+fn label_decode_rejects_a_frame_without_a_label_mode() {
+    let without_mode = base_metadata("key")
+        .into_iter()
+        .filter(|(key, _)| key != LABELS)
+        .collect();
+    assert!(
+        raw_series_frame_label_decode(&schema_with_metadata(without_mode)).is_err(),
+        "a frame without a label mode has no label layout to describe"
+    );
+}
+
+#[test]
+fn raw_series_label_decode_metadata_fixture() {
+    use std::collections::HashMap;
+
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        metadata: HashMap<String, String>,
+        /// The encoding a decoding consumer expects, or `null` when the fixture must be rejected.
+        encoding: Option<String>,
+    }
+
+    let cases: Vec<Case> = serde_json::from_str(include_str!(
+        "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_metadata.json"
+    ))
+    .unwrap();
+    for case in cases {
+        let layout = raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key).unwrap();
+        let metadata = case
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let frame_schema = Schema::new_with_metadata(layout.fields().clone(), metadata);
+        match case.encoding.as_deref() {
+            None => assert!(
+                raw_series_frame_label_decode(&frame_schema).is_err(),
+                "{}: must be rejected",
+                case.name
+            ),
+            Some(expected) => {
+                let decode = raw_series_frame_label_decode(&frame_schema)
+                    .unwrap_or_else(|error| panic!("{}: {error}", case.name))
+                    .unwrap_or_else(|| panic!("{}: no description", case.name));
+                let encoding = match decode.encoding {
+                    LabelDecodeEncoding::Dense => "dense",
+                    LabelDecodeEncoding::Sparse => "sparse",
+                };
+                assert_eq!(encoding, expected, "{}", case.name);
+                assert_eq!(decode.version, LABEL_DECODE_VERSION, "{}", case.name);
+                assert_eq!(decode.metric_name, "cpu_usage", "{}", case.name);
+                assert_eq!(
+                    decode.primary_key,
+                    vec![
+                        LabelDecodeColumn {
+                            column_id: 1,
+                            name: "host".to_string(),
+                            physical_type: crate::data_type::ConcreteDataType::string_datatype(),
+                        },
+                        LabelDecodeColumn {
+                            column_id: 2,
+                            name: "shard".to_string(),
+                            physical_type: crate::data_type::ConcreteDataType::uint32_datatype(),
+                        },
+                    ],
+                    "{}: the ordered key columns are decoded in place",
+                    case.name
+                );
+                assert_eq!(
+                    decode.logical_tags,
+                    vec![
+                        LabelDecodeTag {
+                            column_id: 1,
+                            name: "host".to_string(),
+                        },
+                        LabelDecodeTag {
+                            column_id: 2,
+                            name: "shard".to_string(),
+                        },
+                    ],
+                    "{}",
+                    case.name
+                );
+                if expected == "dense" {
+                    // The fixture text is the encoder's own output, byte for byte: re-encoding the
+                    // description it decodes to must reproduce it exactly.
+                    let roundtrip = raw_series_frame_schema_with_label_decode(
+                        &test_schema(&["value"]),
+                        RawLabelMode::Key,
+                        Some(&decode),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        roundtrip.metadata().get(LABEL_DECODE),
+                        case.metadata.get(LABEL_DECODE),
+                        "{}: re-encoding reproduces the fixture text",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A tag column typed as a timestamp is described like any other key column: the description
+/// carries its physical type, and the text is exactly what the encoder wrote.
+#[test]
+fn label_decode_description_carries_a_timestamp_typed_tag_column() {
+    let mut description = dense_description();
+    description.primary_key[1].name = "observed".to_string();
+    description.primary_key[1].physical_type =
+        crate::data_type::ConcreteDataType::timestamp_millisecond_datatype();
+    description.logical_tags.push(LabelDecodeTag {
+        column_id: 2,
+        name: "observed".to_string(),
+    });
+    let frame = raw_series_frame_schema_with_label_decode(
+        &test_schema(&["value"]),
+        RawLabelMode::Key,
+        Some(&description),
+    )
+    .unwrap();
+    let text = frame.metadata().get(LABEL_DECODE).unwrap();
+    // The expected text is the encoder's real output for a timestamp-typed tag column.
+    assert!(
+        text.contains("\"physical_type\":{\"Timestamp\":{\"Millisecond\":null}}"),
+        "the encoder wrote a timestamp type: {text}"
+    );
+    let recovered = raw_series_frame_label_decode(&frame).unwrap().unwrap();
+    assert_eq!(recovered, description);
+    assert_eq!(
+        recovered.primary_key[1].physical_type,
+        crate::data_type::ConcreteDataType::timestamp_millisecond_datatype()
+    );
+}
+
+/// Two producers that list the same logical tags in a different order write the same bytes.
+///
+/// The tag order carries no meaning to a decoder, so the writer sorts its own copy before
+/// serializing and leaves the caller's value alone. The encoding order of `primary_key` is a
+/// different thing entirely: it is the order of the key columns, so it is written as given.
+#[test]
+fn label_decode_text_is_independent_of_the_callers_tag_order() {
+    let mut ascending = dense_description();
+    ascending.logical_tags = vec![
+        LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        },
+        LabelDecodeTag {
+            column_id: 2,
+            name: "region".to_string(),
+        },
+    ];
+    let mut descending = ascending.clone();
+    descending.logical_tags.reverse();
+    // The encoding order of the key columns is not the tag order: reverse it in the second
+    // description so a writer that sorted `primary_key` too would be caught below.
+    descending.primary_key.reverse();
+
+    let write = |description: &LabelDecodeSpec| {
+        let frame = raw_series_frame_schema_with_label_decode(
+            &test_schema(&["value"]),
+            RawLabelMode::Key,
+            Some(description),
+        )
+        .unwrap();
+        frame.metadata().get(LABEL_DECODE).unwrap().clone()
+    };
+
+    let same_tags = {
+        let mut reordered = ascending.clone();
+        reordered.logical_tags.reverse();
+        write(&reordered)
+    };
+    assert_eq!(
+        write(&ascending),
+        same_tags,
+        "two tag orders wrote different bytes"
+    );
+    assert_eq!(
+        ascending.logical_tags,
+        vec![
+            LabelDecodeTag {
+                column_id: 1,
+                name: "host".to_string(),
+            },
+            LabelDecodeTag {
+                column_id: 2,
+                name: "region".to_string(),
+            },
+        ],
+        "the writer reordered the caller's description"
+    );
+    // The key columns keep the order they were given, so the two descriptions are different
+    // frames rather than the same bytes: that is the part canonicalization must not touch.
+    assert_ne!(
+        write(&ascending),
+        write(&descending),
+        "the writer reordered the encoding columns"
+    );
+    let recovered = raw_series_frame_label_decode(
+        &raw_series_frame_schema_with_label_decode(
+            &test_schema(&["value"]),
+            RawLabelMode::Key,
+            Some(&descending),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        recovered.primary_key, descending.primary_key,
+        "the recovered key order is not the encoding order"
+    );
+}
+/// One entry of `v1_physical_types.json`: a [`ConcreteDataType`] variant and the exact text this
+/// revision's serde writes for a representative value of it.
+#[derive(serde::Deserialize)]
+struct FrozenPhysicalType {
+    /// The [`ConcreteDataType`] variant, as [`concrete_datatype_variants`] spells it.
+    variant: String,
+    /// The `serde_json` text this revision writes for that variant's representative value.
+    text: String,
+}
+
+/// Spells every [`ConcreteDataType`] variant exactly once, together with one representative value of
+/// it.
+///
+/// Everything that has to notice a new variant is derived from this one list:
+///
+/// - [`variant_name`] matches on it with **no wildcard arm**, so adding a variant to
+///   [`ConcreteDataType`] is a compile error until the variant is added here.
+/// - [`datatype_representatives`] yields one value per listed variant, so the same edit is what
+///   supplies the value the tests read the serde text from.
+/// - [`VARIANT_NAMES`] is generated from it too, which is what
+///   [`the_frozen_text_covers_every_datatype_variant`] requires a fixture entry for.
+macro_rules! concrete_datatype_variants {
+    ($($variant:ident => $value:expr),+ $(,)?) => {
+        /// The [`ConcreteDataType`] variant a value belongs to, spelled as the fixture names it.
+        ///
+        /// Exhaustive on purpose: a new variant of [`ConcreteDataType`] makes this match fail to
+        /// compile, which is what makes a missing fixture entry impossible to land.
+        fn variant_name(data_type: &ConcreteDataType) -> &'static str {
+            match data_type {
+                $(ConcreteDataType::$variant(_) => stringify!($variant),)+
+            }
+        }
+
+        /// One representative value per variant, in the order listed above.
+        fn datatype_representatives() -> Vec<ConcreteDataType> {
+            vec![$($value),+]
+        }
+
+        /// Every [`ConcreteDataType`] variant name, in the order listed above.
+        const VARIANT_NAMES: &[&str] = &[$(stringify!($variant)),+];
+    };
+}
+
+concrete_datatype_variants!(
+    Null => ConcreteDataType::null_datatype(),
+    Boolean => ConcreteDataType::boolean_datatype(),
+    Int8 => ConcreteDataType::int8_datatype(),
+    Int16 => ConcreteDataType::int16_datatype(),
+    Int32 => ConcreteDataType::int32_datatype(),
+    Int64 => ConcreteDataType::int64_datatype(),
+    UInt8 => ConcreteDataType::uint8_datatype(),
+    UInt16 => ConcreteDataType::uint16_datatype(),
+    UInt32 => ConcreteDataType::uint32_datatype(),
+    UInt64 => ConcreteDataType::uint64_datatype(),
+    Float32 => ConcreteDataType::float32_datatype(),
+    Float64 => ConcreteDataType::float64_datatype(),
+    Decimal128 => ConcreteDataType::decimal128_datatype(10, 2),
+    Binary => ConcreteDataType::binary_datatype(),
+    String => ConcreteDataType::string_datatype(),
+    Date => ConcreteDataType::date_datatype(),
+    Timestamp => ConcreteDataType::timestamp_millisecond_datatype(),
+    Time => ConcreteDataType::time_microsecond_datatype(),
+    Duration => ConcreteDataType::duration_nanosecond_datatype(),
+    Interval => ConcreteDataType::interval_month_day_nano_datatype(),
+    List => ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
+    Dictionary => ConcreteDataType::dictionary_datatype(
+        ConcreteDataType::int32_datatype(),
+        ConcreteDataType::string_datatype(),
+    ),
+    Struct => ConcreteDataType::struct_datatype(crate::types::StructType::new(Arc::new(vec![
+        crate::types::StructField::new("host", ConcreteDataType::string_datatype(), false),
+        crate::types::StructField::new("port", ConcreteDataType::uint16_datatype(), true),
+    ]))),
+    Json => ConcreteDataType::json_datatype(),
+    Vector => ConcreteDataType::vector_datatype(3),
+);
+
+/// The frozen text of every [`ConcreteDataType`] variant, as a label decode description embeds it.
+const FROZEN_PHYSICAL_TYPES: &str = include_str!(
+    "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_physical_types.json"
+);
+
+fn frozen_physical_types() -> Vec<FrozenPhysicalType> {
+    serde_json::from_str(FROZEN_PHYSICAL_TYPES).expect("the frozen physical-type fixture parses")
+}
+
+/// The representative value of one variant, named the way the fixture names it.
+fn representative(variant: &str) -> ConcreteDataType {
+    VARIANT_NAMES
+        .iter()
+        .zip(datatype_representatives())
+        .find(|(name, _)| **name == variant)
+        .unwrap_or_else(|| panic!("{variant}: no representative value is listed for this variant"))
+        .1
+}
+
+/// The text a description embeds for a key column's type is not this module's to spell: it is
+/// [`ConcreteDataType`]'s own serde, so it changes whenever that type's serde does.
+///
+/// `v1_physical_types.json` freezes that text for every variant. This test fails when a variant no
+/// longer parses back from its frozen text, when it no longer re-serializes to it, or when the
+/// parsed value is no longer the type that variant names — which is what a silent serde change
+/// looks like. Since the frame text is compared byte for byte across nodes, such a change is a
+/// [`LABEL_DECODE_VERSION`] bump, and this test is the alarm that raises it.
+#[test]
+fn every_datatype_round_trips_through_its_frozen_text() {
+    use crate::data_type::DataType as _;
+
+    for entry in frozen_physical_types() {
+        let parsed: ConcreteDataType = serde_json::from_str(&entry.text).unwrap_or_else(|error| {
+            panic!("{}: {} cannot be read: {error}", entry.variant, entry.text)
+        });
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            entry.text,
+            "{}: re-serializes to the frozen text",
+            entry.variant
+        );
+        assert_eq!(
+            parsed.name(),
+            representative(&entry.variant).name(),
+            "{}: the frozen text still names the same type",
+            entry.variant
+        );
+        assert_eq!(
+            parsed,
+            representative(&entry.variant),
+            "{}: the frozen text still describes the same value",
+            entry.variant
+        );
+    }
+}
+
+/// The fixture above only freezes a variant if it has an entry, so every variant must have one.
+///
+/// This test is what makes that hold: [`variant_name`] matches every [`ConcreteDataType`] variant
+/// with no wildcard arm, so a new variant does not compile until it is listed in
+/// [`concrete_datatype_variants`]; that listing also extends [`VARIANT_NAMES`] and
+/// [`datatype_representatives`], and this test then requires a fixture entry for it and rejects an
+/// entry naming a variant that does not exist.
+#[test]
+fn the_frozen_text_covers_every_datatype_variant() {
+    let frozen = frozen_physical_types();
+
+    for data_type in datatype_representatives() {
+        let variant = variant_name(&data_type);
+        let entry = frozen
+            .iter()
+            .find(|entry| entry.variant == variant)
+            .unwrap_or_else(|| {
+                panic!("{variant}: v1_physical_types.json has no entry for this datatype variant")
+            });
+        // The entry's text is this variant's text: read it back and name the variant it describes.
+        let parsed: ConcreteDataType = serde_json::from_str(&entry.text)
+            .unwrap_or_else(|error| panic!("{variant}: {} is unreadable: {error}", entry.text));
+        assert_eq!(
+            variant_name(&parsed),
+            variant,
+            "{variant}: the entry's text describes this variant"
+        );
+    }
+
+    // Nothing in the fixture names a variant that does not exist, and no variant is listed twice.
+    for entry in &frozen {
+        assert!(
+            VARIANT_NAMES.contains(&entry.variant.as_str()),
+            "{}: the fixture names a variant ConcreteDataType does not have",
+            entry.variant
+        );
+    }
+    assert_eq!(
+        frozen.len(),
+        VARIANT_NAMES.len(),
+        "one fixture entry per datatype variant, no duplicates"
+    );
+}
