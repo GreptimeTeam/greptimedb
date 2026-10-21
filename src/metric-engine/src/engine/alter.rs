@@ -196,29 +196,29 @@ impl MetricEngineInner {
             (name.to_string(), column_metadata.clone())
         });
 
+        // The data region has the new columns, whatever happens to the metadata write.
+        self.state
+            .write()
+            .unwrap()
+            .add_physical_columns(data_region_id, new_add_columns);
+
         // Writes logical regions metadata to metadata region
-        if let Err(e) = self
+        let result = self
             .metadata_region
             .add_logical_regions(physical_region_id, false, logical_region_columns)
-            .await
-        {
-            // The metadata may still be written, e.g. when the region lease expires after the
-            // WAL append.
-            self.state
-                .write()
-                .unwrap()
-                .invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
-            return Err(e);
-        }
+            .await;
+        // A failed write may still be applied, e.g. when the region lease expires after the WAL
+        // append, so the cached logical columns are dropped either way.
+        self.state
+            .write()
+            .unwrap()
+            .invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
+        result?;
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
             ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
         );
-
-        let mut state = self.state.write().unwrap();
-        state.add_physical_columns(data_region_id, new_add_columns);
-        state.invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
 
         Ok(0)
     }

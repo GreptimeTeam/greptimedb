@@ -2446,5 +2446,38 @@ mod tests {
         assert!(err.is_retryable(), "{err:?}");
         let metadata = engine.get_metadata(logical_region_id).await.unwrap();
         assert!(metadata.column_by_name("tag1").is_some());
+
+        // Once the lease is renewed, writes with the new column succeed.
+        engine
+            .set_region_role_by_lease(
+                physical_region_id,
+                grant(Instant::now() + Duration::from_secs(10)),
+            )
+            .unwrap();
+        let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
+            rows: Rows {
+                schema: test_util::row_schema_with_tags(&["job", "tag1"]),
+                rows: test_util::build_rows(2, 5),
+            },
+            hint: None,
+            partition_expr_version: None,
+        });
+        let response = engine
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(5, response.affected_rows);
+        let stream = engine
+            .scan_to_stream(physical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert!(batches.schema().column_schema_by_name("tag1").is_some());
+        // Besides these rows, the write that failed after the WAL append is applied.
+        assert_eq!(
+            10,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+        );
     }
 }
