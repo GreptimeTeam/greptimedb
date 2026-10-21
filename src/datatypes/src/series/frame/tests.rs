@@ -3328,6 +3328,87 @@ fn label_decode_description_carries_a_timestamp_typed_tag_column() {
         crate::data_type::ConcreteDataType::timestamp_millisecond_datatype()
     );
 }
+
+/// Two producers that list the same logical tags in a different order write the same bytes.
+///
+/// The tag order carries no meaning to a decoder, so the writer sorts its own copy before
+/// serializing and leaves the caller's value alone. The encoding order of `primary_key` is a
+/// different thing entirely: it is the order of the key columns, so it is written as given.
+#[test]
+fn label_decode_text_is_independent_of_the_callers_tag_order() {
+    let mut ascending = dense_description();
+    ascending.logical_tags = vec![
+        LabelDecodeTag {
+            column_id: 1,
+            name: "host".to_string(),
+        },
+        LabelDecodeTag {
+            column_id: 2,
+            name: "region".to_string(),
+        },
+    ];
+    let mut descending = ascending.clone();
+    descending.logical_tags.reverse();
+    // The encoding order of the key columns is not the tag order: reverse it in the second
+    // description so a writer that sorted `primary_key` too would be caught below.
+    descending.primary_key.reverse();
+
+    let write = |description: &LabelDecodeSpec| {
+        let frame = raw_series_frame_schema_with_label_decode(
+            &test_schema(&["value"]),
+            RawLabelMode::Key,
+            Some(description),
+        )
+        .unwrap();
+        frame.metadata().get(LABEL_DECODE).unwrap().clone()
+    };
+
+    let same_tags = {
+        let mut reordered = ascending.clone();
+        reordered.logical_tags.reverse();
+        write(&reordered)
+    };
+    assert_eq!(
+        write(&ascending),
+        same_tags,
+        "two tag orders wrote different bytes"
+    );
+    assert_eq!(
+        ascending.logical_tags,
+        vec![
+            LabelDecodeTag {
+                column_id: 1,
+                name: "host".to_string(),
+            },
+            LabelDecodeTag {
+                column_id: 2,
+                name: "region".to_string(),
+            },
+        ],
+        "the writer reordered the caller's description"
+    );
+    // The key columns keep the order they were given, so the two descriptions are different
+    // frames rather than the same bytes: that is the part canonicalization must not touch.
+    assert_ne!(
+        write(&ascending),
+        write(&descending),
+        "the writer reordered the encoding columns"
+    );
+    let recovered = raw_series_frame_label_decode(
+        &raw_series_frame_schema_with_label_decode(
+            &test_schema(&["value"]),
+            RawLabelMode::Key,
+            Some(&descending),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        recovered.primary_key, descending.primary_key,
+        "the recovered key order is not the encoding order"
+    );
+}
 /// One entry of `v1_physical_types.json`: a [`ConcreteDataType`] variant and the exact text this
 /// revision's serde writes for a representative value of it.
 #[derive(serde::Deserialize)]

@@ -75,8 +75,6 @@ struct BoundLabel {
 struct KeyColumn {
     id: ColumnId,
     name: String,
-    /// Whether this column is a tag column; only tag columns may back a logical tag.
-    tag: bool,
     data_type: ConcreteDataType,
 }
 
@@ -85,6 +83,8 @@ struct KeyColumn {
 /// It holds only what decoding reads: the metric name, the primary-key encoding, and the ordered
 /// primary-key columns with their physical types. A scan-bound [`RawLabelSource::PrimaryKey`] and a
 /// frame schema's [`LabelDecodeSpec`] both reduce to this view, so both bind the same decoder.
+/// Every key column is a `Tag` column, which is checked when a decoder is bound, so the layout
+/// carries no per-column role.
 struct KeyLayout {
     metric_name: Arc<str>,
     encoding: PrimaryKeyEncoding,
@@ -119,6 +119,9 @@ impl PrimaryKeyLabelDecoder {
     /// Explicit sources already contain complete labels and are rejected. Dense decoding
     /// requires the full key layout described by the bound snapshot; compatibility with
     /// older key layouts must be normalized upstream.
+    ///
+    /// Every primary-key column must be a `Tag` column; [`RegionMetadata::validate`] enforces it, so
+    /// this only rejects a snapshot built without validation.
     pub fn new(source: &RawLabelSource, projection: LabelProjection) -> Result<Self> {
         let RawLabelSource::PrimaryKey {
             metric_name,
@@ -132,6 +135,18 @@ impl PrimaryKeyLabelDecoder {
             .fail();
         };
         let metadata = physical_metadata.as_ref();
+        if let Some(column) = metadata
+            .primary_key_columns()
+            .find(|column| column.semantic_type != SemanticType::Tag)
+        {
+            return InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "primary-key column {} is not a tag column",
+                    column.column_schema.name
+                ),
+            }
+            .fail();
+        }
         let key = KeyLayout {
             metric_name: metric_name.clone(),
             encoding: metadata.primary_key_encoding,
@@ -140,7 +155,6 @@ impl PrimaryKeyLabelDecoder {
                 .map(|column| KeyColumn {
                     id: column.column_id,
                     name: column.column_schema.name.clone(),
-                    tag: column.semantic_type == SemanticType::Tag,
                     data_type: column.column_schema.data_type.clone(),
                 })
                 .collect(),
@@ -181,7 +195,6 @@ impl PrimaryKeyLabelDecoder {
                 .map(|column| KeyColumn {
                     id: column.column_id,
                     name: column.name.clone(),
-                    tag: true,
                     data_type: column.physical_type.clone(),
                 })
                 .collect(),
@@ -214,7 +227,7 @@ impl PrimaryKeyLabelDecoder {
                 || ReservedColumnId::is_reserved(column_id)
                 || !key
                     .column(column_id)
-                    .is_some_and(|column| column.tag && column.name == name)
+                    .is_some_and(|column| column.name == name)
             {
                 return InvalidSparsePrimaryKeySnafu {
                     reason: format!("invalid logical tag binding {name}"),
@@ -297,7 +310,7 @@ impl PrimaryKeyLabelDecoder {
             Layout::Sparse(cache) => {
                 let mut view = SparsePrimaryKeyView::new(read_key, cache)?;
                 view.visit_label_ids(|id| {
-                    if *complete && !key.column(id).is_some_and(|column| column.tag) {
+                    if *complete && key.column(id).is_none() {
                         return InvalidSparsePrimaryKeySnafu {
                             reason: format!("unrecognized sparse tag id {id}"),
                         }

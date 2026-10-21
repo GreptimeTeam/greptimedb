@@ -390,10 +390,7 @@ async fn merges_full_encoded_keys_and_interleaved_chunks_with_global_finality() 
     let mut merged = merge_ordered_raw_series(vec![left, right]).unwrap();
     assert_eq!(merged.ordering(), SeriesOrdering::KeyThenTime);
     assert!(merged.schema().eval_grid.is_none());
-    assert!(matches!(
-        merged.label_source(),
-        RawLabelSource::PrimaryKey { .. }
-    ));
+    assert!(matches!(merged.label_source(), RawLabelSource::Explicit));
     let mut observed = Vec::new();
     while let Some(item) = merged.next().await {
         let item = item.unwrap();
@@ -1967,9 +1964,9 @@ async fn merge_without_a_bound_identity_still_advertises_the_decode_layout() {
     assert_eq!(metric.get("sensor"), Some("sensor-1"));
 }
 
-/// A merged stream's label binding survives the frame wire form: the packed schema declares the
-/// decode description derived from the merge binding, so a consumer holding only that schema can
-/// rebuild a decoder and decode the merged keys without a request-side label source.
+/// A merged stream's label decode description survives the frame wire form: the packed schema
+/// declares that description, so a consumer holding only the schema can rebuild a decoder and decode
+/// the merged keys without a request-side label source.
 #[tokio::test]
 async fn merged_frame_declares_a_label_decode_description_that_decodes_its_keys() {
     use common_query::series_frame::{pack_raw_series, unpack_raw_series};
@@ -1988,10 +1985,12 @@ async fn merged_frame_declares_a_label_decode_description_that_decodes_its_keys(
         [ready(chunk(key.clone(), &[20, 40], &[2.0, 4.0], true))],
     );
     let merged = merge_ordered_raw_series(vec![left, right]).unwrap();
-    let expected = label_decode_spec(merged.label_source())
+    let expected = merged
+        .label_decode_spec()
+        .cloned()
         .expect("the merge advertises a primary-key layout");
     let series_schema = merged.schema().clone();
-    let binding = merged.label_source().clone();
+    let binding = label_source(1);
     let ordering = merged.ordering();
     let framed = pack_raw_series(merged).unwrap();
     assert_eq!(

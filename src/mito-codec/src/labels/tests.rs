@@ -676,3 +676,37 @@ fn frame_label_decode_description_rejects_unsupported_version() {
     unbound.primary_key.retain(|column| column.column_id != 8);
     assert!(PrimaryKeyLabelDecoder::from_decode_spec(&unbound, LabelProjection::All).is_err());
 }
+
+/// A primary-key column that is not a `Tag` column is rejected when a decoder is bound, because the
+/// layout records no per-column role and decodes every listed key column as a tag.
+///
+/// `RegionMetadata::validate` rejects such metadata, so this snapshot is built without validation to
+/// exercise the check the decoder performs itself.
+#[test]
+fn binding_rejects_a_primary_key_column_that_is_not_a_tag() {
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(7, 1));
+    builder.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
+        semantic_type: SemanticType::Timestamp,
+        column_id: 0,
+    });
+    builder.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new("not_a_tag", ConcreteDataType::string_datatype(), true),
+        semantic_type: SemanticType::Field,
+        column_id: 8,
+    });
+    builder.primary_key(vec![8]);
+    builder.primary_key_encoding(PrimaryKeyEncoding::Sparse);
+    let invalid = Arc::new(builder.build_without_validation().unwrap());
+
+    let bound = source(invalid, "m", &[(8, "not_a_tag")]);
+    let error = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All)
+        .err()
+        .expect("a non-tag primary-key column must be rejected")
+        .to_string();
+    assert!(error.contains("not a tag column"), "{error}");
+}

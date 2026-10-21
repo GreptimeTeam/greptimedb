@@ -40,9 +40,8 @@ use store_api::region_engine::{
 ///
 /// The merge contract is the label layout, not a binding: every input must declare the same one —
 /// from its frame if it arrived as a frame, otherwise from its own binding — and the merged stream
-/// advertises that one declaration. A consumer therefore decodes the merged stream from the frame,
-/// and the identity it reports is only what its first input reported: none at all when every input
-/// came from a frame, see [`RawSeriesStream::label_source`].
+/// advertises that one declaration. A consumer therefore decodes the merged stream from the frame;
+/// the identity it reports is none, see [`RawSeriesStream::label_source`].
 pub fn merge_ordered_raw_series(
     inputs: Vec<SendableRawSeriesStream>,
 ) -> Result<SendableRawSeriesStream, BoxedError> {
@@ -51,7 +50,6 @@ pub fn merge_ordered_raw_series(
         .next()
         .ok_or_else(|| invalid("raw merge requires at least one input"))?;
     let schema = Arc::clone(first.schema());
-    let binding = bound_identity(first.as_ref().get_ref());
     let decode = merged_decode_spec(first.as_ref().get_ref())?;
     let mut streams = vec![Input::new(first)];
     for stream in inputs {
@@ -68,7 +66,6 @@ pub fn merge_ordered_raw_series(
     Ok(Box::pin(OrderedRawMerge {
         streams,
         schema,
-        binding,
         decode,
         candidate: None,
     }))
@@ -76,17 +73,6 @@ pub fn merge_ordered_raw_series(
 
 fn invalid(reason: &'static str) -> BoxedError {
     BoxedError::new(InvalidSeriesSnafu { reason }.build())
-}
-
-/// Returns the scan-bound identity a stream states, or `None` when it states none.
-///
-/// A frame-decoded stream reports [`NO_BOUND_LABEL_SOURCE`], a placeholder that reads as `Explicit`
-/// without the chunks carrying labels, so it is not forwarded as an identity.
-fn bound_identity(stream: &dyn RawSeriesStream) -> Option<RawLabelSource> {
-    match stream.label_source() {
-        RawLabelSource::PrimaryKey { .. } => Some(stream.label_source().clone()),
-        RawLabelSource::Explicit => None,
-    }
 }
 
 /// Returns the label layout a stream declares, with no binding required to state it.
@@ -234,14 +220,6 @@ impl Input {
 struct OrderedRawMerge {
     streams: Vec<Input>,
     schema: Arc<SeriesSchema>,
-    /// The identity the first input states, when it states one.
-    ///
-    /// It is not the decode contract: every input declared the layout in [`Self::decode`], which is
-    /// what a consumer decodes from. A merge of frame-decoded inputs has no identity to forward, so
-    /// it advertises none — [`NO_BOUND_LABEL_SOURCE`] by way of
-    /// [`RawSeriesStream::label_source`] — while [`Self::label_decode_spec`] still states the
-    /// layout of its undecoded key chunks.
-    binding: Option<RawLabelSource>,
     /// The description the merged stream advertises for all inputs; see [`merged_decode_spec`].
     decode: LabelDecodeSpec,
     candidate: Option<RawSeriesChunk>,
@@ -461,10 +439,13 @@ impl RawSeriesStream for OrderedRawMerge {
     fn schema(&self) -> &Arc<SeriesSchema> {
         &self.schema
     }
-    /// Returns the first input's identity, or [`NO_BOUND_LABEL_SOURCE`] when it had none; see
-    /// [`Self::label_decode_spec`] for what the chunks actually carry.
+    /// Returns [`NO_BOUND_LABEL_SOURCE`] unconditionally.
+    ///
+    /// A merge is not a region scan, so it has no scan-bound identity to report, and it does not
+    /// invent one from its inputs. Its decode contract is [`Self::label_decode_spec`]; identity is
+    /// not something a merged stream can report.
     fn label_source(&self) -> &RawLabelSource {
-        self.binding.as_ref().unwrap_or(&NO_BOUND_LABEL_SOURCE)
+        &NO_BOUND_LABEL_SOURCE
     }
 
     /// Returns the description this merge advertises for every input, so a consumer of the merged

@@ -253,12 +253,15 @@ async fn merges_typed_multifield_payload_through_frame_and_label_roundtrip() {
     );
     let merged = merge_ordered_raw_series(vec![a, b]).unwrap();
     let frame_schema = merged.schema().clone();
-    let frame_binding = merged.label_source().clone();
     let frame_ordering = merged.ordering();
+    assert!(
+        matches!(merged.label_source(), RawLabelSource::Explicit),
+        "a merge is not a region scan, so it reports no scan-bound identity"
+    );
     let framed = pack_raw_series(merged).unwrap();
-    // The producer's identity is an expectation a caller compares against the declaration, not a
-    // decode input; the frame states the layout the decoder uses.
-    ensure_frame_matches_label_source(framed.schema().as_ref(), &frame_binding).unwrap();
+    // The frame states the layout the decoder uses: it matches the description an input's binding
+    // declares, since the merge only accepts inputs that declare one layout.
+    ensure_frame_matches_label_source(framed.schema().as_ref(), &label_source(1)).unwrap();
     assert_eq!(
         raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
         frame_ordering,
@@ -465,7 +468,8 @@ async fn merge_retains_sliced_float_time_and_histogram_owners_until_output_drop(
         ["temperature", "latency", "observations"]
     );
     assert!(
-        matches!(merged.label_source(), RawLabelSource::PrimaryKey { metric_name, .. } if metric_name.as_ref() == "room_temperature")
+        matches!(merged.label_source(), RawLabelSource::Explicit),
+        "a merge is not a region scan, so it reports no scan-bound identity"
     );
     assert_eq!(merged.ordering(), SeriesOrdering::KeyThenTime);
     let prefix = merged.next().await.unwrap().unwrap();
