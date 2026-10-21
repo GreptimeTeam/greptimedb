@@ -1360,12 +1360,39 @@ impl FusedSeriesStream {
         self.convert(settled)
     }
 
-    /// Ends the input and queues what closing settled.
-    fn close(&mut self) -> DataFusionResult<()> {
-        let Some(mut executor) = self.executor.take() else {
-            return Ok(());
+    /// Ends the input, so the tree settles what it was holding.
+    ///
+    /// `finish()` would be the same thing plus a drain, but the drain collects: it holds the whole
+    /// answer in a `Vec` before anything is handed out, so a tree that answers many chunks after its
+    /// input ends would sit on all of them while the consumer waits for the first. Only the input is
+    /// ended here, and the answers are pulled one per call below, so each chunk leaves as the tree
+    /// settles it and what has not been pulled yet stays charged to the node holding it.
+    fn close_input(&mut self) -> DataFusionResult<()> {
+        match self.executor.as_mut() {
+            Some(executor) => executor.end_of_input(),
+            // Every answer was pulled and the execution closed itself.
+            None => Ok(()),
+        }
+    }
+
+    /// Pulls the next answer the tree settles after its input ended, or `None` when it has none.
+    ///
+    /// One chunk per call is what keeps this a stream: collecting them first would hold the whole
+    /// answer while the consumer waits for the first, and would charge the pool for all of it at
+    /// once. `None` is also when the execution closes and returns its reservations, so it is
+    /// dropped here rather than staying alive until the stream is.
+    fn pull_one(&mut self) -> DataFusionResult<Option<EvaluatedChunk>> {
+        let Some(executor) = self.executor.as_mut() else {
+            return Ok(None);
         };
-        self.convert(executor.finish()?)
+        match executor.next_chunk() {
+            Ok(Some(chunk)) => Ok(Some(chunk)),
+            Ok(None) => {
+                self.executor = None;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Ends the stream in an error, releasing the execution and the input at once.
@@ -1430,16 +1457,36 @@ impl Stream for FusedSeriesStream {
             }
             // An error is the only thing that clears the input, and it ends the stream with it.
             let Some(input) = this.input.as_mut() else {
-                return Poll::Ready(None);
+                // The input ended, so what the tree answers now comes from what it held. One chunk
+                // per iteration keeps it a stream, and `None` is both "nothing more" and the point
+                // where the execution releases its reservations.
+                match this.pull_one() {
+                    Ok(Some(chunk)) => {
+                        if let Err(error) = this.convert(vec![chunk]) {
+                            this.fail();
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                    }
+                    Ok(None) => {
+                        this.done = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+                continue;
             };
             let polled = input.as_mut().poll_next(cx);
             match polled {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => {
-                    // The input ended, so every series it opened has to be closed: what closing
-                    // settles is handed out before the stream ends.
-                    this.done = true;
-                    if let Err(error) = this.close() {
+                    // The input ended, so every series it opened has to be closed. The tree settles
+                    // what it was holding, and the answers are pulled below in this same poll
+                    // rather than collected first.
+                    this.input = None;
+                    if let Err(error) = this.close_input() {
                         this.fail();
                         return Poll::Ready(Some(Err(error)));
                     }
