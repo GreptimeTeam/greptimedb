@@ -586,6 +586,9 @@ impl Inserter {
     }
 
     /// Handles row inserts request with metric engine.
+    ///
+    /// Resolves or creates `physical_table` only when a logical target is missing.
+    /// Existing targets retain their backing tables and time-index units.
     pub async fn handle_metric_row_inserts(
         &self,
         mut requests: RowInsertRequests,
@@ -1076,11 +1079,10 @@ impl Inserter {
     /// remote write. This will modify the `RowInsertRequests` in place.
     /// `is_single_value` indicates whether the default schema only contains single value column so we can accommodate it.
     ///
-    /// `align_time_index_unit` is the selected physical metric table's time
-    /// index unit; passing `Some` (metric engine path only) rewrites each
-    /// request's time index column, inside this function's existing table
-    /// lookups (no extra catalog access): existing destination tables are
-    /// converted to their own unit, and new tables to the given unit.
+    /// `align_time_index_unit` supplies the selected physical table's time-index
+    /// unit for new logical tables. Existing logical targets always use their
+    /// own unit, even when this argument is `None` because no new target needs
+    /// the selected backing table.
     #[allow(clippy::too_many_arguments)]
     async fn create_or_alter_tables_on_demand(
         &self,
@@ -1593,7 +1595,8 @@ impl Inserter {
     /// When `accommodate_existing_schema` is true, it may modify the input `req` to
     /// accommodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
     /// for more details.
-    /// When `is_single_value` is true, it also rejects native-histogram/float kind changes.
+    /// When `is_single_value` is true, it also rejects native-histogram/float kind
+    /// changes even when no columns need adding.
     /// When both options are true, it considers fields when modifying the input `req`.
     fn get_alter_table_expr_on_demand(
         &self,

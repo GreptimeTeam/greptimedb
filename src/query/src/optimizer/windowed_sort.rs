@@ -85,7 +85,7 @@ impl WindowedSortPhysicalRule {
                     let Some(scanner_info) = fetch_partition_range(sort_input.clone())? else {
                         return Ok(Transformed::no(plan));
                     };
-                    // File-engine scans do not expose ranges for windowed sorting.
+                    // Windowed sorting requires partition ranges, which file-engine scans lack.
                     if scanner_info.partition_ranges.is_empty() {
                         return Ok(Transformed::no(plan));
                     }
