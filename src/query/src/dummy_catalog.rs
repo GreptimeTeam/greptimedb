@@ -23,6 +23,7 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
 use catalog::{CatalogManager, CatalogManagerRef};
+use common_query::request::RAW_SERIES_READ_EXTENSION_KEY;
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
@@ -199,7 +200,13 @@ impl TableProvider for DummyTableProvider {
         if let Some(query_ctx) = &self.query_ctx {
             scan_exec.set_explain_verbose(query_ctx.explain_verbose());
         }
-        Ok(Arc::new(scan_exec))
+        // The only guard that keeps an ordinary read ordinary: a request that does not name a
+        // metric for raw frames leaves the region's table provider without this key, and the leaf
+        // below is then exactly the `RegionScanExec` the region has always built.
+        let Some(metric_name) = self.raw_series_metric() else {
+            return Ok(Arc::new(scan_exec));
+        };
+        self.raw_series_leaf(scan_exec, projection, limit, &metric_name)
     }
 
     fn supports_filters_pushdown(
@@ -292,6 +299,145 @@ impl DummyTableProvider {
 
     pub(crate) fn with_json_type_hint(&self, hint: HashMap<String, JsonNativeType>) {
         self.scan_request.lock().unwrap().json_type_hint = hint;
+    }
+
+    /// Returns the metric this read should frame, when it asked for raw series frames.
+    ///
+    /// The region server writes this key on every read it handles, holding the metric derived from
+    /// the plan's table scan for a read that opted into raw frames and an empty value otherwise.
+    /// A read that does not name a metric — every read that existed before this option — keeps its
+    /// ordinary rows.
+    fn raw_series_metric(&self) -> Option<String> {
+        self.query_ctx
+            .as_ref()?
+            .extension(RAW_SERIES_READ_EXTENSION_KEY)
+            .filter(|metric| !metric.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Selects a raw-series leaf for a read that asked for frames, preparing the scan first.
+    ///
+    /// The scanner exists only after `handle_query`, and [`RegionScanExec::with_new_partitions`]
+    /// *returns* the prepared exec the frame leaf then owns, so preparation and leaf selection
+    /// cannot be split: there is no scanner to prepare before this point, and the leaf refuses an
+    /// unprepared scan because its label binding resolves against prepared partition ranges.
+    ///
+    /// **The single partition below is a limit of the named binding, not of the raw frame.** The
+    /// conversion this leaf uses resolves authorized logical names against the prepared scanner, and
+    /// that resolution declines any scan whose partition count is not exactly one
+    /// (`resolve_named_series_binding` in `table::table::scan`). A frame stream is described
+    /// per-series and needs no such reduction.
+    ///
+    /// The alternative that would keep several partitions is [`RegionScanExec::try_to_series_scan`],
+    /// which takes a [`RawLabelSource`] built here instead of resolving names. It cannot be used
+    /// from this layer today: a scanner accepts that source only when its `physical_metadata` is
+    /// the scanner's own snapshot by `Arc` identity, and this provider holds the metadata of the
+    /// region engine, not the snapshot the acquired scanner bound — the named path exists to bridge
+    /// exactly that gap, by binding against the scanner. So relaxing this needs a scanner-side
+    /// binding, not a different call here; preparing more partitions here would only make the
+    /// conversion decline, and the target stays one partition until then.
+    ///
+    /// This read asked for frames and is answered with frames or with an error naming why it could
+    /// not be: it never silently receives rows. Answering with rows would be a different answer to
+    /// a question that was asked exactly once, over a stream whose shape the caller's plan was
+    /// built around; the caller could compare schemas to notice, but "looks like a frame" is not
+    /// the same as "is the answer I asked for", and a caller reading a frame leaf gets no chance to
+    /// ask again once operators above the scan have been planned over one shape. A named error is
+    /// actionable, and the read can be retried as an ordinary one by clearing the request's
+    /// [`RegionReadKind`](common_query::request::RegionReadKind).
+    fn raw_series_leaf(
+        &self,
+        scan_exec: RegionScanExec,
+        projection: Option<&Vec<usize>>,
+        limit: Option<usize>,
+        metric_name: &str,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let region_id = self.region_id;
+        if limit.is_some() {
+            return Err(DataFusionError::NotImplemented(format!(
+                "region {region_id} cannot answer a raw series request: a row limit cannot be \
+                 applied to a raw series frame"
+            )));
+        }
+        let field_names = self.raw_series_field_names(projection).ok_or_else(|| {
+            DataFusionError::NotImplemented(format!(
+                "region {region_id} cannot answer a raw series request: the scan projection selects \
+                 a column that is not a raw series field"
+            ))
+        })?;
+        let logical_tags = self.raw_series_logical_tags();
+        // One partition, with every range inside it: see the note above on why this is the named
+        // binding's limit and not the frame's.
+        let prepared = Arc::new(
+            scan_exec
+                .with_new_partitions(vec![scan_exec.get_partition_ranges()], 1)
+                .map_err(|e| DataFusionError::External(e.into_inner()))?,
+        );
+        let frames = prepared
+            .clone()
+            .try_to_named_series_scan(metric_name, &logical_tags, &field_names)?
+            .ok_or_else(|| {
+                DataFusionError::NotImplemented(format!(
+                    "region {region_id} cannot answer a raw series request for metric \
+                     `{metric_name}`: engine `{}` declined to serve raw series from the prepared \
+                     scan (raw series unsupported, an unprepared or multi-partition scan, dynamic \
+                     filters, or requested names that do not bind)",
+                    self.engine.name(),
+                ))
+            })?;
+        Ok(frames)
+    }
+
+    /// Returns this region's own tag columns as the frames' logical labels.
+    ///
+    /// A region describes the labels it stores, so nothing about them is carried by the request.
+    /// Internal and reserved columns are storage bookkeeping rather than labels, and the metric
+    /// name travels in the frame's label decode description instead of as a label column.
+    fn raw_series_logical_tags(&self) -> Vec<String> {
+        self.metadata
+            .column_metadatas
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Tag)
+            .filter(|column| {
+                let name = column.column_schema.name.as_str();
+                name != "__name__"
+                    && !store_api::storage::consts::is_internal_column(name)
+                    && !store_api::metric_engine_consts::is_metric_engine_internal_column(name)
+            })
+            .map(|column| column.column_schema.name.clone())
+            .collect()
+    }
+
+    /// Returns the projected field columns as the frames' ordered payload fields.
+    ///
+    /// The projection is already part of the request, so no field name is carried either. `None`
+    /// means the projection selects a column a frame cannot carry as a field — an internal column
+    /// or an index outside the region schema — which the caller turns into a named error rather
+    /// than answering with a different shape. Tags and the timestamp need no entry: a key-encoded
+    /// frame describes both itself.
+    fn raw_series_field_names(&self, projection: Option<&Vec<usize>>) -> Option<Vec<String>> {
+        let columns = &self.metadata.column_metadatas;
+        let indices = match projection {
+            Some(projection) => projection.clone(),
+            None => (0..columns.len()).collect::<Vec<_>>(),
+        };
+        let mut names = Vec::with_capacity(indices.len());
+        for index in indices {
+            let column = columns.get(index)?;
+            match column.semantic_type {
+                SemanticType::Tag | SemanticType::Timestamp => {}
+                SemanticType::Field => {
+                    let name = column.column_schema.name.as_str();
+                    if store_api::storage::consts::is_internal_column(name)
+                        || store_api::metric_engine_consts::is_metric_engine_internal_column(name)
+                    {
+                        return None;
+                    }
+                    names.push(column.column_schema.name.clone());
+                }
+            }
+        }
+        Some(names)
     }
 
     /// Gets the scan request of the provider.
@@ -1139,5 +1285,534 @@ mod tests {
         let err = scan_request_from_query_context(region_id, &query_ctx).unwrap_err();
         assert!(matches!(err, Error::InvalidQueryContextExtension { .. }));
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
+
+    // ---- raw series leaf selection ----
+
+    use common_error::ext::BoxedError;
+    use common_query::series_frame::{label_decode_spec, unpack_raw_series};
+    use common_recordbatch::adapter::SERIES_SCAN_EXEC_NAME;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::execution::context::TaskContext;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::frame::LabelDecodeSpec;
+    use datatypes::series::raw::RawSeriesChunk;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::region_engine::{
+        PrepareRequest, QueryScanContext, RawLabelSource, RawSeriesStream, RegionEngine,
+        RegionRole, RegionScanner, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
+        ScannerProperties, SendableRawSeriesStream, SetRegionRoleStateResponse,
+        SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
+    };
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::SequenceNumber;
+    use table::table::scan::{REGION_SCAN_EXEC_NAME, SeriesScanExec};
+
+    /// `Result` here is the crate's one-argument alias, so the engine traits below name theirs.
+    type RegionResult<T> = std::result::Result<T, BoxedError>;
+
+    /// A region whose scan either can or cannot serve raw series frames.
+    ///
+    /// The engine reports the metadata and hands out one scanner; whether that scanner has a raw
+    /// series schema is the single difference between an eligible region and an ineligible one.
+    struct FrameRegionEngine {
+        metadata: RegionMetadataRef,
+        serves_frames: bool,
+        /// Target partitions each `prepare` was asked for, in call order.
+        prepares: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl FrameRegionEngine {
+        fn new(serves_frames: bool) -> (Self, RegionMetadataRef, Arc<Mutex<Vec<usize>>>) {
+            let metadata = Arc::new(frame_region_metadata());
+            let prepares = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    metadata: metadata.clone(),
+                    serves_frames,
+                    prepares: prepares.clone(),
+                },
+                metadata,
+                prepares,
+            )
+        }
+    }
+
+    /// A metric-like region: `host` tag, `ts` timestamp, and two fields so a projection has to
+    /// choose which field the frame carries.
+    fn frame_region_metadata() -> store_api::metadata::RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(2048, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "value",
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![1]);
+        builder.build().unwrap()
+    }
+
+    fn projected_schema(
+        metadata: &store_api::metadata::RegionMetadata,
+        projection: Option<&Vec<usize>>,
+    ) -> datatypes::schema::SchemaRef {
+        let columns = metadata
+            .schema
+            .column_schemas()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| projection.is_none_or(|projection| projection.contains(index)))
+            .map(|(_, column)| column.clone())
+            .collect::<Vec<_>>();
+        Arc::new(datatypes::schema::Schema::new(columns))
+    }
+
+    fn frame_series_schema(
+        metadata: &store_api::metadata::RegionMetadata,
+        projection: Option<&Vec<usize>>,
+    ) -> Arc<SeriesSchema> {
+        let fields = metadata
+            .column_metadatas
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| projection.is_none_or(|projection| projection.contains(index)))
+            .filter(|(_, column)| column.semantic_type == SemanticType::Field)
+            .map(|(_, column)| FieldSpec {
+                name: Arc::from(column.column_schema.name.as_str()),
+            })
+            .collect::<Vec<_>>();
+        Arc::new(SeriesSchema {
+            fields: fields.into(),
+            eval_grid: None,
+        })
+    }
+
+    #[derive(Debug)]
+    struct FrameScanner {
+        metadata: RegionMetadataRef,
+        projection: Option<Vec<usize>>,
+        properties: ScannerProperties,
+        serves_frames: bool,
+        prepares: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl datafusion::physical_plan::DisplayAs for FrameScanner {
+        fn fmt_as(
+            &self,
+            _format: datafusion::physical_plan::DisplayFormatType,
+            f: &mut std::fmt::Formatter<'_>,
+        ) -> std::fmt::Result {
+            write!(f, "FrameScanner")
+        }
+    }
+
+    impl RegionScanner for FrameScanner {
+        fn name(&self) -> &str {
+            "FrameScanner"
+        }
+
+        fn properties(&self) -> &ScannerProperties {
+            &self.properties
+        }
+
+        fn schema(&self) -> datatypes::schema::SchemaRef {
+            projected_schema(&self.metadata, self.projection.as_ref())
+        }
+
+        fn metadata(&self) -> RegionMetadataRef {
+            self.metadata.clone()
+        }
+
+        fn prepare(&mut self, request: PrepareRequest) -> RegionResult<()> {
+            self.prepares
+                .lock()
+                .unwrap()
+                .push(request.target_partitions.unwrap_or(0));
+            self.properties.prepare(request);
+            Ok(())
+        }
+
+        fn scan_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics_set: &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet,
+            _partition: usize,
+        ) -> RegionResult<common_recordbatch::SendableRecordBatchStream> {
+            unimplemented!("these tests never execute the row leaf")
+        }
+
+        fn raw_series_schema(
+            &self,
+            _label_source: &RawLabelSource,
+        ) -> RegionResult<Option<Arc<SeriesSchema>>> {
+            if !self.serves_frames {
+                return Ok(None);
+            }
+            Ok(Some(frame_series_schema(
+                &self.metadata,
+                self.projection.as_ref(),
+            )))
+        }
+
+        fn raw_series_ordering(&self) -> SeriesOrdering {
+            SeriesOrdering::Contiguous
+        }
+
+        fn scan_series_partition(
+            &self,
+            _ctx: &QueryScanContext,
+            _metrics_set: &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet,
+            _partition: usize,
+            label_source: &RawLabelSource,
+        ) -> RegionResult<Option<SendableRawSeriesStream>> {
+            Ok(Some(Box::pin(EmptyRawStream {
+                schema: frame_series_schema(&self.metadata, self.projection.as_ref()),
+                source: label_source.clone(),
+                decode: label_decode_spec(label_source),
+            })))
+        }
+
+        fn has_predicate_without_region(&self) -> bool {
+            false
+        }
+
+        fn add_dyn_filter_to_predicate(
+            &mut self,
+            filter_exprs: Vec<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
+        ) -> Vec<bool> {
+            vec![false; filter_exprs.len()]
+        }
+
+        fn set_logical_region(&mut self, _logical_region: bool) {}
+
+        fn set_query_load_region_id(&mut self, _region_id: RegionId) {}
+    }
+
+    /// A raw stream with no chunks that declares the same binding the scanner was asked for.
+    struct EmptyRawStream {
+        schema: Arc<SeriesSchema>,
+        source: RawLabelSource,
+        decode: Option<LabelDecodeSpec>,
+    }
+
+    impl RawSeriesStream for EmptyRawStream {
+        fn schema(&self) -> &Arc<SeriesSchema> {
+            &self.schema
+        }
+
+        fn label_source(&self) -> &RawLabelSource {
+            &self.source
+        }
+
+        fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+            self.decode.as_ref()
+        }
+
+        fn ordering(&self) -> SeriesOrdering {
+            SeriesOrdering::Contiguous
+        }
+    }
+
+    impl futures::Stream for EmptyRawStream {
+        type Item = RegionResult<RawSeriesChunk>;
+
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Ready(None)
+        }
+    }
+
+    #[async_trait]
+    impl RegionEngine for FrameRegionEngine {
+        fn name(&self) -> &str {
+            "FrameRegionEngine"
+        }
+
+        async fn handle_request(
+            &self,
+            _region_id: RegionId,
+            _request: RegionRequest,
+        ) -> RegionResult<api::region::RegionResponse> {
+            unimplemented!("these tests never write")
+        }
+
+        async fn handle_query(
+            &self,
+            _region_id: RegionId,
+            request: ScanRequest,
+        ) -> RegionResult<store_api::region_engine::RegionScannerRef> {
+            Ok(Box::new(FrameScanner {
+                metadata: self.metadata.clone(),
+                projection: request.projection.clone(),
+                properties: ScannerProperties::new(vec![Vec::new(); 2], false, 0),
+                serves_frames: self.serves_frames,
+                prepares: self.prepares.clone(),
+            }))
+        }
+
+        async fn get_metadata(&self, _region_id: RegionId) -> RegionResult<RegionMetadataRef> {
+            Ok(self.metadata.clone())
+        }
+
+        fn region_statistic(&self, _region_id: RegionId) -> Option<RegionStatistic> {
+            None
+        }
+
+        async fn get_committed_sequence(
+            &self,
+            _region_id: RegionId,
+        ) -> RegionResult<SequenceNumber> {
+            Ok(SequenceNumber::default())
+        }
+
+        async fn stop(&self) -> RegionResult<()> {
+            Ok(())
+        }
+
+        fn set_region_role(&self, _region_id: RegionId, _role: RegionRole) -> RegionResult<()> {
+            Ok(())
+        }
+
+        async fn set_region_role_state_gracefully(
+            &self,
+            _region_id: RegionId,
+            _region_role_state: SettableRegionRoleState,
+        ) -> RegionResult<SetRegionRoleStateResponse> {
+            unimplemented!("these tests never change the region role")
+        }
+
+        async fn sync_region(
+            &self,
+            _region_id: RegionId,
+            _request: SyncRegionFromRequest,
+        ) -> RegionResult<SyncRegionFromResponse> {
+            unimplemented!("these tests never sync")
+        }
+
+        async fn remap_manifests(
+            &self,
+            _request: RemapManifestsRequest,
+        ) -> RegionResult<RemapManifestsResponse> {
+            unimplemented!("these tests never remap manifests")
+        }
+
+        fn role(&self, _region_id: RegionId) -> Option<RegionRole> {
+            None
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Builds a region provider, optionally with the request's raw-series key naming `metric`.
+    async fn frame_provider(
+        serves_frames: bool,
+        raw_metric: Option<&str>,
+    ) -> (DummyTableProvider, Arc<Mutex<Vec<usize>>>) {
+        let region_id = RegionId::new(2048, 1);
+        let (engine, _, prepares) = FrameRegionEngine::new(serves_frames);
+        let mut builder = QueryContextBuilder::default();
+        if let Some(metric) = raw_metric {
+            builder = builder.extensions(HashMap::from([(
+                RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+                metric.to_string(),
+            )]));
+        }
+        let provider = DummyTableProviderFactory
+            .create_table_provider(
+                region_id,
+                Arc::new(engine) as RegionEngineRef,
+                Some(Arc::new(builder.build())),
+            )
+            .await
+            .unwrap();
+        (provider, prepares)
+    }
+
+    fn has_series_frame_metadata(schema: &datatypes::arrow::datatypes::Schema) -> bool {
+        schema
+            .metadata()
+            .keys()
+            .any(|key| key.starts_with("greptime.series."))
+    }
+
+    fn task_context() -> Arc<TaskContext> {
+        datafusion::prelude::SessionContext::new().task_ctx()
+    }
+
+    fn test_session() -> datafusion::execution::SessionState {
+        SessionStateBuilder::new().build()
+    }
+
+    #[tokio::test]
+    async fn ordinary_read_keeps_the_region_scan_exec() {
+        let (provider, prepares) = frame_provider(true, None).await;
+        let state = test_session();
+        let plan = provider
+            .scan(&state, Some(&vec![2]), &[], None)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.name(), REGION_SCAN_EXEC_NAME);
+        assert!(plan.downcast_ref::<RegionScanExec>().is_some());
+        assert!(
+            !has_series_frame_metadata(plan.schema().as_ref()),
+            "an ordinary read must not declare a series frame"
+        );
+        // Nothing prepared the scan on the ordinary path, so its partitioning is untouched.
+        assert!(prepares.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn raw_series_read_answers_with_a_frame_carrying_its_own_layout() {
+        let (provider, prepares) = frame_provider(true, Some("cpu_usage")).await;
+        let state = test_session();
+        let plan = provider
+            .scan(&state, Some(&vec![2]), &[], None)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.name(), SERIES_SCAN_EXEC_NAME);
+        let frames = Arc::clone(&plan);
+        let frames = frames.downcast_ref::<SeriesScanExec>().unwrap();
+        // The conversion requires a prepared single-partition scan, and the region prepares it
+        // exactly once for exactly that target.
+        assert_eq!(*prepares.lock().unwrap(), vec![1usize]);
+        // Fields come from the projection, labels and the metric from the region and its request.
+        assert_eq!(
+            frames
+                .series_schema()
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["value"]
+        );
+        let RawLabelSource::PrimaryKey { metric_name, .. } = frames.label_source() else {
+            panic!("a prepared scan binds key-encoded labels");
+        };
+        assert_eq!(metric_name.as_ref(), "cpu_usage");
+
+        // The stream schema declares the frame: layout, content, label mode and ordering, plus the
+        // label decode description that names the metric.
+        let declared = plan.schema();
+        let metadata = declared.metadata();
+        assert_eq!(
+            metadata.get("greptime.series.layout").map(String::as_str),
+            Some("v1")
+        );
+        assert_eq!(
+            metadata.get("greptime.series.content").map(String::as_str),
+            Some("raw")
+        );
+        assert_eq!(
+            metadata.get("greptime.series.labels").map(String::as_str),
+            Some("key")
+        );
+        assert_eq!(
+            metadata.get("greptime.series.ordering").map(String::as_str),
+            Some("contiguous")
+        );
+        assert!(
+            metadata["greptime.series.label_decode"].contains("cpu_usage"),
+            "the decode description names the metric: {}",
+            metadata["greptime.series.label_decode"]
+        );
+
+        // The region's own stream keeps the declared frame schema, so the frame survives the
+        // region boundary as it is. `execute` yields the frame stream itself, which is what the
+        // cross-process path sends on unchanged.
+        let stream = plan.execute(0, task_context()).unwrap();
+        assert_eq!(stream.schema(), declared);
+
+        // The frame is the only decode input: unpacking it needs no binding from the caller.
+        let unpacked = unpack_raw_series(stream, None).unwrap();
+        assert_eq!(unpacked.schema().fields.len(), 1);
+        assert_eq!(
+            unpacked
+                .schema()
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["value"]
+        );
+        assert_eq!(unpacked.ordering(), SeriesOrdering::Contiguous);
+    }
+
+    #[tokio::test]
+    async fn raw_series_read_over_an_ineligible_region_fails_naming_the_reason() {
+        let (provider, prepares) = frame_provider(false, Some("cpu_usage")).await;
+        let state = test_session();
+        let error = provider
+            .scan(&state, Some(&vec![2]), &[], None)
+            .await
+            .expect_err("a read that asked for frames must not be answered with rows");
+
+        // The region cannot serve frames and says so, naming the region, the metric and the engine
+        // it asked. It never substitutes the ordinary row answer for the frame answer.
+        let message = error.to_string();
+        assert!(
+            message.contains("cannot answer a raw series request"),
+            "unexpected error: {message}"
+        );
+        assert!(message.contains("cpu_usage"), "unexpected error: {message}");
+        assert!(
+            message.contains(&RegionId::new(2048, 1).to_string()),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("FrameRegionEngine"),
+            "unexpected error: {message}"
+        );
+        // It failed after preparing the scan the conversion needs, not by skipping the attempt.
+        assert_eq!(*prepares.lock().unwrap(), vec![1usize]);
+    }
+
+    #[tokio::test]
+    async fn raw_series_read_falls_back_to_no_frames_only_by_being_asked_for_rows() {
+        // The same ineligible region answers normally once the request is an ordinary one: the
+        // way to get rows is to ask for rows, not to ask for frames and receive them.
+        let (provider, _) = frame_provider(false, None).await;
+        let state = test_session();
+        let plan = provider
+            .scan(&state, Some(&vec![2]), &[], None)
+            .await
+            .unwrap();
+        assert_eq!(plan.name(), REGION_SCAN_EXEC_NAME);
+        assert!(!has_series_frame_metadata(plan.schema().as_ref()));
     }
 }

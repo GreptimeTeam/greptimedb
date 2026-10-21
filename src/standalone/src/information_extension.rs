@@ -23,7 +23,7 @@ use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::peer::Peer;
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
-use common_query::request::QueryRequest;
+use common_query::request::{QueryRequest, RegionReadKind};
 use common_stat::{ResourceStatImpl, ResourceStatRef};
 use datanode::region_server::RegionServer;
 use flow::FlowDualEngineRef;
@@ -169,6 +169,7 @@ impl InformationExtension for StandaloneInformationExtension {
                 .context(catalog::error::DatafusionSnafu)?,
             region_id: RegionId::default(),
             header: None,
+            read_kind: RegionReadKind::Rows,
         };
 
         self.region_server

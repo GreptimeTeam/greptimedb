@@ -26,7 +26,7 @@ use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::BoxedError;
 use common_plugins::GREPTIME_EXEC_READ_COST;
-use common_query::request::QueryRequest;
+use common_query::request::{QueryRequest, RegionReadKind};
 use common_recordbatch::adapter::{RecordBatchMetrics, region_scan_output_bytes};
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::{SessionState, TaskContext};
@@ -777,6 +777,9 @@ impl MergeScanExec {
                     }),
                     region_id,
                     plan: plan.clone(),
+                    // The merge scan still asks for ordinary rows; selecting frames here is what
+                    // a later reader of this request opts into.
+                    read_kind: RegionReadKind::Rows,
                 };
                 if explain_verbose {
                     common_telemetry::info!(

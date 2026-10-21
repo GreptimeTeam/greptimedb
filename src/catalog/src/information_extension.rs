@@ -23,7 +23,7 @@ use common_meta::node_manager::DatanodeManagerRef;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::rpc::procedure;
 use common_procedure::{ProcedureInfo, ProcedureState};
-use common_query::request::QueryRequest;
+use common_query::request::{QueryRequest, RegionReadKind};
 use common_recordbatch::adapter::{AsyncRecordBatchStreamAdapter, DfRecordBatchStreamAdapter};
 use common_recordbatch::util::{ChainedRecordBatchStream, LimitedRecordBatchStream};
 use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
@@ -82,6 +82,7 @@ impl DistributedInformationExtension {
                         plan,
                         region_id: RegionId::default(),
                         header: None,
+                        read_kind: RegionReadKind::Rows,
                     })
                     .await
                     .context(crate::error::HandleQuerySnafu)

@@ -39,7 +39,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
-use common_query::request::QueryRequest;
+use common_query::request::{QueryRequest, RAW_SERIES_READ_EXTENSION_KEY, RegionReadKind};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_runtime::Runtime;
@@ -49,6 +49,7 @@ use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
+use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use either::Either;
 use futures_util::future::try_join_all;
@@ -109,6 +110,45 @@ use crate::region_server::registrations::RemoteDynFilterRegistry;
 use crate::region_server::remote_dyn_filter::wrap_remote_dyn_filter_guarded_stream;
 
 const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
+
+/// Returns the metric a raw-series read should frame, or `None` when this read is not one.
+///
+/// The answer is the table the request's plan scans, which is the one thing about a frame the
+/// region cannot infer: a frame declares its metric name in its label decode description, and a
+/// metric name is the logical table's identity rather than a column of any region.
+///
+/// Only a plan that *is* that scan, and asks for all of it, qualifies. A frame leaf answers with a
+/// frame where the row leaf would have answered with rows, so every operator above the scan would
+/// read a frame as rows, and a pushed-down fetch would be dropped by a leaf that returns every
+/// chunk of every series. Anything else therefore keeps the ordinary read it would have had.
+fn raw_series_metric_name(request: &QueryRequest) -> Option<String> {
+    if request.read_kind != RegionReadKind::RawSeries {
+        return None;
+    }
+    let LogicalPlan::TableScan(scan) = &request.plan else {
+        return None;
+    };
+    if scan.fetch.is_some() {
+        return None;
+    }
+    Some(scan.table_name.table().to_string())
+}
+
+/// Publishes the read kind the request asked for, and nothing a caller could have written.
+///
+/// A request header can carry arbitrary query-context extensions, so a context arriving here may
+/// already hold [`RAW_SERIES_READ_EXTENSION_KEY`] with whatever the caller chose. Every read
+/// rewrites the key unconditionally, from the decoded request alone: an ordinary read sets it to
+/// the empty value the region's table provider reads as "no metric", so naming the key in a header
+/// cannot opt a read into frames, and a raw read sets it to the metric derived from its own plan
+/// rather than to a caller-supplied name.
+fn apply_raw_series_read_key(mut ctx: QueryContext, request: &QueryRequest) -> QueryContext {
+    ctx.set_extension(
+        RAW_SERIES_READ_EXTENSION_KEY,
+        raw_series_metric_name(request).unwrap_or_default(),
+    );
+    ctx
+}
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -328,6 +368,9 @@ impl RegionServer {
                     header: request.header,
                     region_id,
                     plan,
+                    // The cross-process request has no way to ask for frames yet, so a remote read
+                    // keeps the ordinary row answer it has always produced.
+                    read_kind: RegionReadKind::Rows,
                 },
                 query_ctx.clone(),
             )
@@ -365,7 +408,15 @@ impl RegionServer {
                 }
                 .build()
             })?;
-        let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
+        // A read that asked for raw series frames names the metric those frames belong to here,
+        // because the region's table provider cannot see the plan and the metric name is not part
+        // of any region's metadata. Everything else a frame declares is derived region-side. The
+        // key is rewritten on every read, so this is also what stops a caller-supplied header from
+        // asking for frames.
+        let query_ctx = Arc::new(apply_raw_series_read_key(
+            ctx.unwrap_or_else(|| QueryContextBuilder::default().build()),
+            &request,
+        ));
 
         let region_id = request.region_id;
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
@@ -2973,5 +3024,123 @@ mod tests {
             .handle_list_metadata_request(&list_metadata_request)
             .await
             .unwrap_err();
+    }
+
+    fn scan_plan(table: &str) -> LogicalPlan {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        datafusion_expr::table_scan(
+            Some(table),
+            &Schema::new(vec![Field::new("v", DataType::Int32, true)]),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    fn query_request(plan: LogicalPlan, read_kind: RegionReadKind) -> QueryRequest {
+        QueryRequest {
+            header: None,
+            region_id: RegionId::new(2048, 1),
+            plan,
+            read_kind,
+        }
+    }
+
+    #[test]
+    fn raw_series_metric_is_the_table_scan_the_plan_is() {
+        // An ordinary read names no metric, so the region keeps its row answer.
+        assert_eq!(
+            raw_series_metric_name(&query_request(scan_plan("cpu"), RegionReadKind::Rows)),
+            None
+        );
+        // A raw read takes the metric from the scan it was asked to answer, which is the one part
+        // of a frame no region holds.
+        assert_eq!(
+            raw_series_metric_name(&query_request(scan_plan("cpu"), RegionReadKind::RawSeries)),
+            Some("cpu".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_series_read_key_cannot_be_opted_into_by_a_request_header() {
+        // A header's extensions reach the query context verbatim, so this is exactly what a caller
+        // that named the key would have on the ordinary read path.
+        let spoofed = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+                "spoofed_metric".to_string(),
+            )]))
+            .build();
+
+        // An ordinary read overwrites it with the empty value, which the region's table provider
+        // reads as "no metric": the answer is the same `RegionScanExec` it always was.
+        let ctx = apply_raw_series_read_key(
+            spoofed.clone(),
+            &query_request(scan_plan("cpu"), RegionReadKind::Rows),
+        );
+        assert_eq!(ctx.extension(RAW_SERIES_READ_EXTENSION_KEY), Some(""));
+
+        // A raw read overwrites it with the metric its own plan names, never the spoofed one.
+        let ctx = apply_raw_series_read_key(
+            spoofed,
+            &query_request(scan_plan("cpu"), RegionReadKind::RawSeries),
+        );
+        assert_eq!(ctx.extension(RAW_SERIES_READ_EXTENSION_KEY), Some("cpu"));
+    }
+
+    #[test]
+    fn raw_series_read_key_ignores_a_header_when_the_plan_is_not_just_a_scan() {
+        use datafusion_expr::LogicalPlanBuilder;
+
+        let spoofed = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+                "spoofed_metric".to_string(),
+            )]))
+            .build();
+        let projected = LogicalPlanBuilder::from(scan_plan("cpu"))
+            .project(vec![datafusion_expr::col("v")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let ctx = apply_raw_series_read_key(
+            spoofed,
+            &query_request(projected, RegionReadKind::RawSeries),
+        );
+        assert_eq!(ctx.extension(RAW_SERIES_READ_EXTENSION_KEY), Some(""));
+    }
+
+    #[test]
+    fn raw_series_metric_declines_a_plan_that_is_not_just_the_scan() {
+        use datafusion_expr::LogicalPlanBuilder;
+
+        let scan = scan_plan("cpu");
+        let projected = LogicalPlanBuilder::from(scan)
+            .project(vec![datafusion_expr::col("v")])
+            .unwrap()
+            .build()
+            .unwrap();
+        // Anything above the scan would read a frame where it expects rows, so the read stays
+        // ordinary rather than answering with a frame it cannot deliver.
+        assert_eq!(
+            raw_series_metric_name(&query_request(projected, RegionReadKind::RawSeries)),
+            None
+        );
+    }
+
+    #[test]
+    fn raw_series_metric_declines_a_scan_that_already_limits_its_rows() {
+        // A pushed-down fetch asks for part of the scan; a frame leaf returns every chunk of every
+        // series, so this read keeps the rows that honour the limit.
+        let mut limited = scan_plan("cpu");
+        let LogicalPlan::TableScan(scan) = &mut limited else {
+            panic!("the fixture is a table scan");
+        };
+        scan.fetch = Some(1);
+        assert_eq!(
+            raw_series_metric_name(&query_request(limited, RegionReadKind::RawSeries)),
+            None
+        );
     }
 }
