@@ -26,6 +26,7 @@ use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
+use futures::future::BoxFuture;
 use futures::{StreamExt, TryStreamExt};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
@@ -41,9 +42,7 @@ use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::FlatLastRowReader;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
-use crate::read::range_cache::{
-    build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
-};
+use crate::read::range_cache;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream,
@@ -283,16 +282,43 @@ impl SeqScan {
         file_scan_semaphore: Option<Arc<Semaphore>>,
         merge_semaphore: Option<Arc<Semaphore>>,
     ) -> Result<(BoxedRecordBatchStream, usize)> {
-        let cache_key = build_range_cache_key(stream_ctx, part_range);
-
-        if let Some(key) = cache_key.as_ref() {
-            if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
-                part_metrics.inc_range_cache_hit();
-                return Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE));
-            }
-            part_metrics.inc_range_cache_miss();
+        let cache_key = if compaction {
+            None
+        } else {
+            range_cache::build_range_cache_key(stream_ctx, part_range, Some(&partition_pruner))
+        };
+        let build = || {
+            Self::build_flat_partition_range_read_inner(
+                stream_ctx,
+                part_range,
+                compaction,
+                part_metrics,
+                partition_pruner,
+                file_scan_semaphore,
+                merge_semaphore,
+            )
+        };
+        if let Some(key) = cache_key {
+            return range_cache::get_or_load_range_result(
+                &stream_ctx.input.cache_strategy,
+                key,
+                part_metrics,
+                build,
+            )
+            .await;
         }
+        build().await
+    }
 
+    async fn build_flat_partition_range_read_inner(
+        stream_ctx: &Arc<StreamContext>,
+        part_range: &PartitionRange,
+        compaction: bool,
+        part_metrics: &PartitionMetrics,
+        partition_pruner: Arc<PartitionPruner>,
+        file_scan_semaphore: Option<Arc<Semaphore>>,
+        merge_semaphore: Option<Arc<Semaphore>>,
+    ) -> Result<(BoxedRecordBatchStream, usize)> {
         let mut sources = Vec::new();
         let split_batch_size = build_flat_sources(
             stream_ctx,
@@ -315,16 +341,6 @@ impl SeqScan {
             channel_size,
         )
         .await?;
-
-        let stream = match cache_key {
-            Some(key) => cache_flat_range_stream(
-                stream,
-                stream_ctx.input.cache_strategy.clone(),
-                key,
-                part_metrics.clone(),
-            ),
-            None => stream,
-        };
 
         Ok((stream, estimated_rows_per_batch))
     }
@@ -630,7 +646,29 @@ impl fmt::Debug for SeqScan {
 
 /// Builds flat sources for the partition range and push them to the `sources` vector.
 /// Returns the estimated rows per batch after splitting if splitting is applied, or `None`.
-pub(crate) async fn build_flat_sources(
+pub(crate) fn build_flat_sources<'a>(
+    stream_ctx: &'a Arc<StreamContext>,
+    part_range: &'a PartitionRange,
+    compaction: bool,
+    part_metrics: &'a PartitionMetrics,
+    partition_pruner: Arc<PartitionPruner>,
+    sources: &'a mut Vec<BoxedRecordBatchStream>,
+    semaphore: Option<Arc<Semaphore>>,
+) -> BoxFuture<'a, Result<Option<usize>>> {
+    // Erase the native cache loader future at the shared query/compaction boundary.
+    // Otherwise compaction's outer state machine embeds the nested reader/cache layouts.
+    Box::pin(build_flat_sources_inner(
+        stream_ctx,
+        part_range,
+        compaction,
+        part_metrics,
+        partition_pruner,
+        sources,
+        semaphore,
+    ))
+}
+
+async fn build_flat_sources_inner(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
     compaction: bool,

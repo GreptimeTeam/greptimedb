@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Benchmarks for `cache_flat_range_stream` overhead.
+//! Benchmarks for the production range-result loader.
 //!
-//! Compares consuming batches from a plain stream vs through the caching wrapper
-//! that clones batches for the range cache.
+//! Compares a plain decoding stream, the loader with caching disabled, and cold
+//! cache construction. Each iteration creates a new cache and fully consumes the
+//! returned stream. Decoder/cache setup and stream drop are measured; asynchronous
+//! cache maintenance is not explicitly awaited. Data generation and Parquet encoding
+//! happen outside the measured iterations.
+//! This does not measure warm reuse, concurrent sharing, or remote I/O.
 //!
 //! Run with:
 //! ```sh
@@ -105,24 +109,29 @@ fn cache_flat_range_stream_bench(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("cache_flat_range_stream", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                let iter = EncodedBulkPartIter::try_new(
-                    &encoded_part,
-                    context.clone(),
-                    row_groups.clone(),
-                    None,
-                    None,
-                )
-                .unwrap();
-                let stream: mito2::read::BoxedRecordBatchStream =
-                    Box::pin(futures::stream::iter(iter));
-                let mut stream = bench_cache_flat_range_stream(stream, 64 * 1024 * 1024, region_id);
-                while let Some(_batch) = stream.try_next().await.unwrap() {}
+    for (name, capacity) in [
+        ("range_loader_cache_disabled", 0),
+        ("range_loader_cold_build", 64 * 1024 * 1024),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let iter = EncodedBulkPartIter::try_new(
+                        &encoded_part,
+                        context.clone(),
+                        row_groups.clone(),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    let stream: mito2::read::BoxedRecordBatchStream =
+                        Box::pin(futures::stream::iter(iter));
+                    let mut stream = bench_cache_flat_range_stream(stream, capacity, region_id);
+                    while let Some(_batch) = stream.try_next().await.unwrap() {}
+                });
             });
         });
-    });
+    }
 }
 
 criterion_group!(benches, cache_flat_range_stream_bench);

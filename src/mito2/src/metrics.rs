@@ -285,6 +285,34 @@ pub(crate) fn cache_loading_metrics(
 
 // Cache metrics.
 lazy_static! {
+    pub static ref RANGE_CACHE_EVENTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_range_cache_events_total",
+        "Range sharing built/reused rows, batches and referenced bytes, and budget fallbacks",
+        &["event"]
+    )
+    .unwrap();
+    pub static ref RANGE_CACHE_STAGING_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_range_cache_staging_bytes",
+        "Referenced batch bytes retained by active shared range buffers, including unread streaming batches"
+    )
+    .unwrap();
+    pub static ref RANGE_CACHE_STREAMING_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_range_cache_streaming_bytes",
+        "Referenced bytes retained for active readers after full-result cache admission stops"
+    ).unwrap();
+    pub static ref RANGE_CACHE_BUFFER_PEAK_BYTES: Histogram = register_histogram!(
+        "greptime_mito_range_cache_buffer_peak_bytes",
+        "Peak referenced bytes per shared range buffer, observed when the buffer is released",
+        exponential_buckets(1024.0, 4.0, 12).unwrap()
+    ).unwrap();
+    pub static ref RANGE_CACHE_STREAMING_PEAK_BATCHES: Histogram = register_histogram!(
+        "greptime_mito_range_cache_streaming_peak_batches",
+        "Peak unread batches retained for the slowest reader after cache admission stops, observed on release",
+        exponential_buckets(1.0, 4.0, 10).unwrap()
+    ).unwrap();
+}
+
+lazy_static! {
     /// Native cache request and actual loader lifecycle; request is not a waiter count.
     pub static ref CACHE_NATIVE_LOAD_EVENTS: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_native_load_events_total",
