@@ -995,3 +995,29 @@ fn a_rejected_series_leaves_the_aggregator_unchanged() {
     let output = aggregator.finish().unwrap();
     assert_eq!(values_of(&output, 0, 128), (10, vec![Some(3.0)]));
 }
+
+/// A group of short-lived series, one sample each at its own point: every point aggregates the one
+/// member present there, the shape whose cost must follow the samples and not members × points.
+#[test]
+fn quantile_over_one_point_members_reads_each_member_at_its_point() {
+    let schema = schema(&["value"]);
+    let series: Vec<Series> = (0..128)
+        .map(|point| {
+            input(
+                &schema,
+                metric("m", &[("i", &point.to_string())]),
+                point,
+                &[vec![Some(point as f64)]],
+            )
+        })
+        .collect();
+    let q = input(
+        &schema,
+        MetricName::try_new(None, Vec::new()).unwrap(),
+        0,
+        &[vec![Some(0.5); 128]],
+    );
+    let output = aggregate_quantile(&schema, &series, &q, Grouping::By(&[])).unwrap();
+    let expected: Vec<Option<f64>> = (0..128).map(|point| Some(point as f64)).collect();
+    assert_eq!(values_of(&output, 0, 128), (0, expected));
+}

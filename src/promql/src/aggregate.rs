@@ -19,8 +19,9 @@
 #[cfg(test)]
 mod tests;
 
+use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -198,21 +199,38 @@ pub fn aggregate_quantile(
     let (mut values, mut sorted, mut row) = (Vec::new(), Vec::new(), Vec::with_capacity(width));
     for (metric, members) in groups {
         builder.begin_series();
-        // Points are visited in order with one forward cursor per member and field, so only one
-        // point's values are held at a time.
+        // Each member's next position waits in a min-heap, so a point costs the members present
+        // there and not the whole group: a group of short-lived series stays linear in its
+        // samples. Ties pop in member order, the input order Prometheus appends values in.
         let mut positions: Vec<_> = members
             .iter()
-            .map(|series| series.time.positions().peekable())
+            .map(|series| series.time.positions())
             .collect();
         let mut cursors: Vec<Vec<_>> = members
             .iter()
             .map(|series| series.fields.iter().map(|field| field.cursor()).collect())
             .collect();
-        while let Some(point) = positions
+        let mut next: BinaryHeap<Reverse<(usize, usize, usize)>> = positions
             .iter_mut()
-            .filter_map(|positions| positions.peek().map(|&(point, _)| point))
-            .min()
-        {
+            .enumerate()
+            .filter_map(|(member, positions)| {
+                positions
+                    .next()
+                    .map(|(point, row)| Reverse((point, member, row)))
+            })
+            .collect();
+        let mut present = Vec::new();
+        while let Some(&Reverse((point, _, _))) = next.peek() {
+            present.clear();
+            while let Some(&Reverse((at, member, row))) = next.peek()
+                && at == point
+            {
+                next.pop();
+                present.push((member, row));
+                if let Some((point, row)) = positions[member].next() {
+                    next.push(Reverse((point, member, row)));
+                }
+            }
             let q = q
                 .binary_search_by_key(&point, |&(point, _)| point)
                 .ok()
@@ -220,11 +238,8 @@ pub fn aggregate_quantile(
             row.clear();
             for field in 0..width {
                 values.clear();
-                for (positions, cursors) in positions.iter_mut().zip(&mut cursors) {
-                    if let Some(&(at, row)) = positions.peek()
-                        && at == point
-                        && let Some(SampleRef::Float(value)) = cursors[field].at(row)
-                    {
+                for &(member, member_row) in &present {
+                    if let Some(SampleRef::Float(value)) = cursors[member][field].at(member_row) {
                         values.push(value);
                     }
                 }
@@ -232,9 +247,6 @@ pub fn aggregate_quantile(
                     Some(q) if !values.is_empty() => Some(quantile(q, &values, &mut sorted)),
                     _ => None,
                 });
-            }
-            for positions in &mut positions {
-                positions.next_if(|&(at, _)| at == point);
             }
             builder.push(point, &row)?;
         }
