@@ -1423,17 +1423,29 @@ impl BinaryOperand {
     ///
     /// One series per closed logical series, on `schema`'s grid, and nothing that copies a sample:
     /// the descriptors the chunks' fields are made of are collected and shared. What is counted is
-    /// therefore metadata only -- the entry in the assembled vector, the field list of the series,
-    /// and for each field the chunk descriptors it is collected into, the list
-    /// [`Samples::try_from_chunks`] flattens them into and the `Arc` it hands them over in, which is
-    /// one list of each per field per boundary. The axis adds the runs the boundary covers in the
-    /// vector they are collected in, and, from two runs on, the span and row-offset arrays
-    /// [`TimeAxis::from_grid_spans`] copies them into; a single run becomes a [`GridRange`] and
+    /// therefore metadata only, and every term is what the work holds at its peak: the entry in the
+    /// assembled vector, the field list of the series ([`SeriesFields`] takes a one-field list out of
+    /// its vector and boxes a wider one, so neither copies), and the exactly sized vector
+    /// [`Self::assemble`] collects a field's chunk descriptors into.
+    ///
+    /// A field's descriptors then go through [`Samples::try_from_chunks`], which copies them into a
+    /// vector that grows by doubling -- so it ends at no more than twice the segments it holds, and
+    /// starts from the four slots such a `Vec` allocates first -- and then into the `Arc<[Samples]>`
+    /// it returns, which holds one slot per segment while that vector is still alive. Three slots
+    /// per segment and the four-slot floor cover the two together, and the floor is also what pays
+    /// for the empty result an all-empty field is replaced with.
+    ///
+    /// The axis adds the runs the boundary covers, collected into an exactly sized vector, and, from
+    /// two runs on, the span and row-offset arrays [`TimeAxis::from_grid_spans`] copies them into
+    /// while the vectors they came from are alive; a single run becomes a [`GridRange`] and
     /// allocates neither.
     fn assembly_bytes(&self, schema: &SeriesSchema) -> Option<usize> {
         let samples = std::mem::size_of::<Samples>();
         let grids = std::mem::size_of::<GridSpan>();
         let width = schema.fields.len();
+        // The slots a first push allocates, which is the floor every growth of the flatten starts
+        // from: `Vec` grows a non-zero capacity to at least this many elements.
+        let vec_floor = 4usize;
         let mut bytes = 0usize;
         for boundary in self.boundaries() {
             let chunks = &self.series[boundary];
@@ -1447,10 +1459,13 @@ impl BinaryOperand {
                     segments = segments.checked_add(field.segments().len())?;
                 }
             }
+            // Per field: the chunks collected into one vector, and the three slots per segment plus
+            // the four-slot floor that the flatten and the `Arc` it is copied into need together.
             let descriptors = chunks
                 .len()
                 .checked_mul(width)?
-                .checked_add(segments.checked_mul(2)?)?;
+                .checked_add(segments.checked_mul(3)?)?
+                .checked_add(width.checked_mul(vec_floor)?)?;
             let collected = runs.checked_mul(grids)?;
             let ranges = if runs > 1 {
                 runs.checked_mul(grids.checked_add(std::mem::size_of::<usize>())?)?

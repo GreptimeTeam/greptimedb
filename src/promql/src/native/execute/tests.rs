@@ -506,6 +506,33 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
     }
 }
 
+/// What a binary node holds once it retains `left` and `right`, and what assembling the retained
+/// chunks into the series the kernel matches adds on top.
+///
+/// Both are read from a runtime of its own, so a pool can be sized from them: the first is the
+/// node's own ledger and the second its own bound, and neither is a figure the pool reports.
+fn binary_charge(
+    schema: &Arc<SeriesSchema>,
+    left: &EvaluatedChunk,
+    right: &EvaluatedChunk,
+) -> (usize, usize) {
+    let mut runtime = binary_runtime(&pool(), schema);
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left.clone()))
+        .unwrap();
+    runtime
+        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right.clone()))
+        .unwrap();
+    let retained = runtime.buffer.held;
+    let assembly = runtime
+        .binary
+        .as_ref()
+        .expect("the runtime holds a binary node")
+        .assembly_bytes()
+        .expect("the assembly bound does not overflow");
+    (retained, assembly)
+}
+
 /// One evaluated chunk of an input series: `values` at `start` and onwards on `schema`'s grid.
 fn evaluated_chunk(
     schema: &SeriesSchema,
@@ -4576,22 +4603,7 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
     let schema = evaluated_schema(Arc::clone(&grid));
     let left = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
     let right = evaluated_chunk(&schema, 0, vec![10.0, 20.0], true);
-
-    // What the node holds once both operands are retained, and what assembling them into the one
-    // series each of them is adds.
-    let (retained, assembly) = {
-        let pool = pool();
-        let mut runtime = binary_runtime(&pool, &schema);
-        runtime
-            .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left.clone()))
-            .unwrap();
-        runtime
-            .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right.clone()))
-            .unwrap();
-        let retained = runtime.buffer.held;
-        let assembly = runtime.binary.as_ref().unwrap().assembly_bytes().unwrap();
-        (retained, assembly)
-    };
+    let (retained, assembly) = binary_charge(&schema, &left, &right);
     assert!(
         assembly > 0,
         "assembling the operands into series is not charged for"
@@ -4604,7 +4616,7 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
         .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left.clone()))
         .unwrap();
     runtime
-        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right))
+        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right.clone()))
         .unwrap();
     assert_eq!(runtime.buffer.held, retained);
     let error = runtime.compute_binary(&NodePath::root()).unwrap_err();
@@ -4630,11 +4642,7 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
         .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left))
         .unwrap();
     runtime
-        .retain_binary(
-            &NodePath::root(),
-            1,
-            NativeChunk::Evaluated(evaluated_chunk(&schema, 0, vec![10.0, 20.0], true)),
-        )
+        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right))
         .unwrap();
     let assembled = runtime
         .binary
@@ -4646,6 +4654,346 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
     assert_eq!(assembled[1].len(), 1, "one closed series is one series");
     let built = EvaluatedChunk::try_new(assembled[0][0].clone(), true).unwrap();
     assert_eq!(sample_values(&built), vec![Some(1.0), Some(2.0)]);
+}
+
+/// An assembly the executor's pool cannot hold stops it and leaves it holding nothing.
+///
+/// The pool is one byte short of what the node retains plus what assembling the retained chunks
+/// allocates, so both operands are retained and the assembly is what the pool refuses. What a caller
+/// sees afterwards is a stopped execution that holds nothing: the operand chunks are dropped and the
+/// reservation is back at zero while the executor is still alive.
+#[test]
+fn an_assembly_the_executors_pool_cannot_hold_stops_it() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
+    let schema = evaluated_schema(grid);
+    let (left_chunk, right_chunk) = (
+        evaluated_chunk(&schema, 0, vec![1.0, 2.0], true),
+        evaluated_chunk(&schema, 0, vec![10.0, 20.0], true),
+    );
+    let (retained, assembly) = binary_charge(&schema, &left_chunk, &right_chunk);
+    let pool = bounded_pool(retained + assembly - 1);
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, Arc::clone(&pool), &set);
+    execution.push_evaluated_at(&left, left_chunk).unwrap();
+    execution.push_evaluated_at(&right, right_chunk).unwrap();
+    // Both operands are retained before anything is assembled, and nothing is answered: the refusal
+    // below is the assembly's and not a chunk's.
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        pool.reserved(),
+        retained,
+        "the operands are not what the pool holds"
+    );
+    assert_eq!(
+        gauge(
+            &set,
+            &NodePath::root().partitioned_metric_name(NodeMetric::PEAK_RESERVED_BYTES, 0)
+        ),
+        retained,
+        "the binary node reserved past what it retains"
+    );
+
+    let error = execution.finish().unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "the assembly was not reserved before it allocated: {error}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "the stopped execution kept a reservation"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(
+        execution.state().nodes_holding_binary(),
+        0,
+        "the stopped execution kept the operands it retained"
+    );
+    let stopped = execution.next_chunk().unwrap_err();
+    assert!(
+        stopped
+            .to_string()
+            .contains("stopped after an earlier error"),
+        "a stopped execution answered again: {stopped}"
+    );
+}
+
+/// The assembly bound covers the vector a field's descriptors are flattened into, on the shape that
+/// grows it the most.
+///
+/// One chunk's field can itself hold 1024 segments. Beside a second chunk's one, [`Samples::try_from_chunks`]
+/// copies all 1025 descriptors into a vector that doubled to 2048 slots, and then into the
+/// `Arc<[Samples]>` it returns, so 3073 slots are live at once: two slots per segment -- 2052 here --
+/// would reserve less than the assembly allocates. The segments are dense slices of one histogram
+/// table, which the assembled field keeps sharing rather than copying.
+#[test]
+fn an_assembly_bound_covers_the_capacity_its_flatten_grows_to() {
+    let (segments, chunks) = (1025usize, 2usize);
+    let grid = grid(0, 60_000, segments as u64);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // One table every segment indexes into, so the assembly has one allocation to share.
+    let mut builder = HistogramBatchBuilder::new();
+    for _ in 0..segments {
+        push_histogram(&mut builder, 4);
+    }
+    let table = builder.finish().unwrap();
+    let one = |index: usize| {
+        let index = u32::try_from(index).unwrap();
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(index)]), Arc::clone(&table))
+            .unwrap()
+    };
+    // The first chunk's field is itself chunked -- 1024 one-sample segments -- and the second holds
+    // one, so the two chunks of the one logical series hold 1025 segments in all.
+    let nested = Samples::try_from_chunks((0..1024).map(one).collect::<Vec<_>>()).unwrap();
+    assert_eq!(
+        nested.segments().len(),
+        1024,
+        "the first field is not nested"
+    );
+    let chunk_of = |start: usize, len: usize, samples: Samples, is_last: bool| {
+        EvaluatedChunk::try_new(
+            Series {
+                metric: metric(),
+                time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), start, len).unwrap()),
+                fields: SeriesFields::one(samples),
+            },
+            is_last,
+        )
+        .unwrap()
+    };
+    let first = chunk_of(0, 1024, nested, false);
+    let second = chunk_of(1024, 1, one(1024), true);
+
+    // What the flatten the assembly runs holds at its peak, measured with the operations it makes:
+    // a chunked field contributes its segments and a dense one contributes itself.
+    let mut flat: Vec<Samples> = Vec::new();
+    for chunk in [&first, &second] {
+        let field = &chunk.series.fields.as_slice()[0];
+        if field.segments().len() > 1 {
+            flat.extend(field.segments().iter().cloned());
+        } else {
+            flat.push(field.clone());
+        }
+    }
+    // The `Arc<[Samples]>` holds one slot per descriptor while the vector they were copied out of is
+    // still alive, so the peak is that vector's capacity plus the descriptors it held.
+    let peak = flat.capacity() + flat.len();
+    assert_eq!(
+        flat.len(),
+        segments,
+        "the flatten did not meet every segment"
+    );
+    assert!(
+        flat.capacity() > flat.len(),
+        "the flatten grew to no more than its descriptors, so this shape proves nothing"
+    );
+    // The bound the assembly is reserved for: one descriptor per chunk per field, three per segment,
+    // and the four slots a first push allocates.
+    let allowed = chunks + 3 * segments + 4;
+    assert!(
+        peak <= allowed,
+        "the flatten of {segments} segments in {chunks} chunks holds {peak} slots at its peak, past \
+         the {allowed} the assembly bound allows"
+    );
+
+    let pool = pool();
+    let mut runtime = binary_runtime(&pool, &schema);
+    for chunk in [first, second.clone()] {
+        runtime
+            .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(chunk))
+            .unwrap();
+    }
+    runtime
+        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(second))
+        .unwrap();
+    let assembly = runtime.binary.as_ref().unwrap().assembly_bytes().unwrap();
+    assert!(
+        peak * std::mem::size_of::<Samples>() <= assembly,
+        "the {assembly} bytes reserved for the assembly do not cover the {peak} slots its flatten \
+         holds"
+    );
+
+    // The assembled series keeps the segments and the one table they index into.
+    let assembled = runtime
+        .binary
+        .as_ref()
+        .unwrap()
+        .assemble(&NodePath::root())
+        .unwrap();
+    assert_eq!(assembled[0].len(), 1, "one closed series is one series");
+    assert_eq!(assembled[0][0].time.len(), segments);
+    let field = &assembled[0][0].fields.as_slice()[0];
+    assert_eq!(field.segments().len(), segments);
+    for segment in field.segments() {
+        let Some(DenseSamplesRef::Histogram(histograms)) = segment.dense() else {
+            panic!("a histogram chunk assembles into histogram segments");
+        };
+        assert!(
+            Arc::ptr_eq(histograms.batch(), &table),
+            "the assembly copied the histogram table instead of sharing it"
+        );
+    }
+    let built = EvaluatedChunk::try_new(assembled[0][0].clone(), true).unwrap();
+    assert_eq!(histogram_counts(&built), vec![4.0; segments]);
+}
+
+/// A mixed operand delivered in two chunks over a sparse axis assembles into one series that keeps
+/// its holes, both its fields and the allocations they are slices of.
+///
+/// Field 0 holds native histograms and field 1 floats, both chunks index one table, and the
+/// positions they decide are 0, 2 and 3 of a four-point grid. The assembly keeps one descriptor per
+/// segment instead of copying a sample, so the assembled series reads the same table and the same
+/// float buffers the chunks read, and the position neither chunk decided stays a hole. The kernel
+/// then answers that series as one candidate, which is what the result below is computed from.
+#[test]
+fn a_mixed_nested_operand_assembles_into_one_series_with_its_holes() {
+    let grid = grid(0, 60_000, 4);
+    let schema = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    // One table both chunks index into.
+    let mut builder = HistogramBatchBuilder::new();
+    for _ in 0..2 {
+        push_histogram(&mut builder, 4);
+    }
+    let table = builder.finish().unwrap();
+    let chunk_of = |spans: &[(usize, usize)],
+                    indices: Vec<Option<u32>>,
+                    floats: Vec<Option<f64>>,
+                    is_last: bool| {
+        let histograms =
+            Samples::try_from_histogram(UInt32Array::from(indices), Arc::clone(&table)).unwrap();
+        let time = TimeAxis::from_grid_spans(
+            Arc::clone(&grid),
+            spans
+                .iter()
+                .map(|&(start, len)| GridSpan::new(start, len))
+                .collect(),
+        )
+        .unwrap();
+        EvaluatedChunk::try_new(
+            Series {
+                metric: metric(),
+                time,
+                fields: SeriesFields::try_from_vec(vec![
+                    histograms,
+                    Samples::from_float(Float64Array::from(floats)),
+                ])
+                .unwrap(),
+            },
+            is_last,
+        )
+        .unwrap()
+    };
+    let (left_a, left_b) = (
+        chunk_of(
+            &[(0, 1), (2, 1)],
+            vec![Some(0), Some(0)],
+            vec![Some(1.0), None],
+            false,
+        ),
+        chunk_of(&[(3, 1)], vec![Some(1)], vec![Some(4.0)], true),
+    );
+    let (right_a, right_b) = (
+        chunk_of(
+            &[(0, 1), (2, 1)],
+            vec![Some(1), Some(1)],
+            vec![Some(10.0), Some(30.0)],
+            false,
+        ),
+        chunk_of(&[(3, 1)], vec![Some(0)], vec![Some(40.0)], true),
+    );
+
+    // The two chunks are collected into the one series the kernel matches.
+    let pool = pool();
+    let mut runtime = binary_runtime(&pool, &schema);
+    for chunk in [&left_a, &left_b] {
+        runtime
+            .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(chunk.clone()))
+            .unwrap();
+    }
+    let assembled = runtime
+        .binary
+        .as_ref()
+        .unwrap()
+        .assemble(&NodePath::root())
+        .unwrap();
+    assert_eq!(
+        assembled[0].len(),
+        1,
+        "two chunks of one series are not one series"
+    );
+    let series = &assembled[0][0];
+    assert_eq!(series.time.len(), 3);
+    assert_eq!(series.time.first_position(), Some(0));
+    assert_eq!(series.time.last_position(), Some(3));
+    assert_eq!(
+        series.time.runs().count(),
+        3,
+        "the assembly filled the hole neither chunk decided"
+    );
+    let histograms = &series.fields.as_slice()[0];
+    assert_eq!(
+        histograms.segments().len(),
+        2,
+        "the chunks' histograms were not collected"
+    );
+    for segment in histograms.segments() {
+        let Some(DenseSamplesRef::Histogram(samples)) = segment.dense() else {
+            panic!("a histogram chunk assembles into histogram segments");
+        };
+        assert!(
+            Arc::ptr_eq(samples.batch(), &table),
+            "the assembly copied a histogram table instead of sharing it"
+        );
+    }
+    let floats = &series.fields.as_slice()[1];
+    assert_eq!(
+        floats.segments().len(),
+        2,
+        "the chunks' floats were not collected"
+    );
+    for (segment, chunk) in floats.segments().iter().zip([&left_a, &left_b]) {
+        let (Some(DenseSamplesRef::Float(values)), Some(DenseSamplesRef::Float(source))) =
+            (segment.dense(), chunk.series.fields.as_slice()[1].dense())
+        else {
+            panic!("a float chunk assembles into float segments");
+        };
+        assert_eq!(
+            values.values().inner().data_ptr(),
+            source.values().inner().data_ptr(),
+            "the assembly copied floats instead of sharing the buffer they are slices of"
+        );
+    }
+
+    // The kernel reads the assembled series, over the two fields and the positions it holds.
+    let root = binary_of(
+        evaluated_input_of(2, Arc::clone(&grid)),
+        evaluated_input_of(2, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let (left, right) = (NodePath::root().left(), NodePath::root().right());
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for chunk in [left_a, left_b] {
+        execution.push_evaluated_at(&left, chunk).unwrap();
+    }
+    for chunk in [right_a, right_b] {
+        execution.push_evaluated_at(&right, chunk).unwrap();
+    }
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1, "one matched label set answers one chunk");
+    assert_eq!(
+        field_values(&out[0], 1),
+        vec![Some(11.0), None, Some(44.0)],
+        "the floats of the two chunks are not added at the positions they hold"
+    );
+    assert_eq!(
+        histogram_counts(&out[0]),
+        vec![8.0, 8.0, 8.0],
+        "the histograms of the two chunks are not added at the positions they hold"
+    );
 }
 
 /// A kernel error and dropping the execution both give back everything the node reserved.
