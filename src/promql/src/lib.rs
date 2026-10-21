@@ -23,6 +23,7 @@ mod go_sort;
 mod golden;
 pub mod grid_series;
 pub mod histogram_eval;
+pub mod info;
 pub mod instant_eval;
 pub mod map;
 pub mod map_label;
