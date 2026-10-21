@@ -607,12 +607,16 @@ mod tests {
     use datafusion::execution::SessionState;
     use datafusion_common::tree_node::TreeNodeRecursion;
     use datafusion_expr::{LogicalPlanBuilder, TableScanBuilder, col, lit};
+    use session::context::QueryContext;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
     use super::*;
     use crate::QueryEngineFactory;
-    use crate::dummy_catalog::DummyTableProvider;
+    use crate::dist_plan::MergeScanLogicalPlan;
+    use crate::dummy_catalog::{DummyCatalogList, DummyTableProvider};
     use crate::optimizer::test_util::mock_table_provider;
     use crate::options::QueryOptions;
+    use crate::query_engine::DefaultSerializer;
 
     /// Builds a [`SessionState`] of a query engine without the dist planner.
     fn session_state() -> SessionState {
@@ -630,6 +634,130 @@ mod tests {
         .query_engine()
         .engine_state()
         .session_state()
+    }
+
+    /// Builds a [`SessionState`] of a query engine with the dist planner, i.e.
+    /// with the frontend analyzer chain that contains
+    /// [`DistPlannerAnalyzer`](crate::dist_plan::DistPlannerAnalyzer).
+    fn session_state_with_dist_planner() -> SessionState {
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+
+        QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            true,
+            QueryOptions::default(),
+        )
+        .query_engine()
+        .engine_state()
+        .session_state()
+    }
+
+    /// Applies `visit` to every node of `plan`, including the remote input of a
+    /// [`MergeScanLogicalPlan`], which is not part of
+    /// [`LogicalPlan::inputs`] and is therefore invisible to a plain walk.
+    fn visit_plan(plan: &LogicalPlan, visit: &mut impl FnMut(&LogicalPlan)) {
+        visit(plan);
+
+        if let LogicalPlan::Extension(extension) = plan
+            && let Some(merge_scan) = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+        {
+            visit_plan(merge_scan.input(), visit);
+        }
+
+        for child in plan.inputs() {
+            visit_plan(child, visit);
+        }
+    }
+
+    /// Returns the [`ScanSequenceBinding`] `plan` is, if it is one.
+    fn binding_of(plan: &LogicalPlan) -> Option<&ScanSequenceBinding> {
+        let LogicalPlan::Extension(extension) = plan else {
+            return None;
+        };
+
+        extension
+            .node
+            .as_any()
+            .downcast_ref::<ScanSequenceBinding>()
+    }
+
+    /// Returns the bindings of `plan` and the number of [`TableScan`]s in it,
+    /// counting the part of the plan a `MergeScan` keeps in its remote input.
+    fn collect_bindings_and_scans(plan: &LogicalPlan) -> (Vec<ScanSequenceBinding>, usize) {
+        let mut bindings = Vec::new();
+        let mut scans = 0;
+        visit_plan(plan, &mut |plan| {
+            if let Some(binding) = binding_of(plan) {
+                bindings.push(binding.clone());
+            }
+            if matches!(plan, LogicalPlan::TableScan(_)) {
+                scans += 1;
+            }
+        });
+
+        (bindings, scans)
+    }
+
+    /// Returns the remote input of the only `MergeScan` of `plan`.
+    fn merge_scan_input(plan: &LogicalPlan) -> LogicalPlan {
+        let mut inputs = Vec::new();
+        visit_plan(plan, &mut |plan| {
+            if let LogicalPlan::Extension(extension) = plan
+                && let Some(merge_scan) = extension
+                    .node
+                    .as_any()
+                    .downcast_ref::<MergeScanLogicalPlan>()
+            {
+                inputs.push(merge_scan.input().clone());
+            }
+        });
+
+        assert_eq!(1, inputs.len(), "expects exactly one MergeScan");
+        inputs.pop().unwrap()
+    }
+
+    /// Reads `plan` back through the production plan serialization: the
+    /// [`DefaultSerializer`] and the plan decoder of a query engine, which is the
+    /// path a region server takes to decode a remote read.
+    #[allow(clippy::print_stdout)]
+    async fn round_trip(plan: &LogicalPlan, provider: Arc<DummyTableProvider>) -> LogicalPlan {
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .unwrap();
+        println!("encoded plan: {} bytes", bytes.len());
+
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+        let engine = QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let decoder = engine
+            .engine_context(QueryContext::arc())
+            .unwrap()
+            .new_plan_decoder()
+            .unwrap();
+
+        decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(provider)),
+                false,
+            )
+            .await
+            .unwrap()
     }
 
     /// Runs the analyzer and the logical optimizer of `state` on `plan`.
@@ -1289,5 +1417,119 @@ mod tests {
             message.contains("no snapshot sequence for region 1"),
             "unexpected error: {message}"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::print_stdout)]
+    async fn test_serializer_round_trips_binding_above_scan() {
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let after_seqs = RegionSeqs::from([(1, 7), (2, 42)]);
+        let binding = ScanSequenceBinding::new(
+            3,
+            after_seqs.clone(),
+            into_scan(scan_plan(provider.clone(), "devices")),
+        );
+        let plan = binding.into_logical_plan();
+        let schema = plan.schema().clone();
+        // Printed to inspect the encoded size and both plans by hand; run the
+        // test with `--nocapture` to see them.
+        println!("encoded plan:\n{}", plan.display_indent());
+
+        let decoded = round_trip(&plan, provider).await;
+        println!("decoded plan:\n{}", decoded.display_indent());
+
+        let bindings = collect_bindings(&decoded);
+        assert_eq!(1, bindings.len());
+        let binding = &bindings[0];
+        // The node-local state survives the trip.
+        assert_eq!(3, binding.scan_id());
+        assert_eq!(&after_seqs, binding.after_seqs());
+        // The consumer re-attaches the decoded child, so the binding stays
+        // adjacent to the scan it belongs to instead of the decode-time
+        // placeholder.
+        let scan = binding
+            .table_scan()
+            .expect("the binding wraps the decoded TableScan");
+        assert_eq!("devices", scan.table_name.table());
+        // A binding's schema is its child's schema, so both come back.
+        assert_eq!(&schema, decoded.schema());
+    }
+
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_dist_planner_pushes_binding_with_its_scan() {
+        let state = session_state_with_dist_planner();
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let after_seqs = RegionSeqs::from([(1, 42)]);
+        let binding = ScanSequenceBinding::new(
+            0,
+            after_seqs.clone(),
+            into_scan(scan_plan(provider, "devices")),
+        );
+        let plan = binding.into_logical_plan();
+
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap();
+        // Printed to inspect the split by hand; run the test with `--nocapture`
+        // to see it.
+        println!("analyzed plan:\n{}", analyzed.display_indent());
+
+        let remote = merge_scan_input(&analyzed);
+        println!("MergeScan input:\n{}", remote.display_indent());
+
+        // Being commutative, the binding is remote-plan material instead of
+        // staying on the frontend, and it takes its scan with it.
+        let remote_binding =
+            binding_of(&remote).expect("the remote input of the MergeScan starts at the binding");
+        assert_eq!(0, remote_binding.scan_id());
+        assert_eq!(&after_seqs, remote_binding.after_seqs());
+        assert!(
+            matches!(remote_binding.input(), LogicalPlan::TableScan(_)),
+            "unexpected binding input: {}",
+            remote_binding.input().display_indent()
+        );
+        assert_eq!(1, count_table_scans(&remote));
+    }
+
+    #[test]
+    #[allow(clippy::print_stdout)]
+    fn test_pushed_down_bindings_with_different_after_seqs_are_not_merged() {
+        let state = session_state_with_dist_planner();
+        let provider = Arc::new(mock_table_provider(1.into()));
+        let binding_a = ScanSequenceBinding::new(
+            0,
+            RegionSeqs::from([(1, 10)]),
+            into_scan(scan_plan(provider.clone(), "devices")),
+        );
+        let binding_b = ScanSequenceBinding::new(
+            0,
+            RegionSeqs::from([(1, 20)]),
+            into_scan(scan_plan(provider, "devices")),
+        );
+        // The wrapped scans are equal, so only the bounds tell the positions
+        // apart.
+        assert_eq!(binding_a.input(), binding_b.input());
+
+        let plan = LogicalPlanBuilder::from(binding_a.into_logical_plan())
+            .union(
+                LogicalPlanBuilder::from(binding_b.into_logical_plan())
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let optimized = analyze_and_optimize(&state, plan);
+        println!("optimized plan:\n{}", optimized.display_indent());
+
+        // Being commutative lets both bindings go down, but it must not make them
+        // one node: each keeps its own bounds and its own scan.
+        let (bindings, scans) = collect_bindings_and_scans(&optimized);
+        assert_eq!(2, bindings.len());
+        assert_eq!(2, scans);
+        assert_ne!(bindings[0].after_seqs(), bindings[1].after_seqs());
     }
 }

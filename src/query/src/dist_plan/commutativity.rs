@@ -28,6 +28,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
+use crate::scan_sequence_binding::ScanSequenceBinding;
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -253,6 +254,11 @@ impl Categorizer {
             {
                 Commutativity::Unimplemented
             }
+            // A binding is a pure semantic constraint: it filters, reorders and projects
+            // nothing, so it blocks no partition. It has to be pushed down together with the
+            // `TableScan` it wraps; kept on the frontend, the remote fragment would hold the
+            // bare scan and the binding would be dropped silently.
+            name if name == ScanSequenceBinding::name() => Commutativity::Commutative,
             _ => Commutativity::Unsupported,
         }
     }
