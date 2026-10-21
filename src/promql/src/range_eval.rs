@@ -1044,7 +1044,6 @@ impl RangeEvaluator {
             }
             state.cursor += 1;
         }
-        // Flushes what the sample loop left pending, so the assert below finds it empty.
         if let Some(kernel) = self.batch.as_mut() {
             flush_batch(
                 kernel,
