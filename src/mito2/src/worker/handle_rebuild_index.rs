@@ -259,6 +259,7 @@ impl<S> RegionWorkerLoop<S> {
             .iter()
             .map(|(file, _)| file.meta_ref().file_id)
             .collect::<Vec<_>>();
+        let build_type = request.build_type.clone();
         // Each task holds a sender and reports at most once, so sends never block.
         let (tx, mut rx) = mpsc::channel::<Result<IndexBuildOutcome>>(build_tasks.len());
         for (file_handle, file_meta) in build_tasks {
@@ -297,12 +298,17 @@ impl<S> RegionWorkerLoop<S> {
 
         // Wait for all index build tasks to finish and notify the caller.
         common_runtime::spawn_global(async move {
+            let mut abort_reasons = Vec::new();
             // The channel closes once every task has reported or been dropped.
             while let Some(result) = rx.recv().await {
-                if let Err(e) = result {
-                    warn!(e; "Index build task failed for region: {}", region_id);
-                    sender.send(Err(e));
-                    return;
+                match result {
+                    Ok(IndexBuildOutcome::Finished) => {}
+                    Ok(IndexBuildOutcome::Aborted(reason)) => abort_reasons.push(reason),
+                    Err(e) => {
+                        warn!(e; "Index build task failed for region: {}", region_id);
+                        sender.send(Err(e));
+                        return;
+                    }
                 }
             }
 
@@ -323,6 +329,14 @@ impl<S> RegionWorkerLoop<S> {
             let result = if incomplete.is_empty() {
                 Ok(0)
             } else {
+                // Background builds have no caller, and files they leave
+                // unindexed by configuration are expected.
+                if build_type == IndexBuildType::Manual {
+                    warn!(
+                        "Manual index build did not complete, region: {}, files: {:?}, aborted: {:?}",
+                        region_id, incomplete, abort_reasons
+                    );
+                }
                 IndexBuildIncompleteSnafu {
                     region_id,
                     file_ids: incomplete,
