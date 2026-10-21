@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Leases the metasrv grants, which bound when a region acknowledges writes.
+//! Leases the metasrv grants. A region acknowledges a write only if the write reached the WAL
+//! within the region's leader lease.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

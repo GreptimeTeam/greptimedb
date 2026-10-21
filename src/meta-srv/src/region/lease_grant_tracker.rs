@@ -24,8 +24,10 @@ pub type LeaseGrantTrackerRef = Arc<LeaseGrantTracker>;
 
 /// Tracks, on a monotonic clock, when this metasrv last granted region leases to each datanode.
 ///
-/// It only holds the grants since this metasrv became the leader. A former leader grants no
-/// lease later than [`META_LEASE_SECS`] after that, which bounds the grants it misses.
+/// It only holds the grants since this metasrv became the leader. For the grants it misses, it
+/// assumes that a former leader stops granting within [`META_LEASE_SECS`] after that, as its
+/// election lease has expired by then. This is not enforced: a former leader that stalls before
+/// it notices the loss of its leadership can grant later.
 #[derive(Debug)]
 pub struct LeaseGrantTracker {
     inner: RwLock<LeaseGrants>,
@@ -66,8 +68,8 @@ impl LeaseGrantTracker {
         inner.granted_at.insert(datanode_id, Instant::now());
     }
 
-    /// Returns when every region lease that any metasrv leader granted to `datanode_id` has
-    /// expired, given the lease duration `region_lease`.
+    /// Returns when the region leases granted to `datanode_id` have expired, given the lease
+    /// duration `region_lease` and the assumption about former leaders above.
     pub fn lease_expiry(&self, datanode_id: DatanodeId, region_lease: Duration) -> Instant {
         let inner = self.inner.read().unwrap();
         let former_leader_grants = inner.leader_since + Duration::from_secs(META_LEASE_SECS);

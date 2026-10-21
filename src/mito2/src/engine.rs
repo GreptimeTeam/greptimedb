@@ -326,7 +326,8 @@ impl MitoEngine {
         self.inner.workers.gc_limiter()
     }
 
-    /// Requires regions to hold a valid lease from the metasrv to take and acknowledge writes.
+    /// Requires regions to hold a valid lease from the metasrv when they take a write and when
+    /// the write reaches the WAL.
     ///
     /// A datanode the metasrv controls calls it before it serves requests.
     pub fn require_write_lease(&self) {

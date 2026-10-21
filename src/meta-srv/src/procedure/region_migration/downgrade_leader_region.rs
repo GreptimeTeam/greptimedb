@@ -270,9 +270,9 @@ impl DowngradeLeaderRegion {
 
     /// Sets the deadline to wait for the region leases of the unreachable leader to expire.
     ///
-    /// They expire one lease after this metasrv last granted them. A former metasrv leader
-    /// grants no lease later than [`META_LEASE_SECS`](common_meta::distributed_time_constants::META_LEASE_SECS)
-    /// after this metasrv became the leader.
+    /// They expire one lease after this metasrv last granted them. A former metasrv leader is
+    /// assumed to grant none later than [`META_LEASE_SECS`](common_meta::distributed_time_constants::META_LEASE_SECS)
+    /// after this metasrv became the leader, as `LeaseGrantTracker` describes.
     fn update_leader_region_lease_deadline(&self, ctx: &mut Context) {
         let leader = &ctx.persistent_ctx.from_peer;
         let region_lease = default_distributed_time_constants().region_lease;
