@@ -269,6 +269,68 @@ fn limit_operators_keep_histogram_samples() {
     assert_eq!(kinds(&kept[0], 0), [(1, "histogram")]);
 }
 
+/// A selection hands back the sample it selected, start timestamp included.
+///
+/// `limitk` and `limit_ratio` choose samples rather than compute them, so a histogram that arrives
+/// with a start timestamp leaves with it. The count and the sum are compared too, so a computed
+/// value that happened to carry a timestamp would not pass for the sample selected. The timestamp
+/// is read downstream -- an extrapolated rate uses it to find where a counter reset fell -- so a
+/// selected sample that lost it would look like one whose reset cannot be placed. A histogram
+/// computed from samples carries none, as
+/// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
+/// pins for the operations that build one.
+#[test]
+fn limit_operators_keep_the_start_timestamp_of_a_selected_sample() {
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let start = 1_500;
+    // The sample a scan read, which is what a selection hands on.
+    let stamped = || {
+        let mut read = FloatHistogram::try_from_view(&histogram.view()).unwrap();
+        read.start_timestamp = Some(start);
+        GridSample::Histogram(Box::new(read))
+    };
+    // What a limit operator keeps out of one series: the count and sum of the histogram it kept,
+    // so the sample selected is named, and the start timestamp it kept with it.
+    let kept = |series: &Series| -> Vec<(usize, f64, f64, Option<i64>)> {
+        let samples = &series.fields.as_slice()[0];
+        series
+            .time
+            .positions()
+            .filter_map(|(point, row)| match samples.sample(row) {
+                SampleRef::Histogram(view) => {
+                    Some((point, view.count, view.sum, view.start_timestamp))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let source = histogram.view();
+    let expected = |point: usize| (point, source.count, source.sum, Some(start));
+
+    let schema = schema(3, 1);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+    builder.push_samples(0, &[Some(stamped())]).unwrap();
+    builder.push_samples(2, &[Some(stamped())]).unwrap();
+    let series = builder.finish(metric("__name__=a")).unwrap().unwrap();
+
+    let by_ratio = limit_ratio(1.0, &schema, std::slice::from_ref(&series)).unwrap();
+    assert_eq!(by_ratio.len(), 1);
+    assert_eq!(
+        kept(&by_ratio[0]),
+        [expected(0), expected(2)],
+        "limit_ratio did not hand back the samples it selected"
+    );
+
+    let by_count = limitk(1.0, &Grouping::By(Vec::new()), &schema, &[series]).unwrap();
+    assert_eq!(by_count.len(), 1);
+    assert_eq!(
+        kept(&by_count[0]),
+        [expected(0), expected(2)],
+        "limitk did not hand back the samples it selected"
+    );
+}
+
 fn grouping(kind: &str, labels: &str) -> Grouping {
     match kind {
         "without" => Grouping::Without(names(labels)),
