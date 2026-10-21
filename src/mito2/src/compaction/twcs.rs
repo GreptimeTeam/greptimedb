@@ -3493,6 +3493,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shared_boundary_l1_files_resolve_in_inactive_and_manual_windows() {
+        let files = [(b"a", b"m"), (b"m", b"z")].map(|(min, max)| {
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                0,
+                100,
+                1,
+                1,
+                100,
+                pk_range(min, max),
+            )
+        });
+        for (active_window, all_windows_inactive, expected) in
+            [(0, false, 0), (0, true, 1), (3, false, 1)]
+        {
+            let picker = TwcsPicker {
+                all_windows_inactive,
+                ..priority_test_picker(1)
+            };
+            let output = picker
+                .build_output_with_time_range(
+                    RegionId::from_u64(1),
+                    assign_to_windows(files.iter(), 1),
+                    Some(active_window),
+                    Some(1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                expected,
+                output.len(),
+                "active: {active_window}, manual: {all_windows_inactive}"
+            );
+            if let Some(output) = output.first() {
+                assert_eq!(2, output.inputs.len());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_settling_window_defers_overlap_resolution() {
         let files = priority_test_files(3, 1, 100, true);
         for (active_window, all_windows_inactive, expected) in

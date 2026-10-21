@@ -31,7 +31,7 @@
 //!
 //! Let `P` be the number of conflicting file pairs ([`Extent::conflicts`]) in an
 //! inactive window and `N` its file count. A merge removes every pair among its
-//! inputs. Its outputs are one sorted run, whose files only share boundary keys,
+//! inputs. Its outputs are one sorted run with no internal conflicts,
 //! so they only conflict with the `I` files intruding on the inputs' box, at
 //! most `outputs · I` pairs. An inactive pick only merges inputs that had at
 //! least as many pairs with other files, so `P` does not grow; without
@@ -45,9 +45,10 @@
 //!
 //! - Outputs hold a subset of the input rows, so each output's time and key
 //!   bounds lie inside the inputs' bounding box.
-//! - Outputs are one stream in (key, time) order split by size, so two outputs
-//!   share at most a boundary key, and two outputs of a single key have
-//!   touching time ranges. Neither is an [`Extent::conflicts`] pair.
+//! - Outputs are one stream in (key, time) order. For regions with a primary
+//!   key, the writer only splits between complete series, so output key ranges
+//!   are disjoint. Without a primary key, outputs have disjoint or touching
+//!   time ranges. Neither is an [`Extent::conflicts`] pair.
 //! - A split only starts a new file once the current one reaches the size
 //!   threshold, and outputs are not larger than inputs in total, so
 //!   [`PickLimits::predicted_outputs`] bounds the output count.
@@ -493,21 +494,15 @@ impl Extent {
 
     /// Whether two files overlap for the picker.
     ///
-    /// Key ranges that share only a key at the boundary of both do not conflict
-    /// unless both hold that single key. A compaction output split by size
-    /// shares boundary keys with its neighbors, and counting them would make
-    /// every sorted run look overlapping. A key inside the other range is a real
-    /// overlap.
+    /// Shared boundary keys count: independently written files can hold
+    /// different versions of the same row there. Compaction outputs do not
+    /// conflict with each other because the writer never splits a series.
     pub(crate) fn conflicts(&self, other: &Self) -> bool {
         self.time_overlaps(other)
             && match (&self.primary_key, &other.primary_key) {
                 (Some(lhs), Some(rhs)) => {
                     let (low, high) = ((&lhs.0).max(&rhs.0), (&lhs.1).min(&rhs.1));
-                    low < high
-                        || (low == high
-                            && ((is_single_key(lhs) && is_single_key(rhs))
-                                || is_inner_key(low, lhs)
-                                || is_inner_key(low, rhs)))
+                    low <= high
                 }
                 _ => true,
             }
@@ -516,27 +511,15 @@ impl Extent {
     /// Whether `self` may conflict with a file inside `area`, which is the
     /// bounding box of a group of files.
     ///
-    /// Sharing a single key with the area is enough if `self` holds only that
-    /// key, or holds it inside its range and the area is that single key.
+    /// A shared boundary key may occur in an output, so the same inclusive
+    /// key overlap used for individual files also applies to the box.
     fn intrudes(&self, area: &Self) -> bool {
-        self.time_overlaps(area)
-            && match (&self.primary_key, &area.primary_key) {
-                (Some(lhs), Some(rhs)) => {
-                    let (low, high) = ((&lhs.0).max(&rhs.0), (&lhs.1).min(&rhs.1));
-                    low < high || (low == high && (is_single_key(lhs) || is_inner_key(low, lhs)))
-                }
-                _ => true,
-            }
+        self.conflicts(area)
     }
 }
 
 fn is_single_key(range: &(Bytes, Bytes)) -> bool {
     range.0 == range.1
-}
-
-/// Whether `key` lies strictly inside `range`, not at its bounds.
-fn is_inner_key(key: &Bytes, range: &(Bytes, Bytes)) -> bool {
-    range.0 < *key && *key < range.1
 }
 
 /// Upper primary key bound, ordered after every key when unknown.
@@ -1243,10 +1226,12 @@ mod tests {
     }
 
     #[test]
-    fn test_conflicts_ignore_shared_boundary_keys() {
-        // Neighbors of a sorted run split by size.
-        assert!(!extent(0, 10, b"a", b"m").conflicts(&extent(0, 10, b"m", b"z")));
-        assert!(!extent(0, 10, b"m", b"m").conflicts(&extent(0, 10, b"m", b"z")));
+    fn test_conflicts_include_shared_boundary_keys() {
+        // Independently written files may share rows at their boundary keys.
+        assert!(extent(0, 10, b"a", b"m").conflicts(&extent(0, 10, b"m", b"z")));
+        assert!(extent(0, 10, b"m", b"m").conflicts(&extent(0, 10, b"m", b"z")));
+        // A writer-produced run has strictly disjoint key ranges.
+        assert!(!extent(0, 10, b"a", b"l").conflicts(&extent(0, 10, b"m", b"z")));
         // A single key shared by two single-key files is a real overlap.
         assert!(extent(0, 10, b"m", b"m").conflicts(&extent(5, 15, b"m", b"m")));
         // So is a single key inside another range.
@@ -1260,16 +1245,16 @@ mod tests {
     #[test]
     fn test_intrusion_covers_every_conflict_inside_an_area() {
         let area = extent(0, 10, b"m", b"z");
-        // A file touching the area's boundary key may conflict with an output
-        // holding only that key, if it holds only that key itself.
+        // Any file sharing the area's boundary key may conflict with an output.
         assert!(extent(0, 10, b"m", b"m").intrudes(&area));
-        assert!(!extent(0, 10, b"a", b"m").intrudes(&area));
+        assert!(extent(0, 10, b"a", b"m").intrudes(&area));
+        assert!(!extent(0, 10, b"a", b"l").intrudes(&area));
         assert!(extent(0, 10, b"a", b"n").intrudes(&area));
         assert!(!extent(10, 20, b"a", b"z").intrudes(&area));
         // A range may conflict with a single-key file inside a single-key area.
         let point = extent(0, 10, b"m", b"m");
         assert!(extent(0, 10, b"a", b"z").intrudes(&point));
-        assert!(!extent(0, 10, b"a", b"m").intrudes(&point));
+        assert!(extent(0, 10, b"a", b"m").intrudes(&point));
     }
 
     #[test]
@@ -1431,6 +1416,20 @@ mod tests {
         assert!(pick.reduces_files);
     }
 
+    #[test]
+    fn test_shared_boundary_files_are_picked_without_file_reduction() {
+        // Independently written files can hold different versions at m. Their
+        // total size predicts two outputs, so only overlap resolution helps.
+        let size = 512 * 1024 * 1024;
+        let files = [
+            file(0, 100, b"a", b"m", size),
+            file(0, 100, b"m", b"z", size),
+        ];
+        let pick = closed_merge(&files, size).unwrap();
+        assert_eq!(ids(&files), ids(&pick.inputs));
+        assert!(!pick.reduces_files);
+    }
+
     /// A sorted run of `sizes.len()` key-sliced files, and files spanning all
     /// of its keys in the given time ranges, which overlap the whole run.
     fn run_with_late_files(
@@ -1442,7 +1441,7 @@ mod tests {
             .enumerate()
             .map(|(idx, &size)| {
                 let idx = 2 * idx as u8;
-                file(0, 1000, &[b'a', idx], &[b'a', idx + 2], size)
+                file(0, 1000, &[b'a', idx], &[b'a', idx + 1], size)
             })
             .collect::<Vec<_>>();
         let max_key = 2 * sizes.len() as u8;
@@ -1706,9 +1705,8 @@ mod tests {
 
     /// Writes the outputs of merging `inputs` like the compactor: one stream in
     /// (key, time) order, split by size into consecutive files. The data is
-    /// spread evenly over a grid of keys and time slots.
+    /// spread evenly over keys, and a series is never split between files.
     fn merge(inputs: &[SimFile], rng: &mut Rng) -> Vec<SimFile> {
-        const SLOTS: u64 = 8;
         let min = inputs.iter().map(|file| file.min).min().unwrap();
         let max = inputs.iter().map(|file| file.max).max().unwrap();
         let start = inputs
@@ -1721,7 +1719,6 @@ mod tests {
             .map(|file| file.handle.time_range().1.value())
             .max()
             .unwrap();
-        let slot_time = |slot: u64| start + (end - start) * slot as i64 / SLOTS as i64;
         let size: u64 = inputs.iter().map(|file| file.handle.size()).sum();
         // Outputs may be fewer than predicted, never more. A single key is
         // never split.
@@ -1730,19 +1727,14 @@ mod tests {
         } else {
             size.div_ceil(MAX_OUTPUT).max(1)
         };
-        let outputs = predicted - rng.next(2).min(predicted - 1);
-        let cells = (max - min + 1) * SLOTS;
+        let keys = max - min + 1;
+        let outputs = (predicted - rng.next(2).min(predicted - 1)).min(keys);
         (0..outputs)
             .map(|i| {
-                let (first, last) = (cells * i / outputs, cells * (i + 1) / outputs - 1);
-                let (first_key, last_key) = (min + first / SLOTS, min + last / SLOTS);
-                let (time_start, time_end) = if first_key == last_key {
-                    (slot_time(first % SLOTS), slot_time(last % SLOTS + 1))
-                } else {
-                    (start, end)
-                };
+                let first_key = min + keys * i / outputs;
+                let last_key = min + keys * (i + 1) / outputs - 1;
                 let output_size = size * (i + 1) / outputs - size * i / outputs;
-                sim_file(time_start, time_end, first_key, last_key, output_size)
+                sim_file(start, end, first_key, last_key, output_size)
             })
             .collect()
     }
@@ -1783,7 +1775,7 @@ mod tests {
                     start,
                     end,
                     5 * idx,
-                    5 * (idx + 1),
+                    5 * (idx + 1) - 1,
                     1 + rng.next(2 * MAX_OUTPUT),
                 )
             })

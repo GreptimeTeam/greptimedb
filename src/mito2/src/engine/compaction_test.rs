@@ -212,6 +212,7 @@ async fn test_strict_window_output_file_size(
     assert!(version.ssts.levels()[0].files.is_empty());
     let primary_key_mapper = version.ssts.primary_key_mapper();
     let files = version.ssts.levels()[1].files().collect::<Vec<_>>();
+    let max_output_size = files.iter().map(|file| file.size()).max().unwrap();
     assert_eq!(
         6000,
         files
@@ -229,6 +230,14 @@ async fn test_strict_window_output_file_size(
             .collect::<Vec<_>>();
         if expect_split {
             assert!(window_files.len() > 1, "each window must split by size");
+            assert_eq!(
+                window_files.len() as u64,
+                window_files
+                    .iter()
+                    .map(|file| file.size())
+                    .sum::<u64>()
+                    .div_ceil(max_output_size)
+            );
         } else {
             assert_eq!(1, window_files.len(), "zero must disable size splitting");
         }
@@ -252,6 +261,35 @@ async fn test_strict_window_output_file_size(
     assert_eq!(
         sort_batches_and_print(&before, &["tag_0", "ts"]),
         sort_batches_and_print(&after, &["tag_0", "ts"])
+    );
+
+    // Fresh size-split outputs have disjoint series and must not look like
+    // independently written files sharing a boundary key to the TWCS picker.
+    // Raise the tiny split threshold so an overlap merge would be eligible by
+    // size; otherwise the output-count guard alone would reject these files.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: SetRegionOptions {
+                    options: vec![SetRegionOption::Twsc(
+                        "compaction.twcs.max_output_file_size".into(),
+                        format!("{max_output_size}B"),
+                    )],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let output_ids: HashSet<_> = files.iter().map(|file| file.file_id()).collect();
+    compact(&engine, region_id).await;
+    let version = engine.get_region(region_id).unwrap().version();
+    assert_eq!(
+        output_ids,
+        version.ssts.levels()[1]
+            .files()
+            .map(|file| file.file_id())
+            .collect()
     );
 }
 
