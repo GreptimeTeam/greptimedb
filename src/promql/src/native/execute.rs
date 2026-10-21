@@ -91,6 +91,7 @@ use datatypes::series::samples::{
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{MetricName, SeriesOrdering};
 
+use crate::aggregate;
 use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
 };
@@ -1884,6 +1885,19 @@ fn select_series(
         BoundSelect::Histogram(function) => {
             evaluate_histograms(*function, schema, &merge_same_labelset(schema, series)?)
         }
+        BoundSelect::CountValues { label, group } => {
+            let (by, labels) = match group {
+                Grouping::By(labels) => (true, labels),
+                Grouping::Without(labels) => (false, labels),
+            };
+            let labels: Vec<&str> = labels.iter().map(|label| &**label).collect();
+            let grouping = if by {
+                aggregate::Grouping::By(&labels)
+            } else {
+                aggregate::Grouping::Without(&labels)
+            };
+            aggregate::count_values(schema, &series, label, grouping)
+        }
         BoundSelect::Absent { labels } => Ok(select::absent(schema, &series, labels.clone())?
             .into_iter()
             .collect()),
@@ -1902,6 +1916,9 @@ fn select_series(
 /// - A sort: the value each series is keyed by, and the floats `sort` and `sort_desc` rebuild a
 ///   series into when it holds histograms; the label sorts move the series they were given.
 /// - `absent`: a presence flag and a result value per grid point and field.
+/// - `count_values`, per row, since a gauge with distinct values makes about one group per sample:
+///   the group's label set twice (its metric and its key) with the value written into it, its
+///   count per field, and the result series it becomes.
 /// - `histogram_quantile` and `histogram_fraction`: the merge of label-set pieces before the kernel
 ///   ([`merge_workspace_bytes`]); per series, its group entry and label pairs and a cursor per
 ///   field; per row, the bucket it contributes and a result value per field.
@@ -1948,6 +1965,20 @@ fn selection_workspace_bytes(op: &BoundSelect, schema: &SeriesSchema, series: &[
                         .saturating_add(item.time.len().saturating_mul(row))
                 },
             );
+        }
+        BoundSelect::CountValues { .. } => {
+            let label = std::mem::size_of::<(Arc<str>, Arc<str>)>();
+            // The value label at the length of a 17-digit value with sign, point and exponent;
+            // the `'f'` form writes a large magnitude out in full, which this does not follow.
+            let value = 24;
+            let group = std::mem::size_of::<Vec<f64>>()
+                + fields * std::mem::size_of::<f64>()
+                + std::mem::size_of::<Series>()
+                + fields * std::mem::size_of::<Samples>();
+            return series.iter().fold(0usize, |total, item| {
+                let labels = 2 * (item.metric.tags().len() + 2) * label + value;
+                total.saturating_add(item.time.len().saturating_mul(group + labels))
+            });
         }
         BoundSelect::TopK { .. } | BoundSelect::LimitK { .. } | BoundSelect::LimitRatio { .. } => {}
     }
@@ -2973,12 +3004,14 @@ impl NativeExecutionState {
                         // set stay pieces: they hold disjoint points, so ranking them apart picks
                         // what ranking the merged series would, and what is above treats them as
                         // it treats a map's. `absent` answers with one series under the labels it
-                        // was bound to, and the histogram functions merge the label sets they
-                        // answer with, so neither hands over pieces.
+                        // was bound to, and the histogram functions and `count_values` answer with
+                        // one series per label set they make, so none of them hands over pieces.
                         let whole = matches!(
                             expr,
                             NativeExpr::Select {
-                                op: BoundSelect::Absent { .. } | BoundSelect::Histogram(_),
+                                op: BoundSelect::Absent { .. }
+                                    | BoundSelect::Histogram(_)
+                                    | BoundSelect::CountValues { .. },
                                 ..
                             }
                         );

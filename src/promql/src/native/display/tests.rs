@@ -445,6 +445,13 @@ fn a_selection_names_its_binding() {
             },
             r#"  root Select absent {job="x"}"#,
         ),
+        (
+            BoundSelect::CountValues {
+                label: "value".into(),
+                group: Grouping::Without(Arc::new(["job".into()])),
+            },
+            r#"  root Select count_values "value" without [job]"#,
+        ),
     ];
     for (op, line) in lines {
         let tree = NativeTree::try_new(NativeNode {

@@ -127,6 +127,9 @@ fn describe(node: &NativeNode) -> String {
             BoundSelect::Histogram(HistogramFunction::Fraction { lower, upper }) => {
                 format!("histogram_fraction {lower} {upper}")
             }
+            BoundSelect::CountValues { label, group } => {
+                format!("count_values {label:?} {}", grouping(group))
+            }
         },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} {}",
