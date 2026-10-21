@@ -712,7 +712,10 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
 /// window exists and would otherwise be accepted with an ordering it cannot be evaluated on.
 #[test]
 fn an_interleaved_scan_is_refused_whatever_the_shape() {
-    for query in ["x", "rate(x[5m])", "quantile_over_time(0.9, x[5m])"] {
+    // The plain range function is the ordering table's case, which compiles `rate(x[5m])` under
+    // `Interleaved` and expects the same refusal; these two cover the shapes that table cannot,
+    // because one returns before a window exists and the other takes a parameter.
+    for query in ["x", "quantile_over_time(0.9, x[5m])"] {
         let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::Interleaved)
             .expect_err(&format!("`{query}` compiled over an interleaved scan"));
         assert!(
@@ -725,10 +728,23 @@ fn an_interleaved_scan_is_refused_whatever_the_shape() {
             "`{query}` did not say why the ordering is refused: {message}"
         );
     }
-    // A scan whose chunks of one series are contiguous is recorded and compiles, which is what
-    // makes the refusal above about the ordering rather than about the shape.
-    compile(&eval_stmt("x"), raw_schema(), SeriesOrdering::Contiguous)
+    // The same scan compiles a bare selector when its chunks are contiguous, and the ordering it
+    // was compiled under is recorded on the tree's input rather than dropped: that is what makes
+    // the refusals above about the ordering rather than about the shape.
+    let tree = compile(&eval_stmt("x"), raw_schema(), SeriesOrdering::Contiguous)
         .expect("a contiguous scan compiles a bare selector");
+    let (input, _) = root_instant(&tree);
+    let NativeExpr::Input(bound) = &input.expr else {
+        panic!(
+            "an instant selection's input is not an input: {:?}",
+            input.expr
+        );
+    };
+    assert_eq!(
+        bound.ordering,
+        SeriesOrdering::Contiguous,
+        "the instant selection dropped the scan's ordering"
+    );
 }
 
 /// A shape outside the subset is refused, and the error says what was found so the query can be
