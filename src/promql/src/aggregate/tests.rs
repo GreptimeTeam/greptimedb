@@ -1039,17 +1039,16 @@ fn count_values_keeps_neighbours_of_a_power_of_two_apart() {
             )
         })
         .collect::<Vec<_>>();
-    let mut groups: Vec<(String, (usize, Vec<Option<f64>>))> =
-        count_values(&schema, &series, "v", Grouping::By(&[]))
-            .unwrap()
-            .iter()
-            .map(|series| {
-                (
-                    series.metric.get("v").unwrap().to_string(),
-                    values(series, 0),
-                )
-            })
-            .collect();
+    let mut groups: Vec<_> = count_values(&schema, &series, "v", Grouping::By(&[]))
+        .unwrap()
+        .iter()
+        .map(|series| {
+            (
+                series.metric.get("v").unwrap().to_string(),
+                values(series, 0),
+            )
+        })
+        .collect();
     groups.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         groups,
