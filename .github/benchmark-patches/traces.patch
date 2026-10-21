@@ -38,7 +38,7 @@
              (output / 'tempo-effective.yaml').write_text(effective)
 --- /dev/null
 +++ b/scripts/cache_capacity_evidence.py
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,187 @@
 +#!/usr/bin/env python3
 +# Copyright 2023 Greptime Team
 +# Licensed under the Apache License, Version 2.0.
@@ -59,11 +59,16 @@
 +# Audited source: Serialize omits content_cache_size iff its value is 512 MiB.
 +# Unknown revisions must provide an explicit value; schema shape alone is not proof.
 +OMISSION_RULES = {
-+    'c7d970da0bb0aa2420cefef5c2cd72d6e6bb6972': {
++    revision: {
 +        'config_git_blob': '94428174f16c79cc0dcf41715501d707272a1dc8',
 +        'path': 'src/mito2/src/config.rs',
 +        'rule': 'ParquetPageConfig::is_default_content_cache_size == ReadableSize::mb(512)',
-+    },
++    }
++    for revision in (
++        'c7d970da0bb0aa2420cefef5c2cd72d6e6bb6972',
++        '0fdd79f19607b520aae48e8cce856a5486cea2f1',
++        '3887dcfcd84b6c02e54ce31691b65c46c6782b35',
++    )
 +}
 +
 +
