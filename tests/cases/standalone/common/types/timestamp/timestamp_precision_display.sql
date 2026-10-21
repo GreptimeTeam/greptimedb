@@ -1,7 +1,7 @@
 -- description: Timestamp display precision over the MySQL protocol should
--- respect the column's storage unit (issue #8227):
+-- respect MySQL's maximum microsecond precision (issues #8227 and #9828):
 --   - TIMESTAMP(3) must not pad to 6 fractional digits
---   - TIMESTAMP(9) must not truncate to 6 fractional digits
+--   - TIMESTAMP(9) must truncate to at most 6 fractional digits
 
 -- SQLNESS PROTOCOL MYSQL
 CREATE TABLE ts_precision_display (
@@ -46,6 +46,11 @@ INSERT INTO ts_precision_display VALUES (
 
 -- SQLNESS PROTOCOL MYSQL
 SELECT * FROM ts_precision_display ORDER BY v;
+
+-- Full nanosecond precision remains available as an integer or string.
+-- SQLNESS PROTOCOL MYSQL
+SELECT ts_ns::BIGINT AS epoch_ns, ts_ns::STRING AS timestamp_string
+FROM ts_precision_display ORDER BY v;
 
 -- SQLNESS PROTOCOL MYSQL
 DROP TABLE ts_precision_display;

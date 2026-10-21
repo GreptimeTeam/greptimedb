@@ -23,7 +23,7 @@ use arrow::datatypes::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_schema::{DataType, IntervalUnit};
-use chrono::{Datelike, NaiveDateTime};
+use chrono::{Datelike, NaiveDateTime, SubsecRound};
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -275,7 +275,8 @@ impl MysqlResultWriter {
                     write!(
                         &mut staged_timestamp.formatted,
                         "{}",
-                        datetime.format("%Y-%m-%d %H:%M:%S%.f")
+                        // MySQL temporal types support at most microsecond precision.
+                        datetime.trunc_subsecs(6).format("%Y-%m-%d %H:%M:%S%.f")
                     )
                     .map_err(|_| {
                         InternalSnafu {
