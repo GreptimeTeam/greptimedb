@@ -180,20 +180,14 @@ fn series_bytes(series: &Series) -> usize {
         .saturating_add(metric_bytes(&series.metric))
 }
 
-/// An estimate of the workspace [`crate::grid_series::merge_same_labelset`] needs for fragments
-/// that hold `rows` rows between them.
+/// A rough workspace estimate for merging fragments that hold `rows` rows between them.
 ///
-/// The helper sorts one `(position, member, row)` triple per fragment row and keeps the distinct
-/// positions beside it, so the figure charges those vectors at their widest. Every field of every
-/// fragment gets a reader, and every merged field is built as a vector of run descriptors -- one
-/// slice of a fragment's segment or one run of missing rows -- before it becomes one field again,
-/// so a row is charged the descriptors it can become in the worst case, several `Samples` headers
-/// and their `Arc` conversions, rather than one. The output side keeps one series and one field
-/// header per merged series, which is as many as there are fragments.
+/// It allows for sorted row indices, readers, sample descriptors and output headers. Like the
+/// retained-state estimates, it is not an allocation bound: vector slack, temporary conversions
+/// and null arrays for complementary fields are not measured individually.
 ///
-/// The sample payload is not charged: a merged run is a slice of the fragment's own segment, so the
-/// merge copies no values and the fragments are what hold them. A histogram table behind several
-/// fragments is likewise left to the fragments' own estimates, which count it once per fragment.
+/// Existing values and histogram tables remain shared with the fragments, whose estimates already
+/// account for their payloads.
 fn merge_workspace_bytes(rows: usize, fragments: usize, fields: usize) -> usize {
     let sorted_rows = rows.saturating_mul(
         std::mem::size_of::<(usize, usize, usize)>() + std::mem::size_of::<usize>(),
@@ -201,9 +195,8 @@ fn merge_workspace_bytes(rows: usize, fragments: usize, fields: usize) -> usize 
     let readers = fragments.saturating_mul(
         fields.saturating_mul(std::mem::size_of::<Samples>() + 4 * std::mem::size_of::<usize>()),
     );
-    // What one merged field can hold while it is built: one descriptor per row at the very worst
-    // (alternating missing rows and values from different fragments), kept once as the run vector
-    // and once as the flattened field that is made from it.
+    // Allow for run and flattened-field descriptors when rows alternate between fragments or
+    // missing values; this is an estimate rather than a count of the allocations made.
     let merged_field_per_row =
         2 * std::mem::size_of::<Samples>() + 3 * std::mem::size_of::<usize>();
     let merged_fields = rows
