@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Mock connectors are registered on a shared channel manager.
 #[cfg(test)]
+#[allow(deprecated)]
 mod test {
     use std::collections::HashMap;
     use std::net::SocketAddr;
@@ -671,7 +673,7 @@ mod test {
             panic!("expected affected rows output");
         };
         assert_eq!(affected_rows, 9);
-        assert!(result.metrics.is_ready());
+        result.metrics.wait_ready().await;
         assert!(result.region_watermark_map().is_none());
 
         let err = client
@@ -697,6 +699,7 @@ mod test {
             panic!("expected affected rows output");
         };
         assert_eq!(affected_rows, 9);
+        result.metrics.wait_ready().await;
         assert_eq!(
             result.region_watermark_map(),
             Some(std::collections::HashMap::from([previous_watermark]))

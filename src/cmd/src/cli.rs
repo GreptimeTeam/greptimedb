@@ -108,6 +108,7 @@ mod tests {
     use clap::Parser;
     use client::{Client, Database};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_grpc::channel_manager::ChannelManager;
     use common_telemetry::logging::LoggingOptions;
     use rand::Rng;
 
@@ -174,7 +175,11 @@ mod tests {
         let mut instance = standalone.build(standalone_opts).await?;
         instance.start().await?;
 
-        let client = Client::with_urls([rpc_addr.as_str()]);
+        let client = Client::with_query_and_control_managers(
+            ChannelManager::new(),
+            ChannelManager::new(),
+            [rpc_addr.as_str()],
+        );
         let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         database
             .sql(r#"CREATE DATABASE "cli.export.create_table";"#)
