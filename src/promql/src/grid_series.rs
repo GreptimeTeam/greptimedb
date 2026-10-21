@@ -353,6 +353,11 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
     })?;
     let mut series: Vec<Option<Series>> = series.into_iter().map(Some).collect();
     let mut output = Vec::with_capacity(groups.len());
+    // The groups in the order their first member arrived: a `HashMap` would hand the merged series
+    // back in an order that changes between runs, and the root's chunk stream exposes exactly this
+    // order, so two executions of one query could report their series differently.
+    let mut groups: Vec<(LabelSet, Vec<usize>)> = groups.into_iter().collect();
+    groups.sort_unstable_by_key(|(_, members)| members[0]);
     // `(absolute position, member slot, compact row)`, sorted by position before merging. The slot
     // indexes the group's fragments, so a row names its member without a search.
     let mut rows: Vec<(usize, usize, usize)> = Vec::new();
