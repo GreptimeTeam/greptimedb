@@ -78,6 +78,7 @@ use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundWindow, Grouping,
     NativeExpr, NativeNode, NativeTree, NativeType,
 };
+use crate::native::runs::absorb_rebuilds;
 use crate::range_eval::{RangeFunction, RangeWindow};
 
 /// The query every tree here is compiled from.
@@ -2332,5 +2333,136 @@ fn a_claim_compares_label_sets_without_empty_values() {
         vec![(Arc::from(HOST), Arc::from("h"))],
         label_set(&metric(&[(HOST, "h"), (ZONE, "")], None)),
         "the empty value is not part of the label set"
+    );
+}
+
+/// A series whose chunks move forward, a hole apart, appends to its stored runs rather than
+/// re-merging them.
+///
+/// One grid point per chunk with a hole after it (`0, 2, 4, ...`) is a legal stream and the shape a
+/// short `count_over_time` over sub-sampled, chunked input produces: the chunks of one label set
+/// hold their values at disjoint positions, so they merge into one series and no position ever
+/// carries two values. What it used to cost was quadratic - `claim` walked the whole stored history
+/// to look for a collision and then rebuilt all of it with a merge, for each chunk - and all of it
+/// ran under the label-set lock every partition shares, so a sparse series of `K` chunks made the
+/// other partitions wait for `K(K+1)/2` run moves.
+///
+/// The counter is the runtime's own, so this test measures the append path the native table takes
+/// as well: one fix, not two that can drift apart again.
+#[test]
+fn a_forward_chunk_does_not_rebuild_the_stored_runs() {
+    // How many one-position chunks the series arrives in: enough that the quadratic cost it used to
+    // pay would be unmistakable, since that cost was the square of this figure.
+    const CHUNKS: usize = 64;
+
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    // Two positions per chunk, so a hole follows every point the series holds.
+    let grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 2 * CHUNKS as u64).unwrap())
+            .unwrap(),
+    );
+    let chunk = |position: usize| Series {
+        metric: metric(&[(HOST, "h")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(position, 1)])
+            .expect("one position of the grid"),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
+    };
+
+    let before = absorb_rebuilds();
+    for index in 0..CHUNKS {
+        labels
+            .claim(&chunk(2 * index))
+            .expect("the chunks of one label set hold values at disjoint positions");
+    }
+
+    assert_eq!(
+        0,
+        absorb_rebuilds() - before,
+        "the {CHUNKS} forward chunks rebuilt the stored runs instead of appending to them"
+    );
+    assert_eq!(
+        1,
+        labels.seen.len(),
+        "every chunk belongs to one label set, so the history is one entry"
+    );
+}
+
+/// A chunk reaching back before the last stored run still merges into the history.
+///
+/// The forward path only takes a chunk that starts at or after the end of the last stored run; a
+/// chunk that starts before it can interleave with what is stored, so it has to go through the full
+/// merge, and the result still has to be sorted, disjoint and with the runs that touch joined -
+/// which is what the look-up in [`LabelSets::claim`] relies on.
+///
+/// A chunk reaching back over a stored run is the other case, and it stays refused: `[0, 11)` shares
+/// position 10 with the stored `[10, 12)`, so it is a collision and the stored history is left
+/// as it was.
+#[test]
+fn a_chunk_reaching_back_still_merges() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
+    // One chunk holding `len` positions from `start`, every one of them with a value.
+    let chunk = |start: usize, len: usize| Series {
+        metric: metric(&[(HOST, "h")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, len)])
+            .expect("one run over the grid"),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; len]))),
+    };
+    // The runs stored under the one label set, which one field of the output holds.
+    let stored = |labels: &LabelSets| -> Vec<(usize, usize)> {
+        labels
+            .seen
+            .values()
+            .next()
+            .expect("the chunk was recorded under one label set")
+            .first()
+            .expect("the series has one field")
+            .iter()
+            .map(|run| (run.start, run.end))
+            .collect()
+    };
+
+    labels
+        .claim(&chunk(10, 2))
+        .expect("the first chunk claims the positions it holds");
+    assert_eq!(
+        vec![(10, 12)],
+        stored(&labels),
+        "the run `[10, 12)` is stored"
+    );
+
+    let error = labels
+        .claim(&chunk(0, 11))
+        .expect_err("`[0, 11)` holds a value at position 10, where `[10, 12)` holds one");
+    assert!(
+        error
+            .to_string()
+            .contains("vector cannot contain metrics with the same labelset"),
+        "refused for another reason: {error}"
+    );
+    assert_eq!(
+        vec![(10, 12)],
+        stored(&labels),
+        "a refused claim left the stored history as it was"
+    );
+
+    let before = absorb_rebuilds();
+    labels
+        .claim(&chunk(0, 10))
+        .expect("`[0, 10)` reaches back before the last stored run without sharing a position");
+    assert_eq!(
+        vec![(0, 12)],
+        stored(&labels),
+        "the run reaching back did not merge into the stored one and join it"
+    );
+    assert_eq!(
+        1,
+        absorb_rebuilds() - before,
+        "a chunk starting before the last stored run was appended rather than merged"
     );
 }

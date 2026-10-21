@@ -79,6 +79,7 @@ use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{NativeExpr, NativeTree};
+use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
 
 #[cfg(test)]
@@ -1115,8 +1116,9 @@ fn render_labels(labels: &LabelSet) -> String {
 #[derive(Default)]
 struct LabelSets {
     /// The grid positions each final label set already occupies, one run list per field of the
-    /// series schema.
-    seen: HashMap<LabelSet, Vec<Vec<(usize, usize)>>>,
+    /// series schema. Each list is sorted, disjoint and has the runs that touch joined, which is
+    /// what lets a claim look a position up instead of walking the history.
+    seen: HashMap<LabelSet, Vec<Vec<Run>>>,
     /// What `seen` keeps charged on the task's memory pool. `None` until the first execution,
     /// since construction has no `TaskContext` and therefore no pool to register against.
     reservation: Option<MemoryReservation>,
@@ -1163,8 +1165,15 @@ impl LabelSets {
             ));
         };
         match seen.entry(key) {
-            Entry::Occupied(mut entry) => {
-                let stored = entry.get_mut();
+            Entry::Occupied(entry) => {
+                if let Some(field) = colliding_field(entry.get(), &runs) {
+                    return Err(DataFusionError::Execution(format!(
+                        "vector cannot contain metrics with the same labelset: {} (field \
+                         {field})",
+                        render_labels(entry.key())
+                    )));
+                }
+                let stored = entry.into_mut();
                 // An entry recorded from a chunk of fewer fields is padded, so every field of this
                 // chunk has a slot of its own: a slot is a field index of the schema, so both sides
                 // count the same field the same way. A chunk of *fewer* fields than the entry
@@ -1172,42 +1181,37 @@ impl LabelSets {
                 if stored.len() < runs.len() {
                     stored.resize_with(runs.len(), Vec::new);
                 }
-                for (field, (stored, new)) in stored.iter().zip(&runs).enumerate() {
-                    if runs_overlap(stored, new) {
-                        return Err(DataFusionError::Execution(format!(
-                            "vector cannot contain metrics with the same labelset: {} (field \
-                             {field})",
-                            render_labels(entry.key())
-                        )));
-                    }
-                }
-                // What the merge below allocates is what this entry grows by: `merge_runs` hands
-                // back a list of `stored + new` runs, so the entry's capacity can only grow by the
-                // difference over what it already holds. Without this the arrays would grow for as
-                // long as the plan lives while the charge stayed at the first claim.
-                // `merge_runs` keeps the capacity it already had, so what the entry grows by is
-                // how much the merged list needs beyond that - and nothing when the runs it holds
-                // already cover the new ones.
+                // What this entry grows by is what its vectors' capacity grew by, and nothing else.
+                // `absorb` appends to a vector whose runs all end at or before the incoming ones
+                // and rebuilds one the chunk can interleave with, so the runs it ends up holding
+                // are not the only thing it allocates: the append path also has the slack a
+                // doubled capacity keeps, which charging the length a merge needs would leave
+                // unaccounted. Charging a vector's capacity again from scratch would go the other
+                // way and charge bytes the entry already paid for. Reading the capacity either
+                // side of the absorb costs nothing, and the difference is exactly what this claim
+                // allocated - which is nothing while the capacity the entry holds still covers the
+                // runs. The absorb therefore runs before the charge is taken, and a pool that
+                // refuses the growth leaves the runs recorded: that refusal fails the query that
+                // made the claim, and the runtime's own table records before its node resizes for
+                // the same reason.
                 let grown = stored
-                    .iter()
+                    .iter_mut()
                     .zip(&runs)
                     .map(|(stored, new)| {
-                        (stored.len() + new.len())
-                            .saturating_sub(stored.capacity().max(stored.len()))
+                        let before = stored.capacity();
+                        absorb(stored, new);
+                        stored.capacity() - before
                     })
-                    .sum::<usize>()
-                    * size_of::<(usize, usize)>();
-                reservation.try_grow(grown)?;
-                for (stored, new) in stored.iter_mut().zip(&runs) {
-                    merge_runs(stored, new);
-                }
+                    .sum::<usize>();
+                reservation.try_grow(grown * size_of::<Run>())?;
             }
             Entry::Vacant(entry) => {
                 // Only the label-set state is this node's own cross-poll state that grows with
-                // the output, so it is the only thing reserved here.
+                // the output, so it is the only thing reserved here. The runs are charged by the
+                // capacity they were gathered with rather than by their length, so that a later
+                // claim appending into that slack is charged nothing for it.
                 let bytes = labels_bytes(entry.key())
-                    + runs.iter().map(|runs| runs.len()).sum::<usize>()
-                        * size_of::<(usize, usize)>();
+                    + runs.iter().map(|runs| runs.capacity()).sum::<usize>() * size_of::<Run>();
                 reservation.try_grow(bytes)?;
                 entry.insert(runs);
             }
@@ -1220,12 +1224,12 @@ type SharedLabelSets = Arc<Mutex<LabelSets>>;
 
 /// The grid positions the rows of one chunk hold a value at, one run list per field.
 ///
-/// Each run is `(start, end_exclusive)` over absolute grid indices, and the runs of one field are
-/// sorted and disjoint. Occupancy is kept per field because it is what a collision is: two series
-/// whose label sets became equal merge field by field in Prometheus, so only two values of the same
-/// field at one position collide. Marking the whole position as taken as soon as *any* field held a
-/// value would refuse the complementary pair that merges cleanly.
-fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<(usize, usize)>>> {
+/// Each [`Run`] is a half-open range of absolute grid indices, and the runs of one field are sorted
+/// and disjoint. Occupancy is kept per field because it is what a collision is: two series whose
+/// label sets became equal merge field by field in Prometheus, so only two values of the same field
+/// at one position collide. Marking the whole position as taken as soon as *any* field held a value
+/// would refuse the complementary pair that merges cleanly.
+fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<Run>>> {
     // Rows are addressed on the statement's grid, so a row sits at the absolute position two
     // series can collide on. An explicit axis has no such position, and a chunk never carries
     // one: this is the refusal `EvaluatedChunk` already makes when the chunk is built.
@@ -1236,7 +1240,7 @@ fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<(usize, usize)>>> 
     }
     let rows = series.time.len();
     let range = series.time.as_grid_range();
-    let mut runs: Vec<Vec<(usize, usize)>> = vec![Vec::new(); series.fields.len()];
+    let mut runs: Vec<Vec<Run>> = vec![Vec::new(); series.fields.len()];
     // A field that is one dense, null-free float run holds a value on every row the chunk carries,
     // so it occupies exactly the range the chunk reports and no row of it has to be inspected. This
     // is the shape the fused evaluator produces for a range function over ordinary float samples.
@@ -1247,7 +1251,10 @@ fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<(usize, usize)>>> 
             (Some(range), Some(DenseSamplesRef::Float(values)))
                 if rows > 0 && values.len() == rows && values.null_count() == 0 =>
             {
-                runs[index] = vec![(range.start(), range.start() + rows)];
+                runs[index] = vec![Run {
+                    start: range.start(),
+                    end: range.start() + rows,
+                }];
             }
             _ => walked.push((index, samples)),
         }
@@ -1263,8 +1270,11 @@ fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<(usize, usize)>>> 
                 continue;
             }
             match runs[*index].last_mut() {
-                Some(run) if run.1 == position => run.1 += 1,
-                _ => runs[*index].push((position, position + 1)),
+                Some(run) if run.end == position => run.end += 1,
+                _ => runs[*index].push(Run {
+                    start: position,
+                    end: position + 1,
+                }),
             }
         }
     }
@@ -1283,59 +1293,25 @@ fn has_value(samples: &Samples, index: usize) -> bool {
     }
 }
 
-/// Whether two sorted, disjoint run lists share at least one grid index.
-fn runs_overlap(stored: &[(usize, usize)], new: &[(usize, usize)]) -> bool {
-    let (mut left, mut right) = (0, 0);
-    while left < stored.len() && right < new.len() {
-        let (stored_start, stored_end) = stored[left];
-        let (new_start, new_end) = new[right];
-        if new_start < stored_end && stored_start < new_end {
-            return true;
-        }
-        if stored_end <= new_start {
-            left += 1;
-        } else {
-            right += 1;
-        }
-    }
-    false
-}
-
-/// Adds sorted, disjoint `new` runs to the sorted, disjoint `stored` runs, coalescing neighbours.
-fn merge_runs(stored: &mut Vec<(usize, usize)>, new: &[(usize, usize)]) {
-    // The merged list never holds more than `stored + new`, and it can hold less once adjacent runs
-    // join. Keeping the capacity the entry already paid for is what makes the charge in `claim`
-    // track what the map holds: a fresh vector sized to the merge would shrink on every merge that
-    // adds nothing, and the next claim would look like growth and be charged for it again.
-    let capacity = (stored.len() + new.len()).max(stored.capacity());
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(capacity);
-    let (mut left, mut right) = (0, 0);
-    while left < stored.len() || right < new.len() {
-        let run = match (stored.get(left), new.get(right)) {
-            (Some(stored), Some(new)) if stored.0 <= new.0 => {
-                left += 1;
-                *stored
+/// The field of `runs` that holds a value where `stored` already holds one, if any.
+///
+/// A collision is two values of one field at one position, so each field is checked on its own.
+/// Each incoming run is looked up rather than the stored history walked: the stored runs are sorted
+/// and disjoint, so the only run that can share a position with `run` is the first one that does not
+/// end before it, which is the look-up the runtime's own `Emitted::occupy` makes. Walking the
+/// history instead costs a sparse series one pass over everything it stored per chunk - a query
+/// whose chunks move forward one position at a time, a hole apart, is legal and would cost the
+/// square of its chunk count under the lock every partition shares.
+fn colliding_field(stored: &[Vec<Run>], runs: &[Vec<Run>]) -> Option<usize> {
+    for (field, (stored, new)) in stored.iter().zip(runs).enumerate() {
+        for run in new {
+            let at = stored.partition_point(|stored| stored.end <= run.start);
+            if stored.get(at).is_some_and(|stored| stored.overlaps(*run)) {
+                return Some(field);
             }
-            (Some(_), Some(new)) => {
-                right += 1;
-                *new
-            }
-            (Some(stored), None) => {
-                left += 1;
-                *stored
-            }
-            (None, Some(new)) => {
-                right += 1;
-                *new
-            }
-            (None, None) => break,
-        };
-        match merged.last_mut() {
-            Some(last) if run.0 <= last.1 => last.1 = last.1.max(run.1),
-            _ => merged.push(run),
         }
     }
-    *stored = merged;
+    None
 }
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
