@@ -19,12 +19,13 @@ use std::time::Instant;
 use api::v1::index::InvertedIndexMetas;
 use async_trait::async_trait;
 use bytes::Bytes;
-use index::inverted_index::error::Result;
+use index::inverted_index::error::{CommonIoSnafu, Error, Result, SharedReadSnafu};
 use index::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use prost::Message;
+use snafu::IntoError;
 use store_api::storage::{FileId, IndexVersion};
 
-use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
+use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
 
 const INDEX_TYPE_INVERTED_INDEX: &str = "inverted_index";
@@ -41,6 +42,7 @@ impl InvertedIndexCache {
             index_content_cap,
             page_size,
             INDEX_TYPE_INVERTED_INDEX,
+            "inverted_index_metadata",
             inverted_index_metadata_weight,
             inverted_index_content_weight,
         )
@@ -58,7 +60,7 @@ fn inverted_index_metadata_weight(k: &(FileId, IndexVersion), v: &Arc<InvertedIn
 }
 
 /// Calculates weight for inverted index content.
-fn inverted_index_content_weight((k, _): &((FileId, IndexVersion), PageKey), v: &Bytes) -> u32 {
+fn inverted_index_content_weight((k, _): &((FileId, IndexVersion), u64), v: &Bytes) -> u32 {
     (k.0.as_bytes().len() + size_of::<IndexVersion>() + v.len()) as u32
 }
 
@@ -110,7 +112,8 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
                 size,
                 move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
-            .await?;
+            .await
+            .map_err(map_page_error)?;
 
         if let Some(m) = metrics {
             m.total_bytes += cache_metrics.page_bytes;
@@ -120,7 +123,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
             m.fetch_elapsed += start.unwrap().elapsed();
         }
 
-        Ok(result)
+        Ok(result.to_vec())
     }
 
     async fn read_vec<'a>(
@@ -139,7 +142,8 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
                 ranges,
                 move |ranges| async move { inner.read_vec(&ranges, None).await },
             )
-            .await?;
+            .await
+            .map_err(map_page_error)?;
         if let Some(m) = metrics {
             m.total_bytes += total_cache_metrics.page_bytes;
             m.total_ranges += total_cache_metrics.num_pages;
@@ -155,19 +159,50 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
         &self,
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<Arc<InvertedIndexMetas>> {
-        if let Some(cached) = self.cache.get_metadata((self.file_id, self.index_version)) {
+        let key = (self.file_id, self.index_version);
+        if let Some(cached) = self.cache.get_metadata(key).await {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             if let Some(m) = metrics {
                 m.cache_hit += 1;
             }
-            Ok(cached)
-        } else {
-            let meta = self.inner.metadata(metrics).await?;
-            self.cache
-                .put_metadata((self.file_id, self.index_version), meta.clone());
-            CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
-            Ok(meta)
+            return Ok(cached);
         }
+
+        let start = metrics.as_ref().map(|_| Instant::now());
+        let collect_metrics = metrics.is_some();
+        let mut loaded = InvertedIndexReadMetrics::default();
+        let result = self
+            .cache
+            .get_or_load_metadata(key, async {
+                self.inner
+                    .metadata(collect_metrics.then_some(&mut loaded))
+                    .await
+            })
+            .await;
+        if let Some(m) = metrics {
+            // Only the selected loader performs I/O. Waiters retain zero I/O
+            // counts. fetch_elapsed is per-caller elapsed (including wait and error),
+            // not physical I/O time summed across callers.
+            m.total_bytes += loaded.total_bytes;
+            m.total_ranges += loaded.total_ranges;
+            m.cache_hit += loaded.cache_hit;
+            m.cache_miss += loaded.cache_miss;
+            if let Some(start) = start {
+                m.fetch_elapsed += start.elapsed();
+            }
+        }
+        let meta = result.map_err(|source| SharedReadSnafu.into_error(source))?;
+        CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
+        Ok(meta)
+    }
+}
+
+/// Recovers the typed source retained by the range-reader adapter.
+fn map_page_error(error: Arc<std::io::Error>) -> Error {
+    if let Some(source) = crate::cache::index::find_shared_page_source::<Error>(&error) {
+        SharedReadSnafu.into_error(source)
+    } else {
+        CommonIoSnafu.into_error(std::io::Error::other(error))
     }
 }
 
@@ -190,46 +225,131 @@ mod test {
     // Repeat times for following little fuzz tests.
     const FUZZ_REPEAT_TIMES: usize = 100;
 
+    struct MetadataReader {
+        release: tokio::sync::Notify,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl InvertedIndexReader for MetadataReader {
+        async fn range_read<'a>(
+            &self,
+            _: u64,
+            _: u32,
+            _: Option<&'a mut InvertedIndexReadMetrics>,
+        ) -> Result<Vec<u8>> {
+            unreachable!("metadata test does not read content pages")
+        }
+
+        async fn read_vec<'a>(
+            &self,
+            _: &[Range<u64>],
+            _: Option<&'a mut InvertedIndexReadMetrics>,
+        ) -> Result<Vec<bytes::Bytes>> {
+            unreachable!("metadata test does not read content pages")
+        }
+
+        async fn metadata<'a>(
+            &self,
+            metrics: Option<&'a mut InvertedIndexReadMetrics>,
+        ) -> Result<Arc<InvertedIndexMetas>> {
+            self.release.notified().await;
+            if let Some(metrics) = metrics {
+                metrics.total_bytes += 8192;
+                metrics.total_ranges += 1;
+                // The wrapper must replace, not add, this physical-fetch duration.
+                metrics.fetch_elapsed += std::time::Duration::from_secs(3600);
+            }
+            if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(CommonIoSnafu.into_error(std::io::Error::other("metadata failed")));
+            }
+            Ok(Arc::new(InvertedIndexMetas::default()))
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_waiters_do_not_duplicate_io_metrics() {
+        for fail in [false, true] {
+            let cache = Arc::new(InvertedIndexCache::new(4096, 4096, 1024));
+            let reader = CachedInvertedIndexBlobReader::new(
+                FileId::random(),
+                0,
+                8192,
+                MetadataReader {
+                    release: tokio::sync::Notify::new(),
+                    fail: std::sync::atomic::AtomicBool::new(fail),
+                },
+                cache,
+            );
+            let mut owner_metrics = InvertedIndexReadMetrics::default();
+            let mut waiter_metrics = InvertedIndexReadMetrics::default();
+            let mut owner = Box::pin(reader.metadata(Some(&mut owner_metrics)));
+            assert!(futures::poll!(&mut owner).is_pending());
+            let mut waiter = Box::pin(reader.metadata(Some(&mut waiter_metrics)));
+            assert!(futures::poll!(&mut waiter).is_pending());
+            reader.inner.release.notify_one();
+            let owner_result = owner.await;
+            let waiter_result = waiter.await;
+            assert_eq!(owner_result.is_err(), fail);
+            assert_eq!(waiter_result.is_err(), fail);
+            assert_eq!(
+                (owner_metrics.total_bytes, owner_metrics.total_ranges),
+                (8192, 1)
+            );
+            assert_eq!(
+                (waiter_metrics.total_bytes, waiter_metrics.total_ranges),
+                (0, 0)
+            );
+            assert_eq!((owner_metrics.cache_hit, waiter_metrics.cache_hit), (0, 0));
+            for metrics in [&owner_metrics, &waiter_metrics] {
+                // Per-caller elapsed includes waiting, including on error; it is
+                // not a sum of physical I/O durations across concurrent callers.
+                assert!(metrics.fetch_elapsed > std::time::Duration::ZERO);
+                assert!(metrics.fetch_elapsed < std::time::Duration::from_secs(3600));
+            }
+            if fail {
+                let Error::SharedRead { source: owner, .. } = owner_result.unwrap_err() else {
+                    panic!("owner must preserve the typed shared read error");
+                };
+                let Error::SharedRead { source: waiter, .. } = waiter_result.unwrap_err() else {
+                    panic!("waiter must preserve the typed shared read error");
+                };
+                assert!(Arc::ptr_eq(&owner, &waiter));
+            } else {
+                let mut hot_metrics = InvertedIndexReadMetrics::default();
+                reader.metadata(Some(&mut hot_metrics)).await.unwrap();
+                assert_eq!(hot_metrics.cache_hit, 1);
+                assert_eq!(hot_metrics.total_bytes, 0);
+            }
+        }
+    }
+
     // Fuzz test for index data page key
     #[test]
     fn fuzz_index_calculation() {
-        // randomly generate a large u8 array
+        use common_cache::page::PageLayout;
+        use std::num::NonZeroU64;
+
         let mut rng = rand::rng();
         let mut data = vec![0u8; 1024 * 1024];
         rng.fill_bytes(&mut data);
-
         for _ in 0..FUZZ_REPEAT_TIMES {
             let offset = rng.random_range(0..data.len() as u64);
-            let size = rng.random_range(0..data.len() as u32 - offset as u32);
-            let page_size: usize = rng.random_range(1..1024);
-
-            let indexes =
-                PageKey::generate_page_keys(offset, size, page_size as u64).collect::<Vec<_>>();
-            let page_num = indexes.len();
+            let size = rng.random_range(0..data.len() as u64 - offset);
+            let page_size = NonZeroU64::new(rng.random_range(1_u64..1024)).unwrap();
+            let layout = PageLayout::new(page_size, data.len() as u64);
+            let requested = offset..offset + size;
             let mut read = Vec::with_capacity(size as usize);
-            for key in indexes.into_iter() {
-                let start = key.page_id as usize * page_size;
-                let page = if start + page_size < data.len() {
-                    &data[start..start + page_size]
-                } else {
-                    &data[start..]
-                };
-                read.extend_from_slice(page);
+            for id in layout.page_ids(requested.clone()).unwrap() {
+                let range = layout.page_range(id).unwrap();
+                let page = &data[range.start as usize..range.end as usize];
+                let slice = layout
+                    .request_slice(id, requested.clone())
+                    .unwrap()
+                    .unwrap();
+                read.extend_from_slice(&page[slice]);
             }
-            let expected_range = offset as usize..(offset + size as u64 as u64) as usize;
-            let read = read[PageKey::calculate_range(offset, size, page_size as u64)].to_vec();
-            if read != data.get(expected_range).unwrap() {
-                panic!(
-                    "fuzz_read_index failed, offset: {}, size: {}, page_size: {}\nread len: {}, expected len: {}\nrange: {:?}, page num: {}",
-                    offset,
-                    size,
-                    page_size,
-                    read.len(),
-                    size as usize,
-                    PageKey::calculate_range(offset, size, page_size as u64),
-                    page_num
-                );
-            }
+            assert_eq!(read, data[offset as usize..(offset + size) as usize]);
         }
     }
 
@@ -460,7 +580,7 @@ mod test {
                 )
                 .await
                 .unwrap();
-            assert_eq!(read, expected);
+            assert_eq!(read.as_ref(), expected.as_slice());
         }
     }
 
@@ -489,10 +609,13 @@ mod test {
                 .collect::<Vec<_>>();
 
             let loads = AtomicUsize::new(0);
+            let physical_ranges = std::sync::Mutex::new(Vec::new());
             let load = |pages: Vec<Range<u64>>| {
                 loads.fetch_add(1, Ordering::Relaxed);
-                // Pages are requested once each, in file order.
-                assert!(pages.windows(2).all(|w| w[0].end <= w[1].start));
+                physical_ranges
+                    .lock()
+                    .unwrap()
+                    .extend(pages.iter().cloned());
                 let data = &data;
                 async move {
                     Ok::<_, std::io::Error>(
@@ -512,8 +635,15 @@ mod test {
                 .await
                 .unwrap();
             assert_eq!(cold, expected);
-            let cold_loads = usize::from(cold_metrics.cache_miss > 0);
-            assert_eq!(loads.load(Ordering::Relaxed), cold_loads);
+            let cold_loads = loads.load(Ordering::Relaxed);
+            assert_eq!(cold_loads, usize::from(cold_metrics.cache_miss > 0));
+            let mut observed = physical_ranges.lock().unwrap().clone();
+            observed.sort_by_key(|r| r.start);
+            assert!(observed.windows(2).all(|w| w[0].end <= w[1].start));
+            assert_eq!(
+                observed.iter().map(|r| r.end - r.start).sum::<u64>(),
+                cold_metrics.page_bytes
+            );
 
             let (warm, metrics) = cache
                 .get_or_load_vec(key, file_size, &ranges, load)

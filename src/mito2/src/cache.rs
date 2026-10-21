@@ -1522,7 +1522,7 @@ impl CacheManager {
         }
 
         if let Some(cache) = &self.puffin_metadata_cache {
-            cache.remove(&file_id.to_string());
+            cache.remove(&file_id.to_string()).await;
         }
 
         if let Some(write_cache) = &self.write_cache {
@@ -1809,7 +1809,8 @@ impl CacheManagerBuilder {
         let prefilter_result_cache = (self.prefilter_result_cache_size != 0)
             .then(|| new_prefilter_result_cache(self.prefilter_result_cache_size));
         let puffin_metadata_cache =
-            PuffinMetadataCache::new(self.puffin_metadata_size, CACHE_BYTES.gauges());
+            PuffinMetadataCache::new(self.puffin_metadata_size, &CACHE_BYTES)
+                .with_load_metrics(crate::metrics::cache_loading_metrics("puffin_metadata"));
         let selector_result_cache = (self.selector_result_cache_size != 0).then(|| {
             Cache::builder()
                 .max_capacity(self.selector_result_cache_size)
@@ -3604,11 +3605,15 @@ mod tests {
             Arc::new(::index::target::IndexTarget::ColumnId(column_id)),
             Tag::Skipping,
         );
-        bloom_cache.put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()));
-        inverted_cache.put_metadata(
-            (index_id.file_id(), index_id.version),
-            Arc::new(InvertedIndexMetas::default()),
-        );
+        bloom_cache
+            .put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()))
+            .await;
+        inverted_cache
+            .put_metadata(
+                (index_id.file_id(), index_id.version),
+                Arc::new(InvertedIndexMetas::default()),
+            )
+            .await;
         let predicate = PredicateKey::new_bloom(Arc::new(BTreeMap::new()));
         let selection = Arc::new(RowGroupSelection::default());
         result_cache.put(predicate.clone(), index_id.file_id(), selection);
@@ -3617,58 +3622,84 @@ mod tests {
             blobs: Vec::new(),
             properties: HashMap::new(),
         });
-        puffin_metadata_cache.put_metadata(file_id_str.clone(), metadata);
+        puffin_metadata_cache
+            .put_metadata(file_id_str.clone(), metadata)
+            .await;
 
-        assert!(bloom_cache.get_metadata(bloom_key.clone()).is_some());
+        assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_some());
         assert!(
             inverted_cache
                 .get_metadata((index_id.file_id(), index_id.version))
+                .await
                 .is_some()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_some());
-        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_some());
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&file_id_str)
+                .await
+                .is_some()
+        );
 
         cache.evict_puffin_cache(index_id).await;
 
-        assert!(bloom_cache.get_metadata(bloom_key.clone()).is_none());
+        assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_none());
         assert!(
             inverted_cache
                 .get_metadata((index_id.file_id(), index_id.version))
+                .await
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
-        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&file_id_str)
+                .await
+                .is_none()
+        );
 
         // Refill caches and evict via CacheStrategy to ensure delegation works.
-        bloom_cache.put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()));
-        inverted_cache.put_metadata(
-            (index_id.file_id(), index_id.version),
-            Arc::new(InvertedIndexMetas::default()),
-        );
+        bloom_cache
+            .put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()))
+            .await;
+        inverted_cache
+            .put_metadata(
+                (index_id.file_id(), index_id.version),
+                Arc::new(InvertedIndexMetas::default()),
+            )
+            .await;
         result_cache.put(
             predicate.clone(),
             index_id.file_id(),
             Arc::new(RowGroupSelection::default()),
         );
-        puffin_metadata_cache.put_metadata(
-            file_id_str.clone(),
-            Arc::new(FileMetadata {
-                blobs: Vec::new(),
-                properties: HashMap::new(),
-            }),
-        );
+        puffin_metadata_cache
+            .put_metadata(
+                file_id_str.clone(),
+                Arc::new(FileMetadata {
+                    blobs: Vec::new(),
+                    properties: HashMap::new(),
+                }),
+            )
+            .await;
 
         let strategy = CacheStrategy::EnableAll(cache.clone());
         strategy.evict_puffin_cache(index_id).await;
 
-        assert!(bloom_cache.get_metadata(bloom_key.clone()).is_none());
+        assert!(bloom_cache.get_metadata(bloom_key.clone()).await.is_none());
         assert!(
             inverted_cache
                 .get_metadata((index_id.file_id(), index_id.version))
+                .await
                 .is_none()
         );
         assert!(result_cache.get(&predicate, index_id.file_id()).is_none());
-        assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&file_id_str)
+                .await
+                .is_none()
+        );
     }
 
     fn wide_region_metadata(column_count: u32) -> RegionMetadata {

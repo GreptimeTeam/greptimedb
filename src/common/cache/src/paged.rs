@@ -31,7 +31,7 @@ use common_base::range_read::RangeReader;
 use futures::channel::{mpsc, oneshot};
 use futures::{StreamExt, future};
 
-use crate::metrics::{CacheMetrics, CacheSizeMetric};
+use crate::metrics::{CacheMetrics, CacheSizeMetric, CacheSizeRegistration};
 use crate::page::PageLayout;
 use crate::{Cache, RemovalCause};
 
@@ -41,8 +41,6 @@ pub enum PageEvent {
     Lookup { hits: usize, misses: usize },
     /// One successful native page loader, excluding waiters and hits.
     Loaded { bytes: u64 },
-    /// Backend weight, not process RSS; sampled after fetch/maintenance.
-    Residency { usage: u64, capacity: u64 },
     /// Backend eviction, excluding unadmitted values released by their owners.
     Evicted { cause: RemovalCause },
 }
@@ -51,6 +49,7 @@ pub enum PageEvent {
 #[derive(Clone)]
 pub struct PageCacheObserver {
     pub bytes: CacheSizeMetric,
+    pub capacity: CacheSizeMetric,
     pub loads: Option<Arc<CacheMetrics>>,
     pub events: Arc<dyn Fn(PageEvent) + Send + Sync>,
 }
@@ -78,6 +77,7 @@ pub struct PagedCache<K> {
     cache: Cache<(K, u64), Arc<CachedPage>>,
     page_size: u64,
     observer: PageCacheObserver,
+    _capacity_registration: CacheSizeRegistration,
 }
 
 impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
@@ -102,7 +102,9 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
         if let Some(metrics) = &observer.loads {
             cache = cache.with_metrics(metrics.clone());
         }
+        let capacity_registration = observer.capacity.register(move || capacity);
         Self {
+            _capacity_registration: capacity_registration,
             cache,
             page_size,
             observer,
@@ -139,7 +141,6 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
     /// Applies pending cache admission and eviction work.
     pub async fn run_pending_tasks(&self) {
         self.cache.run_pending_tasks().await;
-        self.observe_residency();
     }
 
     /// Fetches bytes in input order. The reader must address the same immutable
@@ -329,7 +330,6 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             }
             output.push(assembled.freeze());
         }
-        self.observe_residency();
         Ok((output, stats))
     }
 
@@ -338,13 +338,6 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static> PagedCache<K> {
             bytes: bytes.len() as u64,
         });
         Arc::new(CachedPage { file_size, bytes })
-    }
-
-    fn observe_residency(&self) {
-        (self.observer.events)(PageEvent::Residency {
-            usage: self.cache.weighted_size(),
-            capacity: self.cache.capacity(),
-        });
     }
 }
 

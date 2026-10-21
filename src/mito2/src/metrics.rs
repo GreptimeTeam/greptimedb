@@ -738,3 +738,171 @@ impl StagerNotifier for StagerMetrics {
         self.recycle_cache_bytes.sub(size as i64);
     }
 }
+
+lazy_static! {
+    pub static ref CACHE_PAGE_LOADED_BYTES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_page_loaded_bytes_total",
+        "Bytes produced by successful page loaders, excluding waiters",
+        &[TYPE_LABEL]
+    )
+    .unwrap();
+    /// Configured capacity summed across live page caches in each category.
+    pub static ref CACHE_CAPACITY_BYTES: common_cache::metrics::CacheSizeMetrics = {
+        let metrics = common_cache::metrics::CacheSizeMetrics::new(
+            prometheus::Opts::new("greptime_mito_cache_capacity_bytes", "Configured capacity of live page caches in bytes"),
+            &[TYPE_LABEL],
+        ).unwrap();
+        prometheus::register(Box::new(metrics.clone())).unwrap();
+        metrics
+    };
+}
+
+/// Binds shared page/cache I/O metrics while retaining the business hit/miss labels.
+pub(crate) fn cache_page_observer(
+    cache_name_label: &'static str,
+    cache_category_label: &'static str,
+    lookup_counts: fn(usize, usize) -> (usize, usize),
+) -> common_cache::paged::PageCacheObserver {
+    use common_cache::paged::PageEvent;
+    let hits = CACHE_HIT.with_label_values(&[cache_category_label]);
+    let misses = CACHE_MISS.with_label_values(&[cache_category_label]);
+    let loaded = CACHE_PAGE_LOADED_BYTES.with_label_values(&[cache_name_label]);
+    common_cache::paged::PageCacheObserver {
+        bytes: CACHE_BYTES.bind(&[cache_category_label]),
+        capacity: CACHE_CAPACITY_BYTES.bind(&[cache_category_label]),
+        loads: Some(cache_loading_metrics(cache_name_label)),
+        events: std::sync::Arc::new(move |event| match event {
+            PageEvent::Lookup {
+                hits: count,
+                misses: missing,
+            } => {
+                let (count, missing) = lookup_counts(count, missing);
+                hits.inc_by(count as u64);
+                misses.inc_by(missing as u64);
+            }
+            PageEvent::Loaded { bytes } => loaded.inc_by(bytes),
+            PageEvent::Evicted { cause } => CACHE_EVICTION
+                .with_label_values(&[cache_category_label, cause.as_str()])
+                .inc(),
+        }),
+    }
+}
+
+lazy_static! {
+    pub static ref CACHE_PAGE_BYTES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_page_bytes_total",
+        "Logical page fetch bytes by kind; not physical backend bytes",
+        &[TYPE_LABEL, "kind"]
+    )
+    .unwrap();
+}
+
+/// Records logical byte amplification independently of physical batch reads.
+pub(crate) fn cache_page_fetch_metrics(
+    cache_type: &'static str,
+    stats: &common_cache::paged::PageFetchStats,
+) {
+    for (kind, value) in [
+        ("requested", stats.requested_bytes),
+        ("aligned", stats.aligned_bytes),
+        ("unique_requested", stats.unique_requested_bytes),
+        ("cached", stats.cached_bytes),
+    ] {
+        CACHE_PAGE_BYTES
+            .with_label_values(&[cache_type, kind])
+            .inc_by(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common_cache::paged::{PageEvent, PageFetchStats};
+
+    #[test]
+    fn page_cache_capacity_sums_live_instances_by_category() {
+        use bytes::Bytes;
+        use common_cache::paged::PagedCache;
+        use prometheus::core::Collector;
+
+        let category = "test_shared_page_category";
+        let sample = || {
+            CACHE_CAPACITY_BYTES
+                .collect()
+                .into_iter()
+                .flat_map(|family| family.get_metric().to_vec())
+                .find(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.value() == category)
+                })
+                .unwrap()
+                .get_gauge()
+                .as_ref()
+                .unwrap()
+                .value()
+        };
+        let make_cache = |name, capacity| {
+            PagedCache::<u64>::new(
+                name,
+                capacity,
+                64,
+                |_, bytes: &Bytes| bytes.len() as u32,
+                cache_page_observer(name, category, |hits, misses| (hits, misses)),
+            )
+        };
+        let first = make_cache("test_first_pages", 128);
+        let second = make_cache("test_second_pages", 256);
+        assert_eq!(sample(), 384.0);
+        drop(first);
+        assert_eq!(sample(), 256.0);
+        drop(second);
+        assert_eq!(sample(), 0.0);
+    }
+
+    #[test]
+    fn test_page_observer_retains_business_lookup_units() {
+        let page = cache_page_observer("test_page_unit", "test_page_unit", |hits, misses| {
+            (hits, misses)
+        });
+        let request =
+            cache_page_observer("test_request_unit", "test_request_unit", |hits, misses| {
+                (usize::from(hits > 0), usize::from(misses > 0))
+            });
+        for observer in [&page, &request] {
+            (observer.events)(PageEvent::Lookup { hits: 3, misses: 2 });
+            (observer.events)(PageEvent::Loaded { bytes: 4096 });
+        }
+        assert_eq!(CACHE_HIT.with_label_values(&["test_page_unit"]).get(), 3);
+        assert_eq!(CACHE_MISS.with_label_values(&["test_page_unit"]).get(), 2);
+        assert_eq!(CACHE_HIT.with_label_values(&["test_request_unit"]).get(), 1);
+        assert_eq!(
+            CACHE_MISS.with_label_values(&["test_request_unit"]).get(),
+            1
+        );
+        cache_page_fetch_metrics(
+            "test_page_unit",
+            &PageFetchStats {
+                requested_bytes: 7,
+                aligned_bytes: 12,
+                unique_requested_bytes: 6,
+                cached_bytes: 3,
+                ..Default::default()
+            },
+        );
+        for (kind, expected) in [
+            ("requested", 7),
+            ("aligned", 12),
+            ("unique_requested", 6),
+            ("cached", 3),
+        ] {
+            assert_eq!(
+                CACHE_PAGE_BYTES
+                    .with_label_values(&["test_page_unit", kind])
+                    .get(),
+                expected
+            );
+        }
+    }
+}
