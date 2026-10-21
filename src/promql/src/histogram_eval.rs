@@ -69,7 +69,18 @@ pub fn evaluate_histograms(
     schema: &Arc<SeriesSchema>,
     series: &[Series],
 ) -> Result<Vec<Series>> {
-    let mut groups: HashMap<LabelSet, Group<'_>> = HashMap::new();
+    // The groups in the order their first member arrived, so the result is in one order on every
+    // run, as `merge_same_labelset` keeps it.
+    let mut index: HashMap<LabelSet, usize> = HashMap::new();
+    let mut groups: Vec<Group<'_>> = Vec::new();
+    let mut group_of = |metric: MetricName| {
+        let slot = *index.entry(label_set(&metric)).or_insert_with(|| {
+            groups.push(Group::new(metric));
+            groups.len() - 1
+        });
+        slot
+    };
+    let mut members: Vec<(usize, Option<f64>, &Series)> = Vec::new();
     for series in series {
         grid_axis(series)?;
         if let Some(upper_bound) = series
@@ -79,26 +90,27 @@ pub fn evaluate_histograms(
         {
             let mut metric = series.metric.clone();
             metric.remove(BUCKET_LABEL);
-            groups
-                .entry(label_set(&metric))
-                .or_insert_with(|| Group::new(metric))
-                .classic
-                .push((upper_bound, series));
+            members.push((group_of(metric), Some(upper_bound), series));
         }
         if has_histograms(series) {
-            let metric = series.metric.clone();
-            let group = groups
-                .entry(label_set(&metric))
-                .or_insert_with(|| Group::new(metric));
-            // A label set carries at most one native histogram series: a second one would
-            // overwrite the first and drop it from the result.
-            debug_assert!(
-                group.native.is_none(),
-                "one label set carries at most one native histogram series; a second one for \
-                 the same label set means the input handed one label set over as several \
-                 series, which a gap in the axis is there to avoid"
-            );
-            group.native = Some(series);
+            members.push((group_of(series.metric.clone()), None, series));
+        }
+    }
+    for (slot, upper_bound, series) in members {
+        let group = &mut groups[slot];
+        match upper_bound {
+            Some(upper_bound) => group.classic.push((upper_bound, series)),
+            None => {
+                // A label set carries at most one native histogram series: a second one would
+                // overwrite the first and drop it from the result.
+                debug_assert!(
+                    group.native.is_none(),
+                    "one label set carries at most one native histogram series; a second one for \
+                     the same label set means the input handed one label set over as several \
+                     series, which a gap in the axis is there to avoid"
+                );
+                group.native = Some(series);
+            }
         }
     }
 
@@ -107,7 +119,7 @@ pub fn evaluate_histograms(
     let mut classic_buckets = Vec::new();
     let mut native_buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
-    for mut group in groups.into_values() {
+    for mut group in groups {
         // One builder serves every group, so each result series starts explicitly.
         builder.begin_series();
         // The positions any member carries, merged once: the holes no member holds are never

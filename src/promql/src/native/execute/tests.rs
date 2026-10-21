@@ -40,6 +40,7 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
+use crate::histogram_eval::HistogramFunction;
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
@@ -6707,4 +6708,100 @@ fn a_sorted_series_is_queued_at_what_its_slices_hold() {
     let chunks = run(&mut execution);
     assert_eq!(decided(&chunks).len(), points as usize);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// `histogram_quantile` reads a classic histogram from the bucket series that share its labels,
+/// however they arrived, and answers under those labels without `le` and the name.
+#[test]
+fn histogram_quantile_reads_the_buckets_of_the_whole_vector() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(select(
+        evaluated_input(Arc::clone(&grid)),
+        BoundSelect::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let bucket = |le: &str| {
+        MetricName::try_new(
+            Some("m".into()),
+            vec![
+                Label {
+                    name: "job".into(),
+                    value: "a".into(),
+                },
+                Label {
+                    name: "le".into(),
+                    value: le.into(),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (le, count) in [("+Inf", 2.0), ("1", 1.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                bucket(le),
+                0,
+                vec![Some(count)],
+                true,
+            ))
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric.name(), None);
+    assert_eq!(chunks[0].series.metric.get("le"), None);
+    assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0))]);
+}
+
+/// An empty tag and an absent one are one label set, so the two native histogram series below are
+/// one series to `histogram_quantile`, answered at both of their points rather than one of them
+/// dropped.
+#[test]
+fn histogram_quantile_reads_the_pieces_of_one_label_set_as_one_series() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(select(
+        evaluated_input(Arc::clone(&grid)),
+        BoundSelect::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let metric = |tags: &[(&str, &str)]| {
+        MetricName::try_new(
+            Some("m".into()),
+            tags.iter()
+                .map(|(name, value)| Label {
+                    name: (*name).into(),
+                    value: (*value).into(),
+                })
+                .collect(),
+        )
+        .unwrap()
+    };
+    let table = histogram_table(2, 4);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (start, tags, index) in [
+        (0, vec![("job", "a"), ("zone", "")], 0),
+        (1, vec![("job", "a")], 1),
+    ] {
+        execution
+            .push_evaluated(evaluated_histogram_chunk_of(
+                &schema,
+                metric(&tags),
+                start,
+                vec![Some(index)],
+                &table,
+                true,
+            ))
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    let positions: Vec<usize> = decided(&chunks)
+        .into_iter()
+        .filter_map(|(position, value)| value.map(|_| position))
+        .collect();
+    assert_eq!(positions, [0, 1]);
 }

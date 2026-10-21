@@ -25,12 +25,14 @@
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
 //! <sort>(<expression>[, <string>]*)                 e.g. sort_desc(x), sort_by_label(x, "job")
 //! absent(<expression>)                              e.g. absent(x{job="a"})
+//! <histogram>(<constant>+, <expression>)            e.g. histogram_quantile(0.9, rate(x[5m]))
 //! ```
 //!
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
 //! `Input` (raw samples) → `Window` (the range function over the statement's grid) and
 //! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to), and
-//! `<expression>` → `Select` (a sort or `absent`, which read the whole vector). A
+//! `<expression>` → `Select` (a sort, `absent` or a classic histogram function, which read the
+//! whole vector). A
 //! selector may carry `offset` in either selection shape and, in the window shape, an `@` anchor.
 //! Everything else is a [`DataFusionError::NotImplemented`] that names what was found and quotes the
 //! shapes above, because rejecting a query the compiler does not understand is the only honest
@@ -59,6 +61,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{MetricName, SeriesOrdering};
+use promql::histogram_eval::HistogramFunction;
 use promql::map::{ArithmeticOp, MathOp};
 use promql::native::plan::{
     BoundInput, BoundInstant, BoundMap, BoundSelect, BoundWindow, NativeExpr, NativeNode,
@@ -80,9 +83,9 @@ use crate::promql::label_values::signed_millis_since_epoch;
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
                          the selector as in `quantile_over_time(0.9, x[5m])` — or a math function, \
-                         a sort or `absent` over any of them, as in `abs(rate(x[5m]))`: for \
-                         example `x`, `rate(x[5m])`, `quantile_over_time(0.9, x[5m])` or \
-                         `abs(rate(x[5m]))`";
+                         a sort, `absent` or a histogram function over any of them, as in \
+                         `abs(rate(x[5m]))`: for example `x`, `rate(x[5m])`, \
+                         `quantile_over_time(0.9, x[5m])` or `abs(rate(x[5m]))`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -266,7 +269,7 @@ fn select_call(
 ) -> Result<NativeNode> {
     if vector.value_type() != ValueType::Vector {
         return Err(not_implemented(&format!(
-            "a call to `{name}` whose first argument is `{vector}`, which is a {}, where the \
+            "a call to `{name}` whose vector argument is `{vector}`, which is a {}, where the \
              function takes a vector",
             vector.value_type()
         )));
@@ -282,8 +285,8 @@ fn select_call(
     })
 }
 
-/// The selection a sort or `absent` binds, and the vector it reads, or `None` when `name` is
-/// neither.
+/// The selection a sort, `absent` or a classic histogram function binds, and the vector it reads,
+/// or `None` when `name` is none of them.
 fn select_op<'a>(
     name: &str,
     arguments: &'a [Box<PromExpr>],
@@ -292,6 +295,29 @@ fn select_op<'a>(
         "sort" => Some(SortOrder::Asc),
         "sort_desc" => Some(SortOrder::Desc),
         "sort_by_label" | "sort_by_label_desc" => None,
+        "histogram_quantile" | "histogram_fraction" => {
+            let Some((vector, constants)) = arguments.split_last() else {
+                return Err(not_implemented(&format!(
+                    "a call to `{name}` with no argument"
+                )));
+            };
+            let function = match constants {
+                [quantile] if name == "histogram_quantile" => {
+                    HistogramFunction::Quantile(constant_argument(name, quantile, 0)?)
+                }
+                [lower, upper] if name == "histogram_fraction" => HistogramFunction::Fraction {
+                    lower: constant_argument(name, lower, 0)?,
+                    upper: constant_argument(name, upper, 1)?,
+                },
+                _ => {
+                    return Err(not_implemented(&format!(
+                        "a call to `{name}` with {} argument(s)",
+                        arguments.len()
+                    )));
+                }
+            };
+            return Ok(Some((BoundSelect::Histogram(function), vector)));
+        }
         "absent" => {
             let [vector] = arguments else {
                 return Err(not_implemented(&format!(

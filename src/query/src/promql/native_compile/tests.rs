@@ -1160,13 +1160,14 @@ fn a_math_function_over_a_non_vector_argument_is_refused_and_names_it() {
     }
 }
 
-/// The sorts and `absent` bind a selection over the vector they are given. `absent` derives its
+/// The sorts, `absent` and the classic histogram functions bind a selection over the vector they
+/// are given, the histogram functions with their constants folded. `absent` derives its
 /// labels from the selector's matchers as Prometheus does: the first equality of a name sets the
 /// label and any other matcher of it removes it, the matchers that accept a missing label read
 /// last; `__name__` and the table-choosing matchers are not labels, and any expression other than
 /// a selector answers without labels.
 #[test]
-fn sorts_and_absent_bind_a_selection() {
+fn whole_vector_functions_bind_a_selection() {
     let cases = [
         ("sort(x)", "sort"),
         ("sort_desc(rate(x[5m]))", "sort_desc"),
@@ -1185,6 +1186,11 @@ fn sorts_and_absent_bind_a_selection() {
         // `job!="b"` accepts a missing `job`, so it reads after `job="a"` and removes it.
         (r#"absent(x{job!="b", job="a"})"#, "absent {}"),
         (r#"absent({__name__="x", job="a"})"#, r#"absent {job="a"}"#),
+        (
+            "histogram_quantile(1 - 0.1, rate(x[5m]))",
+            "histogram_quantile 0.9",
+        ),
+        ("histogram_fraction(0, 0.5, x)", "histogram_fraction 0 0.5"),
         ("absent(rate(x[5m]))", "absent {}"),
     ];
     for (query, op) in cases {
