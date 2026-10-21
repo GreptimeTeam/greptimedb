@@ -25,7 +25,7 @@
                      plan, target, target_root, name
 --- /dev/null
 +++ b/scripts/cache_capacity_evidence.py
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,188 @@
 +#!/usr/bin/env python3
 +# Copyright 2023 Greptime Team
 +# Licensed under the Apache License, Version 2.0.
@@ -55,6 +55,7 @@
 +        'c7d970da0bb0aa2420cefef5c2cd72d6e6bb6972',
 +        '0fdd79f19607b520aae48e8cce856a5486cea2f1',
 +        '3887dcfcd84b6c02e54ce31691b65c46c6782b35',
++        '1904eb24564107bb22acad4233ccf983e22ce2a1',
 +    )
 +}
 +
