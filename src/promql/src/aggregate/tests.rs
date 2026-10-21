@@ -1266,6 +1266,23 @@ fn compensation_survives_partials_and_merges() {
         1.0 / 3.0,
         1e-10
     ));
+    // A partial's own compensation must survive a later cancellation of the sums: `1` rides in
+    // the first partial's compensation while `1e84` and `-1e84` cancel across partials.
+    let cancelling: &[&[f64]] = &[&[1e100, 1.0], &[-1e100, 1e84], &[-1e84]];
+    assert_eq!(merged_and_serial(AggregateOp::Sum, cancelling), (1.0, 1.0));
+    let (merged, serial) = merged_and_serial(AggregateOp::Avg, cancelling);
+    assert_eq!(serial, 0.2);
+    assert!(
+        crate::grid_series::reference::close(merged, serial, 1e-10),
+        "{merged}"
+    );
+    let (merged, serial) =
+        merged_and_serial(AggregateOp::Avg, &[&[1e32, 1.0], &[-1e32, 1e16], &[-1e16]]);
+    assert_eq!(serial, 0.2);
+    assert!(
+        crate::grid_series::reference::close(merged, serial, 1e-10),
+        "{merged}"
+    );
 }
 
 /// Merging finite partials does not overflow where the result is finite: `avg` switches to a

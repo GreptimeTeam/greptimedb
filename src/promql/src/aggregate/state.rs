@@ -238,10 +238,7 @@ impl FloatState {
         }
         match op {
             AggregateOp::Sum => {
-                // The error of adding the two sums goes into the compensation with theirs.
-                let (value, compensation) = kahan_inc(other.value, self.value, self.compensation);
-                self.value = value;
-                self.compensation = compensation + other.compensation;
+                (self.value, self.compensation) = add_compensated(*self, other);
             }
             AggregateOp::Count => self.count += other.count,
             AggregateOp::Group => {}
@@ -275,10 +272,10 @@ impl FloatState {
     fn merge_avg(&mut self, other: Self) {
         let count = self.count + other.count;
         if !self.incremental_mean && !other.incremental_mean {
-            let (value, compensation) = kahan_inc(other.value, self.value, self.compensation);
+            let (value, compensation) = add_compensated(*self, other);
             if !value.is_infinite() {
                 self.value = value;
-                self.compensation = compensation + other.compensation;
+                self.compensation = compensation;
                 self.count = count;
                 return;
             }
@@ -303,6 +300,15 @@ impl FloatState {
             (self.value / self.count, self.compensation / self.count)
         }
     }
+}
+
+/// The compensated sum of two partial sums. Both the other sum and its compensation are added as
+/// Kahan addends: adding the compensation plainly would drop what the compensation already
+/// holds once later partials cancel the sums, as merging `[1e100, 1]`, `[-1e100, 1e84]` and
+/// `[-1e84]` would lose the `1`.
+fn add_compensated(this: FloatState, other: FloatState) -> (f64, f64) {
+    let (value, compensation) = kahan_inc(other.value, this.value, this.compensation);
+    kahan_inc(other.compensation, value, compensation)
 }
 
 /// Merges `count_values` results of several partitions. Each partial already carries its full
