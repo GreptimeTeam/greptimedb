@@ -286,6 +286,19 @@ struct NodeSpec {
     input: Option<usize>,
 }
 
+/// The series whose first chunk this buffer received and whose closing chunk it has not seen.
+///
+/// A window reads one series at a time, to the chunk carrying `is_last`, so the chunks of one series
+/// arrive together and each of them continues the one before. What is kept here is the identity of
+/// the open series and the last position it decided, which is what says whether the next chunk still
+/// belongs to it and still moves forward.
+struct OpenSeries {
+    /// The identity of the open series, as the chunk that opened it named it.
+    metric: MetricName,
+    /// The last absolute position the open series decided, when it decided any.
+    last_position: Option<usize>,
+}
+
 /// The input a window with a [`NodeRuntime::merge`] collects until its input ends.
 ///
 /// Such a window cannot evaluate the series under one canonical label set one after another: its
@@ -293,6 +306,14 @@ struct NodeSpec {
 /// boundary needs are exactly the ones that closed series held. The fragments are therefore kept
 /// whole, merged into one series per label set with
 /// [`crate::grid_series::merge_same_labelset`], and only then evaluated.
+///
+/// Collecting is also where the contract a series keeps is checked, because the merge that follows
+/// would hide a stream that broke it: it sorts the rows by position and groups them by label set, so
+/// runs that went backwards inside one series and an identity that changed inside one series both
+/// come out as a plausible merged series. A streaming window refuses such a stream on the chunk that
+/// breaks it, and so does [`MergeInput::check`] before the chunk is kept. An input that ends inside
+/// a series is the one thing left to the executor's own check: it is reported before anything is
+/// flushed, because the close a merge synthesises would make such a series look like one that ended.
 struct MergeInput {
     /// The schema the fragments are addressed on: their grid and their field count.
     schema: Arc<SeriesSchema>,
@@ -305,6 +326,9 @@ struct MergeInput {
     /// Neither figure walks the buffer again, and the space the fragments' payload shares is
     /// counted once per fragment rather than deduplicated.
     bytes: usize,
+    /// The series the next chunk has to continue, if the last chunk this buffer took did not close
+    /// one. Nothing is kept once a series closed: the next chunk, if any, starts another series.
+    open: Option<OpenSeries>,
 }
 
 impl MergeInput {
@@ -314,7 +338,72 @@ impl MergeInput {
             schema,
             fragments: Vec::new(),
             bytes: 0,
+            open: None,
         }
+    }
+
+    /// Checks one received chunk against the contract a series keeps, and follows the open series.
+    ///
+    /// The checks are the ones a streaming window makes on every delivery it reads: the chunk is
+    /// addressed on this window's input grid, carries one sample per row in every field, holds a
+    /// position unless it closes its series, continues the identity of the series it belongs to, and
+    /// only ever moves forward within it. They cost a constant number of reads of the chunk's own
+    /// axis -- its first and last positions, not its rows, which the merge then copies nothing of --
+    /// and they are what keeps the sort below honest: a stream that broke one of them is refused
+    /// here, on the chunk that broke it, rather than merged into an answer.
+    ///
+    /// A chunk carrying `is_last` closes the open series, whether it holds rows or none at all, and
+    /// nothing is remembered of it: the next chunk starts a series whose identity is its own.
+    fn check(&mut self, path: &NodePath, series: &Series, is_last: bool) -> Result<()> {
+        let on_grid = match (&self.schema.eval_grid, series.time.grid()) {
+            (Some(input), Some(grid)) => input.spec() == grid.spec(),
+            _ => false,
+        };
+        if !on_grid
+            || series.fields.len() != self.schema.fields.len()
+            || series
+                .fields
+                .iter()
+                .any(|field| field.len() != series.time.len())
+        {
+            return Err(DataFusionError::Execution(format!(
+                "the window at {path} was handed an evaluated series that does not match its input \
+                 schema"
+            )));
+        }
+        let (first, last) = (series.time.first_position(), series.time.last_position());
+        if !is_last && first.is_none() {
+            return Err(DataFusionError::Execution(format!(
+                "the window at {path} was handed an evaluated series that holds no position before \
+                 the last run of its series"
+            )));
+        }
+        if let Some(open) = &self.open
+            && open.metric != series.metric
+        {
+            return Err(DataFusionError::Execution(format!(
+                "the window at {path} was handed an evaluated series that changed identity before \
+                 its last run"
+            )));
+        }
+        if let Some(previous) = self.open.as_ref().and_then(|open| open.last_position)
+            && let Some(first) = first
+            && first <= previous
+        {
+            return Err(DataFusionError::Execution(format!(
+                "the window at {path} was handed evaluated series runs that are not increasing: \
+                 {first} after {previous}"
+            )));
+        }
+        self.open = if is_last {
+            None
+        } else {
+            Some(OpenSeries {
+                metric: series.metric.clone(),
+                last_position: last,
+            })
+        };
+        Ok(())
     }
 
     /// The bytes of the fragments and of the workspace merging them needs.
@@ -958,6 +1047,9 @@ impl NodeRuntime {
             )));
         };
         let EvaluatedChunk { series, is_last } = chunk;
+        // The chunk is checked before it is charged for or kept, so a stream that breaks the
+        // contract leaves nothing behind.
+        merge.check(path, &series, is_last)?;
         let positions = series.time.len();
         let bytes = series_bytes(&series);
         // The fragment is held from here on, so the pool admits it before this node keeps it: a

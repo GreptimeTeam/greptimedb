@@ -1098,6 +1098,229 @@ fn a_pool_that_cannot_admit_a_chunk_releases_what_it_held() {
     );
 }
 
+/// The malformed streams a streaming window refuses are refused by the collector too.
+///
+/// The window below the map collects the whole fragment stream and hands it to
+/// [`crate::grid_series::merge_same_labelset`], which sorts the rows by position and groups them by
+/// label set. That is what makes two closed series that share a label set one series, and it is also
+/// what would hide a stream that never was one series: runs that went backwards inside a series, and
+/// an identity that changed inside a series, both come out as a plausible merged series with a
+/// peaceful answer. A window that read the same stream as it arrived refuses it on the chunk that
+/// breaks it, and so does the collector, before the chunk is kept.
+///
+/// The stream below is a single series per case and the answer it would have produced is the one
+/// nothing asked for: `3` for the first (the merge would sort 1 and 2 onto positions 0 and 1), and
+/// two answers for the second.
+#[test]
+fn a_collector_refuses_the_malformed_streams_a_streaming_window_refuses() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let tree = || {
+        NativeTree::try_new(window_with(
+            map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        ))
+        .unwrap()
+    };
+
+    let cases = [
+        (
+            "runs going backwards inside one series",
+            evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(1.0)], false),
+            evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(2.0)], true),
+            "not increasing",
+        ),
+        (
+            "an identity changing inside one series",
+            evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(1.0)], false),
+            evaluated_chunk_of(&schema, named_metric("b", "y"), 1, vec![Some(2.0)], true),
+            "changed identity",
+        ),
+    ];
+    for (what, first, second, phrase) in cases {
+        let pool = pool();
+        let mut execution = executor(&tree(), Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+        // The chunk that only opens the series is what a stream hands over first, and it is legal:
+        // the collector keeps it and reports nothing.
+        execution.push_evaluated(first).unwrap();
+        assert!(
+            execution.next_chunk().unwrap().is_none(),
+            "{what}: the collector reported a piece before its input ended"
+        );
+        execution.push_evaluated(second).unwrap();
+        let error = match execution.next_chunk() {
+            Ok(None) => panic!("{what} was collected as if it were one series"),
+            Ok(Some(chunk)) => panic!("{what} reached the evaluator as {:?}", decided(&[chunk])),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(phrase),
+            "{what} was refused for another reason: {message}"
+        );
+        // The failure released everything the chain held while the executor is still alive.
+        assert_eq!(execution.state().reserved_bytes(), 0);
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(
+            execution.state().nodes_holding_windows(),
+            0,
+            "{what}: the stopped execution still holds a window's samples"
+        );
+        // A stopped execution is not resumed.
+        let again = execution.next_chunk().unwrap_err();
+        assert!(
+            again.to_string().contains("stopped after an earlier error"),
+            "{again}"
+        );
+    }
+}
+
+/// The streams a streaming window accepts are accepted by the collector too.
+///
+/// One series arriving in chunks that move forward is what a scan hands over, and the chunk that
+/// closes a series may carry no row at all. Both are legal to a streaming window, so both are legal
+/// to the collector, which merges them into the one series they are and answers over it. The values
+/// are the ones the audit's counterexamples would have produced had they been legal: the two forward
+/// chunks hold 1 and 3 and sum to 4, and the close that carries no row leaves the 1 it follows.
+#[test]
+fn a_collector_accepts_forward_runs_and_a_close_without_a_row() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let tree = || {
+        NativeTree::try_new(window_with(
+            map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        ))
+        .unwrap()
+    };
+
+    let cases = [
+        (
+            "two chunks moving forward",
+            vec![
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(-1.0)], false),
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(-3.0)], true),
+            ],
+            vec![(0, Some(4.0))],
+        ),
+        (
+            "a close that carries no row",
+            vec![
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 0, vec![Some(-1.0)], false),
+                evaluated_chunk_of(&schema, named_metric("a", "x"), 2, Vec::new(), true),
+            ],
+            vec![(0, Some(1.0))],
+        ),
+    ];
+    for (what, chunks, expected) in cases {
+        let mut execution = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
+        for chunk in chunks {
+            execution.push_evaluated(chunk).unwrap();
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "{what}: the collector reported a piece before its input ended"
+            );
+        }
+        let out = execution
+            .finish()
+            .unwrap_or_else(|error| panic!("{what} was refused: {error}"));
+        assert_eq!(decided(&out), expected, "{what}");
+        assert_eq!(
+            out.iter().filter(|chunk| chunk.is_last).count(),
+            1,
+            "{what}: the one merged series closed more than once"
+        );
+    }
+}
+
+/// An input that ends inside a series is reported by a window that collects its input too.
+///
+/// The collector holds the fragments until the input ends and closes every series it merges with a
+/// synthetic `is_last`, so a series the caller never closed would look exactly like one that closed
+/// afterwards: the merge would answer it and the barrier would hide the truncation. Nothing is
+/// merged here, because the executor refuses the truncation before the flush runs. The check is the
+/// input node's own, which follows what it handed over, and it is the only one needed: every closing
+/// chunk the caller sent has already reached the collector, which wrote down the series it left open.
+///
+/// A root map reports the same truncation, and
+/// [`an_input_that_ends_mid_series_is_reported_without_a_window`] is that case on its own; this one
+/// is the barrier's, where the flush would have run before the report if the check came later.
+#[test]
+fn an_input_that_ends_inside_a_collected_series_is_reported() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, Arc::clone(&pool), &set);
+
+    // One piece of a series that never says it ended: the collector keeps it and reports nothing.
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("a", "x"),
+            0,
+            vec![Some(-1.0)],
+            false,
+        ))
+        .unwrap();
+    assert!(
+        execution
+            .next_chunk()
+            .expect("the fragment is legal")
+            .is_none(),
+        "the collector reported a piece before its input ended"
+    );
+    assert!(
+        execution.state().reserved_bytes() > 0,
+        "the collected fragment is not charged for"
+    );
+
+    let error = execution
+        .finish()
+        .expect_err("an input that ended inside a collected series was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("ended before the last chunk of a series"),
+        "the truncation was reported as {error}"
+    );
+    // Nothing was merged and nothing was answered, and everything went back while the executor is
+    // alive.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(
+        execution.state().nodes_holding_windows(),
+        0,
+        "the stopped execution still holds a window's samples"
+    );
+    // The window's own gauge, which is the node that collected the fragment, reads zero.
+    let current = NodePath::root().metric_name(NodeMetric::CURRENT_RESERVED_BYTES);
+    assert_eq!(gauge(&set, &current), 0);
+    // A stopped execution is not resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
 /// Two series that a map turns into one label set are merged before the window above reads them.
 ///
 /// `a{job="x"}` and `b{job="x"}` arrive whole, so each says it is the last chunk of its own source
