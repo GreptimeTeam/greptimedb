@@ -179,6 +179,14 @@ impl PusherId {
         Self { role, id }
     }
 
+    fn channel(&self) -> Channel {
+        match self.role {
+            Role::Datanode => Channel::Datanode(self.id),
+            Role::Frontend => Channel::Frontend(self.id),
+            Role::Flownode => Channel::Flownode(self.id),
+        }
+    }
+
     fn role_range(role: Role) -> (Bound<Self>, Bound<Self>) {
         (
             Bound::Included(Self::new(role, u64::MIN)),
@@ -243,6 +251,7 @@ impl Pusher {
 /// the [`Pushers`] read guard before awaiting the send. It must not hold a [`Pusher`]:
 /// dropping one fires the deregister signal, which reads as a closed channel.
 struct PusherHandle {
+    pusher_id: PusherId,
     sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     res_header: ResponseHeader,
     deregister_signal_receiver: DeregisterSignalReceiver,
@@ -250,29 +259,45 @@ struct PusherHandle {
 
 impl PusherHandle {
     /// Snapshots `pusher`, which callers read under the [`Pushers`] guard.
-    fn from_pusher(pusher: &Pusher) -> Self {
+    fn from_pusher(pusher_id: PusherId, pusher: &Pusher) -> Self {
         Self {
+            pusher_id,
             sender: pusher.sender.clone(),
             res_header: pusher.header(),
             deregister_signal_receiver: pusher.deregister_signal_receiver.clone(),
         }
     }
 
-    /// Sends one mailbox message, consuming the handle.
+    /// Sends one mailbox message, consuming the handle. Gives up without sending if the
+    /// pusher is deregistered first, for example when a newer datanode process fences it
+    /// off while the send waits for channel capacity.
     async fn push(self, mailbox_message: MailboxMessage) -> Result<()> {
-        self.sender
-            .send(Ok(HeartbeatResponse {
-                header: Some(self.res_header),
-                mailbox_message: Some(mailbox_message),
-                ..Default::default()
-            }))
-            .await
-            .map_err(|e| {
+        let Self {
+            pusher_id,
+            sender,
+            res_header,
+            deregister_signal_receiver: mut deregistered,
+        } = self;
+        let send = sender.send(Ok(HeartbeatResponse {
+            header: Some(res_header),
+            mailbox_message: Some(mailbox_message),
+            ..Default::default()
+        }));
+        tokio::select! {
+            biased;
+            _ = deregistered.wait_for(|deregistered| *deregistered) => {
+                error::MailboxChannelClosedSnafu {
+                    channel: pusher_id.channel(),
+                }
+                .fail()
+            }
+            res = send => res.map_err(|e| {
                 error::PushMessageSnafu {
                     err_msg: e.to_string(),
                 }
                 .build()
-            })
+            }),
+        }
     }
 
     #[inline]
@@ -311,7 +336,7 @@ impl Pushers {
                     .with_context(|| error::PusherNotFoundSnafu {
                         pusher_id: pusher_id.to_string(),
                     })?;
-            PusherHandle::from_pusher(pusher)
+            PusherHandle::from_pusher(pusher_id, pusher)
         };
 
         let deregister_signal_receiver = handle.deregister_signal_receiver();
@@ -328,7 +353,7 @@ impl Pushers {
             slots
                 .pushers
                 .range(PusherId::role_range(role))
-                .map(|(_, pusher)| PusherHandle::from_pusher(pusher))
+                .map(|(pusher_id, pusher)| PusherHandle::from_pusher(*pusher_id, pusher))
                 .collect::<Vec<_>>()
         };
 
@@ -1646,12 +1671,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_parked_push_is_dropped_when_the_pusher_is_fenced_off() {
+        let pushers = Pushers::default();
+        let id = PusherId::new(Role::Datanode, 1);
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Ok(HeartbeatResponse::default())).unwrap();
+        assert!(pushers.insert(id, Pusher::new(tx).with_node_epoch(1)).await);
+
+        let mut parked = Box::pin(pushers.push(id, test_mailbox_message("parked")));
+        assert!(poll_immediate(parked.as_mut()).await.is_none());
+
+        // A newer process's startup handshake fences the pusher off, then the channel drains.
+        assert!(pushers.remove_older(id, 2).await.is_some());
+        rx.recv().await.unwrap().unwrap();
+
+        assert_matches!(
+            parked.await.unwrap_err(),
+            error::Error::MailboxChannelClosed { .. }
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn test_pusher_handle_does_not_fire_the_deregister_signal() {
         let (tx, _rx) = mpsc::channel(1);
         let pusher = Pusher::new(tx);
         let mut signal = pusher.deregister_signal_receiver.clone();
 
-        let handle = PusherHandle::from_pusher(&pusher);
+        let handle = PusherHandle::from_pusher(PusherId::new(Role::Datanode, 1), &pusher);
         drop(handle);
 
         assert!(
