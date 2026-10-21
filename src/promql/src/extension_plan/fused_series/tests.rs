@@ -19,6 +19,12 @@
 //! `rate(x[5m])`: the compiler itself lives in the `query` crate, which depends on this one, so a
 //! test in this crate cannot call it.
 //!
+//! The input is what a scan hands over: native raw series frames, one batch per chunk here, packed
+//! by the same code the scan uses ([`pack_raw_series_chunk`]). A frame carries the series' encoded
+//! key, the chunk's finality, its timestamps and its fields, plus the complete labels, so a test
+//! says which series a chunk belongs to and whether it closes it instead of relying on where a row
+//! boundary happens to fall.
+//!
 //! Kernel numerics are not the subject: `rate` is checked against a counter that advances one
 //! second per second, so the value it has to produce is exactly 1 (or 2) at every grid point and
 //! any position or finalization mistake shows up as a wrong, missing or duplicated row.
@@ -30,9 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, StringArray, TimestampMillisecondArray,
-};
+use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -47,24 +51,30 @@ use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream, collect, displayable,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
+    RecordBatchStream, SendableRecordBatchStream, collect, displayable,
 };
 use datafusion::prelude::SessionContext;
+use datatypes::series::frame::{RawLabelMode, pack_raw_series_chunk, raw_series_frame_schema};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
+use store_api::region_engine::RawLabelSource;
 
-use super::{FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET, series_to_record_batch};
+use super::{
+    FusedSeries, FusedSeriesBinding, LabelSets, OutputColumn, POLL_BUDGET, label_set,
+    series_to_record_batch,
+};
 use crate::evaluated::EvaluatedChunk;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundWindow, Grouping, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundWindow, Grouping,
+    NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 
@@ -79,7 +89,7 @@ const GRID_LEN: u64 = 5;
 /// One raw sample per minute, from 0 to 9 minutes: enough to fill every window on the grid.
 const SAMPLE_STEP: i64 = 60_000;
 const SAMPLES: i64 = 10;
-/// How many one-sample batches the quiet series below arrives in.
+/// How many one-sample chunks the quiet series below arrives in.
 ///
 /// Two bounds hold at once: the series reaches the end of the last grid point's window (540s, so
 /// indices `0..=540`), which is what lets it rate at 1 over the whole grid, and it arrives in more
@@ -94,9 +104,12 @@ const QUIET_STEP: i64 = 1_000;
 
 const TIME: &str = "time";
 const VALUE: &str = "value";
+const OTHER: &str = "other";
 const HOST: &str = "host";
 const ZONE: &str = "zone";
 const NAME: &str = "__name__";
+/// A metadata label, which the window drops along with the metric name.
+const TYPE: &str = "__type__";
 const METRIC: &str = "http_requests_total";
 
 fn grid() -> Arc<EvalGrid> {
@@ -113,16 +126,27 @@ fn raw_schema() -> Arc<SeriesSchema> {
     })
 }
 
-/// The tree `rate(x[5m])` compiles to: raw samples folded by one window onto the grid.
-fn rate_tree() -> NativeTree {
+/// A raw schema of two float fields, so one series can fill one of them and another the other.
+fn two_field_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::from([
+            FieldSpec { name: VALUE.into() },
+            FieldSpec { name: OTHER.into() },
+        ]),
+        eval_grid: None,
+    })
+}
+
+/// The tree `rate(x[5m])` compiles to over `schema`: raw samples folded by one window onto the grid.
+fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
     let grid = grid();
     // One schema shared by the window's binding and its output, which is what `NativeTree`'s
     // validation compares by identity.
     let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: raw_schema().fields.clone(),
+        fields: schema.fields.clone(),
         eval_grid: Some(Arc::clone(&grid)),
     }));
-    let raw = NativeType::Samples(raw_schema());
+    let raw = NativeType::Samples(schema);
     NativeTree::try_new(NativeNode {
         expr: NativeExpr::Window {
             input: Box::new(NativeNode {
@@ -147,6 +171,11 @@ fn rate_tree() -> NativeTree {
         output: evaluated,
     })
     .unwrap()
+}
+
+/// The tree `rate(x[5m])` compiles to over one field.
+fn rate_tree() -> NativeTree {
+    rate_tree_of(raw_schema())
 }
 
 /// The `rate(x[5m])` tree with a `sum by (job)` over it, which the runtime does not execute.
@@ -177,10 +206,45 @@ fn aggregate_tree() -> NativeTree {
     .expect("the bound tree is legal")
 }
 
-/// What the tree's input was compiled against, read off the tree itself.
-fn binding(tree: &NativeTree) -> FusedSeriesBinding {
+/// The tree an instant selection compiles to: the last raw sample at or before each grid point.
+///
+/// Unlike a window or a map, a selection rewrites no label: the series it answers carries the labels
+/// its input did.
+fn instant_tree() -> NativeTree {
+    let grid = grid();
+    let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    }));
+    let raw = NativeType::Samples(raw_schema());
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: raw.clone(),
+                    ordering: SeriesOrdering::KeyThenTime,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms: RANGE_MS,
+                offset_ms: 0,
+                output_grid: grid,
+            },
+        },
+        output: evaluated,
+    })
+    .expect("the bound tree is legal")
+}
+
+/// What the tree's input was compiled against, for the input schema and output tags given.
+fn binding_of(
+    tree: &NativeTree,
+    series_schema: Arc<SeriesSchema>,
+    tags: Vec<String>,
+) -> FusedSeriesBinding {
     FusedSeriesBinding {
-        series_schema: raw_schema(),
+        series_schema,
         grid: tree
             .root()
             .output
@@ -191,21 +255,23 @@ fn binding(tree: &NativeTree) -> FusedSeriesBinding {
             .expect("this tree's output is evaluated on a grid"),
         metric_name: Some(Arc::from(METRIC)),
         time_index: TIME.to_string(),
-        tags: vec![HOST.to_string(), NAME.to_string()],
+        tags,
     }
 }
 
-/// The batches the input plan produces: the time, the field and the tag column.
-fn input_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-    ]))
+/// What the tree's input was compiled against, read off the tree itself.
+fn binding(tree: &NativeTree) -> FusedSeriesBinding {
+    binding_of(tree, raw_schema(), vec![HOST.to_string(), NAME.to_string()])
+}
+
+/// The schema of a frame carrying series of `schema` with their labels explicit.
+fn frame_schema_of(schema: &SeriesSchema) -> SchemaRef {
+    raw_series_frame_schema(schema, RawLabelMode::Explicit).expect("explicit labels are a frame")
+}
+
+/// The schema of a frame carrying these series, which is what the node declares as its input.
+fn frame_schema() -> SchemaRef {
+    frame_schema_of(&raw_schema())
 }
 
 /// The columns this node produces: the field, the tags and the grid timestamps.
@@ -222,10 +288,10 @@ fn output_schema() -> SchemaRef {
     ]))
 }
 
-fn input_plan() -> LogicalPlan {
+fn input_plan(schema: SchemaRef) -> LogicalPlan {
     LogicalPlan::EmptyRelation(EmptyRelation {
         produce_one_row: false,
-        schema: input_schema().to_dfschema_ref().unwrap(),
+        schema: schema.to_dfschema_ref().unwrap(),
     })
 }
 
@@ -236,17 +302,26 @@ fn memory_exec_with(schema: SchemaRef, batches: Vec<RecordBatch>) -> Arc<dyn Exe
     )))
 }
 
-/// A physical input producing `batches` in one partition, on the input schema of these tests.
+/// A physical input producing `batches` in one partition, on the frame schema of these tests.
 fn memory_exec(batches: Vec<RecordBatch>) -> Arc<dyn ExecutionPlan> {
-    memory_exec_with(input_schema(), batches)
+    memory_exec_with(frame_schema(), batches)
+}
+
+/// A physical input producing each of `partitions`' batches in a partition of its own, with
+/// `schema` as its schema.
+fn memory_exec_partitioned_with(
+    schema: SchemaRef,
+    partitions: Vec<Vec<RecordBatch>>,
+) -> Arc<dyn ExecutionPlan> {
+    Arc::new(DataSourceExec::new(Arc::new(
+        MemorySourceConfig::try_new(&partitions, schema, None)
+            .expect("every partition holds batches of the given frame schema"),
+    )))
 }
 
 /// A physical input producing each of `partitions`' batches in a partition of its own.
 fn memory_exec_partitioned(partitions: Vec<Vec<RecordBatch>>) -> Arc<dyn ExecutionPlan> {
-    Arc::new(DataSourceExec::new(Arc::new(
-        MemorySourceConfig::try_new(&partitions, input_schema(), None)
-            .expect("every partition holds batches of the input schema"),
-    )))
+    memory_exec_partitioned_with(frame_schema(), partitions)
 }
 
 /// A task context whose memory pool is `pool`, so what the node charges can be read afterwards.
@@ -434,26 +509,126 @@ fn fused(tree: NativeTree) -> FusedSeries {
         Arc::from(PROMQL),
         tree,
         binding,
-        input_plan(),
+        input_plan(frame_schema()),
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
 }
 
-/// One batch of one series' `(timestamp, value)` rows.
-fn series_batch(host: &str, rows: &[(i64, f64)]) -> RecordBatch {
-    let times = rows.iter().map(|(time, _)| *time).collect::<Vec<_>>();
-    let values = rows.iter().map(|(_, value)| *value).collect::<Vec<_>>();
-    let hosts = rows.iter().map(|_| host).collect::<Vec<_>>();
-    RecordBatch::try_new(
-        input_schema(),
-        vec![
-            Arc::new(TimestampMillisecondArray::from(times)),
-            Arc::new(Float64Array::from(values)),
-            Arc::new(StringArray::from(hosts)),
-        ],
+/// The physical node of `node` over `input`, reading the complete labels every frame carries.
+fn plan_of(
+    node: FusedSeries,
+    input: Arc<dyn ExecutionPlan>,
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    node.to_execution_plan(input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)
+}
+
+/// The physical node of `tree` over `input`.
+fn plan(
+    tree: NativeTree,
+    input: Arc<dyn ExecutionPlan>,
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    plan_of(fused(tree), input)
+}
+
+/// The timestamps of `rows`.
+fn times_of(rows: &[(i64, f64)]) -> Vec<i64> {
+    rows.iter().map(|(time, _)| *time).collect()
+}
+
+/// The values of `rows`, one sample per timestamp.
+fn values_of(rows: &[(i64, f64)]) -> Vec<Option<f64>> {
+    rows.iter().map(|(_, value)| Some(*value)).collect()
+}
+
+/// One missing sample per timestamp of `rows`, which is a field the series holds no value in.
+fn no_values(rows: &[(i64, f64)]) -> Vec<Option<f64>> {
+    rows.iter().map(|_| None).collect()
+}
+
+/// One chunk of `metric`, keyed `key`, holding `times` and one sample per field of `schema`.
+fn chunk_of(
+    schema: &SeriesSchema,
+    key: &str,
+    metric: MetricName,
+    times: &[i64],
+    values: Vec<Vec<Option<f64>>>,
+    last: bool,
+) -> RawSeriesChunk {
+    assert_eq!(
+        schema.fields.len(),
+        values.len(),
+        "one value list per field of the schema"
+    );
+    assert!(
+        values.iter().all(|values| values.len() == times.len()),
+        "one sample per timestamp per field"
+    );
+    let fields = values
+        .into_iter()
+        .map(|values| Samples::from_float(Float64Array::from(values)))
+        .collect::<Vec<_>>();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(key.as_bytes()),
+        Some(metric),
+        RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).expect("ascending timestamps"),
+        SeriesFields::try_from_vec(fields).expect("one sample per timestamp per field"),
+        last,
     )
-    .unwrap()
+    .expect("one series' samples are a legal raw chunk")
+}
+
+/// One chunk of the series `{__name__=METRIC, host=<host>}`: `rows` as its samples, and the chunk
+/// that closes the series when `last`. The host names the series, so it doubles as the key.
+fn series_chunk(host: &str, rows: &[(i64, f64)], last: bool) -> RawSeriesChunk {
+    chunk_of(
+        &raw_schema(),
+        host,
+        metric(&[(HOST, host)], Some(METRIC)),
+        &times_of(rows),
+        vec![values_of(rows)],
+        last,
+    )
+}
+
+/// The metric these tests read, with `labels` on it and the name given.
+fn metric(labels: &[(&str, &str)], name: Option<&str>) -> MetricName {
+    MetricName::try_new(
+        name.map(Arc::from),
+        labels
+            .iter()
+            .map(|(name, value)| Label {
+                name: Arc::from(*name),
+                value: Arc::from(*value),
+            })
+            .collect(),
+    )
+    .expect("the labels of these tests are legal")
+}
+
+/// One frame batch carrying `chunk` of `schema`, packed by the scan's own encoder.
+fn frame_of(schema: &SeriesSchema, chunk: &RawSeriesChunk) -> RecordBatch {
+    let mut batches = pack_raw_series_chunk(schema, RawLabelMode::Explicit, chunk)
+        .expect("a chunk of this schema packs into a frame");
+    assert_eq!(1, batches.len(), "one small chunk is one frame batch");
+    batches.remove(0)
+}
+
+/// One frame batch carrying `chunk` of the one-field schema of these tests.
+fn frame(chunk: &RawSeriesChunk) -> RecordBatch {
+    frame_of(&raw_schema(), chunk)
+}
+
+/// The frames carrying `chunks` of `schema`, one batch each, so a test can say how much input one
+/// poll reads.
+fn frames_of(schema: &SeriesSchema, chunks: &[RawSeriesChunk]) -> Vec<RecordBatch> {
+    chunks.iter().map(|chunk| frame_of(schema, chunk)).collect()
+}
+
+/// The frames carrying `chunks` of the one-field schema of these tests, one batch each.
+fn frames(chunks: &[RawSeriesChunk]) -> Vec<RecordBatch> {
+    frames_of(&raw_schema(), chunks)
 }
 
 /// One series' samples: one per minute from 0, `scale` seconds per second.
@@ -466,27 +641,27 @@ fn series_samples(scale: f64) -> Vec<(i64, f64)> {
         .collect()
 }
 
-/// Two series, each split over two batches. A series' batches stay adjacent, which is the input
-/// contract: a label set's rows are contiguous across the whole stream.
-fn two_series_batches() -> Vec<RecordBatch> {
+/// Two series, each split over two chunks. A series' chunks stay adjacent, and the second of each
+/// pair closes it, which is the input contract: a series' chunks arrive together.
+fn two_series_frames() -> Vec<RecordBatch> {
     let first = series_samples(1.0);
     let second = series_samples(2.0);
-    vec![
-        series_batch("web-1", &first[..3]),
-        series_batch("web-1", &first[3..]),
-        series_batch("web-2", &second[..3]),
-        series_batch("web-2", &second[3..]),
-    ]
+    frames(&[
+        series_chunk("web-1", &first[..3], false),
+        series_chunk("web-1", &first[3..], true),
+        series_chunk("web-2", &second[..3], false),
+        series_chunk("web-2", &second[3..], true),
+    ])
 }
 
-/// One series split over three batches, so its chunks have to be stitched.
-fn one_series_batches() -> Vec<RecordBatch> {
+/// One series split over three chunks, so its chunks have to be stitched.
+fn one_series_frames() -> Vec<RecordBatch> {
     let rows = series_samples(1.0);
-    vec![
-        series_batch("web-1", &rows[..4]),
-        series_batch("web-1", &rows[4..7]),
-        series_batch("web-1", &rows[7..]),
-    ]
+    frames(&[
+        series_chunk("web-1", &rows[..4], false),
+        series_chunk("web-1", &rows[4..7], false),
+        series_chunk("web-1", &rows[7..], true),
+    ])
 }
 
 /// The rows of `batches`: timestamp, value, host and metric name.
@@ -531,70 +706,6 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
     rows
 }
 
-/// The input schema of the collision below: the time, the field, `host` and `zone`.
-fn zone_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-        Field::new(ZONE, DataType::Utf8, true),
-    ]))
-}
-
-/// The two rows of the collision: one series, once with an empty `zone` and once with no `zone`.
-fn zone_batches() -> Vec<RecordBatch> {
-    let schema = zone_schema();
-    let samples = series_samples(1.0);
-    let times: Vec<_> = samples.iter().map(|(time, _)| *time).collect();
-    let values: Vec<_> = samples.iter().map(|(_, value)| *value).collect();
-    let hosts: Vec<_> = times.iter().map(|_| "web-1").collect();
-    // The two rows differ only in the zone column: empty against null.
-    let zones: [ArrayRef; 2] = [
-        Arc::new(StringArray::from(vec![""; times.len()])),
-        Arc::new(StringArray::from(vec![None::<&str>; times.len()])),
-    ];
-    zones
-        .into_iter()
-        .map(|zone| {
-            RecordBatch::try_new(
-                Arc::clone(&schema),
-                vec![
-                    Arc::new(TimestampMillisecondArray::from(times.clone())),
-                    Arc::new(Float64Array::from(values.clone())),
-                    Arc::new(StringArray::from(hosts.clone())),
-                    zone,
-                ],
-            )
-            .expect("one batch of the two rows")
-        })
-        .collect()
-}
-
-/// `rate(x[5m])` over an input that carries `zone` as well as `host`, with both in the output.
-fn zone_node() -> FusedSeries {
-    let schema = zone_schema();
-    let tree = rate_tree();
-    let binding = FusedSeriesBinding {
-        tags: vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
-        ..binding(&tree)
-    };
-    FusedSeries::try_new(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: Arc::clone(&schema).to_dfschema_ref().unwrap(),
-        }),
-        zone_output_schema().to_dfschema_ref().unwrap(),
-    )
-    .expect("the binding matches the tree")
-}
-
 /// The output of [`zone_node`]: the field, `host`, `zone`, the dropped name and the grid times.
 fn zone_output_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -610,24 +721,89 @@ fn zone_output_schema() -> SchemaRef {
     ]))
 }
 
+/// `rate(x[5m])` over frames that carry `zone` as well as `host`, with both in the output.
+fn zone_node() -> FusedSeries {
+    let tree = rate_tree();
+    let binding = binding_of(
+        &tree,
+        raw_schema(),
+        vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
+    );
+    FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        input_plan(frame_schema()),
+        zone_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the binding matches the tree")
+}
+
+/// The instant-selection node over frames that carry `zone` as well as `host`.
+///
+/// Its output labels are the input's, so an empty-valued label reaches this node's own state as the
+/// frame wrote it.
+fn instant_node() -> FusedSeries {
+    let tree = instant_tree();
+    let binding = binding_of(
+        &tree,
+        raw_schema(),
+        vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
+    );
+    FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        input_plan(frame_schema()),
+        zone_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the binding matches the tree")
+}
+
+/// The two chunks of the collision: one series once with an empty `zone` and once with no `zone`.
+///
+/// They are one identity to Prometheus — an empty label value is no label — but two different raw
+/// series: the scan encodes the empty value and the absent one differently, so they reach the
+/// runtime as two series that close on the same label set.
+fn zone_chunks() -> Vec<RawSeriesChunk> {
+    let rows = series_samples(1.0);
+    vec![
+        chunk_of(
+            &raw_schema(),
+            "zone-empty",
+            metric(&[(HOST, "web-1"), (ZONE, "")], Some(METRIC)),
+            &times_of(&rows),
+            vec![values_of(&rows)],
+            true,
+        ),
+        chunk_of(
+            &raw_schema(),
+            "zone-absent",
+            metric(&[(HOST, "web-1")], Some(METRIC)),
+            &times_of(&rows),
+            vec![values_of(&rows)],
+            true,
+        ),
+    ]
+}
+
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
 const CLOSED_LABEL_SET: &str =
     "the node at root already closed the label set [(\"host\", \"web-1\")]";
 
-/// Two rows that are already one Prometheus identity, carried under two different raw keys, are
-/// refused by the runtime that would have to answer both.
+/// Two raw series that are already one Prometheus identity are refused by the runtime that would
+/// have to answer both.
 ///
 /// `{host="web-1", zone=""}` and `{host="web-1"}` are one identity to Prometheus: an empty label
-/// value is no label, so the two rows are the same series and `rate` creates no collision here.
-/// What the two *raw* keys differ in is the empty `zone` against the null one, which the scan
-/// encodes differently and the converter therefore opens two input series for. `rate` drops the
+/// value is no label, so the two chunks are the same series and `rate` creates no collision here.
+/// What the two *raw* keys differ in is the empty `zone` against the absent one, which the scan
+/// encodes differently and the decoder therefore opens two input series for. `rate` drops the
 /// metric name and the empty value, so the second raw series arrives on the canonical label set the
 /// runtime has already closed; the refusal names that label set rather than answering it, because
 /// answering would report one series twice.
 #[tokio::test]
 async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
-    let exec = zone_node()
-        .to_execution_plan(memory_exec_with(zone_schema(), zone_batches()))
+    let exec = plan_of(zone_node(), memory_exec(frames(&zone_chunks())))
         .expect("the runtime executes a rate tree");
     let error = collect(exec, SessionContext::default().task_ctx())
         .await
@@ -640,21 +816,20 @@ async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
 
 /// A runtime error after buffered rows is reported, and the terminated stream releases its input.
 ///
-/// The converter holds the batch it is reading, the chunk it is building and its own source, so a
+/// The decoder holds the batch it is reading, the chunks it decoded from it and its own source, so a
 /// stream that kept its input after the error would hold all three until the consumer drops it. The
 /// collision above is the error: it happens on the second series, after the first one's rows have
 /// been handed out.
 #[tokio::test]
 async fn a_runtime_error_after_rows_releases_the_input() {
     let dropped = Arc::new(AtomicBool::new(false));
-    let schema = zone_schema();
-    let batches = zone_batches();
+    let schema = frame_schema();
+    let batches = frames(&zone_chunks());
     let source = staged(schema.clone(), {
         let dropped = Arc::clone(&dropped);
         move || Box::pin(StagedStream::new(schema.clone(), batches.clone()).dropped(&dropped))
     });
-    let mut stream = zone_node()
-        .to_execution_plan(source)
+    let mut stream = plan_of(zone_node(), source)
         .expect("the runtime executes a rate tree")
         .execute(0, SessionContext::default().task_ctx())
         .expect("the node executes");
@@ -690,9 +865,9 @@ async fn a_runtime_error_after_rows_releases_the_input() {
 ///
 /// This is the collision the canonical label set exists for, at the layer that sees it:
 /// `http_requests_total{host="web-1"}` and `http_errors_total{host="web-1"}` reach the window as two
-/// identities and leave it as `{host="web-1"}`. [`FusedSeries`] binds one constant metric name for
-/// every series it reads, so this collision cannot be staged through it; the runtime is driven
-/// directly, with the names on the raw chunks.
+/// identities and leave it as `{host="web-1"}`. [`FusedSeries`] reads one metric per scan, so this
+/// collision cannot be staged through it; the runtime is driven directly, with the names on the raw
+/// chunks.
 #[test]
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
     let tree = rate_tree();
@@ -707,14 +882,31 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
     );
     let samples = series_samples(1.0);
     execution
-        .push_raw(raw_chunk(METRIC, &samples))
+        .push_raw(chunk_of(
+            &raw_schema(),
+            METRIC,
+            metric(&[(HOST, "web-1")], Some(METRIC)),
+            &times_of(&samples),
+            vec![values_of(&samples)],
+            true,
+        ))
         .expect("the first series is a legal raw chunk");
+    assert!(
+        execution
+            .next_chunk()
+            .expect("the first series runs")
+            .is_some(),
+        "the first series is answered"
+    );
     execution
-        .next_chunk()
-        .expect("the first series is answered")
-        .expect("rate decides every grid point of the first series");
-    execution
-        .push_raw(raw_chunk("http_errors_total", &samples))
+        .push_raw(chunk_of(
+            &raw_schema(),
+            "http_errors_total",
+            metric(&[(HOST, "web-1")], Some("http_errors_total")),
+            &times_of(&samples),
+            vec![values_of(&samples)],
+            true,
+        ))
         .expect("the second series is a legal raw chunk");
     let error = execution
         .next_chunk()
@@ -723,30 +915,6 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
         error.to_string().contains(CLOSED_LABEL_SET),
         "refused for another reason: {error}"
     );
-}
-
-/// One raw chunk of the series `name{host="web-1"}`: one sample per minute, closing its series.
-fn raw_chunk(name: &str, samples: &[(i64, f64)]) -> RawSeriesChunk {
-    let times = samples.iter().map(|(time, _)| *time).collect::<Vec<_>>();
-    let values = samples.iter().map(|(_, value)| *value).collect::<Vec<_>>();
-    RawSeriesChunk::try_new(
-        &raw_schema(),
-        Buffer::from_slice_ref(name.as_bytes()),
-        Some(
-            MetricName::try_new(
-                Some(Arc::from(name)),
-                vec![Label {
-                    name: Arc::from(HOST),
-                    value: Arc::from("web-1"),
-                }],
-            )
-            .expect("the labels of this test are legal"),
-        ),
-        RawTimestamps::try_new(ScalarBuffer::from(times)).expect("ascending timestamps"),
-        SeriesFields::one(Samples::from_float(Float64Array::from(values))),
-        true,
-    )
-    .expect("one series' samples are a legal raw chunk")
 }
 
 /// The grid timestamps of the statement, in order.
@@ -775,15 +943,23 @@ impl CountingWake {
     }
 }
 
-/// One series as many chunks that settle nothing: one sample per batch, all before the grid starts.
+/// One series as many chunks that settle nothing: one sample per chunk, all before the grid starts.
 ///
 /// The counter advances one second per second, so `rate` answers 1 at every grid point once the
 /// series is read to its end; until a sample reaches the grid's first point, a push decides
 /// nothing and settles no chunk.
-fn quiet_series_batches() -> Vec<RecordBatch> {
-    (0..QUIET_SAMPLES)
-        .map(|index| series_batch("web-1", &[(index * QUIET_STEP, index as f64)]))
-        .collect()
+fn quiet_series_frames() -> Vec<RecordBatch> {
+    frames(
+        &(0..QUIET_SAMPLES)
+            .map(|index| {
+                series_chunk(
+                    "web-1",
+                    &[(index * QUIET_STEP, index as f64)],
+                    index == QUIET_SAMPLES - 1,
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Asserts that `rows` are `rates`' series, each over the whole grid in order.
@@ -837,9 +1013,8 @@ fn fmt_for_explain_prints_the_promql() {
 /// The physical node prints the tree it was built from, rendered by the tree's own display.
 #[test]
 fn fmt_as_prints_the_native_tree() {
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec(Vec::new()))
-        .expect("the runtime executes a rate tree");
+    let exec =
+        plan(rate_tree(), memory_exec(Vec::new())).expect("the runtime executes a rate tree");
     let text = displayable(exec.as_ref()).indent(false).to_string();
 
     assert!(
@@ -860,8 +1035,7 @@ fn fmt_as_prints_the_native_tree() {
 /// `rate(x[5m])` runs end to end over two raw series: values, tags and the dropped metric name.
 #[tokio::test]
 async fn runs_rate_over_two_series() {
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec(two_series_batches()))
+    let exec = plan(rate_tree(), memory_exec(two_series_frames()))
         .expect("the runtime executes a rate tree");
     let batches = collect(exec, SessionContext::default().task_ctx())
         .await
@@ -899,8 +1073,7 @@ async fn runs_rate_over_two_series() {
 /// A series that spans several input chunks keeps its absolute grid positions and closes once.
 #[tokio::test]
 async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec(one_series_batches()))
+    let exec = plan(rate_tree(), memory_exec(one_series_frames()))
         .expect("the runtime executes a rate tree");
     let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
         .await
@@ -928,8 +1101,7 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
 #[tokio::test]
 async fn a_tree_the_runtime_cannot_run_is_rejected_when_the_exec_is_built() {
     let node = fused(aggregate_tree());
-    let error = node
-        .to_execution_plan(memory_exec(Vec::new()))
+    let error = plan_of(node, memory_exec(Vec::new()))
         .expect_err("the runtime does not execute aggregate nodes");
     assert!(
         matches!(error, DataFusionError::NotImplemented(_)),
@@ -952,7 +1124,7 @@ fn a_tree_bound_to_another_grid_is_rejected() {
         Arc::from(PROMQL),
         tree,
         binding,
-        input_plan(),
+        input_plan(frame_schema()),
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect_err("the tree is not evaluated on the declared grid");
@@ -983,7 +1155,7 @@ fn a_separately_allocated_grid_with_an_equal_spec_is_accepted() {
         Arc::from(PROMQL),
         tree,
         binding,
-        input_plan(),
+        input_plan(frame_schema()),
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("an equal grid spec is the same grid");
@@ -992,9 +1164,8 @@ fn a_separately_allocated_grid_with_an_equal_spec_is_accepted() {
 /// An input that ends without a series still runs the tree, and yields no rows.
 #[tokio::test]
 async fn an_empty_input_runs_the_tree_and_yields_no_rows() {
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec(Vec::new()))
-        .expect("the runtime executes a rate tree");
+    let exec =
+        plan(rate_tree(), memory_exec(Vec::new())).expect("the runtime executes a rate tree");
     let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
         .await
         .expect("a tree with no series in it still closes");
@@ -1011,8 +1182,8 @@ async fn an_empty_input_runs_the_tree_and_yields_no_rows() {
 #[tokio::test]
 async fn an_upstream_error_after_rows_is_reported() {
     let dropped = Arc::new(AtomicBool::new(false));
-    let schema = input_schema();
-    let batches = one_series_batches();
+    let schema = frame_schema();
+    let batches = one_series_frames();
     let source = staged(schema.clone(), {
         let dropped = Arc::clone(&dropped);
         move || {
@@ -1023,8 +1194,7 @@ async fn an_upstream_error_after_rows_is_reported() {
             )
         }
     });
-    let mut stream = fused(rate_tree())
-        .to_execution_plan(source)
+    let mut stream = plan(rate_tree(), source)
         .expect("the runtime executes a rate tree")
         .execute(0, SessionContext::default().task_ctx())
         .expect("the node executes");
@@ -1035,15 +1205,12 @@ async fn an_upstream_error_after_rows_is_reported() {
         match stream.next().await {
             Some(Ok(batch)) => answered.push(batch),
             Some(Err(error)) => break error,
-            None => panic!(
-                "the input's error was swallowed after {:?}",
-                rows(&answered)
-            ),
+            None => panic!("the source failure was swallowed: {:?}", rows(&answered)),
         }
     };
     assert!(
         error.to_string().contains("the source failed"),
-        "reported as another error: {error}"
+        "reported another error: {error}"
     );
     // Still alive here: the release is the stream's, not the drop of a temporary.
     assert!(
@@ -1057,8 +1224,7 @@ async fn an_upstream_error_after_rows_is_reported() {
 async fn a_pending_boundary_loses_no_rows() {
     let expected = rows(
         &collect(
-            fused(rate_tree())
-                .to_execution_plan(memory_exec(one_series_batches()))
+            plan(rate_tree(), memory_exec(one_series_frames()))
                 .expect("the runtime executes a rate tree"),
             SessionContext::default().task_ctx(),
         )
@@ -1067,17 +1233,16 @@ async fn a_pending_boundary_loses_no_rows() {
     );
     assert!(!expected.is_empty(), "the fixture decides some grid points");
 
-    let schema = input_schema();
-    let batches = one_series_batches();
+    let schema = frame_schema();
+    let batches = one_series_frames();
     let source = staged(schema.clone(), move || {
         Box::pin(
             StagedStream::new(schema.clone(), batches.clone())
-                // One batch is in the converter's hands when the stream reports pending.
+                // One batch is in the decoder's hands when the stream reports pending.
                 .pending_after(1),
         )
     });
-    let mut stream = fused(rate_tree())
-        .to_execution_plan(source)
+    let mut stream = plan(rate_tree(), source)
         .expect("the runtime executes a rate tree")
         .execute(0, SessionContext::default().task_ctx())
         .expect("the node executes");
@@ -1098,125 +1263,78 @@ async fn a_pending_boundary_loses_no_rows() {
     assert_eq!(expected, rows(&batches));
 }
 
-/// A tag the input has no column for is refused when the plan is built, naming the column.
+/// A frame whose labels are encoded in its key is refused when the plan is built.
+///
+/// The tags this node declares are read off each chunk's labels, and a key-mode frame carries none:
+/// decoding it with a binding that promises complete labels would produce chunks that name no
+/// series. The frame's own declared layout says which of the two it is, so the mismatch is caught
+/// before the first batch, not when the missing labels reach the output.
 #[test]
-fn a_missing_tag_column_is_rejected_when_the_plan_is_built() {
-    let tree = rate_tree();
-    let binding = FusedSeriesBinding {
-        tags: vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
-        ..binding(&tree)
-    };
-    let error = FusedSeries::try_new(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        input_plan(),
-        zone_output_schema().to_dfschema_ref().unwrap(),
-    )
-    .expect("the logical node does not see the input's columns")
-    .to_execution_plan(memory_exec(Vec::new()))
-    .expect_err("the input has no zone column");
+fn a_frame_whose_labels_are_encoded_is_rejected_when_the_plan_is_built() {
+    let keyed =
+        raw_series_frame_schema(&raw_schema(), RawLabelMode::Key).expect("key labels are a frame");
+    let error = plan(rate_tree(), memory_exec_with(keyed, Vec::new()))
+        .expect_err("the frames carry no labels to read tags from");
     assert!(
-        error.to_string().contains("no column \"zone\""),
+        error.to_string().contains("raw frame"),
         "refused for another reason: {error}"
     );
 }
 
-/// A tag column whose type the converter does not read as a label is refused when the plan is
-/// built, naming the column.
+/// A frame that carries an evaluation grid is refused when the plan is built.
+///
+/// A frame holds raw series: its rows are samples, not grid positions, and the grid every output
+/// row is addressed on is the tree's own. A schema that declares a grid is one this node would
+/// read positions out of, so it is refused rather than decoded.
 #[test]
-fn a_wrong_typed_tag_column_is_rejected_when_the_plan_is_built() {
-    // `zone` is numeric here, which no label of a raw series can be read from.
-    let schema = Arc::new(Schema::new(vec![
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-        Field::new(ZONE, DataType::Float64, true),
-    ]));
-    let tree = rate_tree();
-    let binding = FusedSeriesBinding {
-        tags: vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
-        ..binding(&tree)
-    };
-    let error = FusedSeries::try_new(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: Arc::clone(&schema).to_dfschema_ref().unwrap(),
-        }),
-        zone_output_schema().to_dfschema_ref().unwrap(),
-    )
-    .expect("the logical node does not see the input's column types")
-    .to_execution_plan(memory_exec_with(schema, Vec::new()))
-    .expect_err("a numeric column cannot carry a label");
+fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
+    let mut metadata = frame_schema().metadata().clone();
+    metadata.insert("greptime.series.grid".to_string(), "v1".to_string());
+    let gridded = Arc::new(Schema::new_with_metadata(
+        frame_schema().fields().clone(),
+        metadata,
+    ));
+    let error = plan(rate_tree(), memory_exec_with(gridded, Vec::new()))
+        .expect_err("the frame declares a grid");
     assert!(
-        error.to_string().contains("tag \"zone\""),
-        "refused without naming the column: {error}"
+        error.to_string().contains("raw frame"),
+        "refused for another reason: {error}"
     );
 }
 
-/// An input column the binding does not map is refused when the plan is built, naming the column.
+/// A frame of another series schema is refused when the plan is built.
 ///
-/// `zone` is part of these series' identity to the scan but not to the binding, so reading the
-/// input would drop it: rows a Prometheus query keeps apart would be answered as one series with
-/// the wrong labels.
+/// The tree's input node was compiled against one schema, and a frame for a different one names
+/// fields the tree does not read and omits ones it does: decoding it would hand the tree a column
+/// it never bound. Nothing about the two schemas says which one was meant, so the frame is refused
+/// instead of half-read.
 #[test]
-fn an_input_column_the_binding_does_not_map_is_rejected() {
-    let tree = rate_tree();
-    let binding = binding(&tree);
-    let error = FusedSeries::try_new(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: zone_schema().to_dfschema_ref().unwrap(),
-        }),
-        output_schema().to_dfschema_ref().unwrap(),
-    )
-    .expect("the logical node does not see the input's columns")
-    .to_execution_plan(memory_exec_with(zone_schema(), Vec::new()))
-    .expect_err("the binding does not account for the zone column");
+fn a_frame_of_another_series_schema_is_rejected_when_the_plan_is_built() {
+    let other = frame_schema_of(&two_field_schema());
+    let error = plan(rate_tree(), memory_exec_with(other, Vec::new()))
+        .expect_err("the tree's input reads one field");
     assert!(
-        error.to_string().contains("column \"zone\""),
-        "refused without naming the column: {error}"
+        error.to_string().contains("raw frame"),
+        "refused for another reason: {error}"
     );
 }
 
-/// An input with two columns of one name is refused when the plan is built.
+/// An input with no partitions is refused when the plan is built.
 ///
-/// The coverage check reads names, so both `host` columns pass it as a role the binding maps, while
-/// the mapping itself reads `index_of`, which answers with one index: the other column would be
-/// part of these rows' identity that a raw series never carries, and rows a Prometheus query keeps
-/// apart would be answered as one series with the wrong labels -- and no error. Nothing about the
-/// two columns says which one was meant, so the schema is refused rather than one of them chosen.
+/// The node runs one evaluator per input partition and adds none of its own, so an input with no
+/// partition is one that could answer nothing: the plan is refused rather than built as a node that
+/// would report an empty result for data it never read.
 #[test]
-fn an_input_with_two_columns_of_one_name_is_rejected() {
-    let duplicated = Arc::new(Schema::new(vec![
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-        // The second `host` column, which the name-based coverage check accepts just as well.
-        Field::new(HOST, DataType::Utf8, true),
-    ]));
-    let error = fused(rate_tree())
-        .to_execution_plan(memory_exec_with(duplicated, Vec::new()))
-        .expect_err("the binding maps one of the two host columns");
+fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
+    let schema = frame_schema();
+    let empty = Arc::new(DataSourceExec::new(Arc::new(
+        MemorySourceConfig::try_new(&[], Arc::clone(&schema), None)
+            .expect("no partitions is a legal source"),
+    )));
+    let error = plan(rate_tree(), empty).expect_err("there is no partition to run");
     assert!(
-        error
-            .to_string()
-            .contains("more than one column named \"host\""),
-        "refused without naming the duplicate: {error}"
+        error.to_string().contains("no partitions"),
+        "refused for another reason: {error}"
     );
 }
 
@@ -1229,8 +1347,8 @@ fn an_input_with_two_columns_of_one_name_is_rejected() {
 /// the second one covers the grid, so a poll that resumes properly still answers both.
 #[tokio::test]
 async fn one_poll_reads_at_most_the_budget_and_loses_nothing() {
-    let mut batches = quiet_series_batches();
-    batches.push(series_batch("web-2", &series_samples(2.0)));
+    let mut batches = quiet_series_frames();
+    batches.push(frame(&series_chunk("web-2", &series_samples(2.0), true)));
     let total = batches.len();
     assert!(
         total > POLL_BUDGET,
@@ -1239,13 +1357,12 @@ async fn one_poll_reads_at_most_the_budget_and_loses_nothing() {
 
     let pulled = Arc::new(AtomicUsize::new(0));
     let woken = Arc::new(CountingWake::default());
-    let schema = input_schema();
+    let schema = frame_schema();
     let source = staged(schema.clone(), {
         let pulled = Arc::clone(&pulled);
         move || Box::pin(StagedStream::new(schema.clone(), batches.clone()).counted(&pulled))
     });
-    let mut stream = fused(rate_tree())
-        .to_execution_plan(source)
+    let mut stream = plan(rate_tree(), source)
         .expect("the runtime executes a rate tree")
         .execute(0, SessionContext::default().task_ctx())
         .expect("the node executes");
@@ -1259,11 +1376,11 @@ async fn one_poll_reads_at_most_the_budget_and_loses_nothing() {
     );
     let read = pulled.load(Ordering::SeqCst);
     assert!(read > 0, "the poll did read its input");
-    // One step polls the converter once, and the converter reads at most two batches per poll: the
-    // key it is holding and the first row of the next, which is what tells it the first key ended.
-    // The bound is therefore two batches per step, and the budget is what it is measured in.
+    // One step polls the decoder once, and the decoder reads at most one frame per poll: every
+    // frame here carries one chunk. The bound is therefore one frame per step, and the budget is
+    // what it is measured in.
     assert!(
-        read <= 2 * POLL_BUDGET + 1,
+        read <= POLL_BUDGET + 1,
         "one poll read {read} of {total} batches, past its budget of {POLL_BUDGET} steps"
     );
     assert!(
@@ -1285,23 +1402,28 @@ async fn one_poll_reads_at_most_the_budget_and_loses_nothing() {
 
 /// A batch that is ready is handed over before any batch behind it is read.
 ///
-/// Each series below is one batch, and a series closes on the first batch of the next one, so the
-/// first answer needs two batches and nothing more. A poll that read on would answer the same batch
-/// only after the whole input, which is exactly what the budget above exists to prevent.
+/// Each series below is one chunk, and a chunk that carries `is_last` closes its series, so the
+/// first answer needs only the first chunk. A poll that read on would answer the same batch only
+/// after the whole input, which is exactly what the budget above exists to prevent.
 #[tokio::test]
 async fn a_ready_batch_is_returned_before_later_input_is_read() {
     let batches = (0..20)
-        .map(|index| series_batch(&format!("web-{index}"), &series_samples(1.0)))
+        .map(|index| {
+            frame(&series_chunk(
+                &format!("web-{index}"),
+                &series_samples(1.0),
+                true,
+            ))
+        })
         .collect::<Vec<_>>();
     let total = batches.len();
     let pulled = Arc::new(AtomicUsize::new(0));
-    let schema = input_schema();
+    let schema = frame_schema();
     let source = staged(schema.clone(), {
         let pulled = Arc::clone(&pulled);
         move || Box::pin(StagedStream::new(schema.clone(), batches.clone()).counted(&pulled))
     });
-    let mut stream = fused(rate_tree())
-        .to_execution_plan(source)
+    let mut stream = plan(rate_tree(), source)
         .expect("the runtime executes a rate tree")
         .execute(0, SessionContext::default().task_ctx())
         .expect("the node executes");
@@ -1313,13 +1435,13 @@ async fn a_ready_batch_is_returned_before_later_input_is_read() {
         .expect("the first series is answered without an error");
     let answered = rows(&[first]);
     assert_series_rates(&answered, &[(1.0, "web-0")]);
-    // Two batches: the first series' own, and the one whose first key closes it.
+    // One batch: the series' own chunk closes it, so nothing behind it has to be read.
     assert_eq!(
-        2,
+        1,
         pulled.load(Ordering::SeqCst),
         "the answer waited for input behind the series it reports"
     );
-    assert!(total > 2, "the fixture has to outlast the first answer");
+    assert!(total > 1, "the fixture has to outlast the first answer");
 }
 
 /// A chunk whose rows form several runs is converted row by row from the rows it carries.
@@ -1404,15 +1526,17 @@ fn error_chain(error: &DataFusionError) -> String {
 /// Two partitions, one series each, and both series leave the window on the same label set.
 ///
 /// `rate` drops `__name__`, so `http_requests_total{host="web-1"}` reads as `{host="web-1"}` in
-/// the output. `PerSeries` distribution keeps each of the two whole inside its own partition, so a
-/// check that lived inside one execution would see one series each and report nothing: only state
-/// shared by the partitions sees that the output vector holds the label set twice.
+/// the output. The key column keeps each of the two whole inside its own partition, so a check that
+/// lived inside one execution would see one series each and report nothing: only state shared by
+/// the partitions sees that the output vector holds the label set twice.
 #[tokio::test]
 async fn a_duplicate_label_set_across_partitions_is_refused() {
-    let series = vec![series_batch("web-1", &series_samples(1.0))];
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec_partitioned(vec![series.clone(), series]))
-        .expect("the runtime executes a rate tree");
+    let series = frame(&series_chunk("web-1", &series_samples(1.0), true));
+    let exec = plan(
+        rate_tree(),
+        memory_exec_partitioned(vec![vec![series.clone()], vec![series]]),
+    )
+    .expect("the runtime executes a rate tree");
     assert_eq!(
         2,
         exec.properties().output_partitioning().partition_count(),
@@ -1441,20 +1565,21 @@ async fn a_duplicate_label_set_across_partitions_is_refused() {
 /// merge to matrix assembly, so the check has to allow what it would otherwise refuse.
 #[tokio::test]
 async fn a_duplicate_label_set_on_disjoint_grid_points_is_emitted() {
-    let first = vec![series_batch(
+    let first = vec![frame(&series_chunk(
         "web-1",
         &[(60_000, 60.0), (GRID_START, GRID_START as f64 / 1_000.0)],
-    )];
+        true,
+    ))];
     let last = GRID_START + (GRID_LEN as i64 - 1) * GRID_STEP;
-    let second = vec![series_batch(
+    let second = vec![frame(&series_chunk(
         "web-1",
         &[
             (GRID_START, GRID_START as f64 / 1_000.0),
             (last, last as f64 / 1_000.0),
         ],
-    )];
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec_partitioned(vec![first, second]))
+        true,
+    ))];
+    let exec = plan(rate_tree(), memory_exec_partitioned(vec![first, second]))
         .expect("the runtime executes a rate tree");
 
     let batches = collect(exec, SessionContext::default().task_ctx())
@@ -1475,33 +1600,35 @@ async fn a_duplicate_label_set_on_disjoint_grid_points_is_emitted() {
     }
 }
 
-/// What a label set holds stays charged after the stream that first claimed it ends.
+/// What a label set holds stays charged after the stream that first claimed it ends, and what a
+/// later partition adds to it is charged as well.
 ///
 /// The map belongs to the plan: it outlives every partition and is released with the plan. Charging
 /// each stream for what it inserted returned the bytes of a label set when *that* stream ended,
 /// while the entry the next partition is checked against stayed in the map, so everything the map
 /// held after the first partition was invisible to the pool. What is charged here is therefore read
-/// between the partitions: it has to survive the first stream and grow no further when the second
-/// partition lands on the label set the first one claimed.
+/// between the partitions: it has to survive the first stream, and the runs the second partition
+/// merges into the entry have to cost what they hold.
 #[tokio::test]
 async fn a_label_set_stays_charged_after_its_first_stream_ends() {
     // The first series holds a value only at the first grid point and the second only at the last,
     // so the two share a final label set without sharing an evaluation timestamp: the second
     // partition is legal and has to be answered, and it has to find the first one's entry there.
-    let first = vec![series_batch(
+    let first = vec![frame(&series_chunk(
         "web-0",
         &[(60_000, 60.0), (GRID_START, GRID_START as f64 / 1_000.0)],
-    )];
+        true,
+    ))];
     let last = GRID_START + (GRID_LEN as i64 - 1) * GRID_STEP;
-    let second = vec![series_batch(
+    let second = vec![frame(&series_chunk(
         "web-0",
         &[
             (GRID_START, GRID_START as f64 / 1_000.0),
             (last, last as f64 / 1_000.0),
         ],
-    )];
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec_partitioned(vec![first, second]))
+        true,
+    ))];
+    let exec = plan(rate_tree(), memory_exec_partitioned(vec![first, second]))
         .expect("the runtime executes a rate tree");
     assert_eq!(
         2,
@@ -1528,7 +1655,7 @@ async fn a_label_set_stays_charged_after_its_first_stream_ends() {
     );
 
     // The second partition lands on that same label set on points the first one does not hold: it
-    // is answered, and what it adds to the entry is already paid for.
+    // is answered, and the run it merges into the entry is what its charge grows by.
     let mut stream = exec
         .execute(1, Arc::clone(&context))
         .expect("the node executes");
@@ -1538,10 +1665,11 @@ async fn a_label_set_stays_charged_after_its_first_stream_ends() {
     }
     assert_eq!(1, answered.len(), "disjoint points are legal");
     drop(stream);
-    assert_eq!(
-        charged,
-        pool.reserved(),
-        "a label set the map already holds is not charged a second time"
+    assert!(
+        pool.reserved() > charged,
+        "the second partition's run grew the entry, but nothing was charged for it: {} is not \
+         above {charged}",
+        pool.reserved()
     );
 
     // The entries live as long as the plan, so dropping it is what gives their bytes back.
@@ -1560,14 +1688,14 @@ async fn every_partition_evaluates_its_own_series() {
         .into_iter()
         .enumerate()
         .map(|(index, scale)| {
-            vec![series_batch(
+            vec![frame(&series_chunk(
                 &format!("web-{index}"),
                 &series_samples(scale),
-            )]
+                true,
+            ))]
         })
         .collect::<Vec<_>>();
-    let exec = fused(rate_tree())
-        .to_execution_plan(memory_exec_partitioned(partitions))
+    let exec = plan(rate_tree(), memory_exec_partitioned(partitions))
         .expect("the runtime executes a rate tree");
     assert_eq!(
         3,
@@ -1599,6 +1727,30 @@ async fn every_partition_evaluates_its_own_series() {
     }
 }
 
+/// The node asks the optimizer to keep each series in one partition.
+///
+/// The node runs one window per series and closes it on the chunk carrying `is_last`, so a series
+/// the optimizer split across partitions would be answered as two halves by two trees. What it
+/// declares is a key requirement on the frame's key column, which is the column a producer writes
+/// one series' encoded identity into: the same key then has to reach the same partition, while the
+/// parallelism of an input that already owns whole series per partition is left alone.
+#[test]
+fn the_input_is_required_to_be_key_partitioned() {
+    let exec = plan(rate_tree(), memory_exec_partitioned(vec![vec![], vec![]]))
+        .expect("the runtime executes a rate tree");
+    let distributions = exec.input_distribution_requirements().into_per_child();
+    assert_eq!(1, distributions.len(), "one requirement, one child");
+    let Distribution::KeyPartitioned(keys) = &distributions[0] else {
+        panic!("a single partition would give up the input's parallelism: {distributions:?}");
+    };
+    let key = keys
+        .first()
+        .and_then(|key| (key.as_ref() as &dyn std::any::Any).downcast_ref::<ColumnExpr>())
+        .expect("the key requirement names a column of the frame");
+    assert_eq!("read_key", key.name(), "one read_key is one series");
+    assert_eq!(0, key.index(), "read_key is the frame's first column");
+}
+
 /// A partition index the input does not have is refused rather than answered.
 ///
 /// The node runs one evaluator per input partition and adds none of its own, so it forwards the
@@ -1606,13 +1758,11 @@ async fn every_partition_evaluates_its_own_series() {
 /// refusal, not a series read from another partition.
 #[tokio::test]
 async fn a_partition_past_the_inputs_count_is_refused() {
-    let schema = input_schema();
+    let schema = frame_schema();
     let source = staged(schema.clone(), move || {
         Box::pin(StagedStream::new(schema.clone(), Vec::new()))
     });
-    let exec = fused(rate_tree())
-        .to_execution_plan(source)
-        .expect("the runtime executes a rate tree");
+    let exec = plan(rate_tree(), source).expect("the runtime executes a rate tree");
     assert_eq!(
         1,
         exec.properties().output_partitioning().partition_count(),
@@ -1627,5 +1777,244 @@ async fn a_partition_past_the_inputs_count_is_refused() {
     assert!(
         error.to_string().contains("partition"),
         "refused for another reason: {error}"
+    );
+}
+
+/// The `rate(x[5m])` tree over two fields, with both fields and the tags in the output.
+fn two_field_node() -> FusedSeries {
+    let tree = rate_tree_of(two_field_schema());
+    let binding = binding_of(
+        &tree,
+        two_field_schema(),
+        vec![HOST.to_string(), NAME.to_string()],
+    );
+    FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        input_plan(frame_schema_of(&two_field_schema())),
+        two_field_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the binding matches the tree")
+}
+
+/// The output of [`two_field_node`]: both fields, the tags and the grid times.
+fn two_field_output_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(OTHER, DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(NAME, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]))
+}
+
+/// One chunk of `{__name__=METRIC, host=<host>, __type__=<kind>}` whose `field` holds `rows` and
+/// whose other field is missing everywhere.
+fn one_field_chunk(field: usize, host: &str, kind: &str, last: bool) -> RawSeriesChunk {
+    let rows = series_samples(1.0);
+    let (value, other) = if field == 0 {
+        (values_of(&rows), no_values(&rows))
+    } else {
+        (no_values(&rows), values_of(&rows))
+    };
+    chunk_of(
+        &two_field_schema(),
+        &format!("{host}-{kind}"),
+        metric(&[(HOST, host), (TYPE, kind)], Some(METRIC)),
+        &times_of(&rows),
+        vec![value, other],
+        last,
+    )
+}
+
+/// Two series that close on one label set may still fill it, one field each.
+///
+/// `rate` drops `__name__` and `__type__`, so the two series below leave the window as
+/// `{host="web-1"}` and read as one label set. They hold values in *different* fields, which is the
+/// pair [`crate::grid_series::merge_same_labelset`] merges: one value of one field at each position,
+/// never two. Occupancy is therefore per field, and refusing this pair would refuse a series
+/// Prometheus answers.
+#[tokio::test]
+async fn a_duplicate_label_set_of_complementary_fields_is_emitted() {
+    let exec = plan_of(
+        two_field_node(),
+        memory_exec_partitioned_with(
+            frame_schema_of(&two_field_schema()),
+            vec![
+                frames_of(
+                    &two_field_schema(),
+                    &[one_field_chunk(0, "web-1", "counter", true)],
+                ),
+                frames_of(
+                    &two_field_schema(),
+                    &[one_field_chunk(1, "web-1", "gauge", true)],
+                ),
+            ],
+        ),
+    )
+    .expect("the runtime executes a rate tree");
+    assert_eq!(
+        2,
+        exec.properties().output_partitioning().partition_count(),
+        "this test needs one series in each of two partitions"
+    );
+
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("complementary fields are legal");
+    assert_eq!(2, batches.len(), "each partition emits its own series");
+    // Each batch answers one field of the shared label set and leaves the other missing: the two
+    // together are the merged series, with no value of one field holding a position twice.
+    let answered = batches
+        .iter()
+        .map(|batch| {
+            let host = batch
+                .column_by_name(HOST)
+                .and_then(|host| host.as_any().downcast_ref::<StringArray>())
+                .expect("every batch has its tag column");
+            assert!(
+                (0..host.len()).all(|row| host.value(row) == "web-1"),
+                "both batches answer the one label set"
+            );
+            let present = [VALUE, OTHER]
+                .into_iter()
+                .filter(|field| {
+                    let column = batch
+                        .column_by_name(field)
+                        .unwrap_or_else(|| panic!("every batch has a {field} column"))
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("the field column is Float64");
+                    column.null_count() < column.len()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                1,
+                present.len(),
+                "each series fills exactly one field: {present:?}"
+            );
+            present[0]
+        })
+        .collect::<Vec<_>>();
+    let mut answered = answered;
+    answered.sort_unstable();
+    assert_eq!(vec![OTHER, VALUE], answered, "the two fields are filled");
+}
+
+/// Two series that close on one label set may not hold the same field at the same position.
+///
+/// This is the pair no merge resolves: at one grid position one field of the label set would carry
+/// two values. It is refused even though the two series name different `__type__` labels, because
+/// the window drops that label and what reaches the output is one label set twice.
+#[tokio::test]
+async fn a_duplicate_label_set_of_one_field_is_refused() {
+    let exec = plan_of(
+        two_field_node(),
+        memory_exec_partitioned_with(
+            frame_schema_of(&two_field_schema()),
+            vec![
+                frames_of(
+                    &two_field_schema(),
+                    &[one_field_chunk(0, "web-1", "counter", true)],
+                ),
+                frames_of(
+                    &two_field_schema(),
+                    &[one_field_chunk(0, "web-1", "gauge", true)],
+                ),
+            ],
+        ),
+    )
+    .expect("the runtime executes a rate tree");
+
+    let error = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect_err("both series hold a value of one field at one position");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "refused for another reason: {message}"
+    );
+    assert!(
+        message.contains("host=\"web-1\""),
+        "the label set must be readable: {message}"
+    );
+}
+
+/// Two partitions whose label sets differ only in an empty value hold one label set.
+///
+/// `{host="web-1", zone=""}` and `{host="web-1"}` are one series to Prometheus: an empty label value
+/// is no label. An instant selection rewrites nothing, so both label sets reach this node's own
+/// state as their frames wrote them, and a state that compared the tags as they arrived would file
+/// them apart. Neither partition sees the other's series, so nothing else in the plan can refuse
+/// the pair: this node's state is what compares them, and what it has to compare is the label set
+/// Prometheus compares.
+#[tokio::test]
+async fn partitions_whose_label_sets_differ_only_in_an_empty_value_are_refused() {
+    let [empty, absent] = <[_; 2]>::try_from(zone_chunks()).expect("the fixture has two chunks");
+    let exec = plan_of(
+        instant_node(),
+        memory_exec_partitioned(vec![frames(&[empty]), frames(&[absent])]),
+    )
+    .expect("the runtime executes an instant selection");
+    assert_eq!(
+        2,
+        exec.properties().output_partitioning().partition_count(),
+        "this test needs one series in each of two partitions"
+    );
+
+    let error = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect_err("both partitions hold one value of one field at the same position");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "refused for another reason: {message}"
+    );
+    assert!(
+        message.contains("host=\"web-1\""),
+        "the label set must be readable: {message}"
+    );
+}
+
+/// The claim compares the label set Prometheus compares, so an empty value is no label.
+///
+/// Driven directly at the layer that keeps the state: a window and a map both drop an empty-valued
+/// label before a chunk reaches this node, so no tree this crate can build produces the pair below.
+/// The state has to key on the same normalization they apply all the same, or the equality it
+/// enforces would be one Prometheus does not have.
+#[test]
+fn a_claim_compares_label_sets_without_empty_values() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 5)])
+        .expect("one run over the whole grid");
+    let series_of = |metric: MetricName| Series {
+        metric,
+        time: axis.clone(),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; 5]))),
+    };
+
+    labels
+        .claim(&series_of(metric(&[(HOST, "h"), (ZONE, "")], Some(METRIC))))
+        .expect("the first label set is claimed");
+    let error = labels
+        .claim(&series_of(metric(&[(HOST, "h")], Some(METRIC))))
+        .expect_err("an empty label value is no label");
+    assert!(
+        error
+            .to_string()
+            .contains("vector cannot contain metrics with the same labelset"),
+        "refused for another reason: {error}"
+    );
+    assert_eq!(
+        vec![(Arc::from(HOST), Arc::from("h"))],
+        label_set(&metric(&[(HOST, "h"), (ZONE, "")], None)),
+        "the empty value is not part of the label set"
     );
 }

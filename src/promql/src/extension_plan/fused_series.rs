@@ -16,8 +16,8 @@
 //!
 //! [`FusedSeries`] is the logical half: it holds the PromQL text the tree was compiled from, the
 //! tree itself and the binding its input was compiled against. [`FusedSeriesExec`] is the physical
-//! half: it owns one execution of that tree per partition and converts its input batches into raw
-//! series chunks and its evaluated chunks back into batches.
+//! half: it owns one execution of that tree per partition and decodes its input frames into raw
+//! series chunks and converts its evaluated chunks back into batches.
 //!
 //! The two halves show different things in `EXPLAIN`, which is the point of having both. The
 //! logical node prints the query a reader wrote ([`FusedSeries`]'s `fmt_for_explain`), and the
@@ -26,24 +26,26 @@
 //! can therefore see whether a query was compiled the way they expected without decoding node
 //! names.
 //!
-//! Scope of this layer: the input is a stream of ordinary record batches carrying one timestamp
-//! column, the series' field columns and the series' tag columns, with each complete label set
-//! contiguous and its timestamps ascending. The output is one batch per evaluated chunk, with the
-//! statement's grid timestamps in the declared time column. Everything the tree cannot do is
-//! rejected when the execution plan is built, not when the first batch arrives: a tree the native
-//! runtime does not execute, a binding that does not match the tree, or an input or output schema
-//! the conversion cannot classify.
+//! Scope of this layer: the input is a stream of native raw series frames
+//! ([`raw_series_frame_schema`](datatypes::series::frame::raw_series_frame_schema)) — one row per
+//! chunk, carrying the series' encoded key, its finality, its timestamps and its fields, plus the
+//! complete labels when the frame is explicit — with each series' rows contiguous and its
+//! timestamps ascending, which is what the caller's [`SeriesOrdering`] names. The output is one
+//! batch per evaluated chunk, with the statement's grid timestamps in the declared time column.
+//! Everything the tree cannot do is rejected when the execution plan is built, not when the first
+//! batch arrives: a tree the native runtime does not execute, a frame whose schema the tree's input
+//! was not compiled against, or an output schema the conversion cannot classify.
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::{InputMapping, record_batches_to_raw_series};
+use common_query::series_frame::unpack_raw_series;
 use datafusion::arrow::array::{
     Array, ArrayRef, Float64Array, StringArray, TimestampMillisecondArray,
 };
@@ -59,24 +61,26 @@ use datafusion::execution::memory_pool::{
 };
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, EmptyRecordBatchStream, ExecutionPlan, Partitioning,
-    PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
+    Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
-use datatypes::series::MetricName;
+use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{
-    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesSchema,
-};
+use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
-use store_api::region_engine::SendableRawSeriesStream;
+use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
 use crate::evaluated::EvaluatedChunk;
+use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{NativeExpr, NativeTree};
+use crate::source::materialize_raw_labels;
 
 #[cfg(test)]
 mod tests;
@@ -86,7 +90,7 @@ const METRIC_NAME: &str = "__name__";
 
 /// How many input steps one poll of [`FusedSeriesStream`] runs before it wakes itself.
 ///
-/// A step polls the input once and hands what it settled to the converter. Settling is not
+/// A step polls the input once and hands what it settled to the executor. Settling is not
 /// guaranteed: raw samples before the first evaluation point settle nothing, so an input of many
 /// such chunks would otherwise be read to its end inside one poll, holding the task's thread for
 /// an unbounded time and delaying both other tasks on it and the cancellation the consumer asked
@@ -98,14 +102,15 @@ const POLL_BUDGET: usize = 64;
 ///
 /// The binding travels with the tree: a tree is legal only against the schema it was bound to, and
 /// a reader of the output needs to know which grid a chunk's absolute positions are on. Keeping it
-/// in one value is what lets both halves of the node be built from the same description.
+/// in one value is what lets the logical node be built from the same description, and the physical
+/// node reads the same facts back off the tree rather than trusting a second copy of them.
 ///
-/// What the node checks is that the input's columns are exactly the ones the binding accounts for:
-/// the time column, the fields and the tags. What it cannot check is whether the caller meant a
-/// *different* column of the same type. A binding whose [`metric_name`](Self::metric_name) is not
-/// the metric the scan selects, or whose [`time_index`](Self::time_index) names another millisecond
-/// timestamp column of the input, is indistinguishable from a correct one from here: the node sees
-/// one timestamp column and one constant name, so picking them is the caller's obligation.
+/// What the logical node checks is that the schema the tree's input node declares is the one this
+/// binding names. What it cannot check is whether the caller meant *some other* schema with the
+/// same field names, or whether [`time_index`](Self::time_index) is the column the query reports
+/// positions in: from here both are indistinguishable from a correct binding, so picking them is
+/// the caller's obligation. The physical node reads neither the metric name nor a time column from
+/// the input — a raw frame carries the labels of each series and its own timestamps.
 #[derive(Clone, Debug)]
 pub struct FusedSeriesBinding {
     /// The raw series schema the tree's input node was bound to, without an evaluation grid.
@@ -114,14 +119,15 @@ pub struct FusedSeriesBinding {
     pub grid: Arc<EvalGrid>,
     /// The metric name every input series is bound to, when the input reads one named metric.
     ///
-    /// The name is a binding rather than a column because a raw series chunk carries one metric
-    /// name for all of its samples; a name that varied inside a series would not be one series.
+    /// The logical node requires it when [`tags`](Self::tags) declares [`METRIC_NAME`]: a reader of
+    /// the output has to be able to tell that a range function dropped the name, which needs a name
+    /// to drop. The physical node takes the names from the frames, which carry each series' own.
     pub metric_name: Option<Arc<str>>,
-    /// The input column holding the timestamps.
+    /// The output column holding the grid timestamps.
     pub time_index: String,
     /// The logical tag names the output carries, read from each series' labels.
     ///
-    /// [`METRIC_NAME`] is special: it is resolved to the bound metric name instead of a column,
+    /// [`METRIC_NAME`] is special: it is resolved to the series' metric name instead of a column,
     /// which is how a reader sees that a range function dropped it.
     pub tags: Vec<String>,
 }
@@ -254,19 +260,28 @@ impl FusedSeries {
 
     /// The physical node that runs `exec_input` as this node's input.
     ///
-    /// Building it rejects a tree the runtime cannot execute and a schema the conversion cannot
+    /// `label_source` and `ordering` are the binding of the frames `exec_input` produces: the
+    /// frame carries the encoded key and, in explicit mode, the complete labels, but no schema can
+    /// say which of the two a producer meant or how it ordered the series, so the caller that built
+    /// the frame passes both on. Building the node rejects a tree the runtime cannot execute, a
+    /// frame schema the tree's input was not compiled against, and a schema the conversion cannot
     /// classify, so a plan that is built is a plan that runs.
     pub fn to_execution_plan(
         &self,
         exec_input: Arc<dyn ExecutionPlan>,
+        label_source: RawLabelSource,
+        ordering: SeriesOrdering,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         Ok(Arc::new(FusedSeriesExec::try_new(
             Arc::clone(&self.promql),
-            Arc::new(self.tree.clone()),
-            Arc::new(self.binding.clone()),
             exec_input,
+            label_source,
+            ordering,
+            Arc::new(self.tree.clone()),
             output_schema,
+            self.binding.time_index.clone(),
+            self.binding.tags.clone(),
         )?))
     }
 }
@@ -355,6 +370,64 @@ impl PartialOrd for FusedSeries {
     }
 }
 
+/// What the tree's input node reads, read off the tree itself.
+///
+/// The tree is the one authority on the schema its input was compiled against: a caller's binding
+/// can only agree or disagree with it, and the frame this node reads has to be decoded against the
+/// same schema, so both halves read it here instead of each carrying a copy.
+struct TreeInput {
+    /// The position the tree's raw chunks enter at: a position is how the runtime addresses a node,
+    /// so nothing on the node has to carry an identity that the tree itself does not.
+    path: NodePath,
+    /// The raw series schema the tree's input node was compiled against.
+    schema: Arc<SeriesSchema>,
+}
+
+/// Reads what the tree's input node was compiled against, rejecting a tree this node cannot feed.
+///
+/// A node feeds one raw input, and its output is addressed on a grid; a tree that does not have
+/// that shape is one this layer cannot hand chunks to or read positions from.
+fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
+    let mut sources = 0;
+    let mut input_path = None;
+    let mut schema = None;
+    metrics::walk(tree.root(), &mut |node, path| {
+        let NativeExpr::Input(input) = &node.expr else {
+            return;
+        };
+        sources += 1;
+        input_path.get_or_insert_with(|| path.clone());
+        // Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was
+        // compiled against an already-evaluated schema would read the wrong thing.
+        schema = input
+            .output
+            .samples()
+            .filter(|schema| schema.eval_grid.is_none())
+            .map(Arc::clone);
+    });
+    if sources != 1 {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeries runs a tree with {sources} inputs, and it needs exactly one"
+        )));
+    }
+    let (Some(path), Some(schema)) = (input_path, schema) else {
+        return Err(DataFusionError::Plan(
+            "FusedSeries runs a tree whose input is not raw series".to_string(),
+        ));
+    };
+    let evaluated = tree
+        .root()
+        .output
+        .samples()
+        .is_some_and(|schema| schema.eval_grid.is_some());
+    if !evaluated {
+        return Err(DataFusionError::Plan(
+            "FusedSeries runs a tree whose output is not evaluated on a grid".to_string(),
+        ));
+    }
+    Ok(TreeInput { path, schema })
+}
+
 /// Checks that `tree` reads the schema `binding` declares, on the grid it declares.
 ///
 /// The output grid is compared by [`EvalGrid::spec`], not by allocation: that is the rule
@@ -362,10 +435,12 @@ impl PartialOrd for FusedSeries {
 /// from its absolute grid positions, so a separately allocated grid with the same spec is the same
 /// grid to everything downstream.
 ///
-/// Returns the position of the tree's input node, which is what a caller names when it hands a raw
-/// chunk over: a position is how the runtime addresses a node, so nothing on the node has to carry
-/// an identity that the tree itself does not.
-fn validate_binding(tree: &NativeTree, binding: &FusedSeriesBinding) -> DataFusionResult<NodePath> {
+/// Answers with what the tree's input reads, which is what a caller names when it hands a raw chunk
+/// over.
+fn validate_binding(
+    tree: &NativeTree,
+    binding: &FusedSeriesBinding,
+) -> DataFusionResult<TreeInput> {
     if binding.series_schema.eval_grid.is_some() {
         return Err(DataFusionError::Plan(
             "FusedSeries binds a raw series schema, which cannot have an evaluation grid"
@@ -381,36 +456,13 @@ fn validate_binding(tree: &NativeTree, binding: &FusedSeriesBinding) -> DataFusi
     // The tree's own input node says which schema it reads, so the binding is checked against the
     // tree rather than trusted: a mismatch would evaluate one schema and label the result as
     // another.
-    let mut sources = 0;
-    let mut bound = false;
-    let mut input_path = None;
-    metrics::walk(tree.root(), &mut |node, path| {
-        let NativeExpr::Input(input) = &node.expr else {
-            return;
-        };
-        sources += 1;
-        input_path.get_or_insert_with(|| path.clone());
-        if let Some(schema) = input.output.samples() {
-            // Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was
-            // compiled against an already-evaluated schema would read the wrong thing.
-            bound = binding.same_fields(schema) && schema.eval_grid.is_none();
-        }
-    });
-    if sources != 1 {
-        return Err(DataFusionError::Plan(format!(
-            "FusedSeries runs a tree with {sources} inputs, and it needs exactly one"
-        )));
-    }
-    if !bound {
+    let input = tree_input(tree)?;
+    if !binding.same_fields(&input.schema) {
         return Err(DataFusionError::Plan(
             "FusedSeries binds a raw series schema the tree's input was not compiled against"
                 .to_string(),
         ));
     }
-    let input_path = input_path.ok_or_else(|| {
-        DataFusionError::Plan("FusedSeries runs a tree with no input node".to_string())
-    })?;
-
     match tree.root().output.samples() {
         Some(schema)
             if schema
@@ -418,7 +470,7 @@ fn validate_binding(tree: &NativeTree, binding: &FusedSeriesBinding) -> DataFusi
                 .as_ref()
                 .is_some_and(|grid| grid.spec() == binding.grid.spec()) =>
         {
-            Ok(input_path)
+            Ok(input)
         }
         _ => Err(DataFusionError::Plan(
             "FusedSeries runs a tree whose output is not evaluated on the statement's grid"
@@ -573,161 +625,29 @@ fn classify_output(
     Ok(classification)
 }
 
-/// Maps the input columns this node reads onto the raw-series roles it needs.
-///
-/// The input has to be exactly the columns the binding accounts for: the time column, the fields
-/// and the tags. A column outside them is part of some series' identity that the raw chunks would
-/// not carry, so two rows a Prometheus query keeps apart could be answered as one series with the
-/// wrong labels; such an input is refused rather than read past. Whether a *different* column of
-/// the same type was meant is not something this function can see — that is the caller commitment
-/// [`FusedSeriesBinding`] documents.
-fn input_mapping(
-    binding: &FusedSeriesBinding,
-    schema: &SchemaRef,
-) -> DataFusionResult<InputMapping> {
-    // A name that appears more than once says less than it looks: every one of those columns
-    // passes the coverage check below, because the check reads names, while the mapping reads
-    // `index_of`, which answers with one index. The other column would then be part of a series'
-    // identity that the raw chunks never carry -- rows a Prometheus query keeps apart answered as
-    // one series with the wrong labels, and no error. Which of the two the caller meant is not
-    // visible from here, so the schema is refused rather than one of them chosen.
-    let mut named = HashSet::with_capacity(schema.fields().len());
-    for field in schema.fields() {
-        if !named.insert(field.name()) {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeriesExec input has more than one column named {:?}: it cannot say which \
-                 one its binding maps, and the other would take no part in the series it holds",
-                field.name()
-            )));
-        }
-    }
-    if schema.column_with_name(METRIC_NAME).is_some() {
-        return Err(DataFusionError::Plan(format!(
-            "FusedSeriesExec cannot read a {METRIC_NAME:?} column: a raw series' metric name is \
-             bound on the node, not varied inside one series"
-        )));
-    }
-    let index_of = |name: &str| -> DataFusionResult<usize> {
-        schema.index_of(name).map_err(|_| {
-            DataFusionError::Plan(format!("FusedSeriesExec input has no column {name:?}"))
-        })
-    };
-
-    // Every column of the input has to be a role the binding reads. The binding cannot express
-    // "ignore this column": a column it does not read is one the raw series loses.
-    for field in schema.fields() {
-        let name = field.name();
-        let read = name == binding.time_index.as_str()
-            || binding.tags.iter().any(|tag| tag == name)
-            || binding
-                .series_schema
-                .fields
-                .iter()
-                .any(|spec| spec.name.as_ref() == name);
-        if !read {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeriesExec input column {name:?} is neither the time column {:?} nor one of \
-                 the fields and tags its binding maps, so it would take no part in the series' \
-                 identity",
-                binding.time_index
-            )));
-        }
-    }
-
-    let tags = binding
-        .tags
-        .iter()
-        .filter(|tag| tag.as_str() != METRIC_NAME)
-        .map(|tag| Ok((Arc::from(tag.as_str()), index_of(tag)?)))
-        .collect::<DataFusionResult<Vec<(Arc<str>, usize)>>>()?;
-    let fields = binding
-        .series_schema
-        .fields
-        .iter()
-        .map(|spec: &FieldSpec| {
-            let index = index_of(&spec.name)?;
-            // A native-histogram column would reach the output converter as a histogram sample,
-            // which only fails there, once execution has started. This node answers in floats, so
-            // the column it reads has to be one.
-            if schema.field(index).data_type() != &DataType::Float64 {
-                return Err(DataFusionError::Plan(format!(
-                    "FusedSeriesExec reads field {:?} as Float64, and the input column is {}",
-                    spec.name,
-                    schema.field(index).data_type()
-                )));
-            }
-            Ok((spec.clone(), index))
-        })
-        .collect::<DataFusionResult<Vec<(FieldSpec, usize)>>>()?;
-    let mapping = InputMapping {
-        time_index: index_of(&binding.time_index)?,
-        metric_name: binding.metric_name.clone(),
-        tags,
-        fields,
-    };
-    // The shared converter is the authority on which column types it accepts, so it is asked
-    // rather than copied: handing it an empty stream of this schema makes it validate the mapping
-    // with no batch to convert.
-    validate_mapping_types(&mapping, schema)?;
-    Ok(mapping)
-}
-
-/// Rejects a mapping the shared converter would refuse, naming the column at fault.
-///
-/// The types accepted here are the converter's own, not a copy of its rules: [`converter_accepts`]
-/// runs the converter's validation, so a time or tag type this node accepts is a type `execute`
-/// converts, and one it refuses can only be refused there too.
-fn validate_mapping_types(mapping: &InputMapping, schema: &SchemaRef) -> DataFusionResult<()> {
-    let Err(error) = converter_accepts(mapping, schema) else {
-        return Ok(());
-    };
-    // The converter reports the mapping as a whole, so the column at fault is found by asking it
-    // again with the time column alone and then with one tag at a time. The field columns are
-    // already checked above, and they are the only other columns this mapping maps.
-    let mut without_tags = mapping.clone();
-    let tags = std::mem::take(&mut without_tags.tags);
-    if converter_accepts(&without_tags, schema).is_err() {
-        return Err(DataFusionError::Plan(format!(
-            "FusedSeriesExec cannot read {:?} as its time column: {error}",
-            schema.field(mapping.time_index).name()
-        )));
-    }
-    for tag in tags {
-        let mut one = without_tags.clone();
-        one.tags = vec![tag.clone()];
-        if converter_accepts(&one, schema).is_err() {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeriesExec cannot read tag {:?} from its input column: {error}",
-                tag.0
-            )));
-        }
-    }
-    // Something the converter refuses that no single role accounts for: its own error says it.
-    Err(error)
-}
-
-/// Whether the shared converter validates `mapping` against `schema`.
-fn converter_accepts(mapping: &InputMapping, schema: &SchemaRef) -> DataFusionResult<()> {
-    record_batches_to_raw_series(
-        Box::pin(EmptyRecordBatchStream::new(Arc::clone(schema))),
-        mapping.clone(),
-    )
-    .map(|_| ())
-}
-
 /// The physical node that runs a compiled native tree over its input's raw series.
 pub struct FusedSeriesExec {
     /// The PromQL text the tree was compiled from, which is what the plan line shows.
     promql: Arc<str>,
     /// The tree this node runs, shared by every partition's execution.
     tree: Arc<NativeTree>,
-    /// What the tree's input was compiled against, and what the output columns are called.
-    binding: Arc<FusedSeriesBinding>,
+    /// The raw series schema the tree's input was compiled against, which every frame is decoded
+    /// against.
+    series_schema: Arc<SeriesSchema>,
+    /// How the input frames name their series: labels encoded in the key, or carried along.
+    label_source: RawLabelSource,
+    /// The ordering the input frames guarantee.
+    ordering: SeriesOrdering,
     /// The position of the tree's input node, where every raw chunk a partition reads enters.
     input_path: NodePath,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
-    /// The plan producing the raw series.
+    /// The output column holding the grid timestamps, kept so this node can be rebuilt over a new
+    /// child without losing which column its time came from.
+    time_column: String,
+    /// The tag column names, indexed by [`OutputColumn::Tag`].
+    tags: Arc<[String]>,
+    /// The plan producing the raw series frames.
     input: Arc<dyn ExecutionPlan>,
     /// The columns this node produces.
     output_schema: SchemaRef,
@@ -744,14 +664,27 @@ pub struct FusedSeriesExec {
 
 impl FusedSeriesExec {
     /// Creates the node, rejecting whatever this node cannot execute or convert.
+    ///
+    /// `input` produces native raw series frames: the series' encoded key, its finality, its
+    /// timestamps and its fields, plus the complete labels when `label_source` is
+    /// [`RawLabelSource::Explicit`]. `time_column` and `tags` name the columns of the output, which
+    /// is a row table rather than a frame.
+    ///
+    /// The parameters stay separate because each is a fact its own caller has: the query, the plan
+    /// below, the frame's label binding and ordering, the tree, and the three things the output
+    /// schema is classified by. A struct over them would be the same list under another name.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         promql: Arc<str>,
-        tree: Arc<NativeTree>,
-        binding: Arc<FusedSeriesBinding>,
         input: Arc<dyn ExecutionPlan>,
+        label_source: RawLabelSource,
+        ordering: SeriesOrdering,
+        tree: Arc<NativeTree>,
         output_schema: SchemaRef,
+        time_column: String,
+        tags: Vec<String>,
     ) -> DataFusionResult<Self> {
-        let input_path = validate_binding(&tree, &binding)?;
+        let tree_input = tree_input(&tree)?;
         // Building a state is what proves the runtime executes this tree: a node kind it does not
         // run yet is refused here, so a plan that is built is a plan that starts. The throwaway
         // state is dropped at once, returning its (unbounded) reservations.
@@ -761,24 +694,32 @@ impl FusedSeriesExec {
             &ExecutionPlanMetricsSet::new(),
             0,
         )?;
-        let classification = classify_output(
-            &output_schema,
-            &binding.series_schema,
-            &binding.tags,
-            &binding.time_index,
+        let classification =
+            classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
+        // The frame is checked against what the tree's input reads, so a frame this node cannot
+        // decode is reported when the plan is built. The shared decoder is the authority on that
+        // layout, so it is asked rather than copied: handing it an empty stream of this schema makes
+        // it validate the declared frame with no batch to decode, which is the check
+        // `unpack_raw_series` makes before its first poll too.
+        unpack_raw_series(
+            Box::pin(RecordBatchStreamAdapter::new(
+                input.schema(),
+                futures::stream::empty(),
+            )),
+            Arc::clone(&tree_input.schema),
+            label_source.clone(),
+            ordering,
         )?;
-        // The mapping is checked against the declared input schema, so a column this node reads
-        // but the input does not produce is reported when the plan is built.
-        input_mapping(&binding, &input.schema())?;
         // One evaluator runs per input partition, so the node's partition count is the child's.
-        // The child must therefore be a raw-series scan that assigns every series whole to one
-        // partition: `PerSeries` distribution is what makes a per-partition evaluation equivalent
-        // to evaluating the whole series, because no series is split across partitions and no
-        // series appears in two of them.
+        // The child must therefore produce frames that assign every series whole to one partition,
+        // which is what this node asks for when the optimizer enforces its distribution
+        // requirements (see `input_distribution_requirements`): a per-partition evaluation is
+        // equivalent to evaluating the whole series only because no series is split across
+        // partitions and no series appears in two of them.
         //
         // One window holds the state of the series it is reading, and a raw series arrives as one
-        // contiguous run. The scan guarantees that per partition, not across them: a scan that put
-        // half of a series in one partition would leave each tree answering half of it.
+        // contiguous run. The frames guarantee that per partition, not across them: a producer that
+        // put half of a series in one partition would leave each tree answering half of it.
         let input_properties = input.properties();
         let partition_count = input_properties.partitioning.partition_count();
         if partition_count == 0 {
@@ -802,9 +743,13 @@ impl FusedSeriesExec {
         Ok(Self {
             promql,
             tree,
-            binding,
-            input_path,
+            series_schema: tree_input.schema,
+            label_source,
+            ordering,
+            input_path: tree_input.path,
             classification: classification.into(),
+            time_column,
+            tags: tags.into(),
             input,
             output_schema,
             labels,
@@ -842,6 +787,22 @@ impl ExecutionPlan for FusedSeriesExec {
         &self.properties
     }
 
+    /// One `read_key` is one series, so the requirement is that every row of one key lands in one
+    /// partition.
+    ///
+    /// The node holds one window per series at a time and closes it on the chunk carrying
+    /// `is_last` ([`FusedSeriesStream`]), so a series split across two partitions would be answered
+    /// as two halves by two trees, and a series appearing in two of them would have its state
+    /// restarted. [`Distribution::KeyPartitioned`] is exactly the requirement that says "same key,
+    /// same partition"; [`Distribution::SinglePartition`] would say it too, by collapsing the node
+    /// to one partition and giving up the parallelism the input has. A one-partition input already
+    /// satisfies a key requirement, so nothing is inserted for it.
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        InputDistributionRequirements::new(vec![Distribution::KeyPartitioned(vec![Arc::new(
+            ColumnExpr::new("read_key", 0),
+        ) as _])])
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -864,14 +825,17 @@ impl ExecutionPlan for FusedSeriesExec {
                 children.len()
             ))
         })?;
-        // Rebuilt rather than patched: the new child's schema is what the input mapping is checked
-        // against, so a child that changed shape is refused instead of read with stale indices.
+        // Rebuilt rather than patched: the new child's schema is what the frame is validated
+        // against, so a child that changed shape is refused instead of decoded with a stale layout.
         Ok(Arc::new(Self::try_new(
             Arc::clone(&self.promql),
-            Arc::clone(&self.tree),
-            Arc::clone(&self.binding),
             child,
+            self.label_source.clone(),
+            self.ordering,
+            Arc::clone(&self.tree),
             self.output_schema.clone(),
+            self.time_column.clone(),
+            self.tags.to_vec(),
         )?))
     }
 
@@ -889,10 +853,19 @@ impl ExecutionPlan for FusedSeriesExec {
             .unwrap_or_else(|e| e.into_inner())
             .attach(&context.runtime_env().memory_pool);
         let input = self.input.execute(partition, Arc::clone(&context))?;
-        let mapping = input_mapping(&self.binding, &self.input.schema())?;
-        // Batches become raw series chunks through the shared frame converter, which is what groups
-        // rows into one chunk per label set and closes each series exactly once.
-        let input = record_batches_to_raw_series(input, mapping)?;
+        // Batches become raw series chunks through the shared frame decoder, which is the inverse of
+        // what the producer packed: one chunk per frame row, each series closed exactly once by the
+        // row carrying `is_last`.
+        let input = unpack_raw_series(
+            input,
+            Arc::clone(&self.series_schema),
+            self.label_source.clone(),
+            self.ordering,
+        )?;
+        // A source bound in key mode carries its identity encoded and no decoded labels, and a chunk
+        // handed to the tree has to name the series it holds.
+        let input =
+            materialize_raw_labels(input).map_err(|e| DataFusionError::External(Box::new(e)))?;
         let state = NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
@@ -906,7 +879,7 @@ impl ExecutionPlan for FusedSeriesExec {
             executor: Some(NativeExecutor::new(state)),
             input_path: self.input_path.clone(),
             classification: Arc::clone(&self.classification),
-            binding: Arc::clone(&self.binding),
+            tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
             labels: Arc::clone(&self.labels),
             ready: VecDeque::new(),
@@ -1005,69 +978,44 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
     }
 }
 
-/// A canonical, collision-free encoding of a final label set.
+/// The bytes one label set holds, for the memory reservation.
 ///
-/// [`MetricName`] implements `PartialEq + Eq` but not `Hash`, and it is a dependency-owned type,
-/// so the duplicate-label-set state keys on these bytes instead of on the label set itself. Every
-/// component carries a length prefix: label names and values are arbitrary UTF-8, so a separator
-/// byte could occur inside a component and let two different label sets encode to the same bytes.
-/// [`MetricName`] keeps its tags sorted by name, so one label set has exactly one encoding.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct LabelsKey(Vec<u8>);
-
-impl LabelsKey {
-    /// Encodes the metric name, marked for presence, and then every label, name before value.
-    fn new(metric: &MetricName) -> Self {
-        let mut bytes = Vec::new();
-        match metric.name() {
-            // The marker keeps an absent metric name distinct from an empty one.
-            Some(name) => {
-                bytes.push(1);
-                push_component(&mut bytes, name);
-            }
-            None => bytes.push(0),
-        }
-        for tag in metric.tags() {
-            push_component(&mut bytes, &tag.name);
-            push_component(&mut bytes, &tag.value);
-        }
-        Self(bytes)
-    }
-
-    /// Number of bytes this key occupies, for the memory reservation.
-    fn len(&self) -> usize {
-        self.0.len()
-    }
+/// It counts each label's name and value with the pair that refers to them, which is the same
+/// convention [`crate::native::execute`]'s own label-set table keeps.
+fn labels_bytes(labels: &LabelSet) -> usize {
+    labels
+        .iter()
+        .map(|(name, value)| size_of::<(Arc<str>, Arc<str>)>() + name.len() + value.len())
+        .sum()
 }
 
-/// Appends one length-prefixed UTF-8 component.
-fn push_component(bytes: &mut Vec<u8>, component: &str) {
-    bytes.extend_from_slice(&component.len().to_le_bytes());
-    bytes.extend_from_slice(component.as_bytes());
-}
-
-/// Renders a label set the way Prometheus prints one, for the duplicate-label-set error.
-fn render_labels(metric: &MetricName) -> String {
-    let mut parts = Vec::new();
-    if let Some(name) = metric.name() {
-        parts.push(format!("__name__={name:?}"));
-    }
-    parts.extend(
-        metric
-            .tags()
-            .iter()
-            .map(|tag| format!("{}={:?}", tag.name, tag.value)),
-    );
+/// Renders the label set Prometheus compares the way it prints one, for the duplicate-label-set
+/// error.
+fn render_labels(labels: &LabelSet) -> String {
+    let parts = labels
+        .iter()
+        .map(|(name, value)| format!("{name}={value:?}"))
+        .collect::<Vec<_>>();
     format!("{{{}}}", parts.join(", "))
 }
 
-/// The grid positions each final label set already occupies, as merged, sorted runs.
+/// The grid positions each final label set already occupies, per field and as merged, sorted runs.
 ///
 /// Shared by every partition's stream, because a label-set collision is a property of the whole
-/// output vector and not of one partition. `PerSeries` distribution keeps each series whole inside
-/// one partition, but two series that carry the same labels after the range function and its maps
-/// drop a label can still land in different partitions. Checking only within a partition would
-/// miss exactly those collisions.
+/// output vector and not of one partition. `KeyPartitioned` distribution keeps each series whole
+/// inside one partition, but two series that carry the same labels after the range function and
+/// its maps drop a label can still land in different partitions. Checking only within a partition
+/// would miss exactly those collisions.
+///
+/// The key is [`crate::grid_series::label_set`]'s normalization of the final labels rather than
+/// [`datatypes::series::MetricName`] itself: a label with an empty value is no label to
+/// Prometheus, so `{host="h", zone=""}` and `{host="h"}` are one label set and have to be compared
+/// as one. Encoding the tags as they are would file them apart and let one point hold two values.
+///
+/// Occupancy is per field and per position, not per chunk: two series whose label sets became equal
+/// while holding values in *different* fields merge cleanly in Prometheus, so only the same field
+/// at the same position collides. That is the rule
+/// [`crate::grid_series::merge_same_labelset`] applies.
 ///
 /// The map belongs to the plan, not to one stream: a partition that ends leaves what it claimed
 /// for the partitions still running, so the entries are only released with the plan itself. The
@@ -1078,8 +1026,9 @@ fn render_labels(metric: &MetricName) -> String {
 /// was unaccounted for.
 #[derive(Default)]
 struct LabelSets {
-    /// The grid positions each final label set already occupies, as merged, sorted runs.
-    seen: HashMap<LabelsKey, Vec<(usize, usize)>>,
+    /// The grid positions each final label set already occupies, one run list per field of the
+    /// series schema.
+    seen: HashMap<LabelSet, Vec<Vec<(usize, usize)>>>,
     /// What `seen` keeps charged on the task's memory pool. `None` until the first execution,
     /// since construction has no `TaskContext` and therefore no pool to register against.
     reservation: Option<MemoryReservation>,
@@ -1099,13 +1048,14 @@ impl LabelSets {
 
     /// Claims the occupied grid positions of one chunk of a final series for its label set.
     ///
-    /// A collision is an error only when both series hold a sample at the same evaluation
-    /// timestamp, which is Prometheus' range-query rule. Series with disjoint points are legal:
-    /// Prometheus merges them into one output series, while this node emits them as separate
-    /// batches and defers that merge to matrix assembly, so every sample survives.
+    /// A collision is an error only when both series hold a sample of *one field* at the same
+    /// evaluation timestamp, which is Prometheus' range-query rule. Series with disjoint points are
+    /// legal, and so are series that fill the same points field by field: Prometheus merges both
+    /// into one output series, while this node emits them as separate batches and defers that merge
+    /// to matrix assembly, so every sample survives.
     fn claim(&mut self, series: &Series) -> DataFusionResult<()> {
         let runs = occupied_runs(series)?;
-        let key = LabelsKey::new(&series.metric);
+        let key = label_set(&series.metric);
         let Self { seen, reservation } = self;
         // Nothing reaches a claim without an `execute` first, and an execution that ran attached the
         // reservation. Claiming without one would leave the map growing uncharged, so it is refused
@@ -1118,18 +1068,45 @@ impl LabelSets {
         match seen.entry(key) {
             Entry::Occupied(mut entry) => {
                 let stored = entry.get_mut();
-                if runs_overlap(stored, &runs) {
-                    return Err(DataFusionError::Execution(format!(
-                        "vector cannot contain metrics with the same labelset: {}",
-                        render_labels(&series.metric)
-                    )));
+                // An entry recorded from a chunk of fewer fields is padded, so every field of this
+                // chunk has a slot of its own: a slot is a field index of the schema, so both sides
+                // count the same field the same way. A chunk of *fewer* fields than the entry
+                // leaves the remaining slots to the chunks that fill them.
+                if stored.len() < runs.len() {
+                    stored.resize_with(runs.len(), Vec::new);
                 }
-                merge_runs(stored, &runs);
+                for (field, (stored, new)) in stored.iter().zip(&runs).enumerate() {
+                    if runs_overlap(stored, new) {
+                        return Err(DataFusionError::Execution(format!(
+                            "vector cannot contain metrics with the same labelset: {} (field \
+                             {field})",
+                            render_labels(entry.key())
+                        )));
+                    }
+                }
+                // What the merge below allocates is what this entry grows by: `merge_runs` hands
+                // back a list of `stored + new` runs, so the entry's capacity can only grow by the
+                // difference over what it already holds. Without this the arrays would grow for as
+                // long as the plan lives while the charge stayed at the first claim.
+                let grown = stored
+                    .iter()
+                    .zip(&runs)
+                    .map(|(stored, new)| {
+                        (stored.len() + new.len()).saturating_sub(stored.capacity())
+                    })
+                    .sum::<usize>()
+                    * size_of::<(usize, usize)>();
+                reservation.try_grow(grown)?;
+                for (stored, new) in stored.iter_mut().zip(&runs) {
+                    merge_runs(stored, new);
+                }
             }
             Entry::Vacant(entry) => {
                 // Only the label-set state is this node's own cross-poll state that grows with
                 // the output, so it is the only thing reserved here.
-                let bytes = entry.key().len() + runs.len() * 2 * size_of::<usize>();
+                let bytes = labels_bytes(entry.key())
+                    + runs.iter().map(|runs| runs.len()).sum::<usize>()
+                        * size_of::<(usize, usize)>();
                 reservation.try_grow(bytes)?;
                 entry.insert(runs);
             }
@@ -1140,12 +1117,14 @@ impl LabelSets {
 
 type SharedLabelSets = Arc<Mutex<LabelSets>>;
 
-/// The grid positions the rows of one chunk hold a value at, as sorted, disjoint runs.
+/// The grid positions the rows of one chunk hold a value at, one run list per field.
 ///
-/// Each run is `(start, end_exclusive)` over absolute grid indices. A row whose every field is
-/// missing is not occupied: Prometheus has no point there, so it cannot collide with another
-/// series.
-fn occupied_runs(series: &Series) -> DataFusionResult<Vec<(usize, usize)>> {
+/// Each run is `(start, end_exclusive)` over absolute grid indices, and the runs of one field are
+/// sorted and disjoint. Occupancy is kept per field because it is what a collision is: two series
+/// whose label sets became equal merge field by field in Prometheus, so only two values of the same
+/// field at one position collide. Marking the whole position as taken as soon as *any* field held a
+/// value would refuse the complementary pair that merges cleanly.
+fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<(usize, usize)>>> {
     // Rows are addressed on the statement's grid, so a row sits at the absolute position two
     // series can collide on. An explicit axis has no such position, and a chunk never carries
     // one: this is the refusal `EvaluatedChunk` already makes when the chunk is built.
@@ -1155,30 +1134,37 @@ fn occupied_runs(series: &Series) -> DataFusionResult<Vec<(usize, usize)>> {
         ));
     }
     let rows = series.time.len();
-    // A series with one dense, null-free float field holds a value on every row it carries, so a
-    // chunk that forms one run occupies exactly the range it reports and no row has to be
-    // inspected. This is the shape the fused evaluator produces for a range function over
-    // ordinary float samples.
-    if rows > 0
-        && series.fields.len() == 1
-        && let Some(DenseSamplesRef::Float(values)) =
-            series.fields.iter().next().and_then(Samples::dense)
-        && values.len() == rows
-        && values.null_count() == 0
-        && let Some(range) = series.time.as_grid_range()
-    {
-        return Ok(vec![(range.start(), range.start() + rows)]);
+    let range = series.time.as_grid_range();
+    let mut runs: Vec<Vec<(usize, usize)>> = vec![Vec::new(); series.fields.len()];
+    // A field that is one dense, null-free float run holds a value on every row the chunk carries,
+    // so it occupies exactly the range the chunk reports and no row of it has to be inspected. This
+    // is the shape the fused evaluator produces for a range function over ordinary float samples.
+    // Every other field is walked below, and a field filled here is skipped there.
+    let mut walked: Vec<(usize, &Samples)> = Vec::new();
+    for (index, samples) in series.fields.iter().enumerate() {
+        match (range, samples.dense()) {
+            (Some(range), Some(DenseSamplesRef::Float(values)))
+                if rows > 0 && values.len() == rows && values.null_count() == 0 =>
+            {
+                runs[index] = vec![(range.start(), range.start() + rows)];
+            }
+            _ => walked.push((index, samples)),
+        }
+    }
+    if walked.is_empty() {
+        return Ok(runs);
     }
     // `positions` walks a chunk that forms one run and one whose rows form several the same way,
     // in position order, so the holes between two runs are never read as rows.
-    let mut runs: Vec<(usize, usize)> = Vec::new();
     for (position, row) in series.time.positions() {
-        if !series.fields.iter().any(|samples| has_value(samples, row)) {
-            continue;
-        }
-        match runs.last_mut() {
-            Some(run) if run.1 == position => run.1 += 1,
-            _ => runs.push((position, position + 1)),
+        for (index, samples) in &walked {
+            if !has_value(samples, row) {
+                continue;
+            }
+            match runs[*index].last_mut() {
+                Some(run) if run.1 == position => run.1 += 1,
+                _ => runs[*index].push((position, position + 1)),
+            }
         }
     }
     Ok(runs)
@@ -1248,9 +1234,9 @@ fn merge_runs(stored: &mut Vec<(usize, usize)>, new: &[(usize, usize)]) {
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
-    /// The input batches, read as raw series chunks, or `None` once the stream ended in an error.
+    /// The input frames, read as raw series chunks, or `None` once the stream ended in an error.
     ///
-    /// The converter behind it holds its current batch, the chunk it is building and its own
+    /// The decoder behind it holds its current batch, the chunks it decoded from it and its own
     /// source, so a terminated stream that kept it alive would hold upstream resources until the
     /// consumer drops the stream.
     input: Option<SendableRawSeriesStream>,
@@ -1261,7 +1247,7 @@ pub struct FusedSeriesStream {
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
     /// The tag column names, indexed by `OutputColumn::Tag`.
-    binding: Arc<FusedSeriesBinding>,
+    tags: Arc<[String]>,
     /// The schema of every batch this stream yields.
     output_schema: SchemaRef,
     /// The label-set occupancy shared with the other partitions' streams.
@@ -1304,7 +1290,7 @@ impl FusedSeriesStream {
     ///
     /// An ordinary drop of the stream releases all of this as well, so this is not about the last
     /// release: it is about a consumer that keeps the terminated stream, which would otherwise
-    /// hold the evaluator, the converter's held batch and chunk, and the plan upstream of it.
+    /// hold the evaluator, the decoder's held batch and chunks, and the plan upstream of it.
     fn fail(&mut self) {
         self.done = true;
         self.executor = None;
@@ -1327,7 +1313,7 @@ impl FusedSeriesStream {
                 .claim(&chunk.series)?;
             let batch = series_to_record_batch(
                 &self.classification,
-                &self.binding.tags,
+                &self.tags,
                 &self.output_schema,
                 chunk,
             )?;
