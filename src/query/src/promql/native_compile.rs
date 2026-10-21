@@ -21,7 +21,9 @@
 //! ```text
 //! <selector>                                        e.g. x
 //! <range function>(<selector>[<range>])             e.g. rate(x[5m])
-//! <range function>(<constant>, <selector>[<range>]) e.g. quantile_over_time(0.9, x[5m])
+//! <range function>(<constant>[, <constant>], <selector>[<range>])
+//!                                                   e.g. quantile_over_time(0.9, x[5m]),
+//!                                                        double_exponential_smoothing(x[5m], 0.5, 0.5)
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
 //! <expression> <operator> <constant>                e.g. x * 100, x > bool 0
 //! <constant> <operator> <expression>                e.g. 1 / x, 0 < x
@@ -549,7 +551,7 @@ fn window_call(
 ) -> Result<NativeNode> {
     // The count is the signature's, so the rejection names what this function takes rather than
     // what one argument happens to be.
-    let expected = signature.parameters() + 1;
+    let expected = signature.arity();
     if args.len() != expected {
         return Err(not_implemented(&format!(
             "a call to `{name}` with {} argument(s), where it takes {expected}: {}",
@@ -557,17 +559,24 @@ fn window_call(
             signature.arguments()
         )));
     }
-    let (parameters, selector) = args.split_at(signature.parameters());
-    let function = match signature {
-        RangeSignature::Selector(function) => function,
-        RangeSignature::Scalar(bind) => bind(constant_argument(name, &parameters[0], 0)?),
-    };
-    let argument = &selector[0];
+    // The selector sits where the signature says it does, and everything else is a constant. Reading
+    // it by position rather than by "the last argument" is what lets `predict_linear(x[5m], 300)` and
+    // `quantile_over_time(0.9, x[5m])` share one path.
+    let selector_index = signature.selector_index();
+    let argument = &args[selector_index];
     let PromExpr::MatrixSelector(MatrixSelector { vs, range }) = unparen(argument) else {
         return Err(not_implemented(&format!(
-            "a call to `{name}` whose argument is `{argument}`"
+            "a call to `{name}` whose range selector is `{argument}`, where it has to be a range \
+             selector like `x[5m]`"
         )));
     };
+    let constants: Vec<Box<PromExpr>> = args
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| *position != selector_index)
+        .map(|(_, argument)| argument.clone())
+        .collect();
+    let function = signature.bind(name, &constants)?;
     window_selection(context, function, vs, range)
 }
 
@@ -804,33 +813,83 @@ fn grid_error(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::Plan(format!("the statement's grid is invalid: {error}"))
 }
 
-/// What a call to a range function has to be: the parameters it reads, and how to bind them.
+/// What a call to a range function has to be: where its range selector sits, how many constants it
+/// reads, and how they bind.
+///
+/// The selector's position is a variant rather than a convention because PromQL does not put it in
+/// one place: `quantile_over_time(0.9, x[5m])` writes its quantile before the selector, while
+/// `predict_linear(x[5m], 300)` and `double_exponential_smoothing(x[5m], 0.5, 0.1)` write theirs
+/// after it. A single "parameters come first" rule would read the selector as a constant in the
+/// second group and reject an ordinary query, so each shape states its own layout.
 #[derive(Clone, Copy)]
 enum RangeSignature {
     /// A function that reads only its range selector, as in `rate(x[5m])`.
     Selector(RangeFunction),
-    /// A function that reads one constant before its range selector, and the function that constant
-    /// binds, as in `quantile_over_time(0.9, x[5m])`.
-    ///
-    /// The constant is kept out of the variant name because only the call site knows it.
-    Scalar(fn(f64) -> RangeFunction),
+    /// One constant, then the range selector, as in `quantile_over_time(0.9, x[5m])`.
+    ConstantBeforeSelector(fn(f64) -> RangeFunction),
+    /// The range selector, then one constant, as in `predict_linear(x[5m], 300)`.
+    ConstantAfterSelector(fn(f64) -> RangeFunction),
+    /// The range selector, then two constants, as in
+    /// `double_exponential_smoothing(x[5m], 0.5, 0.1)`.
+    TwoConstantsAfterSelector(fn(f64, f64) -> RangeFunction),
 }
 
 impl RangeSignature {
-    /// How many scalar parameters the function reads before its range selector.
-    fn parameters(self) -> usize {
+    /// The position of the range selector among the call's arguments.
+    fn selector_index(self) -> usize {
+        match self {
+            Self::Selector(_)
+            | Self::ConstantAfterSelector(_)
+            | Self::TwoConstantsAfterSelector(_) => 0,
+            Self::ConstantBeforeSelector(_) => 1,
+        }
+    }
+
+    /// How many constants the function reads.
+    fn constants(self) -> usize {
         match self {
             Self::Selector(_) => 0,
-            Self::Scalar(_) => 1,
+            Self::ConstantBeforeSelector(_) | Self::ConstantAfterSelector(_) => 1,
+            Self::TwoConstantsAfterSelector(_) => 2,
         }
+    }
+
+    /// How many arguments the call writes, its range selector counted in.
+    fn arity(self) -> usize {
+        self.constants() + 1
     }
 
     /// What the call's arguments are, for the arity rejection to name them.
     fn arguments(self) -> &'static str {
         match self {
             Self::Selector(_) => "its range selector",
-            Self::Scalar(_) => "a number and its range selector",
+            Self::ConstantBeforeSelector(_) => "a number and its range selector",
+            Self::ConstantAfterSelector(_) => "its range selector and a number",
+            Self::TwoConstantsAfterSelector(_) => "its range selector and two numbers",
         }
+    }
+
+    /// Binds the function over the `constants` its call wrote, in the order they were written.
+    ///
+    /// The count is the signature's, so a caller that reached here has already checked it: reading
+    /// `constants[0]` and `constants[1]` cannot panic on a call this signature accepted.
+    fn bind(self, name: &str, constants: &[Box<PromExpr>]) -> Result<RangeFunction> {
+        // Each constant is folded by [`constant_argument`], which names the argument it found if the
+        // query wrote something only known at run time.
+        let mut folded = constants
+            .iter()
+            .enumerate()
+            .map(|(position, argument)| constant_argument(name, argument, position));
+        Ok(match self {
+            Self::Selector(function) => function,
+            Self::ConstantBeforeSelector(bind) | Self::ConstantAfterSelector(bind) => {
+                bind(folded.next().expect("one constant")?)
+            }
+            Self::TwoConstantsAfterSelector(bind) => bind(
+                folded.next().expect("first constant")?,
+                folded.next().expect("second constant")?,
+            ),
+        })
     }
 }
 
@@ -842,7 +901,17 @@ impl RangeSignature {
 /// its name alone cannot produce the variant the tree binds.
 fn range_signature(name: &str) -> Option<RangeSignature> {
     match name {
-        "quantile_over_time" => Some(RangeSignature::Scalar(RangeFunction::QuantileOverTime)),
+        "quantile_over_time" => Some(RangeSignature::ConstantBeforeSelector(
+            RangeFunction::QuantileOverTime,
+        )),
+        // These two write their constants after the selector, which is the opposite order to
+        // `quantile_over_time`.
+        "predict_linear" => Some(RangeSignature::ConstantAfterSelector(
+            RangeFunction::PredictLinear,
+        )),
+        "double_exponential_smoothing" => Some(RangeSignature::TwoConstantsAfterSelector(
+            |smoothing, trend| RangeFunction::DoubleExponentialSmoothing { smoothing, trend },
+        )),
         _ => range_function(name).map(RangeSignature::Selector),
     }
 }
@@ -1153,6 +1222,16 @@ fn range_function(name: &str) -> Option<RangeFunction> {
         "resets" => Some(RangeFunction::Resets),
         "changes" => Some(RangeFunction::Changes),
         "deriv" => Some(RangeFunction::Deriv),
+        // Prometheus marks these six as experimental, and this crate implements every one of them
+        // unconditionally: `RangeFunction` names them without a gate and the kernels answer them.
+        // Binding them here is therefore the same decision as binding `rate`, not a new policy —
+        // if a gate is ever wanted it belongs where a query is admitted, not scattered here.
+        "first_over_time" => Some(RangeFunction::FirstOverTime),
+        "mad_over_time" => Some(RangeFunction::MadOverTime),
+        "ts_of_first_over_time" => Some(RangeFunction::TsOfFirstOverTime),
+        "ts_of_last_over_time" => Some(RangeFunction::TsOfLastOverTime),
+        "ts_of_min_over_time" => Some(RangeFunction::TsOfMinOverTime),
+        "ts_of_max_over_time" => Some(RangeFunction::TsOfMaxOverTime),
         _ => None,
     }
 }
