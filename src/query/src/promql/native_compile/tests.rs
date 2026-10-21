@@ -100,6 +100,15 @@ fn with_call_arguments(query: &str, edit: impl FnOnce(&mut Vec<Box<PromExpr>>)) 
     stmt
 }
 
+/// The bare selector `x`, as the parser builds it.
+///
+/// The parser type-checks function arguments, so a vector selector where a matrix belongs can only be
+/// handed to the compiler by editing a tree the parser accepted: this supplies one.
+fn a_bare_selector() -> PromExpr {
+    let stmt = eval_stmt("x");
+    stmt.expr
+}
+
 /// The range selector out of `rate(x[5m])`.
 ///
 /// The parser type-checks function arguments, so a range selector can only be handed to a function
@@ -880,24 +889,30 @@ fn an_interleaved_scan_is_refused_whatever_the_shape() {
 #[test]
 fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
     let cases = [
-        ("x[5m:]", "the expression `x[5m:]`"),
-        // Nested shapes are refused by the argument check, not skipped over. A subquery is the
-        // reachable case of an argument that is not a range selector: the parser type-checks
-        // function arguments, so `rate(x)` never gets past parsing.
+        // A bare subquery is a matrix, and a tree reports evaluated samples: only a range function
+        // can fold a matrix, so a subquery on its own has no node.
+        (eval_stmt("x[5m:]"), "x[5m:]", "the expression `x[5m:]`"),
+        // A matrix position that is neither a range selector nor a subquery: a bare vector selector
+        // where a matrix belongs. The parser type-checks function arguments, so this can only reach
+        // the compiler as an edited tree.
         (
-            "rate(x[5m:])",
-            "a call to `rate` whose range selector is `x[5m:]`",
+            with_call_arguments("rate(x[5m])", |args| {
+                *args[0] = a_bare_selector();
+            }),
+            "rate(x)",
+            "whose matrix is `x`",
         ),
         // A function with no kernel. `predict_linear` used to stand here as the parameterised case
         // and is now bound, so what is left is a name this compiler has no kernel for at all.
         (
+            eval_stmt("absent(x)"),
             "absent(x)",
             "a call to `absent`, which has no native kernel",
         ),
     ];
 
-    for (query, named) in cases {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+    for (stmt, query, named) in cases {
+        let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
             .expect_err(&format!("`{query}` compiled, and it should not have"));
         assert!(
             matches!(error, DataFusionError::NotImplemented(_)),
@@ -2483,4 +2498,344 @@ fn a_parameterised_window_nests_under_a_comparison_and_an_aggregate() {
         );
     };
     assert_eq!(op.function, RangeFunction::PredictLinear(300.0));
+}
+
+/// The grid a subquery evaluates its inner expression on, as `(start_ms, step_ms, len)`.
+fn child_grid(window: &BoundWindow) -> (i64, i64, u64) {
+    let grid = window
+        .input_grid
+        .as_ref()
+        .expect("a subquery's window declares the grid its input was evaluated on");
+    let spec = grid.spec();
+    (spec.start_ms, spec.step_ms, spec.len)
+}
+
+/// `rate(x[5m:1m])` folds a subquery rather than a range selector: the inner selector is evaluated on
+/// the subquery's own grid, and the window declares that grid as its input's. The two grids are
+/// asserted apart, because a compiler that bound the child onto the statement's grid would still
+/// produce a window.
+#[test]
+fn a_subquery_feeds_a_window_evaluated_on_its_own_grid() {
+    let tree = compile(
+        &eval_stmt("rate(x[5m:1m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`rate(x[5m:1m])` was refused: {error}"));
+
+    let (input, op) = root_window(&tree);
+    assert_eq!(op.function, RangeFunction::Rate);
+    assert_eq!(op.window.range_ms, 300_000, "the subquery range was lost");
+    assert_eq!(op.window.offset_ms, 0);
+    assert_eq!(op.window.anchor_ms, None);
+
+    // The output lands on the statement's grid: 0, 5s, ..., 100s.
+    let spec = op.output_grid.spec();
+    assert_eq!((spec.start_ms, spec.step_ms, spec.len), (0, 5_000, 21));
+
+    // The inner selector is evaluated at one-minute steps, and the earliest read window opens at
+    // `0 - 300000`, so the first step boundary strictly after it is `-240000`.
+    assert_eq!(
+        child_grid(op),
+        (-240_000, 60_000, 6),
+        "the subquery's own grid is wrong"
+    );
+    // The input is that evaluation, not raw samples: this is the field that tells a subquery's window
+    // from one over a range selector.
+    let inner = evaluated(input);
+    assert_eq!(
+        inner.eval_grid.as_ref().unwrap().spec().start_ms,
+        -240_000,
+        "the inner expression was not evaluated on the subquery's grid"
+    );
+
+    // Below the window's input sits the one raw scan, so the tree still reads the scan exactly once.
+    let NativeExpr::Instant { input: scan, .. } = &input.expr else {
+        panic!(
+            "the subquery's input is not an instant selection: {:?}",
+            input.expr
+        );
+    };
+    let NativeExpr::Input(bound) = &scan.expr else {
+        panic!("the innermost node is not an input: {:?}", scan.expr);
+    };
+    assert!(
+        matches!(&bound.output, NativeType::Samples(schema) if schema.eval_grid.is_none()),
+        "the subquery's innermost input is not raw samples: {:?}",
+        bound.output
+    );
+}
+
+/// The child grid is derived from the statement's grid, the range, the offset and the step, and each
+/// of those changes it. The cases are asserted as whole specs, because a formula that dropped one
+/// term would still produce a plausible grid.
+#[test]
+fn a_subquery_grid_follows_its_range_step_and_offset() {
+    let cases = [
+        // (query, start_ms, step_ms, len)
+        // The plain case: one minute steps, five minute windows, no offset.
+        ("rate(x[5m:1m])", -240_000, 60_000, 6),
+        // The statement's own step is not the subquery's step.
+        ("rate(x[5m:5s])", -295_000, 5_000, 80),
+        // A step that does not divide the range, so the first boundary is not `-range`, and the last
+        // point is the last multiple of the step rather than the statement's end.
+        ("rate(x[5m:7s])", -294_000, 7_000, 57),
+        // A positive offset reads earlier samples, so the whole child grid moves back.
+        ("rate(x[5m:1m] offset 1m)", -300_000, 60_000, 6),
+        // A negative offset reads later ones, so it moves forward.
+        ("rate(x[5m:1m] offset -1m)", -180_000, 60_000, 6),
+    ];
+
+    for (query, start_ms, step_ms, len) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = root_window(&tree);
+        assert_eq!(
+            child_grid(op),
+            (start_ms, step_ms, len),
+            "`{query}` bound the wrong child grid"
+        );
+        // Whatever the child grid is, the window still reports the statement's.
+        let spec = op.output_grid.spec();
+        assert_eq!(
+            (spec.start_ms, spec.step_ms, spec.len),
+            (0, 5_000, 21),
+            "`{query}` moved the output off the statement's grid"
+        );
+    }
+}
+
+/// A subquery step that names no point is refused: `x[5m:]` falls back to Prometheus's default
+/// evaluation interval of one minute, and a step of zero has no point at all. The rejection names the
+/// number rather than reporting an empty grid.
+#[test]
+fn a_subquery_step_must_be_positive() {
+    // The parser refuses `x[5m:0s]`, so a zero step can only be handed to the compiler as an edited
+    // tree — the same way the range and arity tests reach their shapes.
+    let mut stmt = eval_stmt("rate(x[5m:1m])");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("`rate(x[5m:1m])` parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("`x[5m:1m]` parses to a subquery");
+    };
+    subquery.step = Some(Duration::ZERO);
+
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("a zero subquery step compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::Plan(_)),
+        "a zero step is a plan error, not a shape this compiler lacks: {error}"
+    );
+    assert!(
+        error.to_string().contains("has to be longer than zero"),
+        "the rejection did not say what a step has to be: {error}"
+    );
+}
+
+/// A subquery with no step falls back to Prometheus's default evaluation interval of one minute,
+/// which is not the statement's step: the statement here steps in five seconds, so a compiler that
+/// reused it would produce a grid five times longer.
+#[test]
+fn a_subquery_without_a_step_uses_the_default_interval() {
+    let tree = compile(
+        &eval_stmt("rate(x[5m:])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`rate(x[5m:])` was refused: {error}"));
+
+    let (_, op) = root_window(&tree);
+    assert_eq!(op.window.range_ms, 300_000);
+    assert_eq!(
+        child_grid(op).1,
+        60_000,
+        "a subquery without a step did not use the default interval"
+    );
+}
+
+/// An anchored subquery is refused, and the rejection says what is missing rather than treating the
+/// anchor as unsupported in general: a range selector binds one.
+#[test]
+fn an_anchored_subquery_is_refused() {
+    let error = compile(
+        &eval_stmt("rate(x[5m:1m] @ 1234)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("an anchored subquery compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the refusal is not NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("anchored subquery"),
+        "the refusal did not name what it found: {message}"
+    );
+    assert!(
+        message.contains("anchoring is bound on a range selector"),
+        "the refusal did not say where an anchor does belong: {message}"
+    );
+}
+
+/// A window folds one value per grid point, so the expression inside a subquery has to produce a
+/// vector. A scalar has no fields to fold and no points at all, so it is refused by type.
+#[test]
+fn a_subquery_over_a_scalar_is_refused() {
+    let mut stmt = eval_stmt("rate(x[5m:1m])");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("`rate(x[5m:1m])` parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("`x[5m:1m]` parses to a subquery");
+    };
+    *subquery.expr = PromExpr::NumberLiteral(NumberLiteral::new(1.0));
+
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("a subquery over a scalar compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the refusal is not NotImplemented: {error}"
+    );
+    assert!(
+        error.to_string().contains("has to evaluate a vector"),
+        "the refusal did not say what a subquery evaluates: {error}"
+    );
+}
+
+/// A subquery nests like any other matrix: a window over a subquery can itself sit inside a subquery,
+/// and the whole chain still reads the scan once. The grids are asserted level by level, because a
+/// compiler that passed the outer grid down would produce a tree that validates but reads the wrong
+/// points.
+#[test]
+fn a_subquery_nests_and_each_level_has_its_own_grid() {
+    let tree = compile(
+        &eval_stmt("rate(rate(x[5m:1m])[10m:30s])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`rate(rate(x[5m:1m])[10m:30s])` was refused: {error}"));
+
+    let (outer_input, outer) = root_window(&tree);
+    assert_eq!(outer.window.range_ms, 600_000);
+    // The outer subquery reads ten minutes back at thirty-second steps, so its first boundary after
+    // `-600000` is `-570000` and its last multiple of 30000 below the statement's end is `90000`.
+    assert_eq!(
+        child_grid(outer),
+        (-570_000, 30_000, 23),
+        "the outer subquery's grid is wrong"
+    );
+
+    let NativeExpr::Window {
+        input: inner_input,
+        op: inner,
+    } = &outer_input.expr
+    else {
+        panic!(
+            "the outer subquery's input is not a window: {:?}",
+            outer_input.expr
+        );
+    };
+    assert_eq!(inner.function, RangeFunction::Rate);
+    assert_eq!(inner.window.range_ms, 300_000);
+    // The inner subquery is evaluated on the outer one's grid, not on the statement's: its earliest
+    // read window opens at `-570000 - 300000`, whose first one-minute boundary is `-840000`.
+    assert_eq!(
+        child_grid(inner),
+        (-840_000, 60_000, 16),
+        "the inner subquery's grid is wrong, so the outer grid was not passed down"
+    );
+
+    // The innermost node is still the one raw scan.
+    let NativeExpr::Instant { input: scan, .. } = &inner_input.expr else {
+        panic!(
+            "the inner window's input is not an instant selection: {:?}",
+            inner_input.expr
+        );
+    };
+    assert!(
+        matches!(scan.expr, NativeExpr::Input(_)),
+        "the innermost node is not the scan: {:?}",
+        scan.expr
+    );
+}
+
+/// A subquery composes with the rest of the compiler: a sum over a rate over a subquery is a tree,
+/// not a shape the compiler knows by name.
+#[test]
+fn a_subquery_composes_with_an_aggregate_and_a_comparison() {
+    let tree = compile(
+        &eval_stmt("sum by(job)(rate(x[5m:1m]) > 0)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`sum by(job)(rate(x[5m:1m]) > 0)` was refused: {error}"));
+
+    let (input, aggregate) = aggregate_parts(tree.root());
+    assert_eq!(aggregate.kind, AggregateKind::Sum);
+    let (left, _, matching) = binary_parts(input);
+    assert_eq!(matching.op, BinaryOp::Gt);
+    let NativeExpr::Window { op, .. } = &left.expr else {
+        panic!(
+            "the comparison's left operand is not a window: {:?}",
+            left.expr
+        );
+    };
+    assert_eq!(op.window.range_ms, 300_000);
+    assert!(
+        op.input_grid.is_some(),
+        "the window over a subquery forgot its input grid"
+    );
+}
+
+/// The grid a subquery declares has to hold every point its window will read, and that property is
+/// what `BoundWindow::input_grid` means. Pinning the numbers of a formula would pass even if the
+/// formula were wrong in the same way the test was written; this checks the property instead, at
+/// every point of the statement's grid.
+#[test]
+fn a_subquery_grid_covers_every_read_window() {
+    for query in [
+        "rate(x[5m:1m])",
+        "rate(x[5m:5s])",
+        // A step that divides neither the range nor the statement's step.
+        "rate(x[5m:7s])",
+        "rate(x[1m:7s])",
+        // Offsets in both directions move the whole set of read windows.
+        "rate(x[5m:1m] offset 1m)",
+        "rate(x[5m:1m] offset -1m)",
+        "rate(x[90s:40s] offset 30s)",
+    ] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = root_window(&tree);
+        let spec = op
+            .input_grid
+            .as_ref()
+            .expect("a subquery declares its grid")
+            .spec();
+        let child_first = spec.start_ms;
+        let child_last = spec.start_ms + (spec.len as i64 - 1) * spec.step_ms;
+
+        // Every point the window reads lies at `point - offset`, and the window reaches `range` back
+        // from there. The subquery evaluates at multiples of its step, so the points it can supply are
+        // the step boundaries strictly after the earliest read and at or before the latest one.
+        let out = op.output_grid.spec();
+        for index in 0..out.len as i64 {
+            let point = out.start_ms + index * out.step_ms;
+            let read_end = point - op.window.offset_ms;
+            let read_start = read_end - op.window.range_ms;
+            let first_needed = (read_start.div_euclid(spec.step_ms) + 1) * spec.step_ms;
+            let last_needed = read_end.div_euclid(spec.step_ms) * spec.step_ms;
+            if first_needed > last_needed {
+                // The window is narrower than one step, so this point folds nothing; nothing to cover.
+                continue;
+            }
+            assert!(
+                first_needed >= child_first && last_needed <= child_last,
+                "`{query}`: the window at {point}ms reads {first_needed}..={last_needed}ms, which the \
+                 declared grid {child_first}..={child_last}ms does not cover"
+            );
+        }
+    }
 }
