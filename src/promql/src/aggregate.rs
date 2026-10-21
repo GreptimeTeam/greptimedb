@@ -206,9 +206,14 @@ pub fn aggregate_quantile(
             .iter()
             .map(|series| series.time.positions())
             .collect();
-        let mut cursors: Vec<Vec<_>> = members
-            .iter()
-            .map(|series| series.fields.iter().map(|field| field.cursor()).collect())
+        // Indexed by field, then member.
+        let mut cursors: Vec<Vec<_>> = (0..width)
+            .map(|field| {
+                members
+                    .iter()
+                    .map(|series| series.fields.as_slice()[field].cursor())
+                    .collect()
+            })
             .collect();
         let mut next: BinaryHeap<Reverse<(usize, usize, usize)>> = positions
             .iter_mut()
@@ -236,10 +241,10 @@ pub fn aggregate_quantile(
                 .ok()
                 .map(|index| q[index].1);
             row.clear();
-            for field in 0..width {
+            for field in &mut cursors {
                 values.clear();
                 for &(member, member_row) in &present {
-                    if let Some(SampleRef::Float(value)) = cursors[member][field].at(member_row) {
+                    if let Some(SampleRef::Float(value)) = field[member].at(member_row) {
                         values.push(value);
                     }
                 }
