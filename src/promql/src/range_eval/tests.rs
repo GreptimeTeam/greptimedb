@@ -1010,6 +1010,180 @@ fn histogram_chunk(schema: &SeriesSchema, buckets: i32, ts: i64) -> RawSeriesChu
     .unwrap()
 }
 
+/// The single histogram sample of [`histogram_chunk`], read with `start_timestamp`.
+///
+/// A sample carries the start timestamp a scan read it with, and it is payload rather than a
+/// property of the value.
+fn histogram_chunk_from(
+    schema: &SeriesSchema,
+    buckets: i32,
+    ts: i64,
+    start_timestamp: Option<i64>,
+    is_last: bool,
+) -> RawSeriesChunk {
+    let offsets = [0];
+    let lengths = [buckets];
+    let counts = vec![1.0; usize::try_from(buckets).unwrap()];
+    let mut builder = HistogramBatchBuilder::new();
+    let index = builder
+        .push(HistogramView {
+            schema: 0,
+            zero_threshold: 0.0,
+            zero_count: 0.0,
+            count: f64::from(buckets),
+            sum: f64::from(buckets),
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp,
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &offsets,
+                span_lengths: &lengths,
+                buckets: &counts,
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        })
+        .unwrap();
+    let samples = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(index)]),
+        builder.finish().unwrap(),
+    )
+    .unwrap();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from(0u64.to_le_bytes().to_vec()),
+        Some(metric(0)),
+        RawTimestamps::try_new(ScalarBuffer::from(vec![ts])).unwrap(),
+        SeriesFields::try_from_vec(vec![samples]).unwrap(),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// A function that hands back the sample it selected hands back that sample's payload.
+///
+/// `last_over_time` and `first_over_time` select a sample instead of computing one, so the
+/// histogram that leaves them is the histogram that arrived, start timestamp included. The window
+/// here holds two samples that differ in bucket count and in start timestamp, so the count and the
+/// timestamp together say which one was selected rather than only that some timestamp survived:
+/// the last sample for `last_over_time`, the first one for `first_over_time`. What this pins is
+/// that the selection passes the stored payload through; it does not pin a Prometheus result, whose
+/// histogram values carry no such field, and it does not claim that a native rate reads the field
+/// afterwards. A histogram computed from samples carries none, as
+/// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
+/// pins for the operations that build one.
+#[test]
+fn a_selected_histogram_keeps_its_start_timestamp() {
+    let schema = raw_schema(1);
+    let (first_start, last_start): (i64, i64) = (1_500, 2_500);
+    // One bucket at 0ms and two at 5000ms, each read with its own start timestamp. Both samples
+    // are inside the window of the second grid point; the first point is decided on the first
+    // chunk alone, before the second sample has arrived.
+    let chunks = [
+        histogram_chunk_from(&schema, 1, 0, Some(first_start), false),
+        histogram_chunk_from(&schema, 2, 5_000, Some(last_start), true),
+    ];
+    // The histogram of every row the function hands out, read off the output's own views: the
+    // bucket count tells the selected sample apart from any other, the start timestamp is the
+    // payload this test is about.
+    let selected = |function: RangeFunction| -> Vec<(usize, f64, Option<i64>)> {
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(0, 10_000, 2),
+            RangeWindow {
+                range_ms: 20_000,
+                offset_ms: 0,
+                anchor_ms: None,
+            },
+            function,
+        )
+        .unwrap();
+        let out = collect_chunks(&mut evaluator, &chunks);
+        assert!(!out.is_empty(), "{function:?} answered no chunk");
+        let mut picked = Vec::new();
+        for chunk in &out {
+            let mut cursor = chunk.series.fields.as_slice()[0].cursor();
+            for (position, row) in chunk.series.time.positions() {
+                match cursor.at(row).expect("the axis and the fields are aligned") {
+                    SampleRef::Histogram(view) => {
+                        picked.push((position, view.count, view.start_timestamp));
+                    }
+                    SampleRef::Float(_) => panic!("{function:?} answered a float for a histogram"),
+                    SampleRef::Missing => {
+                        panic!("{function:?} handed out a row of its own axis without a sample")
+                    }
+                }
+            }
+        }
+        picked
+    };
+
+    assert_eq!(
+        selected(RangeFunction::LastOverTime),
+        [(0, 1.0, Some(first_start)), (1, 2.0, Some(last_start))],
+        "last_over_time did not hand back the sample it selected"
+    );
+    assert_eq!(
+        selected(RangeFunction::FirstOverTime),
+        [(0, 1.0, Some(first_start)), (1, 1.0, Some(first_start))],
+        "first_over_time did not hand back the sample it selected"
+    );
+}
+
+/// A histogram computed from a window carries no start timestamp, even when the window holds one.
+///
+/// `sum_over_time` computes a histogram rather than selecting one, so the timestamp the sample was
+/// read with is not part of the result -- the rule the histogram operations themselves follow, as
+/// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
+/// pins. The fold clears the field while adding, so a window holding two histograms already loses
+/// it; a window holding one must not depend on that, or whether a result carries the field would
+/// say how many samples the window held rather than what the function did.
+#[test]
+fn a_computed_histogram_drops_its_start_timestamp() {
+    let schema = raw_schema(1);
+    let start: i64 = 1_500;
+    // One histogram sample inside the window of both grid points, so the fold adds nothing to it
+    // and the single input is the whole result.
+    let chunks = [histogram_chunk_from(&schema, 1, 0, Some(start), true)];
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(0, 10_000, 2),
+        RangeWindow {
+            range_ms: 20_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::SumOverTime,
+    )
+    .unwrap();
+    let out = collect_chunks(&mut evaluator, &chunks);
+    let mut computed = Vec::new();
+    for chunk in &out {
+        let mut cursor = chunk.series.fields.as_slice()[0].cursor();
+        for (position, row) in chunk.series.time.positions() {
+            match cursor.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Histogram(view) => {
+                    computed.push((position, view.count, view.start_timestamp));
+                }
+                SampleRef::Float(_) => panic!("sum_over_time answered a float for a histogram"),
+                SampleRef::Missing => {
+                    panic!("sum_over_time handed out a row of its own axis without a sample")
+                }
+            }
+        }
+    }
+    // The sum of one histogram is that histogram, so the count says the sample was summed rather
+    // than passed over; only the start timestamp has to be gone.
+    assert_eq!(
+        computed,
+        [(0, 1.0, None), (1, 1.0, None)],
+        "sum_over_time kept the start timestamp of the histogram it summed"
+    );
+}
+
 /// A window retaining a native histogram is charged for the payload it owns, not only the slot.
 ///
 /// The histogram sample below stays ahead of the second grid point's window, so the evaluator keeps

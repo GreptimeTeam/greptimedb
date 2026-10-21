@@ -35,6 +35,22 @@ type Buckets = Vec<(i32, f64)>;
 #[derive(Debug, Clone)]
 pub(crate) struct FloatHistogram {
     pub(crate) reset_hint: CounterResetHint,
+    /// The start timestamp of the sample this histogram was read from, in milliseconds.
+    ///
+    /// It is metadata of GreptimeDB's histogram row, not part of the histogram value that
+    /// Prometheus's `FloatHistogram` models. This owned form preserves it -- [`Self::try_from_view`]
+    /// reads it off the sample and [`Self::push_to`] writes it back -- while every operation that
+    /// derives a histogram from its input ([`Self::add`], [`Self::kahan_add`], [`Self::mul`],
+    /// [`Self::div`], [`Self::compact`], [`Self::copy_to_schema`], with the constructors beside
+    /// them) clears it. [`Self::equals`] does not compare it.
+    ///
+    /// Both halves are this module's own policy and say nothing about how Prometheus propagates
+    /// these timestamps: its `FloatHistogram` does not carry the field, while its rate and reset
+    /// evaluation receives start timestamps through a separate channel. This crate's native range
+    /// kernel does not read the field; the legacy extrapolation path does, to synthesize a zero
+    /// point. So a selection that keeps the field preserves what was stored, and does not by itself
+    /// make a native rate agree with the legacy one.
+    pub(crate) start_timestamp: Option<i64>,
     pub(crate) schema: i32,
     pub(crate) zero_threshold: f64,
     pub(crate) zero_count: f64,
@@ -62,6 +78,7 @@ impl FloatHistogram {
     pub(crate) fn try_from_view(view: &HistogramView<'_>) -> Result<Self> {
         Ok(Self {
             reset_hint: view.reset_hint,
+            start_timestamp: view.start_timestamp,
             schema: view.schema,
             zero_threshold: view.zero_threshold,
             zero_count: view.zero_count,
@@ -130,7 +147,7 @@ impl FloatHistogram {
                 count: self.count,
                 zero_count: self.zero_count,
                 reset_hint: self.reset_hint,
-                start_timestamp: None,
+                start_timestamp: self.start_timestamp,
                 custom_values: &self.custom_values,
                 positive: BucketSideView {
                     span_offsets: &positive_offsets,
@@ -151,6 +168,7 @@ impl FloatHistogram {
     pub(crate) fn empty_like(&self) -> Self {
         Self {
             reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
             schema: self.schema,
             zero_threshold: 0.0,
             zero_count: 0.0,
@@ -169,6 +187,8 @@ impl FloatHistogram {
 
     /// Go `Mul`.
     pub(crate) fn mul(&mut self, factor: f64) {
+        // A result this operation derived, so it carries no start timestamp of its own.
+        self.start_timestamp = None;
         self.zero_count *= factor;
         self.count *= factor;
         self.sum *= factor;
@@ -182,6 +202,8 @@ impl FloatHistogram {
 
     /// Go `Div`; dividing by zero removes every bucket.
     pub(crate) fn div(&mut self, scalar: f64) {
+        // A result this operation derived, so it carries no start timestamp of its own.
+        self.start_timestamp = None;
         self.zero_count /= scalar;
         self.count /= scalar;
         self.sum /= scalar;
@@ -215,6 +237,8 @@ impl FloatHistogram {
 
     /// Go `Compact(0)`: drops empty buckets.
     pub(crate) fn compact(&mut self) {
+        // A result this operation derived, so it carries no start timestamp of its own.
+        self.start_timestamp = None;
         self.positive.retain(|&(_, count)| count != 0.0);
         self.negative.retain(|&(_, count)| count != 0.0);
         self.layout = None;
@@ -223,13 +247,19 @@ impl FloatHistogram {
     /// Go `CopyToSchema`; `target` must not exceed the schema.
     pub(crate) fn copy_to_schema(&self, target: i32) -> Result<Self> {
         if target == self.schema {
-            return Ok(self.clone());
+            // The copy is a histogram this call produced, like the reduced one below: a start
+            // timestamp belongs to the sample that carried it, not to a value derived from it.
+            return Ok(Self {
+                start_timestamp: None,
+                ..self.clone()
+            });
         }
         if self.uses_custom_buckets() || target == CUSTOM_BUCKETS_SCHEMA || target > self.schema {
             return Err(incompatible_schema());
         }
         Ok(Self {
             reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
             schema: target,
             zero_threshold: self.zero_threshold,
             zero_count: self.zero_count,
@@ -255,6 +285,8 @@ impl FloatHistogram {
     fn add_or_sub(&mut self, other: &Self, subtract: bool) -> Result<AddOutcome> {
         check_schemas(self, other)?;
         self.layout = None;
+        // A result this operation derived, so it carries no start timestamp of its own.
+        self.start_timestamp = None;
         let mut outcome = AddOutcome {
             counter_reset_collision: self.adjust_counter_reset(other),
             custom_bounds_reconciled: false,
@@ -323,6 +355,8 @@ impl FloatHistogram {
     ) -> Result<(Self, AddOutcome)> {
         check_schemas(self, other)?;
         self.layout = None;
+        // A result this operation derived, so it carries no start timestamp of its own.
+        self.start_timestamp = None;
         let mut outcome = AddOutcome {
             counter_reset_collision: self.adjust_counter_reset(other),
             custom_bounds_reconciled: false,
@@ -410,6 +444,7 @@ impl FloatHistogram {
     fn new_compensation(&self) -> Self {
         Self {
             reset_hint: self.reset_hint,
+            start_timestamp: None,
             schema: self.schema,
             zero_threshold: self.zero_threshold,
             zero_count: 0.0,
