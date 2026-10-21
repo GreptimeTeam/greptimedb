@@ -2479,5 +2479,53 @@ mod tests {
             10,
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
         );
+
+        // The lease expires while creating a logical region with a new tag. Once the lease is
+        // renewed, the retried CREATE succeeds and writes with the new tag succeed.
+        let logical_region_id = RegionId::new(5, 2);
+        let create_request = || {
+            RegionRequest::Create(test_util::create_logical_region_request(
+                &["job", "tag2"],
+                physical_region_id,
+                &table_dir("test", logical_region_id.table_id()),
+            ))
+        };
+        listener.pause_next();
+        let create = {
+            let engine = engine.clone();
+            let request = create_request();
+            tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
+        };
+        listener.wait_appended().await;
+        engine
+            .set_region_role_by_lease(physical_region_id, grant(Instant::now()))
+            .unwrap();
+        listener.resume();
+        let err = create.await.unwrap().unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+        engine
+            .set_region_role_by_lease(
+                physical_region_id,
+                grant(Instant::now() + Duration::from_secs(10)),
+            )
+            .unwrap();
+        engine
+            .handle_request(logical_region_id, create_request())
+            .await
+            .unwrap();
+        let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
+            rows: Rows {
+                schema: test_util::row_schema_with_tags(&["job", "tag2"]),
+                rows: test_util::build_rows(2, 5),
+            },
+            hint: None,
+            partition_expr_version: None,
+        });
+        let response = engine
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap();
+        assert_eq!(5, response.affected_rows);
     }
 }

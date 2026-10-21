@@ -534,6 +534,7 @@ mod test {
     use api::v1::meta::{HeartbeatResponse, RegionLease};
     use api::v1::{ColumnSchema, Rows};
     use common_meta::heartbeat::mailbox::HeartbeatMailbox;
+    use common_recordbatch::RecordBatches;
     use mito2::config::MitoConfig;
     use mito2::engine::MitoEngine;
     use mito2::engine::listener::WriteWalListener;
@@ -542,6 +543,7 @@ mod test {
     use store_api::region_request::{
         EnterStagingRequest, RegionCatchupRequest, RegionPutRequest, StagingPartitionDirective,
     };
+    use store_api::storage::ScanRequest;
 
     use super::*;
     use crate::tests::mock_region_server;
@@ -972,7 +974,7 @@ mod test {
         let region_id = RegionId::new(1024, 1);
         let schema = create_region(&region_server, region_id).await;
         alive_keeper.register_region(region_id).await;
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_secs(2);
         alive_keeper
             .renew_region_leases(&[leader_grant(region_id)], Instant::now(), deadline)
             .await;
@@ -992,6 +994,20 @@ mod test {
         listener.resume();
         let err = write.await.unwrap().unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("lost its leader lease while writing to the WAL"),
+            "{err:?}"
+        );
+        // The write is in the WAL, so it is applied.
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            1,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+        );
 
         // Without the countdown task, the region is still a leader but rejects writes.
         assert_eq!(engine.role(region_id), Some(RegionRole::Leader));
@@ -999,6 +1015,10 @@ mod test {
             .await
             .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("does not hold a valid leader lease"),
+            "{err:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
