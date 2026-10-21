@@ -57,6 +57,7 @@ use table::table::numbers::NumbersTable;
 use table::{Table, TableRef};
 
 use super::*;
+use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 
 fn collect_merge_scan_remote_dyn_filter_producer_ids(
     plan: &LogicalPlan,
@@ -1973,6 +1974,98 @@ fn expand_step_aggr_avg_limit() {
         "    Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_merge(__avg_state(t.number)) AS avg(t.number)]]",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_state(CAST(t.number AS Float64))]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// `count(*)` and `count(1)` are rewritten to `count(ts)` with their names preserved, so
+/// all three share one state expression and must share one state column.
+#[test]
+fn expand_step_aggr_count_wildcard_and_time_index() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![
+                datafusion::functions_aggregate::count::count_all(),
+                datafusion::functions_aggregate::expr_fn::count(lit(1i64)),
+                datafusion::functions_aggregate::expr_fn::count(col("ts")),
+            ],
+        )
+        .unwrap()
+        .project(vec![
+            col("count(*)").alias("a"),
+            col("count(Int64(1))"),
+            col("count(t.ts)").alias("b"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let plan = CountWildcardToTimeIndexRule.analyze(plan, &config).unwrap();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: count(*) AS a, count(Int64(1)), count(t.ts) AS b",
+        "  Projection: count(*), count(Int64(1)), count(t.ts)",
+        "    Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(t.ts)) AS count(*), __count_merge(__count_state(t.ts)) AS count(Int64(1)), __count_merge(__count_state(t.ts)) AS count(t.ts)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__count_state(t.ts)]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// After the `count(*)` rewrite, `count(ts)` and the casts of `ts` are different states with
+/// the same schema name, as schema names hide casts. The output alias `t.ts` and the second
+/// cast make sure a renamed state never takes a name that is already allocated.
+#[test]
+fn expand_step_aggr_count_wildcard_and_cast_time_index() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![
+                datafusion::functions_aggregate::count::count_all(),
+                datafusion::functions_aggregate::expr_fn::count(datafusion_expr::cast(
+                    col("ts"),
+                    DataType::Int64,
+                ))
+                .alias("t.ts"),
+                datafusion::functions_aggregate::expr_fn::count(datafusion_expr::cast(
+                    col("ts"),
+                    DataType::Utf8,
+                ))
+                .alias("c"),
+            ],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let plan = CountWildcardToTimeIndexRule.analyze(plan, &config).unwrap();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: count(*), t.ts, c",
+        "  Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(t.ts)) AS count(*), __count_merge(__count_state(t.ts)_1) AS t.ts, __count_merge(__count_state(t.ts)_2) AS c]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__count_state(t.ts), __count_state(CAST(t.ts AS Int64)) AS __count_state(t.ts)_1, __count_state(CAST(t.ts AS Utf8)) AS __count_state(t.ts)_2]]",
         "  TableScan: t",
         "]]",
     ]

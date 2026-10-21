@@ -22,6 +22,7 @@
 //! `foo_merge`'s input arg is the same as `foo_state`'s output, and its output is the same as `foo`'s input.
 //!
 
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -183,7 +184,13 @@ impl StateMergeHelper {
                 )));
             }
         };
-        let mut lower_aggr_exprs = vec![];
+        // (unaliased state expression, output column name)
+        let mut lower_states: Vec<(Expr, String)> = vec![];
+        let mut lower_output_names: HashSet<String> = aggr
+            .group_expr
+            .iter()
+            .map(|e| e.qualified_name().1)
+            .collect();
         let mut upper_aggr_exprs = vec![];
 
         // group exprs for upper plan should refer to the output group expr as column from lower plan
@@ -218,9 +225,28 @@ impl StateMergeHelper {
                 params: aggr_func.params.clone(),
             };
             let expr = Expr::AggregateFunction(expr);
-            let lower_state_output_col_name = expr.schema_name().to_string();
 
-            lower_aggr_exprs.push(expr);
+            // The state column is named after the unaliased state expression, which can
+            // repeat even though the original output names are unique: a name-preserving
+            // rewrite such as `count(*)` -> `count(ts) AS count(*)` can make two aggregates
+            // share one state expression, and schema names hide casts, so
+            // `count(CAST(ts AS Int64))` is named `count(t.ts)` too. Identical states are
+            // computed once; a different state with a taken name gets a numeric suffix.
+            let lower_state_output_col_name =
+                if let Some((_, name)) = lower_states.iter().find(|(e, _)| *e == expr) {
+                    name.clone()
+                } else {
+                    let base = expr.schema_name().to_string();
+                    let mut name = base.clone();
+                    let mut suffix = 0;
+                    while lower_output_names.contains(&name) {
+                        suffix += 1;
+                        name = format!("{base}_{suffix}");
+                    }
+                    lower_output_names.insert(name.clone());
+                    lower_states.push((expr, name.clone()));
+                    name
+                };
 
             // then create the merge function using the physical expression of the original aggregate function
             let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
@@ -257,7 +283,16 @@ impl StateMergeHelper {
         }
 
         let mut lower = aggr.clone();
-        lower.aggr_expr = lower_aggr_exprs;
+        lower.aggr_expr = lower_states
+            .into_iter()
+            .map(|(expr, name)| {
+                if expr.schema_name().to_string() == name {
+                    expr
+                } else {
+                    expr.alias(name)
+                }
+            })
+            .collect();
         let lower_plan = LogicalPlan::Aggregate(lower);
 
         // update aggregate's output schema

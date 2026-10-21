@@ -54,6 +54,11 @@ insert into t values
 -- group keys derived from the partition column span regions
 select substr(host, 6, 1) as g, count(*), sum(val) from t group by g order by g;
 
+-- count(*) and count(1) are rewritten to count(ts), sharing the same state column
+select count(*), count(1), count(ts) from t;
+
+select count(*) as a, count(ts) as b from t;
+
 -- grouping sets are computed on the frontend, only the PostgreSQL dialect parses them
 -- SQLNESS PROTOCOL POSTGRES
 select host, idc, sum(val) from t group by grouping sets ((host, idc), (host)) order by host, idc;
