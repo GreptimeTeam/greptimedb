@@ -39,6 +39,7 @@ mod histogram;
 mod tests;
 
 pub use function::RangeFunction;
+pub(crate) use function::quantile;
 
 /// The samples a range selector reads at evaluation time `T`: source timestamps in
 /// `(E - range_ms, E]`, where `E` is `T - offset_ms`, or `anchor_ms - offset_ms` with `@`.
