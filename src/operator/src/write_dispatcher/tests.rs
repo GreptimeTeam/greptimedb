@@ -563,11 +563,7 @@ async fn test_write_retry_stops_when_a_sibling_is_nonretryable() {
                 .await
                 .unwrap_err();
             let terminal_region = RegionId::new(1, 2).as_u64();
-            assert!(
-                format!("{error:?}")
-                    .contains(&format!("region {terminal_region} rejected the write")),
-                "{error:?}"
-            );
+            assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
             assert_eq!(
                 server.attempt_counts(),
                 HashMap::from([(RegionId::new(1, 1).as_u64(), 1), (terminal_region, 1),])
