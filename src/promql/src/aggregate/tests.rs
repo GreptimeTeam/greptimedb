@@ -42,6 +42,10 @@ const OPS: [AggregateOp; 6] = [
 ];
 
 fn schema(fields: &[&str]) -> Arc<SeriesSchema> {
+    schema_with_grid_len(fields, 128)
+}
+
+fn schema_with_grid_len(fields: &[&str], len: u64) -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
         fields: fields
             .iter()
@@ -50,7 +54,7 @@ fn schema(fields: &[&str]) -> Arc<SeriesSchema> {
             })
             .collect(),
         eval_grid: Some(Arc::new(
-            EvalGrid::try_new(GridSpec::try_new(-1000, 250, 128).unwrap()).unwrap(),
+            EvalGrid::try_new(GridSpec::try_new(-1000, 250, len).unwrap()).unwrap(),
         )),
     })
 }
@@ -971,4 +975,23 @@ fn count_values_accepts_its_own_label_in_by() {
         count_values(&schema, &series, "c", Grouping::By(&["value"])),
         Err(DataFusionError::NotImplemented(_))
     ));
+}
+
+/// A series the aggregator rejects is not folded in part: the series after it aggregate as if it
+/// had never been offered.
+#[test]
+fn a_rejected_series_leaves_the_aggregator_unchanged() {
+    let schema = schema(&["value"]);
+    let other = schema_with_grid_len(&["value"], 64);
+    let first = input(&schema, metric("m", &[("i", "0")]), 10, &[vec![Some(1.0)]]);
+    let second = input(&schema, metric("m", &[("i", "1")]), 10, &[vec![Some(2.0)]]);
+    let foreign = input(&other, metric("m", &[("i", "2")]), 10, &[vec![Some(4.0)]]);
+
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&first).unwrap();
+    assert!(aggregator.update(&foreign).is_err());
+    aggregator.update(&second).unwrap();
+    let output = aggregator.finish().unwrap();
+    assert_eq!(values_of(&output, 0, 128), (10, vec![Some(3.0)]));
 }

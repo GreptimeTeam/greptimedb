@@ -69,40 +69,97 @@ pub fn aggregate_float(
     op: AggregateOp,
     grouping: Grouping<'_>,
 ) -> Result<Vec<Series>> {
-    validate_input(schema, input, grouping)?;
-    let mut group_index = HashMap::new();
-    let mut groups = Vec::new();
+    let mut aggregator = FloatAggregator::try_new(schema, op, grouping)?;
     for series in input {
+        aggregator.update(series)?;
+    }
+    aggregator.finish()
+}
+
+/// [`aggregate_float`] fed one series at a time, for a caller that does not hold all its input
+/// at once. Series are folded in the order they arrive, with the same semantics.
+///
+/// The grouping labels are copied in, so the aggregator borrows nothing and can live in the
+/// state of a stream.
+pub struct FloatAggregator {
+    schema: Arc<SeriesSchema>,
+    op: AggregateOp,
+    /// `by` (true) or `without`, and its labels.
+    by: bool,
+    labels: Vec<Arc<str>>,
+    group_index: HashMap<LabelKey, usize>,
+    groups: Vec<Group>,
+}
+
+impl FloatAggregator {
+    pub fn try_new(
+        schema: &Arc<SeriesSchema>,
+        op: AggregateOp,
+        grouping: Grouping<'_>,
+    ) -> Result<Self> {
+        validate_input(schema, &[], grouping)?;
+        let (by, labels) = match grouping {
+            Grouping::By(labels) => (true, labels),
+            Grouping::Without(labels) => (false, labels),
+        };
+        Ok(Self {
+            schema: schema.clone(),
+            op,
+            by,
+            labels: labels.iter().map(|label| Arc::from(*label)).collect(),
+            group_index: HashMap::new(),
+            groups: Vec::new(),
+        })
+    }
+
+    /// Folds `series` into its group. A series that fails validation leaves the state unchanged.
+    pub fn update(&mut self, series: &Series) -> Result<()> {
+        validate_float_series(&self.schema, series)?;
+        let labels: Vec<&str> = self.labels.iter().map(|label| &**label).collect();
+        let grouping = if self.by {
+            Grouping::By(&labels)
+        } else {
+            Grouping::Without(&labels)
+        };
         let metric = grouping.apply(&series.metric)?;
-        let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
-            groups.push(Group {
-                metric,
-                blocks: BTreeMap::new(),
-            });
-            groups.len() - 1
-        });
-        groups[index].accumulate(series, op)?;
-    }
-    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    let mut output = Vec::with_capacity(groups.len());
-    let mut row = Vec::with_capacity(schema.fields.len());
-    for group in groups {
-        // One builder serves every group, so each result series starts explicitly.
-        builder.begin_series();
-        for (&block, states) in &group.blocks {
-            // The last block can extend past the grid; only points with a sample are pushed.
-            for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
-                if !point.iter().any(|state| state.seen) {
-                    continue;
-                }
-                row.clear();
-                row.extend(point.iter().map(|state| state.finish(op)));
-                builder.push(block * BLOCK_POINTS + offset, &row)?;
+        let index = match self.group_index.entry(label_key(&metric)) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                self.groups.push(Group {
+                    metric,
+                    blocks: BTreeMap::new(),
+                });
+                *entry.insert(self.groups.len() - 1)
             }
-        }
-        output.extend(builder.finish(group.metric)?);
+        };
+        self.groups[index].accumulate(series, self.op);
+        Ok(())
     }
-    Ok(output)
+
+    /// The result of every group, in the order the groups first appeared.
+    pub fn finish(self) -> Result<Vec<Series>> {
+        let width = self.schema.fields.len();
+        let mut builder = GridSeriesBuilder::try_new(self.schema)?;
+        let mut output = Vec::with_capacity(self.groups.len());
+        let mut row = Vec::with_capacity(width);
+        for group in self.groups {
+            // One builder serves every group, so each result series starts explicitly.
+            builder.begin_series();
+            for (&block, states) in &group.blocks {
+                // The last block can extend past the grid; only points with a sample are pushed.
+                for (offset, point) in states.chunks_exact(width).enumerate() {
+                    if !point.iter().any(|state| state.seen) {
+                        continue;
+                    }
+                    row.clear();
+                    row.extend(point.iter().map(|state| state.finish(self.op)));
+                    builder.push(block * BLOCK_POINTS + offset, &row)?;
+                }
+            }
+            output.extend(builder.finish(group.metric)?);
+        }
+        Ok(output)
+    }
 }
 
 /// `quantile(q, v)`, with `q` read at each grid point from an unlabelled single-field scalar on
@@ -361,7 +418,9 @@ impl Grouping<'_> {
     }
 }
 
-fn label_key(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
+type LabelKey = Vec<(Arc<str>, Arc<str>)>;
+
+fn label_key(metric: &MetricName) -> LabelKey {
     let mut labels = Vec::with_capacity(metric.tags().len() + 1);
     if let Some(name) = metric.name() {
         labels.push((Arc::from("__name__"), Arc::from(name)));
@@ -387,7 +446,7 @@ struct Group {
 }
 
 impl Group {
-    fn accumulate(&mut self, series: &Series, op: AggregateOp) -> Result<()> {
+    fn accumulate(&mut self, series: &Series, op: AggregateOp) {
         let width = series.fields.len();
         let mut pending = Vec::with_capacity(BLOCK_POINTS);
         for (field_index, field) in series.fields.iter().enumerate() {
@@ -407,7 +466,6 @@ impl Group {
             }
             self.update_block(block, width, field_index, op, &mut pending);
         }
-        Ok(())
     }
 
     /// Applies one field's samples within a block, so a block costs one lookup per field run.
