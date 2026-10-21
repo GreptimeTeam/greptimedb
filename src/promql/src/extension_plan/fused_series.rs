@@ -45,7 +45,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::unpack_raw_series;
+use common_query::series_frame::{ensure_frame_matches_label_source, unpack_raw_series};
 use datafusion::arrow::array::{
     Array, ArrayRef, Float64Array, StringArray, TimestampMillisecondArray,
 };
@@ -61,7 +61,6 @@ use datafusion::execution::memory_pool::{
 };
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
-use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -696,6 +695,9 @@ impl FusedSeriesExec {
         )?;
         let classification =
             classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
+        // The frame states its own label layout and series ordering; this plan's binding is an
+        // expectation checked against that declaration, not an input to decoding.
+        ensure_frame_matches_label_source(input.schema().as_ref(), &label_source)?;
         // The frame is checked against what the tree's input reads, so a frame this node cannot
         // decode is reported when the plan is built. The shared decoder is the authority on that
         // layout, so it is asked rather than copied: handing it an empty stream of this schema makes
@@ -706,33 +708,38 @@ impl FusedSeriesExec {
                 input.schema(),
                 futures::stream::empty(),
             )),
-            Arc::clone(&tree_input.schema),
-            label_source.clone(),
-            ordering,
+            Some(Arc::clone(&tree_input.schema)),
         )?;
-        // One evaluator runs per input partition, so the node's partition count is the child's.
-        // The child must therefore produce frames that assign every series whole to one partition,
-        // which is what this node asks for when the optimizer enforces its distribution
-        // requirements (see `input_distribution_requirements`): a per-partition evaluation is
-        // equivalent to evaluating the whole series only because no series is split across
-        // partitions and no series appears in two of them.
+        // One evaluator runs, over one series stream, so this node takes one input partition.
         //
-        // One window holds the state of the series it is reading, and a raw series arrives as one
-        // contiguous run. The frames guarantee that per partition, not across them: a producer that
-        // put half of a series in one partition would leave each tree answering half of it.
+        // A window holds the state of the series it is reading and a raw series arrives as one
+        // contiguous run, so a single tree can answer a series only if nothing splits that run and
+        // nothing puts part of it in another tree. Those are two different promises and only the
+        // first is a property of a stream: the frame decoder refuses a chunk interleaved with
+        // another series', but nothing it can see tells it that half the series is in a partition it
+        // never reads. Asking for the key to be whole does not buy that either - DataFusion treats
+        // two hash layouts with the same count as co-partitioned and will add its own hash exchange
+        // regardless of whether a requirement is met, when target partitions outnumber the child's,
+        // and a hash exchange does not preserve order. So the partition count is fixed at one here
+        // and reported as one below; a split that cannot happen cannot be answered wrongly.
+        //
+        // This is the phase-1 contract. Reading a series spread over partitions needs an exchange
+        // above this node that merges the pieces of one logical series before a stateful consumer
+        // reads them, which does not exist yet.
         let input_properties = input.properties();
         let partition_count = input_properties.partitioning.partition_count();
-        if partition_count == 0 {
-            return Err(DataFusionError::Plan(
-                "FusedSeriesExec input has no partitions".into(),
-            ));
+        if partition_count != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "FusedSeriesExec runs over one series stream and needs one input partition, but its \
+                 input has {partition_count}: a series split across partitions would be answered \
+                 from one part of it"
+            )));
         }
 
-        // Emitted one batch per evaluated chunk at a time, and as many partitions as the input
-        // hands over: the node runs one evaluator per partition and answers each as it settles.
+        // One partition, emitted one batch per evaluated chunk at a time.
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(partition_count),
+            Partitioning::UnknownPartitioning(1),
             input_properties.emission_type,
             input_properties.boundedness,
         ));
@@ -787,20 +794,22 @@ impl ExecutionPlan for FusedSeriesExec {
         &self.properties
     }
 
-    /// One `read_key` is one series, so the requirement is that every row of one key lands in one
-    /// partition.
+    /// One partition, and no partitioning is asked of the input.
     ///
-    /// The node holds one window per series at a time and closes it on the chunk carrying
-    /// `is_last` ([`FusedSeriesStream`]), so a series split across two partitions would be answered
-    /// as two halves by two trees, and a series appearing in two of them would have its state
-    /// restarted. [`Distribution::KeyPartitioned`] is exactly the requirement that says "same key,
-    /// same partition"; [`Distribution::SinglePartition`] would say it too, by collapsing the node
-    /// to one partition and giving up the parallelism the input has. A one-partition input already
-    /// satisfies a key requirement, so nothing is inserted for it.
+    /// [`try_new`](Self::try_new) refuses an input that has any other count, so this node is only
+    /// ever built over one stream; the requirement states that rather than asking an optimizer to
+    /// arrange it. Asking is what does not work here: a distribution requirement is checked against
+    /// the layouts an optimizer considers equal, and it may add a hash exchange above the input even
+    /// when the requirement is already met. A hash exchange reorders, which is exactly what a
+    /// per-series window cannot survive.
     fn input_distribution_requirements(&self) -> InputDistributionRequirements {
-        InputDistributionRequirements::new(vec![Distribution::KeyPartitioned(vec![Arc::new(
-            ColumnExpr::new("read_key", 0),
-        ) as _])])
+        InputDistributionRequirements::new(vec![Distribution::SinglePartition])
+    }
+
+    /// A second partition would be a second set of series answered by a second tree, and this node
+    /// answers one stream.
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false]
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -856,12 +865,7 @@ impl ExecutionPlan for FusedSeriesExec {
         // Batches become raw series chunks through the shared frame decoder, which is the inverse of
         // what the producer packed: one chunk per frame row, each series closed exactly once by the
         // row carrying `is_last`.
-        let input = unpack_raw_series(
-            input,
-            Arc::clone(&self.series_schema),
-            self.label_source.clone(),
-            self.ordering,
-        )?;
+        let input = unpack_raw_series(input, Some(Arc::clone(&self.series_schema)))?;
         // A source bound in key mode carries its identity encoded and no decoded labels, and a chunk
         // handed to the tree has to name the series it holds.
         let input =
