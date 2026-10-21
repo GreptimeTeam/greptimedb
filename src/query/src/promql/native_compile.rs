@@ -86,12 +86,13 @@ const SUPPORTED: &str = "a selector, a range function over a range selector — 
 /// one.
 ///
 /// `ordering` is what the caller's scan guarantees, and the tree records it rather than assuming
-/// one. Only `Contiguous` and `KeyThenTime` are accepted: a native range window consumes one series
-/// to its last chunk before the next, so chunks of different series may not interleave, and an
-/// `Interleaved` declaration is refused here — which is where the refusal belongs, since a tree that
-/// declares it under a window cannot be built by this compiler at all. [`NativeTree::validate`]'s
-/// window branch checks the same thing, so if both land this refusal comes first and the tree check
-/// is a backstop for a tree built some other way.
+/// one. Only `Contiguous` and `KeyThenTime` are accepted: a native evaluation reads one series to
+/// its last chunk before the next, so chunks of different series may not interleave, and an
+/// `Interleaved` declaration is refused here for every shape this compiler accepts. That is where
+/// the refusal belongs: no accepted shape can consume interleaved chunks, so a tree declaring one
+/// cannot be built here at all. [`NativeTree::validate`]'s window branch checks the same thing, so
+/// if both land this refusal comes first and the tree check is a backstop for a tree built some
+/// other way.
 ///
 /// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
 /// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
@@ -102,6 +103,16 @@ pub fn compile(
     input: Arc<SeriesSchema>,
     ordering: SeriesOrdering,
 ) -> Result<NativeTree> {
+    // Every shape this compiler accepts reads one series to its last chunk before the next, so raw
+    // samples whose chunks of different series interleave cannot be fed to any of them. The refusal
+    // is here rather than in a shape's branch so that a shape added later inherits it.
+    if ordering == SeriesOrdering::Interleaved {
+        return Err(not_implemented(
+            "raw samples whose series interleave, which this compiler cannot consume: a native \
+             evaluation reads one series to its last chunk before the next, so chunks of different \
+             series may not interleave",
+        ));
+    }
     let context = Context {
         stmt,
         input,
@@ -199,16 +210,6 @@ fn window_call(
             "a call to `{name}` whose argument is `{argument}`"
         )));
     };
-    // A native range window reads one series to its last chunk before it reads the next, so raw
-    // samples whose chunks of different series interleave cannot be folded by it. The declaration
-    // is refused here rather than recorded onto an input the tree is built over and fails on.
-    if context.ordering == SeriesOrdering::Interleaved {
-        return Err(not_implemented(
-            "raw samples whose series interleave, which this compiler cannot consume: its range \
-             window reads one series to its last chunk before the next, so chunks of different \
-             series may not interleave",
-        ));
-    }
     window_selection(context, function, vs, range)
 }
 

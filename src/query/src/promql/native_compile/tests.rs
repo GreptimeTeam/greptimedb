@@ -1119,3 +1119,28 @@ fn a_math_function_over_a_non_vector_argument_is_refused_and_names_it() {
         );
     }
 }
+
+/// An interleaved scan is refused for every shape this compiler accepts, not only for the window
+/// that first needed the guarantee: a native evaluation reads one series to its last chunk before
+/// the next, so an instant over raw samples cannot consume interleaved chunks either. The refusal
+/// sits at the entry so that a shape added later inherits it, and a contiguous scan still compiles
+/// as the control that the refusal is about the ordering rather than about the queries.
+#[test]
+fn an_interleaved_scan_is_refused_whatever_the_shape() {
+    for query in ["x", "abs(x)", "rate(x[5m])"] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::Interleaved)
+            .expect_err(&format!("`{query}` compiled over an interleaved scan"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("interleave"),
+            "`{query}` did not say why an interleaved scan cannot be read: {message}"
+        );
+    }
+
+    compile(&eval_stmt("x"), raw_schema(), SeriesOrdering::Contiguous)
+        .expect("`x` did not compile over a contiguous scan");
+}
