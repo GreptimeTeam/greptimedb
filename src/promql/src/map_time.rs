@@ -107,7 +107,7 @@ pub fn map_date(
     }
     let mut metric = series.metric.clone();
     metric.remove_all(&METADATA_LABELS);
-    let map = |seconds: f64| function.apply(go_int64(seconds));
+    let map = |seconds: f64| function.of_seconds(seconds);
 
     // The fast path maps every float in place, so it needs each field to be entirely present: it
     // keeps the input axis as it is. A hole means the mapped rows are fewer than the axis rows,
@@ -199,6 +199,25 @@ const UNIX_TO_ABSOLUTE: i64 = (1969 * 365 + 1969 / 4 - 1969 / 100 + 1969 / 400) 
     + (ABSOLUTE_YEARS as i64 / 400 * 146_097 + MARCH_THRU_DECEMBER as i64) * 86_400;
 
 impl DateFunction {
+    /// The PromQL name of the function.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DayOfMonth => "day_of_month",
+            Self::DayOfWeek => "day_of_week",
+            Self::DayOfYear => "day_of_year",
+            Self::DaysInMonth => "days_in_month",
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+            Self::Month => "month",
+            Self::Year => "year",
+        }
+    }
+
+    /// The component of `seconds` read as a Unix time, as Prometheus truncates it with `int64`.
+    pub(crate) fn of_seconds(self, seconds: f64) -> f64 {
+        self.apply(go_int64(seconds))
+    }
+
     /// The component of Unix second `seconds` in UTC, computed the way Go's `time` package does,
     /// including its wrapping arithmetic for instants out of its range.
     fn apply(self, seconds: i64) -> f64 {

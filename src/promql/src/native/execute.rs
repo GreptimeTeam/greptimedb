@@ -3420,7 +3420,8 @@ fn map_chunk(
     for &op in ops {
         series = match map_math(schema, &series, op)? {
             Some(mapped) => mapped,
-            // `clamp` with `max < min` is the empty vector: every position it held was decided and
+            // `clamp` with `max < min` is the empty vector, and math skips native histograms, so a
+            // series of histograms only has no value left: every position it held was decided and
             // holds no value now, so there is no row to hand over.
             None => {
                 return if chunk.is_last {

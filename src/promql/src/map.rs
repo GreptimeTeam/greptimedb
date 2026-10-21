@@ -43,6 +43,7 @@ use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::functions::Round;
 use crate::grid_series::GridSeriesBuilder;
+use crate::map_time::DateFunction;
 
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +83,8 @@ pub enum MathOp {
         min: f64,
         max: f64,
     },
+    /// A date function of the value read as Unix seconds, such as `hour(v)`.
+    Date(DateFunction),
     ClampMin {
         min: f64,
     },
@@ -294,6 +297,7 @@ impl MathOp {
                 }
             }
             Self::Clamp { min, max } => go_max(min, go_min(max, v)),
+            Self::Date(function) => function.of_seconds(v),
             Self::ClampMin { min } => go_max(min, v),
             Self::ClampMax { max } => go_min(max, v),
             Self::Abs => v.abs(),

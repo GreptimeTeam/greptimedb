@@ -6417,3 +6417,37 @@ fn an_all_missing_match_group_fits_its_pool() {
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
+
+/// A date function runs as a map over evaluated input: each value is read as Unix seconds and
+/// replaced by its component, and the metric name is dropped.
+#[test]
+fn a_date_map_reads_values_as_unix_seconds() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(map(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MathOp::Date(crate::map_time::DateFunction::Hour)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    // 05:00:30 and 23:59:59 on 1970-01-01, then 1970-01-02 00:00:00.
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("a", "x"),
+            0,
+            vec![Some(18_030.0), Some(86_399.0), Some(86_400.0)],
+            true,
+        ))
+        .unwrap();
+    let chunks = run(&mut execution);
+    assert_eq!(
+        decided(&chunks),
+        [(0, Some(5.0)), (1, Some(23.0)), (2, Some(0.0))]
+    );
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.series.metric.name().is_none())
+    );
+}
