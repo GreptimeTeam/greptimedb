@@ -16,6 +16,7 @@ mod at_modifier;
 mod function_plans;
 mod island;
 mod matching_filters;
+pub(crate) mod native;
 
 mod set_operator;
 
@@ -292,6 +293,17 @@ pub struct PromPlanner {
     ctx: PromPlannerContext,
     /// Optional collector passed to native histogram UDFs.
     promql_annotations: Option<PromqlAnnotationCollector>,
+    /// Whether a statement is first offered to the native fused-series compiler.
+    ///
+    /// Read per query from the context extension
+    /// [`NATIVE_PROMQL_EXTENSION_KEY`](super::planner::native::NATIVE_PROMQL_EXTENSION_KEY), and
+    /// `false` when the query says nothing: with it off, planning takes the existing path unchanged
+    /// and nothing below is reached.
+    ///
+    /// The engine-wide `QueryOptions::experimental_native_promql` is not the source. It is consumed
+    /// while `QueryEngineState` is built and not kept, so the planner cannot read it; the extension
+    /// is what a client sets for one request.
+    native_fused: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
@@ -302,21 +314,37 @@ impl PromPlanner {
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
-        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None).await
+        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None, false)
+            .await
     }
 
     /// Plans a PromQL statement and passes the optional collector to histogram UDFs.
+    ///
+    /// `native_fused` enables the native fused-series route: the statement is offered to
+    /// [`compile`](crate::promql::native_compile::compile) first, and whatever that compiler does
+    /// not accept is planned by the existing path, unchanged. See
+    /// [`Self::try_plan_native_fused`].
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
         promql_annotations: Option<PromqlAnnotationCollector>,
+        native_fused: bool,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
+            native_fused,
         };
+
+        // The whole statement is offered to the native compiler first, because that compiler folds
+        // a range function and the math functions over it into one tree: offered any later, the
+        // expression has already been split into the nodes those functions would have shared. A
+        // shape it does not accept is planned by the existing path exactly as if it were not here.
+        if let Some(plan) = planner.try_plan_native_fused(&stmt.expr).await? {
+            return planner.strip_tsid_column(plan);
+        }
 
         let plan = planner
             .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
