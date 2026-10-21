@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
@@ -21,9 +22,14 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::raw::RawTimestamps;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, SeriesFields};
+use datatypes::series::samples::{
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridSpec};
 
-use super::select_instants;
+use super::{info_sample_times, select_instants, timestamp_of_evaluated, timestamp_of_selection};
+use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::reference::{Labels, labels_of, metric_of};
 
 fn axis(times: &[i64]) -> RawTimestamps {
     RawTimestamps::try_new(ScalarBuffer::from(times.to_vec())).unwrap()
@@ -249,4 +255,206 @@ fn empty_axis_returns_no_selections() {
         select(&[], &fields, -10..=10, 1, 10, 0).unwrap(),
         (vec![], vec![])
     );
+}
+
+fn grid_schema(fields: usize, start: i64, step: i64, points: u64) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: (0..fields)
+            .map(|field| FieldSpec {
+                name: Arc::from(format!("f{field}")),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        eval_grid: Some(Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(start, step, points).unwrap()).unwrap(),
+        )),
+    })
+}
+
+/// Each field's value per position, `None` where it has none.
+fn values_by_position(series: &Series) -> Vec<(usize, Vec<Option<u64>>)> {
+    series
+        .time
+        .positions()
+        .map(|(position, row)| {
+            let values = series
+                .fields
+                .iter()
+                .map(|field| match field.sample(row) {
+                    SampleRef::Float(value) => Some(value.to_bits()),
+                    _ => None,
+                })
+                .collect();
+            (position, values)
+        })
+        .collect()
+}
+
+/// `timestamp()` evaluated by the Prometheus v3.15.0 engine, over a selector and over an
+/// evaluated expression; see the header of `timestamp_cases.txt`.
+#[test]
+fn timestamp_matches_prometheus() {
+    const LOOKBACK_MS: i64 = 25_000;
+    let mut checked = 0;
+    for case in include_str!("timestamp_cases.txt")
+        .split("end\n")
+        .filter(|case| case.contains("case "))
+    {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let spec: Vec<&str> = lines[0].split_whitespace().skip(1).collect();
+        let offset: i64 = spec[1].parse().unwrap();
+        let grid: Vec<i64> = lines[2]
+            .split_whitespace()
+            .skip(1)
+            .map(|value| value.parse().unwrap())
+            .collect();
+        let (start, step, points) = (grid[0], grid[1], grid[2] as u64);
+        let schema = grid_schema(1, start, step, points);
+        let end = start + (points as i64 - 1) * step;
+        let mut actual = BTreeMap::new();
+        let mut expected = BTreeMap::new();
+        for line in &lines[3..] {
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (labels, values) = rest.split_once(" ;").unwrap();
+            let labels: Labels = labels
+                .split(',')
+                .filter(|pair| *pair != "-")
+                .map(|pair| {
+                    let (name, value) = pair.split_once('=').unwrap();
+                    (name.to_string(), value.to_string())
+                })
+                .collect();
+            let points: Vec<(i64, u64)> = values
+                .split_whitespace()
+                .map(|point| {
+                    let (at, bits) = point.split_once(':').unwrap();
+                    (at.parse().unwrap(), u64::from_str_radix(bits, 16).unwrap())
+                })
+                .collect();
+            match kind {
+                "raw" => {
+                    let times: Vec<i64> = points.iter().map(|(at, _)| *at).collect();
+                    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(
+                        points
+                            .iter()
+                            .map(|(_, bits)| f64::from_bits(*bits))
+                            .collect::<Vec<_>>(),
+                    )));
+                    let time = axis(&times);
+                    let (indices, timestamps) =
+                        select_instants(&time, &fields, start..=end, step, LOOKBACK_MS, offset)
+                            .unwrap();
+                    let metric = metric_of(&labels);
+                    let result = if spec[0] == "selector" {
+                        timestamp_of_selection(
+                            &schema,
+                            &metric,
+                            &time,
+                            &fields,
+                            &indices,
+                            &timestamps,
+                        )
+                    } else {
+                        // Any evaluated series holding the selected points: only where it holds
+                        // values matters to `timestamp`.
+                        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+                        for at in &timestamps {
+                            builder
+                                .push(((at - start) / step) as usize, &[Some(1.0)])
+                                .unwrap();
+                        }
+                        match builder.finish(metric).unwrap() {
+                            Some(evaluated) => timestamp_of_evaluated(&schema, &evaluated),
+                            None => Ok(None),
+                        }
+                    }
+                    .unwrap();
+                    if let Some(result) = result {
+                        actual.insert(labels_of(&result.metric), values_by_position(&result));
+                    }
+                }
+                "result" => {
+                    let values = points
+                        .into_iter()
+                        .map(|(position, bits)| (position as usize, vec![Some(bits)]))
+                        .collect::<Vec<_>>();
+                    expected.insert(labels, values);
+                }
+                other => panic!("unexpected line {other}"),
+            }
+        }
+        assert_eq!(actual, expected, "{case}");
+        checked += 1;
+    }
+    assert!(checked > 40, "{checked}");
+}
+
+/// The series `info()` reads holds the original time in milliseconds, keeps its labels, and
+/// leaves a field without a sample in the selected row empty; a native histogram is not an info
+/// sample.
+#[test]
+fn info_sample_times_keep_milliseconds_labels_and_missing_fields() {
+    let schema = grid_schema(2, 100, 10, 3);
+    let time = axis(&[95, 107]);
+    let fields = SeriesFields::try_from_vec(vec![
+        Samples::from_float(Float64Array::from(vec![Some(1.0), Some(1.0)])),
+        Samples::from_float(Float64Array::from(vec![Some(1.0), None])),
+    ])
+    .unwrap();
+    let metric = metric_of(&Labels::from([
+        ("__name__".to_string(), "target_info".to_string()),
+        ("job".to_string(), "x".to_string()),
+    ]));
+    let (indices, timestamps) = select_instants(&time, &fields, 100..=120, 10, 20, 0).unwrap();
+    let result = info_sample_times(&schema, &metric, &time, &fields, &indices, &timestamps)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.metric, metric);
+    assert_eq!(
+        values_by_position(&result),
+        [
+            (0, vec![Some(95f64.to_bits()), Some(95f64.to_bits())]),
+            (1, vec![Some(107f64.to_bits()), None]),
+            (2, vec![Some(107f64.to_bits()), None]),
+        ]
+    );
+
+    let histograms = SeriesFields::one(
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), histogram_batch(&[1.0]))
+            .unwrap(),
+    );
+    let schema = grid_schema(1, 100, 10, 1);
+    let time = axis(&[95]);
+    let (indices, timestamps) = select_instants(&time, &histograms, 100..=100, 10, 20, 0).unwrap();
+    assert!(
+        info_sample_times(&schema, &metric, &time, &histograms, &indices, &timestamps).is_err()
+    );
+    assert!(
+        timestamp_of_selection(&schema, &metric, &time, &histograms, &indices, &timestamps)
+            .unwrap()
+            .is_some(),
+        "timestamp() reads the time of a histogram sample too"
+    );
+}
+
+/// A selection must lie on the grid in increasing points and rows.
+#[test]
+fn selections_off_the_grid_or_going_back_are_rejected() {
+    let schema = grid_schema(1, 100, 10, 3);
+    let time = axis(&[95, 107]);
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0, 2.0])));
+    let metric = metric_of(&Labels::new());
+    for (indices, timestamps) in [
+        (vec![0], vec![105]),
+        (vec![0], vec![130]),
+        (vec![2], vec![100]),
+        (vec![1, 0], vec![100, 110]),
+        (vec![0, 0], vec![110, 100]),
+    ] {
+        assert!(
+            timestamp_of_selection(&schema, &metric, &time, &fields, &indices, &timestamps)
+                .is_err(),
+            "{indices:?} {timestamps:?}"
+        );
+    }
 }
