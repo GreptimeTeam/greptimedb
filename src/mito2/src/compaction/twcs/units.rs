@@ -176,17 +176,23 @@ fn pick_reducing_interval(
     files: &[FileHandle],
     options: PickLimits,
 ) -> Option<UnitPick> {
-    pick_reducing_interval_with_range(units, files, options).map(|(_, pick)| pick)
+    sort_units(units);
+    let range = pick_reducing_interval_where(units, options, |_| true)?;
+    Some(UnitPick {
+        inputs: collect_inputs(&units[range], files),
+        reduces_files: true,
+        units: units.len(),
+        dense_fallback: false,
+    })
 }
 
-/// [`pick_reducing_interval`], also returning the selected interval so the
-/// caller can check the pick against the conflict bound.
-fn pick_reducing_interval_with_range(
-    units: &mut [Unit],
-    files: &[FileHandle],
+/// Selects a reducing interval of sorted units, with an additional filter so
+/// the dense fallback can retry without duplicating the reduction guards.
+fn pick_reducing_interval_where(
+    units: &[Unit],
     options: PickLimits,
-) -> Option<(Range<usize>, UnitPick)> {
-    sort_units(units);
+    is_eligible: impl Fn(&IntervalStats) -> bool,
+) -> Option<Range<usize>> {
     let mut best: Option<(usize, u64, Range<usize>)> = None;
     // File reductions ignore conflicts, so split files are not counted.
     for_each_interval(units, &[], options.max_input_files, |range, stats| {
@@ -197,6 +203,7 @@ fn pick_reducing_interval_with_range(
             || reduction == 0
             || !options.within_reduction_cost(stats.size, reduction)
             || stats.largest_file_size > stats.size - stats.largest_file_size
+            || !is_eligible(stats)
         {
             return;
         }
@@ -208,16 +215,7 @@ fn pick_reducing_interval_with_range(
         }
     });
 
-    best.map(|(_, _, range)| {
-        let inputs = collect_inputs(&units[range.clone()], files);
-        let pick = UnitPick {
-            inputs,
-            reduces_files: true,
-            units: units.len(),
-            dense_fallback: false,
-        };
-        (range, pick)
-    })
+    best.map(|(_, _, range)| range)
 }
 
 /// Thresholds of the closed merge pick.
@@ -284,10 +282,10 @@ fn pick_closed_merge_with_budget(
     };
     sort_units(&mut units);
     if dense {
-        return pick_dense_closed_merge(&mut units, files, &extents, &index, options);
+        return pick_dense_closed_merge(&units, files, &extents, &index, options);
     }
     let Some(pairs) = split_conflicts(&units, &extents, &index, work_budget) else {
-        return pick_dense_closed_merge(&mut units, files, &extents, &index, options);
+        return pick_dense_closed_merge(&units, files, &extents, &index, options);
     };
 
     let mut best: Option<(u64, u64, Range<usize>, bool)> = None;
@@ -341,36 +339,57 @@ fn pick_closed_merge_with_budget(
 /// Picks a bounded file reduction when the split-unit conflict graph is too
 /// dense to materialize.
 ///
-/// The candidate comes from [`pick_reducing_interval_with_range`], which
-/// ignores conflicts. It is accepted only if [`adds_no_conflicts`] proves that
-/// its outputs do not add conflict pairs, so the `(P, N)` termination argument
-/// still holds. A rejected candidate leaves the window unchanged.
+/// The candidate comes from [`pick_reducing_interval_where`], which ignores
+/// conflicts. If rejected, it is searched once more for a one-output interval.
+/// Both candidates must pass [`adds_no_conflicts`], so the `(P, N)` termination
+/// argument still holds. Searching only within the original candidate adds at
+/// most O(K²) interval visits for K input files and one extra conflict check,
+/// rather than checking external conflicts for every interval in the window.
+/// This bounded retry can still miss other safely reducible intervals.
 fn pick_dense_closed_merge(
-    units: &mut [Unit],
+    units: &[Unit],
     files: &[FileHandle],
     extents: &[Extent],
     index: &ExtentIndex,
     options: ClosedMergeOptions,
 ) -> Option<UnitPick> {
     let limits = options.limits;
-    let (range, mut pick) = pick_reducing_interval_with_range(units, files, limits)?;
-    let stats = interval_stats_exact(&units[range.clone()], extents);
-    let outputs = limits.predicted_outputs(&stats);
-    let reduction = stats.num_files.saturating_sub(outputs);
-    let reduces_files = reduction > 0
-        && (options.allow_file_reduction || stats.conflicts > 0)
-        && limits.within_reduction_cost(stats.size, reduction);
-    if !reduces_files
-        || outputs >= stats.num_files
-        || (stats.conflicts > 0 && !options.allow_conflicts)
-    {
-        return None;
+    let range = pick_reducing_interval_where(units, limits, |_| true)?;
+    let mut selected = &units[range];
+    if !is_admissible_dense_interval(selected, extents, index, options) {
+        let range = pick_reducing_interval_where(selected, limits, |stats| {
+            limits.predicted_outputs(stats) == 1
+        })?;
+        selected = &selected[range];
+        if !is_admissible_dense_interval(selected, extents, index, options) {
+            return None;
+        }
     }
-    if !adds_no_conflicts(&units[range], extents, index, outputs) {
-        return None;
-    }
-    pick.dense_fallback = true;
-    Some(pick)
+    Some(UnitPick {
+        inputs: collect_inputs(selected, files),
+        reduces_files: true,
+        units: units.len(),
+        dense_fallback: true,
+    })
+}
+
+/// File reduction and rewrite limits are checked by the interval picker;
+/// each dense candidate must also respect the closed-window conflict policy.
+fn is_admissible_dense_interval(
+    units: &[Unit],
+    extents: &[Extent],
+    index: &ExtentIndex,
+    options: ClosedMergeOptions,
+) -> bool {
+    let stats = interval_stats_exact(units, extents);
+    (options.allow_file_reduction || stats.conflicts > 0)
+        && (options.allow_conflicts || stats.conflicts == 0)
+        && adds_no_conflicts(
+            units,
+            extents,
+            index,
+            options.limits.predicted_outputs(&stats),
+        )
 }
 
 /// Totals of an interval without materializing [`split_conflicts`].
@@ -1608,11 +1627,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dense_closed_merge_rejects_candidates_that_add_conflicts() {
-        // A long chain is one oversized component, and the file-reduction pick
-        // selects a long interval. Its outputs would overlap the two neighbors
-        // outside the interval, which is more conflicts than the inputs had
-        // with the rest of the window.
+    fn test_dense_closed_merge_retries_one_output_interval() {
+        // PR #9741: the first 16 files predict two outputs but have only one
+        // conflict with the rest of the chain. The first eight predict one
+        // output, so rejecting the larger interval must not prevent progress.
         let files = chain_files(300, 2);
         let mapper = primary_key_mapper_for_test();
         let extents = extents_of(&files, &mapper);
@@ -1621,16 +1639,39 @@ mod tests {
         close_units(&mut units, &extents, &index);
         split_oversized_units(&mut units, &files, &extents, 16);
         sort_units(&mut units);
-        assert!(
+
+        assert!(!adds_no_conflicts(&units[..16], &extents, &index, 2));
+        assert!(adds_no_conflicts(&units[..8], &extents, &index, 1));
+        // Cover both single-file units from an exhausted grouping budget and
+        // split units from an oversized closure.
+        for pick in [
+            closed_merge_with_budget(&files, MAX_OUTPUT, 0).unwrap(),
             pick_dense_closed_merge(
-                &mut units,
+                &units,
                 &files,
                 &extents,
                 &index,
-                closed_merge_options(MAX_OUTPUT)
+                closed_merge_options(MAX_OUTPUT),
             )
-            .is_none()
-        );
+            .unwrap(),
+        ] {
+            assert_eq!(ids(&files[..8]), ids(&pick.inputs));
+            assert!(pick.dense_fallback);
+            assert!(pick.reduces_files);
+            assert_eq!(300, pick.units);
+        }
+    }
+
+    #[test]
+    fn test_dense_closed_merge_rejects_unsafe_one_output_retry() {
+        // Intruders lie in the time gaps between inputs, so even a one-output
+        // merge can introduce conflicts that no input previously had.
+        let mut files: Vec<_> = (0..4)
+            .map(|i| file(30 * i, 30 * i + 10, b"a", b"z", 6))
+            .collect();
+        files.extend((0..3).map(|i| file(30 * i + 15, 30 * i + 25, b"b", b"y", 1_000)));
+
+        assert!(closed_merge_with_budget(&files, MAX_OUTPUT, 0).is_none());
     }
 
     /// SplitMix64, so the simulation needs no random number dependency.
