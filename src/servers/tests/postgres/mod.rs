@@ -44,6 +44,9 @@ use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::TableRef;
 use table::test_util::MemTable;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_instance;
@@ -99,11 +102,13 @@ const MIXED_AUTH_CLEARTEXT_USER: &str = "clear_user";
 const MIXED_AUTH_CLEARTEXT_PASSWORD: &str = "clear-password";
 const MIXED_AUTH_DENIED_USER: &str = "denied_user";
 
-/// Selects SCRAM-SHA-256 for [`MIXED_AUTH_SCRAM_USER`] and cleartext for
-/// everyone else, so one endpoint serves both mechanisms.
+/// Selects SCRAM-SHA-256 for [`MIXED_AUTH_SCRAM_USER`] and
+/// [`MIXED_AUTH_DENIED_USER`] (whose authorization is denied) and cleartext
+/// for everyone else, so one endpoint serves both mechanisms.
 struct MixedAuthProvider {
     scram_verifier: PgScramSha256Verifier,
     selections: Mutex<HashMap<String, &'static str>>,
+    authorize_calls: Mutex<HashMap<String, usize>>,
 }
 
 #[async_trait]
@@ -125,7 +130,7 @@ impl UserProvider for MixedAuthProvider {
             .fail();
         };
 
-        let verified = if username == MIXED_AUTH_SCRAM_USER {
+        let verified = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
             self.scram_verifier
                 .verify_plain_password(password.expose_secret().as_bytes())?
         } else if username == MIXED_AUTH_CLEARTEXT_USER {
@@ -153,6 +158,13 @@ impl UserProvider for MixedAuthProvider {
         schema: &str,
         user_info: &UserInfoRef,
     ) -> auth::error::Result<()> {
+        *self
+            .authorize_calls
+            .lock()
+            .unwrap()
+            .entry(user_info.username().to_string())
+            .or_insert(0) += 1;
+
         if user_info.username() == MIXED_AUTH_DENIED_USER {
             return auth::error::AccessDeniedSnafu {
                 catalog: catalog.to_string(),
@@ -170,24 +182,27 @@ impl UserProvider for MixedAuthProvider {
         _catalog: &str,
     ) -> auth::error::Result<PgAuthInfo> {
         let Identity::UserId(username, _) = id;
-        let method = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
-            "scram"
+        let auth_info = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
+            PgAuthInfo::ScramSha256 {
+                verifier: self.scram_verifier.clone(),
+                user_info: Some(auth::userinfo_by_name(Some(username.to_string()))),
+            }
         } else {
-            "cleartext"
+            PgAuthInfo::Cleartext
+        };
+
+        // Record the mechanism from the returned variant, so the map can
+        // never claim a mechanism the provider did not hand out.
+        let method = match &auth_info {
+            PgAuthInfo::ScramSha256 { .. } => "scram",
+            PgAuthInfo::Cleartext => "cleartext",
         };
         self.selections
             .lock()
             .unwrap()
             .insert(username.to_string(), method);
 
-        if username == MIXED_AUTH_SCRAM_USER {
-            Ok(PgAuthInfo::ScramSha256 {
-                verifier: self.scram_verifier.clone(),
-                user_info: Some(auth::userinfo_by_name(Some(username.to_string()))),
-            })
-        } else {
-            Ok(PgAuthInfo::Cleartext)
-        }
+        Ok(auth_info)
     }
 }
 
@@ -347,6 +362,92 @@ async fn test_pg_scram_sha256_auth() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_scram_rejects_channel_binding_request() -> Result<()> {
+    // The server supports no channel binding (no certificate configured),
+    // so RFC 5802 §6 requires rejecting a client-first with a "p" flag.
+    let verifier =
+        format_pg_scram_sha256_password_verifier(b"greptime", b"pg-scram-salt", 4096).unwrap();
+    let user_provider =
+        user_provider_from_option(&format!("static_user_provider:cmd:greptime={verifier}"))
+            .unwrap();
+    let (postgres_server, server_port) =
+        start_test_server_with_user_provider(user_provider, Default::default()).await?;
+
+    // "p" flag: rejected with an error
+    let response = raw_scram_client_first(
+        server_port,
+        b"p=tls-server-end-point,,n=greptime,r=clientnonce",
+    )
+    .await?;
+    assert_eq!(
+        b'E', response,
+        "expected an ErrorResponse for a p-flag client-first"
+    );
+
+    // "n" flag (tokio_postgres sends this): handshake continues normally
+    let response = raw_scram_client_first(server_port, b"n,,n=greptime,r=clientnonce").await?;
+    assert_eq!(
+        b'R', response,
+        "expected a SASLContinue for an n-flag client-first"
+    );
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+/// A minimal raw SCRAM client: sends the startup message and a
+/// SASLInitialResponse carrying `client_first`, returns the message type
+/// byte of the server's answer ('R' for Authentication::SASL*, 'E' for
+/// ErrorResponse).
+async fn raw_scram_client_first(port: u16, client_first: &[u8]) -> Result<u8> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    fn put_i32(buf: &mut Vec<u8>, v: i32) {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+
+    async fn read_message(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        let len = i32::from_be_bytes(header[1..].try_into().unwrap()) as usize - 4;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).await.unwrap();
+        (header[0], body)
+    }
+
+    // startup message: i32 len | i32 196608 | user/database params
+    let mut body = Vec::new();
+    put_i32(&mut body, 196608);
+    body.extend_from_slice(b"user\0greptime\0database\0public\0\0");
+    let mut message = Vec::new();
+    put_i32(&mut message, (body.len() + 4) as i32);
+    message.extend_from_slice(&body);
+    stream.write_all(&message).await.unwrap();
+
+    // Authentication::SASL advertisement: 'R' | len | i32 10 | mechanism cstrings
+    let (typ, body) = read_message(&mut stream).await;
+    assert_eq!(b'R', typ, "expected the SASL mechanism advertisement");
+    assert_eq!(10, i32::from_be_bytes(body[..4].try_into().unwrap()));
+    assert!(
+        body.windows(b"SCRAM-SHA-256".len())
+            .any(|w| w == b"SCRAM-SHA-256")
+    );
+
+    // SASLInitialResponse: 'p' | len | "SCRAM-SHA-256"\0 | i32 len | client-first
+    let mut body = Vec::new();
+    body.extend_from_slice(b"SCRAM-SHA-256\0");
+    put_i32(&mut body, client_first.len() as i32);
+    body.extend_from_slice(client_first);
+    let mut message = Vec::new();
+    message.push(b'p');
+    put_i32(&mut message, (body.len() + 4) as i32);
+    message.extend_from_slice(&body);
+    stream.write_all(&message).await.unwrap();
+
+    Ok(read_message(&mut stream).await.0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_cleartext_auth_fallback() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
@@ -381,6 +482,7 @@ async fn test_pg_mixed_auth_scram_and_cleartext() -> Result<()> {
         )
         .unwrap(),
         selections: Mutex::new(HashMap::new()),
+        authorize_calls: Mutex::new(HashMap::new()),
     });
     let (postgres_server, server_port) =
         start_test_server_with_user_provider(provider.clone(), Default::default()).await?;
@@ -432,17 +534,18 @@ async fn test_pg_mixed_auth_scram_and_cleartext() -> Result<()> {
             .is_err()
     );
 
-    // SCRAM-selected user denied by authorization: rejected at proof
-    // verification like a wrong password, before AuthenticationOk
-    assert!(
-        create_plain_connection_with_credentials(
-            server_port,
-            MIXED_AUTH_DENIED_USER,
-            "scram-password",
-        )
-        .await
-        .is_err()
-    );
+    // SCRAM-selected user denied by authorization: the client proof
+    // verifies, authorize rejects, and the failure reaches the client as
+    // 28P01 before SASLFinal/AuthenticationOk/ReadyForQuery were sent —
+    // had the completion fired first, this connection would succeed.
+    let denied = create_plain_connection_with_credentials(
+        server_port,
+        MIXED_AUTH_DENIED_USER,
+        "scram-password",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(Some(&SqlState::INVALID_PASSWORD), denied.code());
 
     // both mechanisms were served by the same endpoint
     let selections = provider.selections.lock().unwrap().clone();
@@ -452,6 +555,15 @@ async fn test_pg_mixed_auth_scram_and_cleartext() -> Result<()> {
         Some(&"cleartext"),
         selections.get(MIXED_AUTH_CLEARTEXT_USER)
     );
+
+    // authorize ran exactly once for every password-verified user —
+    // including the denied one, proving it was rejected by authorization
+    // after successful SCRAM verification, not by authentication
+    let authorize_calls = provider.authorize_calls.lock().unwrap().clone();
+    assert_eq!(Some(&1), authorize_calls.get(MIXED_AUTH_SCRAM_USER));
+    assert_eq!(Some(&1), authorize_calls.get(MIXED_AUTH_DENIED_USER));
+    assert_eq!(Some(&1), authorize_calls.get(MIXED_AUTH_CLEARTEXT_USER));
+    assert!(!authorize_calls.contains_key("nobody"));
 
     postgres_server.shutdown().await.unwrap();
     Ok(())
