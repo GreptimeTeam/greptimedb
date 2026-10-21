@@ -356,6 +356,15 @@ async fn test_write_retry_disabled_and_enabled_ablation() {
             );
             assert_eq!(result.is_ok(), max_retries > 0);
             assert_eq!(attempts, max_retries + 1);
+            for request in server.service.requests.lock().unwrap().iter() {
+                let accepts_partial = request
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.query_context.as_ref())
+                    .and_then(|context| context.extensions.get(api::region::ACCEPT_PARTIAL_RESULT))
+                    .is_some_and(|value| value == "true");
+                assert_eq!(accepts_partial, max_retries > 0);
+            }
             assert!(server.invalidator.calls.lock().unwrap().is_empty());
         }
     }
@@ -1709,11 +1718,11 @@ async fn check_write_retry_rebuilds_logical_rows_in_mixed_table_envelope(kind: W
     );
     let mut requests = server.service.requests.lock().unwrap().clone();
     requests.sort_by_key(|request| write_region_id(request).unwrap().as_u64());
-    assert_eq!(
-        requests,
-        vec![physical, rebuilt_upper, logical, rebuilt_lower],
-        "{kind:?}"
-    );
+    let mut expected = vec![physical, rebuilt_upper, logical, rebuilt_lower];
+    for request in &mut expected {
+        api::region::set_accept_partial_result(request.header.get_or_insert_default());
+    }
+    assert_eq!(requests, expected, "{kind:?}");
     let calls = invalidator.calls.lock().unwrap();
     assert_eq!(calls.len(), 2, "{kind:?}");
     assert_eq!(calls[0].len(), 2, "{kind:?}");
