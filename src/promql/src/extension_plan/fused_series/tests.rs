@@ -2114,6 +2114,83 @@ async fn partitions_whose_label_sets_differ_only_in_an_empty_value_are_refused()
     );
 }
 
+/// A chunk holding no value records nothing, so a query that answers nothing holds nothing.
+///
+/// A selection over a series that staleness or the range left empty still closes that series, and
+/// hands over a closing chunk with no rows - [`crate::native::execute::no_row_chunk`] is where it is
+/// built. Every chunk reaches [`LabelSets::claim`], so an implementation that wrote an entry per
+/// chunk would record one per empty series and charge the plan's reservation for it, for a query
+/// whose answer is empty: enough of them would exhaust a finite pool without a single row produced.
+///
+/// The entries are checked rather than the charge, because a charge of zero is what a mistake here
+/// would still show if the label bytes happened to be free: what must not grow is the table.
+#[test]
+fn a_chunk_holding_no_value_is_claimed_without_recording_it() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 0)])
+        .expect("an empty run over the grid");
+    let empty_series = |index: usize| Series {
+        metric: metric(&[(HOST, &format!("web-{index}"))], Some(METRIC)),
+        time: axis.clone(),
+        // Five positions were never filled, so no field occupies one.
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![f64::NAN; 0]))),
+    };
+
+    for index in 0..64 {
+        labels
+            .claim(&empty_series(index))
+            .expect("an empty chunk cannot collide with anything");
+    }
+
+    assert_eq!(
+        0,
+        labels.seen.len(),
+        "64 empty series were recorded, and the table outlives the query: {:?}",
+        labels.seen.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "nothing is held, so nothing may be charged"
+    );
+}
+
+/// An empty chunk does not stop a later chunk of the same label set from being recorded.
+///
+/// Skipping the empty chunk is only safe while it also records nothing a later one needs: a series
+/// that answers nothing holds no position, so a second series under one label set has to be free to
+/// claim the positions it really holds.
+#[test]
+fn a_later_chunk_still_claims_the_label_set_an_empty_one_skipped() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let empty_axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 0)])
+        .expect("an empty run over the grid");
+    let full_axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 5)])
+        .expect("one run over the whole grid");
+
+    labels
+        .claim(&Series {
+            metric: metric(&[(HOST, "h")], Some(METRIC)),
+            time: empty_axis,
+            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![f64::NAN; 0]))),
+        })
+        .expect("an empty chunk cannot collide with anything");
+    labels
+        .claim(&Series {
+            metric: metric(&[(HOST, "h")], Some(METRIC)),
+            time: full_axis,
+            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; 5]))),
+        })
+        .expect("the first chunk to hold a value claims the positions it holds");
+
+    assert_eq!(1, labels.seen.len(), "the positions are recorded once");
+    assert!(pool.reserved() > 0, "the recorded positions are charged");
+}
+
 /// The claim compares the label set Prometheus compares, so an empty value is no label.
 ///
 /// Driven directly at the layer that keeps the state: a window and a map both drop an empty-valued

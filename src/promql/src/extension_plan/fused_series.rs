@@ -1124,6 +1124,15 @@ impl LabelSets {
     /// to matrix assembly, so every sample survives.
     fn claim(&mut self, series: &Series) -> DataFusionResult<()> {
         let runs = occupied_runs(series)?;
+        // A chunk holding no value occupies nothing, so there is no collision to remember and no
+        // entry to write. Such a chunk is not rare: a selection over a series that staleness or the
+        // range left empty still closes it, and hands over a closing chunk with no rows. Recording
+        // one entry per such series would grow the table - and its charge, which the plan holds for
+        // its whole life - for a query that never answers a value, until an empty result exhausted
+        // the pool. The executor's own `Emitted::occupy` takes the same early return.
+        if runs.iter().all(Vec::is_empty) {
+            return Ok(());
+        }
         let key = label_set(&series.metric);
         let Self { seen, reservation } = self;
         // Nothing reaches a claim without an `execute` first, and an execution that ran attached the
