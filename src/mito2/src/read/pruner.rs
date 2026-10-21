@@ -810,7 +810,7 @@ mod tests {
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
-    use crate::read::range::RowGroupIndex;
+    use crate::read::range::{RangeMeta, RowGroupIndex};
     use crate::read::scan_region::{PredicateGroup, ScanInput};
     use crate::read::scan_util::PartitionMetrics;
     use crate::sst::file::{FileHandle, FileMeta};
@@ -853,7 +853,13 @@ mod tests {
             .with_files(files)
             .with_append_mode(true)
             .build();
-        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::unordered_scan_ranges(&input).await;
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(
+            input,
+            ranges,
+            query_start,
+        ));
         let pruner = Arc::new(Pruner::new_with_options(
             stream_ctx,
             1,
@@ -912,7 +918,13 @@ mod tests {
             .with_predicate(predicate)
             .with_append_mode(true)
             .build();
-        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::unordered_scan_ranges(&input).await;
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(
+            input,
+            ranges,
+            query_start,
+        ));
         let pruner = Arc::new(Pruner::new(stream_ctx, 1));
         (env, pruner)
     }

@@ -53,7 +53,10 @@ use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
 use crate::cache::index::result_cache::PredicateKey;
-use crate::cache::{CacheStrategy, CachedSstMeta, SstMetaPreparation, prepare_sst_meta};
+use crate::cache::{
+    CacheStrategy, CachedSstMeta, SstMetaObservation, SstMetaPreparation, SstMetaResolution,
+    prepare_sst_meta,
+};
 use crate::error::{
     ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
     UnexpectedSnafu,
@@ -814,14 +817,62 @@ impl ParquetReaderBuilder {
             .with_label_values(&["read_parquet_metadata"])
             .start_timer();
 
+        let observation = self
+            .cache_strategy
+            .observe_sst_meta(self.file_handle.file_id(), page_index_policy, cache_metrics)
+            .await;
+        if let SstMetaObservation::Decoded(metadata) = observation {
+            cache_metrics.metadata_load_cost += start.elapsed();
+            return Ok((metadata, false));
+        }
+
+        let mut loader_metrics = MetadataCacheMetrics::default();
+        let (result, resolution) = self
+            .cache_strategy
+            .get_or_load_observed_sst_meta(self.file_handle.file_id(), page_index_policy, async {
+                let result = self
+                    .read_parquet_metadata_inner(
+                        file_path,
+                        file_size,
+                        &mut loader_metrics,
+                        page_index_policy,
+                        observation,
+                    )
+                    .await;
+                (
+                    result,
+                    SstMetaResolution {
+                        file_cache_hit: loader_metrics.file_cache_hit,
+                        cache_miss: loader_metrics.cache_miss,
+                    },
+                )
+            })
+            .await;
+        // These are resolution counts, including a known miss before a failed remote read.
+        // Only the selected loader contributes actual I/O counts and bytes.
+        cache_metrics.file_cache_hit += resolution.file_cache_hit;
+        cache_metrics.cache_miss += resolution.cache_miss;
+        cache_metrics.num_reads += loader_metrics.num_reads;
+        cache_metrics.bytes_read += loader_metrics.bytes_read;
+        cache_metrics.metadata_load_cost += start.elapsed();
+        result
+    }
+
+    async fn read_parquet_metadata_inner(
+        &self,
+        file_path: &str,
+        file_size: u64,
+        cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
+        observation: SstMetaObservation,
+    ) -> Result<(Arc<CachedSstMeta>, bool)> {
         let file_id = self.file_handle.file_id();
         // Tries to get from cache with metrics tracking.
         if let Some(metadata) = self
             .cache_strategy
-            .get_sst_meta_data(file_id, cache_metrics, page_index_policy)
+            .resolve_sst_meta(observation, file_id, cache_metrics, page_index_policy)
             .await
         {
-            cache_metrics.metadata_load_cost += start.elapsed();
             return Ok((metadata, false));
         }
 
@@ -844,7 +895,7 @@ impl ParquetReaderBuilder {
             match metadata {
                 SstMetaPreparation::Prepared(metadata) => {
                     self.cache_strategy
-                        .put_prepared_sst_meta(file_id, metadata, true);
+                        .put_compact_sst_meta(file_id, metadata.compact);
                 }
                 SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
                     warn!(
@@ -864,7 +915,6 @@ impl ParquetReaderBuilder {
             )?)
         };
 
-        cache_metrics.metadata_load_cost += start.elapsed();
         Ok((decoded, true))
     }
 
@@ -1627,13 +1677,13 @@ impl ReaderFilterMetrics {
 pub struct MetadataCacheMetrics {
     /// Number of memory cache hits for parquet metadata.
     pub mem_cache_hit: usize,
-    /// Number of file cache hits for parquet metadata.
+    /// Successful file-cache resolutions, including results shared with concurrent callers.
     pub file_cache_hit: usize,
     /// Number of cache misses for parquet metadata.
     pub cache_miss: usize,
     /// Duration to load parquet metadata.
     pub metadata_load_cost: Duration,
-    /// Number of read operations performed.
+    /// Physical reads executed by this caller; shared waiters do not repeat them.
     pub num_reads: usize,
     /// Total bytes read from storage.
     pub bytes_read: u64,
@@ -2462,10 +2512,12 @@ mod tests {
     use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use object_store::layers::mock::MockLayerBuilder;
     use object_store::services::Memory;
     use parquet::arrow::ArrowWriter;
     use parquet::arrow::arrow_reader::RowSelector;
     use parquet::file::properties::WriterProperties;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
@@ -2474,11 +2526,275 @@ mod tests {
 
     use super::*;
     use crate::cache::CacheManager;
+    use crate::cache::test_util::{GatedStorageReader, parquet_file_data_with_region_metadata};
     use crate::sst::parquet::metadata::MetadataLoader;
     use crate::sst::parquet::prefilter::{build_reader_filter_plan, execute_prefilter};
     use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
     use crate::sst::parquet::row_group::ParquetFetchMetrics;
     use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
+
+    #[tokio::test]
+    async fn test_shared_file_metadata_resolution_counts_without_duplicate_io() {
+        use crate::cache::file_cache::{FileType, IndexKey, IndexValue};
+        use crate::cache::write_cache::WriteCache;
+        use crate::test_util::TestEnv;
+        use common_base::readable_size::ReadableSize;
+
+        let env = TestEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let bytes = parquet_file_data_with_region_metadata(&metadata);
+        let handle = sst_file_handle(0, 3);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let layer = MockLayerBuilder::default()
+            .reader_factory(Arc::new({
+                let reads = reads.clone();
+                let gate = gate.clone();
+                move |_, _, inner| {
+                    Box::new(GatedStorageReader {
+                        inner,
+                        reads: reads.clone(),
+                        gate: gate.clone(),
+                    })
+                }
+            }))
+            .build()
+            .unwrap();
+        let local = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+        let write_cache = Arc::new(
+            WriteCache::new(
+                local.clone(),
+                ReadableSize::mb(10),
+                None,
+                None,
+                false,
+                env.get_puffin_manager(),
+                env.get_intermediate_manager(),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let file_cache = write_cache.file_cache();
+        let key = IndexKey::new(
+            handle.region_id(),
+            handle.file_id().file_id(),
+            FileType::Parquet,
+        );
+        local
+            .write(&file_cache.cache_file_path(key), bytes.clone())
+            .await
+            .unwrap();
+        file_cache
+            .put(
+                key,
+                IndexValue {
+                    file_size: bytes.len() as _,
+                },
+            )
+            .await;
+        let cache = Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(1024 * 1024)
+                .write_cache(Some(write_cache))
+                .build(),
+        );
+        // The remote store is empty: success must come from the local file cache.
+        let builder = ParquetReaderBuilder::new(
+            "file_resolution".to_string(),
+            PathType::Bare,
+            handle.clone(),
+            ObjectStore::new(Memory::default()).unwrap(),
+        )
+        .cache(CacheStrategy::EnableAll(cache));
+        let path = handle.file_path("file_resolution", PathType::Bare);
+        let mut requests = (0..8)
+            .map(|_| {
+                Box::pin(async {
+                    let mut metrics = MetadataCacheMetrics::default();
+                    let result = builder
+                        .read_parquet_metadata(
+                            &path,
+                            bytes.len() as u64,
+                            &mut metrics,
+                            PageIndexPolicy::Skip,
+                        )
+                        .await;
+                    (result, metrics)
+                })
+            })
+            .collect::<Vec<_>>();
+        for request in &mut requests {
+            assert!(futures::poll!(request).is_pending());
+        }
+        assert_eq!(1, reads.load(Ordering::Relaxed));
+        gate.add_permits(32);
+        let results =
+            tokio::time::timeout(Duration::from_secs(10), futures::future::join_all(requests))
+                .await
+                .unwrap();
+        assert_eq!(1, reads.load(Ordering::Relaxed));
+        assert_eq!(
+            1,
+            results
+                .iter()
+                .map(|(_, metrics)| metrics.num_reads)
+                .sum::<usize>()
+        );
+        for (result, metrics) in results {
+            assert!(!result.unwrap().1);
+            assert_eq!(0, metrics.mem_cache_hit);
+            assert_eq!(1, metrics.file_cache_hit);
+            assert_eq!(0, metrics.cache_miss);
+        }
+        let mut warm = MetadataCacheMetrics::default();
+        builder
+            .read_parquet_metadata(&path, bytes.len() as u64, &mut warm, PageIndexPolicy::Skip)
+            .await
+            .unwrap();
+        assert_eq!(1, warm.mem_cache_hit);
+        assert_eq!(
+            0, warm.file_cache_hit,
+            "hot hits must not replay the original file source"
+        );
+        assert_eq!(0, warm.num_reads);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::print_stdout,
+        reason = "records the controlled storage-read comparison"
+    )]
+    async fn test_metadata_load_coalescing_storage_reads() {
+        const CONCURRENCY: usize = 8;
+        let metadata = Arc::new(sst_region_metadata());
+        let bytes = parquet_file_data_with_region_metadata(&metadata);
+        let file_handle = sst_file_handle(0, 3);
+        let file_path = file_handle.file_path("metadata_coalescing", PathType::Bare);
+        // Same bytes, file, cache budget and concurrency; only bypass the coordinator
+        // in the control arm. Repeat with fresh caches to verify cold behavior.
+        for _ in 0..3 {
+            for coalesce in [false, true] {
+                let reads = Arc::new(AtomicUsize::new(0));
+                let gate = Arc::new(tokio::sync::Semaphore::new(0));
+                let layer = MockLayerBuilder::default()
+                    .reader_factory(Arc::new({
+                        let reads = reads.clone();
+                        let gate = gate.clone();
+                        move |_, _, inner| {
+                            Box::new(GatedStorageReader {
+                                inner,
+                                reads: reads.clone(),
+                                gate: gate.clone(),
+                            })
+                        }
+                    }))
+                    .build()
+                    .unwrap();
+                let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+                store.write(&file_path, bytes.clone()).await.unwrap();
+                let cache = Arc::new(
+                    CacheManager::builder()
+                        .sst_meta_cache_size(1024 * 1024)
+                        .build(),
+                );
+                let builder = ParquetReaderBuilder::new(
+                    "metadata_coalescing".to_string(),
+                    PathType::Bare,
+                    file_handle.clone(),
+                    store,
+                )
+                .cache(CacheStrategy::EnableAll(cache.clone()));
+                let mut requests = (0..CONCURRENCY)
+                    .map(|_| {
+                        Box::pin(async {
+                            let mut metrics = MetadataCacheMetrics::default();
+                            let result = if coalesce {
+                                builder
+                                    .read_parquet_metadata(
+                                        &file_path,
+                                        bytes.len() as u64,
+                                        &mut metrics,
+                                        PageIndexPolicy::Skip,
+                                    )
+                                    .await
+                            } else {
+                                let observation = builder
+                                    .cache_strategy
+                                    .observe_sst_meta(
+                                        file_handle.file_id(),
+                                        PageIndexPolicy::Skip,
+                                        &mut metrics,
+                                    )
+                                    .await;
+                                builder
+                                    .read_parquet_metadata_inner(
+                                        &file_path,
+                                        bytes.len() as u64,
+                                        &mut metrics,
+                                        PageIndexPolicy::Skip,
+                                        observation,
+                                    )
+                                    .await
+                            };
+                            (result.unwrap(), metrics)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for request in &mut requests {
+                    assert!(futures::poll!(request).is_pending());
+                }
+                let expected_reads = if coalesce { 1 } else { CONCURRENCY };
+                assert_eq!(expected_reads, reads.load(Ordering::Relaxed));
+                gate.add_permits(CONCURRENCY * 4);
+                let results = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    futures::future::join_all(requests),
+                )
+                .await
+                .unwrap();
+                assert_eq!(expected_reads, reads.load(Ordering::Relaxed));
+                assert_eq!(
+                    expected_reads,
+                    results.iter().map(|(_, m)| m.num_reads).sum::<usize>()
+                );
+                for ((value, miss), request_metrics) in &results {
+                    assert_eq!(1, request_metrics.cache_miss);
+                    assert_eq!(0, request_metrics.mem_cache_hit);
+                    assert_eq!(0, request_metrics.file_cache_hit);
+                    assert!(
+                        *miss,
+                        "each request must preserve background-download eligibility"
+                    );
+                    assert_eq!(3, value.parquet_metadata().file_metadata().num_rows());
+                    if coalesce {
+                        assert!(Arc::ptr_eq(value, &results[0].0.0));
+                    }
+                }
+                let mut warm_metrics = MetadataCacheMetrics::default();
+                let (_, miss) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    builder.read_parquet_metadata(
+                        &file_path,
+                        bytes.len() as u64,
+                        &mut warm_metrics,
+                        PageIndexPolicy::Skip,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(!miss);
+                assert_eq!(1, warm_metrics.mem_cache_hit);
+                assert_eq!(0, warm_metrics.cache_miss);
+                assert_eq!(0, warm_metrics.num_reads);
+                assert_eq!(expected_reads, reads.load(Ordering::Relaxed));
+                println!(
+                    "coalesce={coalesce} concurrency={CONCURRENCY} cold_storage_reads={expected_reads} warm_storage_reads=0"
+                );
+            }
+        }
+    }
 
     async fn prefilter_test_builder(
         object_store: ObjectStore,

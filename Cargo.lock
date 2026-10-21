@@ -8719,6 +8719,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-base",
+ "common-cache",
  "common-datasource",
  "common-error",
  "common-function",
