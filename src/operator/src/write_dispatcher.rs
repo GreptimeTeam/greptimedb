@@ -271,6 +271,8 @@ impl WriteDispatcher {
         if !matches!(&request.body, Some(Body::Inserts(_) | Body::Deletes(_))) {
             return vec![self.send(peer, request, histogram).await];
         }
+        // Upgrade datanodes first and roll back frontends first: old datanodes
+        // cannot report which entries succeeded, so retrying a batch may replay writes.
         api::region::set_accept_partial_result(request.header.get_or_insert_default());
         let request = Arc::new(request);
         let requester = self.node_manager.datanode(&peer).await;
