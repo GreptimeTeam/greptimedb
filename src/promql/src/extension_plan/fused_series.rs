@@ -1088,11 +1088,14 @@ impl LabelSets {
                 // back a list of `stored + new` runs, so the entry's capacity can only grow by the
                 // difference over what it already holds. Without this the arrays would grow for as
                 // long as the plan lives while the charge stayed at the first claim.
+                // `merge_runs` keeps the capacity it already had, so what the entry grows by is
+                // how much the merged list needs beyond that - and nothing when the runs it holds
+                // already cover the new ones.
                 let grown = stored
                     .iter()
                     .zip(&runs)
                     .map(|(stored, new)| {
-                        (stored.len() + new.len()).saturating_sub(stored.capacity())
+                        (stored.len() + new.len()).saturating_sub(stored.capacity().max(stored.len()))
                     })
                     .sum::<usize>()
                     * size_of::<(usize, usize)>();
@@ -1202,7 +1205,12 @@ fn runs_overlap(stored: &[(usize, usize)], new: &[(usize, usize)]) -> bool {
 
 /// Adds sorted, disjoint `new` runs to the sorted, disjoint `stored` runs, coalescing neighbours.
 fn merge_runs(stored: &mut Vec<(usize, usize)>, new: &[(usize, usize)]) {
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(stored.len() + new.len());
+    // The merged list never holds more than `stored + new`, and it can hold less once adjacent runs
+    // join. Keeping the capacity the entry already paid for is what makes the charge in `claim`
+    // track what the map holds: a fresh vector sized to the merge would shrink on every merge that
+    // adds nothing, and the next claim would look like growth and be charged for it again.
+    let capacity = (stored.len() + new.len()).max(stored.capacity());
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(capacity);
     let (mut left, mut right) = (0, 0);
     while left < stored.len() || right < new.len() {
         let run = match (stored.get(left), new.get(right)) {
