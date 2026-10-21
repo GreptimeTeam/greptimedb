@@ -1133,6 +1133,57 @@ fn a_selected_histogram_keeps_its_start_timestamp() {
     );
 }
 
+/// A histogram computed from a window carries no start timestamp, even when the window holds one.
+///
+/// `sum_over_time` computes a histogram rather than selecting one, so the timestamp the sample was
+/// read with is not part of the result -- the rule the histogram operations themselves follow, as
+/// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
+/// pins. The fold clears the field while adding, so a window holding two histograms already loses
+/// it; a window holding one must not depend on that, or whether a result carries the field would
+/// say how many samples the window held rather than what the function did.
+#[test]
+fn a_computed_histogram_drops_its_start_timestamp() {
+    let schema = raw_schema(1);
+    let start: i64 = 1_500;
+    // One histogram sample inside the window of both grid points, so the fold adds nothing to it
+    // and the single input is the whole result.
+    let chunks = [histogram_chunk_from(&schema, 1, 0, Some(start), true)];
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(0, 10_000, 2),
+        RangeWindow {
+            range_ms: 20_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::SumOverTime,
+    )
+    .unwrap();
+    let out = collect_chunks(&mut evaluator, &chunks);
+    let mut computed = Vec::new();
+    for chunk in &out {
+        let mut cursor = chunk.series.fields.as_slice()[0].cursor();
+        for (position, row) in chunk.series.time.positions() {
+            match cursor.at(row).expect("the axis and the fields are aligned") {
+                SampleRef::Histogram(view) => {
+                    computed.push((position, view.count, view.start_timestamp));
+                }
+                SampleRef::Float(_) => panic!("sum_over_time answered a float for a histogram"),
+                SampleRef::Missing => {
+                    panic!("sum_over_time handed out a row of its own axis without a sample")
+                }
+            }
+        }
+    }
+    // The sum of one histogram is that histogram, so the count says the sample was summed rather
+    // than passed over; only the start timestamp has to be gone.
+    assert_eq!(
+        computed,
+        [(0, 1.0, None), (1, 1.0, None)],
+        "sum_over_time kept the start timestamp of the histogram it summed"
+    );
+}
+
 /// A window retaining a native histogram is charged for the payload it owns, not only the slot.
 ///
 /// The histogram sample below stays ahead of the second grid point's window, so the evaluator keeps
