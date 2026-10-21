@@ -49,7 +49,7 @@ use common_query::OutputData;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use common_runtime::Runtime;
+use common_runtime::{JoinHandle, Runtime};
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
@@ -250,11 +250,10 @@ impl RegionServer {
         if RegionServerInner::is_ingest_request(&request) {
             let inner = self.inner.clone();
             let request_type = request.request_type();
-            return common_runtime::spawn_ingest(async move {
+            let task = common_runtime::spawn_ingest(async move {
                 inner.handle_request(region_id, request).await
-            })
-            .await
-            .context(RuntimeJoinSnafu { request_type })?;
+            });
+            return join_ingest_task(task, request_type).await?;
         }
 
         self.inner.handle_request(region_id, request).await
@@ -672,14 +671,13 @@ impl RegionServer {
             "RegionServer::handle_metric_batch_puts",
             batch_size = batch_size
         ));
-        let results = common_runtime::spawn_ingest(async move {
+        let task = common_runtime::spawn_ingest(async move {
             metric_engine
                 .put_regions_batch(put_requests)
                 .trace(span)
                 .await
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })?;
+        });
+        let results = join_ingest_task(task, request_type).await?;
         let mut response = BatchRegionResponse {
             affected_rows: 0,
             extensions: HashMap::new(),
@@ -739,7 +737,7 @@ impl RegionServer {
             .collect();
         let started = Instant::now();
         let tracing_context = TracingContext::from_current_span();
-        common_runtime::spawn_ingest(async move {
+        let task = common_runtime::spawn_ingest(async move {
             let mut pending = engine
                 .handle_batch_put_requests(puts)
                 .into_iter()
@@ -793,10 +791,8 @@ impl RegionServer {
             }
             response.failures.sort_unstable_by_key(|(index, _)| *index);
             response
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })
-        .map(Either::Left)
+        });
+        join_ingest_task(task, request_type).await.map(Either::Left)
     }
 
     /// Returns the mito engine when there are at least two requests, every one a put into a ready
@@ -2285,6 +2281,22 @@ fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usi
         .inc_by(count as u64);
 }
 
+/// Awaits an ingest task without treating a join failure as an entry-level write result.
+async fn join_ingest_task<T>(task: JoinHandle<T>, request_type: &'static str) -> Result<T> {
+    task.await
+        .inspect_err(|error| {
+            let reason = if error.is_panic() {
+                "panic"
+            } else {
+                "cancelled"
+            };
+            crate::metrics::INGEST_TASK_FAILURES_TOTAL
+                .with_label_values(&[request_type, reason])
+                .inc();
+        })
+        .context(RuntimeJoinSnafu { request_type })
+}
+
 /// Records the result of `count` ingest requests answered by one response: the rows they
 /// changed, or their failures.
 fn record_ingest_result(request_type: &str, count: usize, result: &Result<RegionResponse>) {
@@ -2339,6 +2351,7 @@ mod tests {
     use std::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use api::v1::region::{InsertRequest, InsertRequests};
     use api::v1::{PartitionExprVersion, Rows, SemanticType};
@@ -2913,6 +2926,291 @@ mod tests {
             .unwrap_err();
         assert_eq!(StatusCode::RegionBusy, error.status_code());
         assert_eq!(RetryHint::Retryable, error.retry_hint());
+    }
+
+    #[tokio::test]
+    async fn test_ingest_task_panic_has_separate_failure_metric() {
+        let server = mock_region_server();
+        let region_id = RegionId::new(1, 1);
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+            "mock",
+            Box::new(|_, request| {
+                assert!(matches!(request, RegionRequest::Put(_)));
+                panic!("test ingest task panic");
+            }),
+        );
+        server.register_test_region(region_id, engine);
+
+        let entry_labels = [(crate::metrics::REGION_REQUEST_TYPE, "Put")];
+        let task_labels = [
+            (crate::metrics::REGION_REQUEST_TYPE, "Put"),
+            ("reason", "panic"),
+        ];
+        let entry_failures_before = counter_value(
+            "greptime_datanode_region_failed_insert_count",
+            &entry_labels,
+        );
+        let task_failures_before =
+            counter_value("greptime_datanode_ingest_task_failures_total", &task_labels);
+        let changed_rows = crate::metrics::REGION_CHANGED_ROW_COUNT.with_label_values(&["Put"]);
+        let changed_rows_before = changed_rows.get();
+        let failed_requests =
+            crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT.with_label_values(&["Inserts"]);
+        let failed_requests_before = failed_requests.get();
+
+        let request = RegionRequestV1 {
+            header: Some(Default::default()),
+            body: Some(region_request::Body::Inserts(InsertRequests {
+                requests: vec![InsertRequest {
+                    region_id: region_id.as_u64(),
+                    rows: Some(Rows::default()),
+                    ..Default::default()
+                }],
+            })),
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            server.handle_region_request(request),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::Internal);
+        assert_eq!(failed_requests.get(), failed_requests_before + 1);
+        assert_eq!(changed_rows.get(), changed_rows_before);
+        assert_eq!(
+            counter_value(
+                "greptime_datanode_region_failed_insert_count",
+                &entry_labels
+            ),
+            entry_failures_before,
+            "a task panic does not establish an entry's write outcome"
+        );
+        assert_eq!(
+            counter_value("greptime_datanode_ingest_task_failures_total", &task_labels),
+            task_failures_before + 1.0,
+            "an ingest-task panic must have its own failure metric"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ingest_task_cancellation_has_separate_failure_metric() {
+        let task_failures_before = ingest_task_failure_counts("Delete");
+        let entry_labels = [(crate::metrics::REGION_REQUEST_TYPE, "Delete")];
+        let entry_failures_before = counter_value(
+            "greptime_datanode_region_failed_insert_count",
+            &entry_labels,
+        );
+        let changed_rows = crate::metrics::REGION_CHANGED_ROW_COUNT.with_label_values(&["Delete"]);
+        let changed_rows_before = changed_rows.get();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = common_runtime::spawn_ingest(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        tokio::time::timeout(Duration::from_secs(10), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        let error = tokio::time::timeout(Duration::from_secs(10), join_ingest_task(task, "Delete"))
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert_matches!(
+            error,
+            error::Error::RuntimeJoin {
+                request_type: "Delete",
+                error,
+                ..
+            } if error.is_cancelled()
+        );
+        assert_eq!(
+            ingest_task_failure_counts("Delete"),
+            [task_failures_before[0], task_failures_before[1] + 1.0]
+        );
+        assert_eq!(changed_rows.get(), changed_rows_before);
+        assert_eq!(
+            counter_value(
+                "greptime_datanode_region_failed_insert_count",
+                &entry_labels
+            ),
+            entry_failures_before
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ingest_task_completed_writes_are_not_join_failures() {
+        let task_failures_before = ingest_task_failure_counts("Put");
+        let entry_labels = [(crate::metrics::REGION_REQUEST_TYPE, "Put")];
+        let changed_rows = crate::metrics::REGION_CHANGED_ROW_COUNT.with_label_values(&["Put"]);
+        let failed_requests =
+            crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT.with_label_values(&["Inserts"]);
+
+        for fail_write in [false, true] {
+            let server = mock_region_server();
+            let region_id = RegionId::new(1, 1);
+            let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+                "mock",
+                Box::new(move |region_id, _| {
+                    if fail_write {
+                        return error::RegionBusySnafu { region_id }.fail();
+                    }
+                    Ok(3)
+                }),
+            );
+            server.register_test_region(region_id, engine);
+            let entry_failures_before = counter_value(
+                "greptime_datanode_region_failed_insert_count",
+                &entry_labels,
+            );
+            let changed_rows_before = changed_rows.get();
+            let failed_requests_before = failed_requests.get();
+            let request = RegionRequestV1 {
+                header: Some(Default::default()),
+                body: Some(region_request::Body::Inserts(InsertRequests {
+                    requests: vec![InsertRequest {
+                        region_id: region_id.as_u64(),
+                        rows: Some(Rows::default()),
+                        ..Default::default()
+                    }],
+                })),
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                server.handle_region_request(request),
+            )
+            .await
+            .unwrap();
+
+            if fail_write {
+                assert_eq!(result.unwrap_err().status_code(), StatusCode::RegionBusy);
+                assert_eq!(failed_requests.get(), failed_requests_before + 1);
+                assert_eq!(changed_rows.get(), changed_rows_before);
+                assert_eq!(
+                    counter_value(
+                        "greptime_datanode_region_failed_insert_count",
+                        &entry_labels
+                    ),
+                    entry_failures_before + 1.0
+                );
+            } else {
+                assert_eq!(result.unwrap().affected_rows, 3);
+                assert_eq!(failed_requests.get(), failed_requests_before);
+                assert_eq!(changed_rows.get(), changed_rows_before + 3);
+                assert_eq!(
+                    counter_value(
+                        "greptime_datanode_region_failed_insert_count",
+                        &entry_labels
+                    ),
+                    entry_failures_before
+                );
+            }
+            assert_eq!(ingest_task_failure_counts("Put"), task_failures_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ingest_task_mito_batch_panic_preserves_recorded_outcomes() {
+        let server = mock_region_server();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_in_task = Arc::clone(&completed);
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id, request| {
+                assert!(matches!(request, RegionRequest::Put(_)));
+                // Each ready response is accounted before the batch polls its next response.
+                // Base the outcomes on call count rather than FuturesUnordered's poll order.
+                match completed_in_task.fetch_add(1, Ordering::Relaxed) {
+                    0 => Ok(3),
+                    1 => error::RegionBusySnafu { region_id }.fail(),
+                    _ => panic!("test ingest batch panic after recorded entry outcomes"),
+                }
+            }),
+        );
+        let regions = [1, 2, 3].map(|number| RegionId::new(1, number));
+        for region_id in regions {
+            server.register_test_region(region_id, engine.clone());
+        }
+        let task_failures_before = ingest_task_failure_counts("Put");
+        let entry_labels = [(crate::metrics::REGION_REQUEST_TYPE, "Put")];
+        let entry_failures_before = counter_value(
+            "greptime_datanode_region_failed_insert_count",
+            &entry_labels,
+        );
+        let changed_rows = crate::metrics::REGION_CHANGED_ROW_COUNT.with_label_values(&["Put"]);
+        let changed_rows_before = changed_rows.get();
+        let failed_requests =
+            crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT.with_label_values(&["Inserts"]);
+        let failed_requests_before = failed_requests.get();
+        let request = RegionRequestV1 {
+            header: Some(Default::default()),
+            body: Some(region_request::Body::Inserts(InsertRequests {
+                requests: regions
+                    .into_iter()
+                    .map(|region_id| InsertRequest {
+                        region_id: region_id.as_u64(),
+                        rows: Some(Rows::default()),
+                        ..Default::default()
+                    })
+                    .collect(),
+            })),
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            server.handle_region_request(request),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(error.status_code(), StatusCode::Internal);
+        assert_eq!(completed.load(Ordering::Relaxed), 3);
+        assert_eq!(failed_requests.get(), failed_requests_before + 1);
+        assert_eq!(changed_rows.get(), changed_rows_before + 3);
+        assert_eq!(
+            counter_value(
+                "greptime_datanode_region_failed_insert_count",
+                &entry_labels
+            ),
+            entry_failures_before + 1.0,
+            "the observed failure is counted once, not again for the whole batch"
+        );
+        assert_eq!(
+            ingest_task_failure_counts("Put"),
+            [task_failures_before[0] + 1.0, task_failures_before[1]]
+        );
+    }
+
+    fn ingest_task_failure_counts(request_type: &str) -> [f64; 2] {
+        ["panic", "cancelled"].map(|reason| {
+            counter_value(
+                "greptime_datanode_ingest_task_failures_total",
+                &[
+                    (crate::metrics::REGION_REQUEST_TYPE, request_type),
+                    ("reason", reason),
+                ],
+            )
+        })
+    }
+
+    fn counter_value(name: &str, labels: &[(&str, &str)]) -> f64 {
+        prometheus::gather()
+            .iter()
+            .filter(|family| family.name() == name)
+            .flat_map(|family| family.get_metric())
+            .filter(|metric| {
+                labels.iter().all(|(name, value)| {
+                    metric
+                        .label
+                        .iter()
+                        .any(|label| label.name() == *name && label.value() == *value)
+                })
+            })
+            .map(|metric| metric.counter.value())
+            .sum()
     }
 
     #[tokio::test]
@@ -3601,6 +3899,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metric_batch_failure_indices() {
+        let task_failures_before = ingest_task_failure_counts("Put");
         let mut env = TestEnv::with_prefix("region-server-metric-results").await;
         let mito = env.create_engine(MitoConfig::default()).await;
         let metric = Arc::new(
@@ -3705,6 +4004,7 @@ mod tests {
                 .iter()
                 .all(|(_, error)| error.retry_hint() == RetryHint::RetryAfterRouteRefresh)
         );
+        assert_eq!(ingest_task_failure_counts("Put"), task_failures_before);
     }
 
     #[tokio::test]
