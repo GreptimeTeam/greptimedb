@@ -264,8 +264,44 @@ lazy_static! {
     ).unwrap();
 }
 
+pub(crate) fn cache_loading_metrics(
+    cache_type: &'static str,
+) -> std::sync::Arc<common_cache::metrics::CacheMetrics> {
+    use common_cache::metrics::{CacheMetrics, OperationMetrics};
+
+    let operation = |stage| OperationMetrics {
+        started: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "started"]),
+        succeeded: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "success"]),
+        failed: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "error"]),
+        cancelled: CACHE_NATIVE_LOAD_EVENTS.with_label_values(&[cache_type, stage, "cancelled"]),
+        active: CACHE_NATIVE_LOAD_ACTIVE.with_label_values(&[cache_type, stage]),
+        elapsed: CACHE_NATIVE_LOAD_ELAPSED.with_label_values(&[cache_type, stage]),
+    };
+    std::sync::Arc::new(CacheMetrics {
+        requests: operation("request"),
+        loads: operation("loader"),
+    })
+}
+
 // Cache metrics.
 lazy_static! {
+    /// Native cache request and actual loader lifecycle; request is not a waiter count.
+    pub static ref CACHE_NATIVE_LOAD_EVENTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_cache_native_load_events_total",
+        "Native cache request and executed loader outcomes; requests include hits and shared loads",
+        &[TYPE_LABEL, STAGE_LABEL, "event"]
+    ).unwrap();
+    pub static ref CACHE_NATIVE_LOAD_ACTIVE: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_mito_cache_native_load_active",
+        "Active native cache requests or executed loaders, not waiting requests",
+        &[TYPE_LABEL, STAGE_LABEL]
+    ).unwrap();
+    pub static ref CACHE_NATIVE_LOAD_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_cache_native_load_seconds",
+        "Native cache request or executed loader wall time including suspension and cancellation, not CPU time",
+        &[TYPE_LABEL, STAGE_LABEL], exponential_buckets(0.0001, 10.0, 6).unwrap()
+    ).unwrap();
+
     /// Cache hit counter.
     pub static ref CACHE_HIT: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_hit",
