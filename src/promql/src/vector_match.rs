@@ -30,7 +30,7 @@ use datatypes::series::samples::{FieldSpec, RowCursor, SampleRef, Series, Series
 use datatypes::series::time::{EvalGrid, GridRunPair, GridSpan, TimeAxis};
 use datatypes::series::{Label, MetricName};
 
-use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS};
+use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS, external, owned};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
 #[cfg(test)]
@@ -138,7 +138,29 @@ pub struct BinaryMatching {
     pub return_bool: bool,
     pub labels: MatchingLabels,
     pub cardinality: Cardinality,
+    pub fill: FillValues,
 }
+
+/// The values of `fill`, `fill_left` and `fill_right`, which stand in for a sample that has no
+/// match on the other side.
+///
+/// Prometheus applies them after it swaps the operands of `group_right`, so there `fill_left`
+/// stands in for a missing right-hand sample and `fill_right` for a missing left-hand one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FillValues {
+    pub lhs: Option<f64>,
+    pub rhs: Option<f64>,
+}
+
+// Compared by bits: a NaN fill equals itself, and `fill(-0)` differs from `fill(0)` (`1 / fill`).
+impl PartialEq for FillValues {
+    fn eq(&self, other: &Self) -> bool {
+        let bits = |value: Option<f64>| value.map(f64::to_bits);
+        bits(self.lhs) == bits(other.lhs) && bits(self.rhs) == bits(other.rhs)
+    }
+}
+
+impl Eq for FillValues {}
 
 /// A PromQL set operator between two instant vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,7 +185,8 @@ pub fn binary_output_schema(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Ar
 /// Fields are paired by position. Arithmetic and `bool` comparisons drop `__name__`, `__type__`
 /// and `__unit__`; comparisons without `bool` keep the left value where they hold. Native
 /// histograms support `+`, `-`, `==` and `!=` with each other, `*` with a float on either side
-/// and `/` by a float; Prometheus skips any other pairing of a histogram.
+/// and `/` by a float; Prometheus skips any other pairing of a histogram. A fill value pairs a
+/// sample that has no match with a float sample labelled with its match group.
 pub fn binary_vectors(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -764,12 +787,15 @@ fn binary_field(
         }
         None => FieldMetadata::default(),
     };
-    // Prometheus short-circuits a point where either side is empty, before any check.
-    let both_present: Vec<bool> = lhs
+    let fill = matching.fill;
+    // Prometheus short-circuits a point where either side is empty, before any check; with a fill
+    // value only a point where both are empty.
+    let filling = fill.lhs.is_some() || fill.rhs.is_some();
+    let evaluated: Vec<bool> = lhs
         .presence(points)
         .into_iter()
         .zip(rhs.presence(points))
-        .map(|(lhs, rhs)| lhs && rhs)
+        .map(|(lhs, rhs)| if filling { lhs || rhs } else { lhs && rhs })
         .collect();
 
     let one_groups = group(one, &matching.labels);
@@ -780,7 +806,7 @@ fn binary_field(
         let duplicate = overlap(
             one,
             members,
-            |point| both_present[point],
+            |point| evaluated[point],
             metadata.tables,
             budget.as_deref_mut(),
         )?;
@@ -792,26 +818,29 @@ fn binary_field(
     }
 
     let drop_name = !matching.op.is_comparison() || matching.return_bool;
-    let mut results = Results::default();
-    let group_keys: Vec<&GroupKey> = one_groups.keys().collect();
-    let group_ids: HashMap<&GroupKey, usize> = group_keys
-        .iter()
-        .enumerate()
-        .map(|(id, key)| (*key, id))
-        .collect();
-    // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
-    // comparison as a match too, but not an operation that failed.
     let rows_before = budget.as_deref().map_or(0, |budget| budget.rows);
-    let mut matched: HashSet<(usize, usize)> = HashSet::new();
-    // The slots the match set holds are part of this field's workspace, not of what a row keeps.
-    let mut matched_bytes = 0usize;
-    let mut implicit_many_to_one: Option<(usize, &GroupKey)> = None;
+    let mut pairs = Pairs {
+        matching,
+        one_is_left,
+        results: Results::default(),
+        group_keys: Vec::new(),
+        group_ids: HashMap::new(),
+        // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
+        // comparison as a match too, but not an operation that failed. Filling the many side
+        // consults the same set.
+        matched: (matching.cardinality == Cardinality::OneToOne || fill.lhs.is_some())
+            .then(HashSet::new),
+        // The slots the match set holds are part of this field's workspace, not of what a row keeps.
+        matched_bytes: 0,
+        implicit_many_to_one: None,
+    };
     for (many_index, many_series) in many.series.iter().enumerate() {
         let key = group_key(&many_series.metric, &matching.labels);
-        let Some(candidates) = one_groups.get(&key) else {
+        let candidates = one_groups.get(&key).map_or(&[][..], Vec::as_slice);
+        if candidates.is_empty() && fill.rhs.is_none() {
             continue;
-        };
-        let group_id = group_ids[&key];
+        }
+        let group = pairs.group_id(&key);
         for &one_index in candidates {
             // One candidate of the one side is paired with this series, whether or not the pairing
             // turns out to hold a row: the visit is what the test-only counter reports, before the
@@ -828,7 +857,7 @@ fn binary_field(
                     matching,
                     include,
                 );
-                budget.step(row_workspace(&metadata, matched_bytes, pairing, 0))?;
+                budget.step(row_workspace(&metadata, pairs.matched_bytes, pairing, 0))?;
             }
             let metric = result_metric(
                 &many_series.metric,
@@ -861,93 +890,54 @@ fn binary_field(
                             .at(pair.other_row + offset)
                             .expect("a row never goes back"),
                     );
-                    if matches!(many_value, SampleRef::Missing)
-                        || matches!(one_value, SampleRef::Missing)
-                    {
-                        continue;
-                    }
-                    let (lhs_value, rhs_value) = if one_is_left {
-                        (one_value, many_value)
-                    } else {
-                        (many_value, one_value)
-                    };
-                    // The operator's temporaries: an owned copy of each histogram operand and the
-                    // union it grows into, live while the row it reads is computed.
-                    if let Some(budget) = budget.as_deref_mut() {
-                        let histograms = histogram_pair_bytes(&lhs_value, &rhs_value);
-                        budget.step(row_workspace(
-                            &metadata,
-                            matched_bytes,
-                            pairing,
-                            histograms,
-                        ))?;
-                    }
-                    let Some((result, keep)) = elem_binop(matching.op, lhs_value, rhs_value)?
-                    else {
-                        // The operator skipped the pair: its temporaries are gone and nothing of
-                        // it was filed.
-                        if let Some(budget) = budget.as_deref_mut() {
-                            budget.step(row_workspace(&metadata, matched_bytes, pairing, 0))?;
-                        }
-                        continue;
-                    };
-                    // The operator has returned, so the copies it read its operands into are gone
-                    // and what it still owns -- possibly on the heap -- is the value it handed
-                    // back. That value is live until it is dropped or filed, so the figure it costs
-                    // replaces the operator's temporary and is held across the steps below.
-                    let owned = match &result {
-                        GridSample::Histogram(histogram) => result_histogram_bytes(histogram),
-                        GridSample::Float(_) => 0,
-                    };
-                    if let Some(budget) = budget.as_deref_mut() {
-                        budget.step(row_workspace(&metadata, matched_bytes, pairing, owned))?;
-                    }
-                    if matching.cardinality == Cardinality::OneToOne {
-                        let slot = (group_id, point);
-                        if matched.contains(&slot) {
-                            if implicit_many_to_one.is_none_or(|(first, _)| point < first) {
-                                implicit_many_to_one = Some((point, group_keys[group_id]));
-                            }
-                        } else {
-                            // Only a point the group has not been matched at yet costs an entry,
-                            // charged with the value that is still owned beside it.
-                            if let Some(budget) = budget.as_deref_mut() {
-                                matched_bytes = matched_bytes.saturating_add(MATCH_SLOT_BYTES);
-                                budget.step(row_workspace(
-                                    &metadata,
-                                    matched_bytes,
-                                    pairing,
-                                    owned,
-                                ))?;
-                            }
-                            matched.insert(slot);
-                        }
-                    }
-                    // The value the row keeps. A `bool` comparison keeps a float and a filtered
-                    // comparison keeps nothing, so what the operator built is dropped there before
-                    // its charge is given up; a kept value is moved into the row.
-                    let value = if matching.return_bool {
-                        drop(result);
-                        Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
-                    } else if keep {
-                        Some(result)
-                    } else {
-                        drop(result);
-                        None
-                    };
-                    // One total replaces the operator's temporary: a kept histogram moves into the
-                    // results as it goes, and in every other case the value is already dropped.
-                    if let Some(budget) = budget.as_deref_mut() {
-                        if let Some(GridSample::Histogram(histogram)) = &value {
-                            budget.keep_histogram(histogram);
-                        }
-                        budget.step(row_workspace(&metadata, matched_bytes, pairing, 0))?;
-                    }
-                    results.insert(
+                    pairs.apply(
+                        group,
                         &metric,
-                        group_id,
                         point,
-                        value,
+                        many_value,
+                        one_value,
+                        &metadata,
+                        pairing,
+                        label_set,
+                        budget.as_deref_mut(),
+                    )?;
+                }
+            }
+        }
+        // A many-side sample no one-side series matched is answered with the fill value, at the
+        // label set the match group of the many-side series gives it.
+        if let Some(value) = fill.rhs {
+            let metric = result_metric(
+                &many_series.metric,
+                &metric_of(&key)?,
+                matching,
+                include,
+                drop_name,
+            )?;
+            let label_set = if budget.is_some() {
+                result_set_bytes(&metric, &many_series.metric, include)
+            } else {
+                0
+            };
+            let mut cursor = many.cursor(many_index);
+            let mut candidate_cursors: Vec<RowCursor<'_>> =
+                candidates.iter().map(|&index| one.cursor(index)).collect();
+            for (point, row) in many.positions(many_index) {
+                let sample = cursor.at(row).expect("a row never goes back");
+                let matched = candidates
+                    .iter()
+                    .zip(&mut candidate_cursors)
+                    .any(|(&index, cursor)| one.present(index, point, cursor));
+                if !matched {
+                    // A fill row pairs no two series, so it builds no pairing label set.
+                    pairs.apply(
+                        group,
+                        &metric,
+                        point,
+                        sample,
+                        SampleRef::Float(value),
+                        &metadata,
+                        0,
                         label_set,
                         budget.as_deref_mut(),
                     )?;
@@ -955,9 +945,57 @@ fn binary_field(
             }
         }
     }
-    // The match set is a step of the walk, not something the field keeps: it goes before the sort
-    // is charged, so the sort figure is the one that is live.
-    drop(matched);
+    // Prometheus fills the many side after every match of the step, for the samples of the one
+    // side that no operation matched.
+    if let Some(value) = fill.lhs {
+        for (one_index, one_series) in one.series.iter().enumerate() {
+            let key = group_key(&one_series.metric, &matching.labels);
+            let group = pairs.group_id(&key);
+            let metric = result_metric(
+                &metric_of(&key)?,
+                &one_series.metric,
+                matching,
+                include,
+                drop_name,
+            )?;
+            let label_set = if budget.is_some() {
+                result_set_bytes(&metric, &one_series.metric, include)
+            } else {
+                0
+            };
+            let mut cursor = one.cursor(one_index);
+            for (point, row) in one.positions(one_index) {
+                if !pairs
+                    .matched
+                    .as_ref()
+                    .is_some_and(|matched| matched.contains(&(group, point)))
+                {
+                    let sample = cursor.at(row).expect("a row never goes back");
+                    // A fill row pairs no two series, so it builds no pairing label set: what it
+                    // reserves is the workspace of one row and the label set it is filed under.
+                    pairs.apply(
+                        group,
+                        &metric,
+                        point,
+                        SampleRef::Float(value),
+                        sample,
+                        &metadata,
+                        0,
+                        label_set,
+                        budget.as_deref_mut(),
+                    )?;
+                }
+            }
+        }
+    }
+    // The match set is a step of the walk, not something the field keeps: taking the pairing state
+    // apart here drops it, so the sort and the messages are what is live from here on.
+    let Pairs {
+        mut results,
+        group_keys,
+        implicit_many_to_one,
+        ..
+    } = pairs;
     // The messages the field reports and the sort of its rows are its last workspace, with the
     // messages it may append charged before they exist.
     if let Some(budget) = budget.as_deref_mut() {
@@ -986,7 +1024,8 @@ fn binary_field(
             ),
         ));
     }
-    if let Some((point, key)) = implicit_many_to_one {
+    if let Some((point, group)) = implicit_many_to_one {
+        let key = &group_keys[group];
         errors.push((
             point,
             1,
@@ -1033,6 +1072,150 @@ fn binary_field(
         budget.keep(appended);
     }
     Ok(results)
+}
+
+/// The matched pairs of one field and the state Prometheus checks them against.
+struct Pairs<'a> {
+    matching: &'a BinaryMatching,
+    one_is_left: bool,
+    results: Results,
+    group_keys: Vec<GroupKey>,
+    group_ids: HashMap<GroupKey, usize>,
+    /// The match groups an operation matched at a point, kept where Prometheus consults them:
+    /// one-to-one matching, and filling the many side. A filtered comparison counts as a match,
+    /// an operation that failed does not.
+    matched: Option<HashSet<(usize, usize)>>,
+    /// The bytes the match set holds: its slots are part of the field's workspace, not of what a
+    /// row keeps, so they are charged beside the tables and given back with the set.
+    matched_bytes: usize,
+    implicit_many_to_one: Option<(usize, usize)>,
+}
+
+impl Pairs<'_> {
+    /// The id of the match group `key`, which stands for it in `matched` and in the results.
+    fn group_id(&mut self, key: &GroupKey) -> usize {
+        if let Some(&id) = self.group_ids.get(key) {
+            return id;
+        }
+        let id = self.group_keys.len();
+        self.group_keys.push(key.clone());
+        self.group_ids.insert(key.clone(), id);
+        id
+    }
+
+    /// Applies the operator to a sample of each side at `point`; a missing sample is no pair.
+    ///
+    /// `metadata` is what the field keeps between rows, `pairing` the label set and axis
+    /// intersection this pairing built, and `label_set` the bytes the result label set keeps: the
+    /// workspace is reserved through `budget` as each step of the row replaces the one before.
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        group: usize,
+        metric: &MetricName,
+        point: usize,
+        many_value: SampleRef<'_>,
+        one_value: SampleRef<'_>,
+        metadata: &FieldMetadata,
+        pairing: usize,
+        label_set: usize,
+        mut budget: Option<&mut Budget<'_>>,
+    ) -> Result<()> {
+        if matches!(many_value, SampleRef::Missing) || matches!(one_value, SampleRef::Missing) {
+            return Ok(());
+        }
+        let (lhs_value, rhs_value) = if self.one_is_left {
+            (one_value, many_value)
+        } else {
+            (many_value, one_value)
+        };
+        // The operator's temporaries: an owned copy of each histogram operand and the union it
+        // grows into, live while the row it reads is computed.
+        if let Some(budget) = budget.as_deref_mut() {
+            let histograms = histogram_pair_bytes(&lhs_value, &rhs_value);
+            budget.step(row_workspace(
+                metadata,
+                self.matched_bytes,
+                pairing,
+                histograms,
+            ))?;
+        }
+        let Some((result, keep)) = elem_binop(self.matching.op, lhs_value, rhs_value)? else {
+            // The operator skipped the pair: its temporaries are gone and nothing of it was filed.
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.step(row_workspace(metadata, self.matched_bytes, pairing, 0))?;
+            }
+            return Ok(());
+        };
+        // The operator has returned, so the copies it read its operands into are gone and what it
+        // still owns -- possibly on the heap -- is the value it handed back. That value is live
+        // until it is dropped or filed, so the figure it costs replaces the operator's temporary and
+        // is held across the steps below.
+        let owned = match &result {
+            GridSample::Histogram(histogram) => result_histogram_bytes(histogram),
+            GridSample::Float(_) => 0,
+        };
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.step(row_workspace(metadata, self.matched_bytes, pairing, owned))?;
+        }
+        // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
+        // comparison as a match too, but not an operation that failed.
+        if let Some(matched) = &mut self.matched {
+            if !matched.insert((group, point)) {
+                if self.matching.cardinality == Cardinality::OneToOne
+                    && self
+                        .implicit_many_to_one
+                        .is_none_or(|(first, _)| point < first)
+                {
+                    self.implicit_many_to_one = Some((point, group));
+                }
+            } else if let Some(budget) = budget.as_deref_mut() {
+                // Only a point the group has not been matched at yet costs an entry, charged with
+                // the value that is still owned beside it.
+                self.matched_bytes = self.matched_bytes.saturating_add(MATCH_SLOT_BYTES);
+                budget.step(row_workspace(metadata, self.matched_bytes, pairing, owned))?;
+            }
+        }
+        // The value the row keeps. A `bool` comparison keeps a float and a filtered comparison
+        // keeps nothing, so what the operator built is dropped there before its charge is given up;
+        // a kept value is moved into the row.
+        let value = if self.matching.return_bool {
+            drop(result);
+            Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
+        } else if keep {
+            Some(result)
+        } else {
+            drop(result);
+            None
+        };
+        // One total replaces the operator's temporary: a kept histogram moves into the results as it
+        // goes, and in every other case the value is already dropped.
+        if let Some(budget) = budget.as_deref_mut() {
+            if let Some(GridSample::Histogram(histogram)) = &value {
+                budget.keep_histogram(histogram);
+            }
+            budget.step(row_workspace(metadata, self.matched_bytes, pairing, 0))?;
+        }
+        self.results
+            .insert(metric, group, point, value, label_set, budget)
+    }
+}
+
+/// The labels Prometheus gives a fill sample: the match group of the sample it pairs with.
+fn metric_of(key: &GroupKey) -> Result<MetricName> {
+    let mut name = None;
+    let mut labels = Vec::with_capacity(key.len());
+    for (label, value) in key {
+        if &**label == "__name__" {
+            name = Some(value.clone());
+        } else {
+            labels.push(Label {
+                name: label.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    MetricName::try_new(name, labels).map_err(external)
 }
 
 fn earliest_error(errors: Vec<(usize, u8, String)>) -> Result<()> {
@@ -1487,17 +1670,6 @@ impl<'a> Operand<'a> {
         }
         presence
     }
-}
-
-/// `sample` as an owned value; `None` when missing.
-fn owned(sample: SampleRef<'_>) -> Result<Option<GridSample>> {
-    Ok(match sample {
-        SampleRef::Missing => None,
-        SampleRef::Float(value) => Some(GridSample::Float(value)),
-        SampleRef::Histogram(view) => Some(GridSample::Histogram(Box::new(
-            FloatHistogram::try_from_view(&view)?,
-        ))),
-    })
 }
 
 /// Prometheus `vectorElemBinop` over present samples: the value and whether to keep it, or

@@ -35,7 +35,7 @@ use promql::map::MathOp;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::metrics::NodePath;
 use promql::native::plan::{BoundInput, BoundMap, NativeExpr, NativeNode, NativeTree, NativeType};
-use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
+use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The statement's grid: five points one second apart, starting at zero.
 fn grid() -> Arc<EvalGrid> {
@@ -130,6 +130,7 @@ fn bound_tree(schema: &Arc<SeriesSchema>) -> NativeTree {
                 return_bool: false,
                 labels: MatchingLabels::Ignoring(Vec::new()),
                 cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
             },
         },
         output: NativeType::Samples(Arc::clone(schema)),
