@@ -21,8 +21,9 @@ use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
+    EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
+use promql::native::plan::{NativeExpr, NativeNode};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -240,6 +241,29 @@ impl Categorizer {
 
                 Commutativity::Commutative
             }
+            name if name == FusedSeries::name() => {
+                let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
+                // A region builds this node from the region scan itself: the conversion takes that
+                // scan's raw-series entrypoint and cannot look through anything in between, so a
+                // node whose input is not that scan has nothing to read where it would be placed
+                // and stays where it was planned.
+                if !matches!(fused.inputs().as_slice(), [LogicalPlan::TableScan(_)]) {
+                    return Commutativity::NonCommutative;
+                }
+                // The region asks the scan for the series of one named metric, so a node that binds
+                // no name cannot be built there at all.
+                if fused.binding().metric_name.is_none() {
+                    return Commutativity::NonCommutative;
+                }
+                // A region holds a subset of the metric's series and no series is split across
+                // regions, so the node may be evaluated there only when every node of its tree
+                // reads one series at a time.
+                if reads_across_series(fused.tree().root()) {
+                    return Commutativity::NonCommutative;
+                }
+
+                Commutativity::Commutative
+            }
             name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
                 || name == RangeManipulate::name() =>
@@ -346,19 +370,60 @@ impl Categorizer {
     }
 }
 
+/// Whether any node of `tree` reads more than one series at a time.
+///
+/// Everything the native compiler emits today reads one series: an instant selection, a window and
+/// a point-wise map each select, fold or map the samples of the series they were handed. An
+/// aggregate folds a label set's series together and a binary operation pairs them, so both consume
+/// several series at once. Neither has a compiler producer yet, which is why refusing them costs
+/// nothing today: a tree built some other way is exactly what this check is for, because evaluating
+/// it one region at a time would fold a partial input and answer a wrong query silently.
+fn reads_across_series(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. } => reads_across_series(input),
+        NativeExpr::Aggregate { .. } | NativeExpr::Binary { .. } => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::{Duration, UNIX_EPOCH};
 
+    use datafusion::arrow::datatypes::{
+        DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit,
+    };
+    use datafusion::common::{DFSchema, DFSchemaRef};
+    use datafusion::datasource::DefaultTableSource;
     use datafusion_common::Column;
+    use datafusion_common::config::ConfigOptions;
     use datafusion_expr::LogicalPlanBuilder;
     use datafusion_expr::expr::ScalarFunction;
+    use datafusion_expr::{Extension, LogicalPlan};
     use datafusion_functions::core::coalesce;
+    use datafusion_optimizer::analyzer::AnalyzerRule;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
+    use promql::native::plan::{
+        AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, Grouping,
+        NativeType,
+    };
+    use promql_parser::parser;
+    use store_api::storage::RegionId;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
     use super::*;
+    use crate::dist_plan::DistPlannerAnalyzer;
+    use crate::optimizer::test_util::mock_table_provider;
+    use crate::promql::native_compile::{compile, statement_grid};
+    use crate::query_engine::DefaultSerializer;
 
     #[test]
     fn series_divide_by_tsid_is_commutative() {
@@ -392,6 +457,237 @@ mod tests {
                 Commutativity::Commutative
             ));
         }
+    }
+
+    /// The statement one `FusedSeries` test node is bound to.
+    fn native_statement() -> promql_parser::parser::EvalStmt {
+        promql_parser::parser::EvalStmt {
+            expr: parser::parse("some_metric").unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        }
+    }
+
+    /// A `FusedSeries` node over `input`, bound to the tree a bare selector compiles to.
+    ///
+    /// The tree is the simplest shape the compiler accepts, because what these tests change is
+    /// where the node may be placed, not what it computes.
+    fn fused_series_plan(input: LogicalPlan) -> LogicalPlan {
+        fused_series_plan_named(input, Some("some_metric"))
+    }
+
+    /// The same node, with the metric name it binds chosen by the caller.
+    fn fused_series_plan_named(input: LogicalPlan, metric_name: Option<&str>) -> LogicalPlan {
+        let stmt = native_statement();
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let tree = compile(
+            &stmt,
+            Arc::clone(&series_schema),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let binding = FusedSeriesBinding {
+            series_schema,
+            grid: statement_grid(&stmt).unwrap(),
+            metric_name: metric_name.map(Arc::from),
+            time_index: "ts".to_string(),
+            tags: Vec::new(),
+        };
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![
+                    (
+                        None,
+                        Arc::new(Field::new("v0", ArrowDataType::Float64, true)),
+                    ),
+                    (
+                        None,
+                        Arc::new(Field::new(
+                            "ts",
+                            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                            false,
+                        )),
+                    ),
+                ],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new(
+                    Arc::from("some_metric"),
+                    tree,
+                    binding,
+                    input,
+                    output_schema,
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
+    /// The region's own view of the metric's table: a scan whose provider is the region provider.
+    fn table_scan_plan() -> LogicalPlan {
+        let provider = mock_table_provider(RegionId::new(1, 1));
+        LogicalPlanBuilder::scan(
+            "some_metric",
+            Arc::new(DefaultTableSource::new(Arc::new(provider))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    fn holds_fused_series(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<FusedSeries>()
+        {
+            return true;
+        }
+        plan.inputs().into_iter().any(holds_fused_series)
+    }
+
+    #[test]
+    fn fused_series_over_its_scan_is_commutative() {
+        let plan = fused_series_plan(table_scan_plan());
+
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::Commutative
+        ));
+    }
+
+    /// The region builds the node from the scan's own raw-series entrypoint, so an input that is
+    /// not that scan leaves the node with nothing to read where it would be placed.
+    #[test]
+    fn fused_series_over_anything_but_a_scan_is_not_commutative() {
+        let scan = table_scan_plan();
+        let input = LogicalPlanBuilder::from(scan)
+            .filter(datafusion_expr::col("k0").eq(datafusion_expr::lit("a")))
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = fused_series_plan(input);
+
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// The region asks the scan for one named metric's series, so a node binding no name cannot
+    /// be built there.
+    #[test]
+    fn fused_series_that_binds_no_metric_name_is_not_commutative() {
+        let plan = fused_series_plan_named(table_scan_plan(), None);
+
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// A tree built by something other than the compiler can hold a node that folds several
+    /// series. The check is a property of the tree, so it is exercised on the node itself: the
+    /// compiler emits no such node today, and nothing else would build a tree containing one.
+    #[test]
+    fn a_tree_that_folds_across_series_is_not_per_series() {
+        let raw = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        }));
+        let input = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                output: raw.clone(),
+                ordering: SeriesOrdering::KeyThenTime,
+            }),
+            output: raw,
+        };
+        let group = Grouping::By(Arc::from(["k0".into()]));
+        let aggregate = NativeNode {
+            expr: NativeExpr::Aggregate {
+                input: Box::new(input),
+                op: BoundAggregate {
+                    kind: AggregateKind::Sum,
+                    group: group.clone(),
+                    stage: AggregateStage::Partial,
+                },
+            },
+            output: NativeType::AggregateState(Arc::new(AggregateStateSchema {
+                group,
+                accumulators: Arc::from([]),
+                grid: statement_grid(&native_statement()).unwrap(),
+            })),
+        };
+        assert!(reads_across_series(&aggregate));
+
+        // The same walk over what the compiler emits stays per-series.
+        let single_selector = compile(
+            &native_statement(),
+            Arc::new(SeriesSchema {
+                fields: Arc::from([FieldSpec { name: "v0".into() }]),
+                eval_grid: None,
+            }),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        assert!(!reads_across_series(single_selector.root()));
+    }
+
+    /// Blocks placement, and pins the blocker rather than the intent.
+    ///
+    /// `PlanRewriter::should_expand` asks two questions about a node before it lets the descent
+    /// continue, and the Substrait one comes first: unless the *whole* root plan encodes, every
+    /// subtree that fails to encode is expanded on, whichever way `check_plan` answers. A
+    /// `FusedSeries` node has no serializer branch — `ExtensionSerializer` answers
+    /// `NotImplemented` for every name it does not list — so its subtree does not encode, the
+    /// boundary is drawn at the node, and the region receives the bare scan instead of the node.
+    ///
+    /// The commutativity arm above is necessary and not sufficient. This test fails the day the
+    /// node gains a serializer branch (or the analyzer stops asking), which is when the placement
+    /// assertion this one replaces can be written.
+    #[test]
+    fn fused_series_does_not_encode_so_the_analyzer_keeps_it_on_the_frontend() {
+        let plan = fused_series_plan(table_scan_plan());
+
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "the fused node encodes now, so it can be placed inside the merge scan"
+        );
+
+        let analyzed = DistPlannerAnalyzer {}
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let mut remote_input_holds_fused = false;
+        analyzed
+            .apply(|node| {
+                if let LogicalPlan::Extension(extension) = node
+                    && let Some(merge_scan) = extension
+                        .node
+                        .as_any()
+                        .downcast_ref::<MergeScanLogicalPlan>()
+                {
+                    remote_input_holds_fused = holds_fused_series(merge_scan.input());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert!(
+            !remote_input_holds_fused,
+            "the analyzer placed the node despite the encoding gate: {analyzed}"
+        );
     }
 }
 
