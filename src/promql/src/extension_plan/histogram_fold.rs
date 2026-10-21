@@ -384,10 +384,7 @@ impl HistogramFold {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::Hash(
-                partition_exprs.clone(),
-                exec_input.output_partitioning().partition_count(),
-            ),
+            Partitioning::UnknownPartitioning(exec_input.output_partitioning().partition_count()),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -595,10 +592,7 @@ impl ExecutionPlan for HistogramFoldExec {
         let new_input = children[0].clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
-            Partitioning::Hash(
-                self.partition_exprs.clone(),
-                new_input.output_partitioning().partition_count(),
-            ),
+            Partitioning::UnknownPartitioning(new_input.output_partitioning().partition_count()),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -1448,7 +1442,9 @@ mod test {
         RecordBatch::try_new(schema, columns).unwrap()
     }
 
-    fn prepare_test_data() -> DataSourceExec {
+    /// The batches and schema shared by [`prepare_test_data`] and
+    /// [`prepare_test_data_with_two_partitions`].
+    fn prepare_test_data_batches() -> (Vec<RecordBatch>, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("le", DataType::Utf8, true),
@@ -1501,8 +1497,24 @@ mod test {
         )
         .unwrap();
 
+        (vec![data_1, data_2, data_3], schema)
+    }
+
+    fn prepare_test_data() -> DataSourceExec {
+        let (batches, schema) = prepare_test_data_batches();
         DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap(),
+            MemorySourceConfig::try_new(&[batches], schema, None).unwrap(),
+        ))
+    }
+
+    /// The batches from [`prepare_test_data_batches`], laid out over two
+    /// partitions, so that partitioning metadata is checked against a real
+    /// multi-partition input.
+    fn prepare_test_data_with_two_partitions() -> DataSourceExec {
+        let (mut batches, schema) = prepare_test_data_batches();
+        let first_partition = vec![batches.remove(0)];
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[first_partition, batches], schema, None).unwrap(),
         ))
     }
 
@@ -1590,9 +1602,8 @@ mod test {
 
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::Hash(
-                partition_exprs.clone(),
-                input.output_partitioning().partition_count(),
+            Partitioning::UnknownPartitioning(
+                input.properties().output_partitioning().partition_count(),
             ),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -1793,6 +1804,34 @@ mod test {
         .catch_unwind()
         .await;
         assert!(broken_result.is_err());
+    }
+
+    #[test]
+    fn fold_does_not_claim_hash_partitioning() {
+        let input: Arc<dyn ExecutionPlan> = Arc::new(prepare_test_data_with_two_partitions());
+        let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(input.schema().to_dfschema().unwrap()),
+        });
+        let logical_fold = HistogramFold::new(
+            "le".to_string(),
+            "val".to_string(),
+            "host".to_string(),
+            0.5,
+            logical_input,
+        )
+        .unwrap();
+        let constructed = logical_fold.to_execution_plan(input.clone());
+        assert!(matches!(
+            constructed.output_partitioning(),
+            Partitioning::UnknownPartitioning(2)
+        ));
+
+        let rebuilt = constructed.with_new_children(vec![input]).unwrap();
+        assert!(matches!(
+            rebuilt.output_partitioning(),
+            Partitioning::UnknownPartitioning(2)
+        ));
     }
 
     #[test]

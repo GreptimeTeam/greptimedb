@@ -117,6 +117,101 @@ macro_rules! repartition_tests {
     };
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_physical_metric_without_logical_table() {
+    common_telemetry::init_default_ut_logging();
+    let (store_config, _guard) = get_test_store_config(&StorageType::File);
+    let home_dir = create_temp_dir("repartition_physical_metric_without_logical_table");
+    let cluster =
+        GreptimeDbClusterBuilder::new("test_repartition_physical_metric_without_logical_table")
+            .await
+            .with_datanodes(3)
+            .with_store_config(store_config)
+            .with_shared_home_dir(Arc::new(home_dir))
+            .with_datanode_wal_config(DatanodeWalConfig::Noop)
+            .with_metasrv_gc_config(GcSchedulerOptions {
+                enable: true,
+                gc_cooldown_period: Duration::from_nanos(1),
+                ..Default::default()
+            })
+            .with_datanode_gc_config(GcConfig {
+                enable: true,
+                lingering_time: Some(Duration::from_secs(0)),
+                unknown_file_lingering_time: Duration::from_secs(0),
+                ..Default::default()
+            })
+            .build(true)
+            .await;
+
+    let instance = cluster.fe_instance();
+    let query_ctx = QueryContext::arc();
+    let sql = r#"
+        CREATE TABLE `physical_metric_without_logical`(
+          `ts` TIMESTAMP TIME INDEX,
+          `val` DOUBLE,
+          `host` STRING PRIMARY KEY
+        ) PARTITION ON COLUMNS (`host`) (
+          `host` < 'm',
+          `host` >= 'm'
+        ) ENGINE = metric
+        WITH (
+          "physical_metric_table" = "true"
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let table_id = get_table_id(&cluster.metasrv, "physical_metric_without_logical").await;
+    let table_info = cluster
+        .metasrv
+        .table_metadata_manager()
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let column_ids_before_split = table_info.table_info.meta.column_ids.clone();
+    assert_eq!(column_ids_before_split, vec![0, 1, 2]);
+
+    let sql = r#"
+        ALTER TABLE `physical_metric_without_logical` SPLIT PARTITION (
+          `host` < 'm'
+        ) INTO (
+          `host` < 'g',
+          `host` >= 'g' AND `host` < 'm'
+        );
+    "#;
+    run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let table_info = cluster
+        .metasrv
+        .table_metadata_manager()
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        table_info.table_info.meta.column_ids,
+        column_ids_before_split
+    );
+
+    let result = run_sql(
+        instance,
+        &query_partitions_sql("physical_metric_without_logical"),
+        query_ctx,
+    )
+    .await
+    .unwrap();
+    let expected = r#"+---------------+--------------+---------------------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+
+| table_catalog | table_schema | table_name                      | partition_name | partition_expression | partition_description  | greptime_partition_id | partition_ordinal_position |
++---------------+--------------+---------------------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+
+| greptime      | public       | physical_metric_without_logical | p0             | host                 | host < g               | 4398046511104         | 1                          |
+| greptime      | public       | physical_metric_without_logical | p1             | host                 | host >= m              | 4398046511105         | 2                          |
+| greptime      | public       | physical_metric_without_logical | p2             | host                 | host >= g AND host < m | 4398046511106         | 3                          |
++---------------+--------------+---------------------------------+----------------+----------------------+------------------------+-----------------------+----------------------------+"#;
+    check_output_stream(result.data, expected).await;
+}
+
 /// COUNT must use visible rows rather than the full row counts of shared SSTs.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_append_count_file() {
