@@ -28,6 +28,7 @@ prost.workspace = true
 regex.workspace = true
 snafu.workspace = true
 store-api.workspace = true
+twox-hash.workspace = true
 
 [dev-dependencies]
 api.workspace = true

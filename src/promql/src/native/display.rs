@@ -32,7 +32,7 @@ use crate::native::plan::{
     NativeType,
 };
 use crate::range_eval::RangeFunction;
-use crate::vector_match::{BinaryOp, Cardinality, MatchingLabels};
+use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The header line of every tree.
 const HEADER: &str = "NativeTree";
@@ -121,7 +121,7 @@ fn describe(node: &NativeNode) -> String {
             }
         ),
         NativeExpr::Binary { matching, .. } => format!(
-            "{}{} {} {}",
+            "{}{} {} {}{}",
             binary_op(matching.op),
             if matching.return_bool { " bool" } else { "" },
             match &matching.labels {
@@ -132,9 +132,23 @@ fn describe(node: &NativeNode) -> String {
                 Cardinality::OneToOne => "one-to-one".to_string(),
                 Cardinality::ManyToOne(labels) => format!("many-to-one [{}]", label_list(labels)),
                 Cardinality::OneToMany(labels) => format!("one-to-many [{}]", label_list(labels)),
-            }
+            },
+            fill(matching.fill)
         ),
     }
+}
+
+fn fill(values: FillValues) -> String {
+    let side = |name: &str, value: Option<f64>| {
+        value
+            .map(|value| format!(" {name} {value}"))
+            .unwrap_or_default()
+    };
+    format!(
+        "{}{}",
+        side("fill_left", values.lhs),
+        side("fill_right", values.rhs)
+    )
 }
 
 /// A window: what it runs, over which range, and where it lands.

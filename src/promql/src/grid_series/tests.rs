@@ -15,7 +15,7 @@
 use std::mem::size_of;
 use std::sync::Arc;
 
-use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, SeriesSchema};
+use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
@@ -25,7 +25,9 @@ use super::reference::{
     Labels, Points, assert_pieces_eq, assert_result_eq, points_of, random_dense, run_ranges,
     series_of, stitch,
 };
-use super::{GridSeriesBuilder, merge_same_labelset};
+use super::{GridSample, GridSeriesBuilder, merge_same_labelset};
+use crate::grid_series::reference::OwnedHistogram;
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 fn grid_schema(fields: usize, grid_len: u64) -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
@@ -204,6 +206,93 @@ fn merge_combines_disjoint_fields_at_one_point() {
         )
         .is_err()
     );
+}
+
+/// Native histograms merge like floats: members of one label set combine by field and position,
+/// histograms and floats keep their type, and a field held twice at one point collides whatever
+/// the sample types.
+#[test]
+fn merge_keeps_histograms_and_rejects_any_doubled_field() {
+    #[derive(Clone, Copy)]
+    enum Value {
+        Float(f64),
+        Histogram(usize),
+    }
+
+    let schema = grid_schema(2, 3);
+    let histograms = [
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///"),
+        OwnedHistogram::parse("0/0/0/4000000000000000/4008000000000000/1/0_1/4000000000000000///"),
+    ];
+    let histogram =
+        |index: usize| FloatHistogram::try_from_view(&histograms[index].view()).unwrap();
+    let sample = |value: Option<Value>| {
+        value.map(|value| match value {
+            Value::Float(float) => GridSample::Float(float),
+            Value::Histogram(index) => GridSample::Histogram(Box::new(histogram(index))),
+        })
+    };
+    let series = |rows: &[(usize, [Option<Value>; 2])]| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        for &(point, row) in rows {
+            builder
+                .push_samples(point, &[sample(row[0]), sample(row[1])])
+                .unwrap();
+        }
+        builder.finish(metric(0)).unwrap().unwrap()
+    };
+    let describe = |series: &Series, field: usize| -> Vec<(usize, String)> {
+        let samples = &series.fields.as_slice()[field];
+        series
+            .time
+            .positions()
+            .filter_map(|(point, row)| match samples.sample(row) {
+                SampleRef::Missing => None,
+                SampleRef::Float(value) => Some((point, format!("{value}"))),
+                SampleRef::Histogram(view) => Some((
+                    point,
+                    format!("{:?}", FloatHistogram::try_from_view(&view).unwrap()),
+                )),
+            })
+            .collect()
+    };
+
+    let merged = merge_same_labelset(
+        &schema,
+        vec![
+            series(&[
+                (0, [Some(Value::Histogram(0)), None]),
+                (2, [Some(Value::Float(1.0)), None]),
+            ]),
+            series(&[
+                (0, [None, Some(Value::Float(2.0))]),
+                (1, [Some(Value::Histogram(1)), None]),
+            ]),
+        ],
+    )
+    .unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        describe(&merged[0], 0),
+        [
+            (0, format!("{:?}", histogram(0))),
+            (1, format!("{:?}", histogram(1))),
+            (2, "1".to_string()),
+        ]
+    );
+    assert_eq!(describe(&merged[0], 1), [(0, "2".to_string())]);
+
+    for second in [Value::Float(3.0), Value::Histogram(1)] {
+        let error = merge_same_labelset(
+            &schema,
+            vec![
+                series(&[(1, [Some(Value::Histogram(0)), None])]),
+                series(&[(1, [Some(second), None])]),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("same labelset"), "{error}");
+    }
 }
 
 /// Two values a million positions apart are one series with two rows, addressed by two runs: the

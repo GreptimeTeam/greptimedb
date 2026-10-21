@@ -45,7 +45,9 @@
 //! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
 //! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
 //! single authority on that, so a node added later cannot be legal in one place and illegal in
-//! another.
+//! another. What is refused before a tree exists is the scan's shape: no shape below can consume
+//! chunks of different series that interleave, so an `Interleaved` ordering is refused once, at the
+//! entry, and [`NativeNode::validate`] refuses the same ordering for a tree built some other way.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,13 +88,12 @@ const SUPPORTED: &str = "a selector, a range function over a range selector — 
 /// one.
 ///
 /// `ordering` is what the caller's scan guarantees, and the tree records it rather than assuming
-/// one. Only `Contiguous` and `KeyThenTime` are accepted: a native evaluation reads one series to
-/// its last chunk before the next, so chunks of different series may not interleave, and an
-/// `Interleaved` declaration is refused here for every shape this compiler accepts. That is where
-/// the refusal belongs: no accepted shape can consume interleaved chunks, so a tree declaring one
-/// cannot be built here at all. [`NativeTree::validate`]'s window branch checks the same thing, so
-/// if both land this refusal comes first and the tree check is a backstop for a tree built some
-/// other way.
+/// one. Only `Contiguous` and `KeyThenTime` are accepted: every shape this compiler accepts reads
+/// one series to its last chunk before the next, so an `Interleaved` declaration is refused at the
+/// entry, before any shape is built — the bare selector included, which returns before a window
+/// exists — and a shape added later inherits the refusal instead of restating it.
+/// [`NativeNode::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
+/// backstop for a tree built some other way.
 ///
 /// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
 /// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
