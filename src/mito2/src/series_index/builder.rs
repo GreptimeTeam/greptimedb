@@ -32,9 +32,13 @@ use crate::read::read_columns::ReadColumns;
 use crate::region::MitoRegionRef;
 use crate::region::version::VersionRef;
 use crate::series_index::bucket::SeriesBucket;
-use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry, range_index_path};
+use crate::series_index::catalog::{
+    RangeIndexEntry, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
+};
+use crate::series_index::format::SeriesIndexFormat;
 use crate::series_index::purger::{IndexFilePurger, IndexFileType, file_operation};
 use crate::series_index::version::SeriesIndexFileHandle;
+use crate::series_index::{SeriesIndexWriter, SeriesIndexWriterOptions};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
@@ -127,6 +131,7 @@ pub(crate) async fn build_series_index(
     version: &VersionRef,
     bucket: &SeriesBucket,
     entry: &SeriesIndexEntry,
+    backend: Option<&dyn SeriesIndexFormat>,
     purger: &IndexFilePurger,
 ) -> Result<SeriesIndexFileHandle> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
@@ -177,16 +182,44 @@ pub(crate) async fn build_series_index(
         )
     };
     // TODO(yingwen): Deduplicate update-mode rows before series indexes are used by queries.
-    let formats = region
-        .series_index_version_control
-        .formats
-        .read()
-        .unwrap()
-        .clone();
-    let mut writer = formats
-        .index
-        .writer(version.metadata.clone(), store.clone(), entry)
-        .await?;
+    if let Some(backend) = backend {
+        let mut writer = backend
+            .writer(version.metadata.clone(), store.clone(), entry)
+            .await?;
+        let result: Result<()> = async {
+            while let Some(batch) = visible.try_next().await? {
+                writer.write(&batch).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if let Err(cleanup_error) = writer.abort().await {
+                warn!(cleanup_error; "Failed to abort series-index artifact build");
+            }
+            return Err(error);
+        }
+        let artifact = writer.finish().await?;
+        file_operation(IndexFileType::Series, "build", "success");
+        return Ok(SeriesIndexFileHandle::new(
+            region.region_id,
+            SeriesIndexEntry {
+                file_size: artifact.file_size,
+                artifact: Some(artifact),
+                ..entry.clone()
+            },
+            purger.clone(),
+        ));
+    }
+    let path = series_index_path(region.region_id, entry.index_uuid);
+    let mut writer = SeriesIndexWriter::try_new(
+        version.metadata.clone(),
+        store.clone(),
+        &path,
+        SeriesIndexWriterOptions::default(),
+        Some(series_metadata(entry)?),
+    )
+    .await?;
     let result: Result<()> = async {
         while let Some(batch) = visible.try_next().await? {
             writer.write(&batch).await?;
@@ -200,13 +233,12 @@ pub(crate) async fn build_series_index(
         }
         return Err(error);
     }
-    let artifact = writer.finish().await?;
+    let metrics = writer.finish().await?;
     file_operation(IndexFileType::Series, "build", "success");
     Ok(SeriesIndexFileHandle::new(
         region.region_id,
         SeriesIndexEntry {
-            artifact: Some(artifact.clone()),
-            file_size: artifact.file_size,
+            file_size: metrics.output_bytes,
             ..entry.clone()
         },
         purger.clone(),
@@ -394,6 +426,7 @@ mod tests {
             &version,
             &bucket,
             &entry,
+            None,
             &purger,
         )
         .await;
@@ -412,12 +445,6 @@ mod tests {
             assert_eq!(
                 handle.entry(),
                 &SeriesIndexEntry {
-                    artifact: Some(crate::series_index::artifact::ArtifactMetadata {
-                        format: "parquet".to_string(),
-                        generation: entry.index_uuid,
-                        objects: vec![series_index_path(region.region_id, entry.index_uuid)],
-                        file_size: handle.entry().file_size,
-                    }),
                     file_size: handle.entry().file_size,
                     ..entry.clone()
                 }
@@ -550,7 +577,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
             .await
             .unwrap();
         let bytes = store
@@ -619,7 +646,7 @@ mod tests {
                 };
                 completed.push(entry.file_id);
             }
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
                 .await
                 .map(Some)
         }
@@ -825,7 +852,7 @@ mod tests {
                 .map(|_| ())
         } else {
             let (purger, _receiver) = series_index_channel(store.clone());
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
                 .await
                 .map(|_| ())
         };

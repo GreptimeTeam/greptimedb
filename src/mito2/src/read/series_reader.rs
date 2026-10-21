@@ -76,7 +76,7 @@ impl SeriesRange {
         })
     }
 
-    pub(crate) fn partition_for(tsid: u64, partitions: usize) -> usize {
+    fn partition_for(tsid: u64, partitions: usize) -> usize {
         ((tsid as u128 * partitions as u128) >> u64::BITS) as usize
     }
 }
@@ -90,11 +90,7 @@ pub(crate) struct AssignedSeriesBatch {
 }
 
 impl AssignedSeriesBatch {
-    pub(crate) fn new(
-        range: SeriesRange,
-        series: Vec<MetricSeriesId>,
-        enable_range_cache: bool,
-    ) -> Self {
+    fn new(range: SeriesRange, series: Vec<MetricSeriesId>, enable_range_cache: bool) -> Self {
         Self {
             range,
             series,

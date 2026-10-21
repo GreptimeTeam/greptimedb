@@ -61,6 +61,7 @@ pub(crate) struct WindowSequence {
 /// relies on this complete-coverage contract, not on `source_file_ids`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) artifact: Option<crate::series_index::artifact::ArtifactMetadata>,
     /// Completed size in the catalog; zero in the footer written before completion.
     pub(crate) file_size: u64,
@@ -85,6 +86,14 @@ pub(crate) struct SeriesIndexEntry {
 }
 
 impl SeriesIndexEntry {
+    /// Entries written before pluggable formats describe the original Parquet layout.
+    pub(crate) fn format(&self) -> crate::series_index::artifact::ArtifactFormat {
+        self.artifact.as_ref().map_or(
+            crate::series_index::artifact::ArtifactFormat::Parquet,
+            |artifact| artifact.format,
+        )
+    }
+
     /// Whether this index completely covers an SST in the query's sequence domain.
     pub(crate) fn covers_file(
         &self,
@@ -284,6 +293,32 @@ mod tests {
                 mock::ErrorKind::Unexpected,
                 "injected catalog read failure",
             ))
+        }
+    }
+
+    #[test]
+    fn legacy_series_catalog_fixture() {
+        use crate::series_index::artifact::ArtifactFormat;
+        let json = include_str!(
+            "../../../../tests/compatibility/fixtures/series_index/legacy_catalog.json"
+        );
+        let catalog: SeriesIndexCatalog = serde_json::from_str(json).unwrap();
+        assert_eq!(1, catalog.indexes.len());
+        let entry = &catalog.indexes[0];
+        assert!(entry.artifact.is_none());
+        assert_eq!(ArtifactFormat::Parquet, entry.format());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(json).unwrap(),
+            serde_json::to_value(&catalog).unwrap()
+        );
+        for (format, name) in [
+            (ArtifactFormat::Parquet, "parquet"),
+            (ArtifactFormat::FakeSamples, "fake-samples"),
+            (ArtifactFormat::FakeIndex, "fake-index"),
+        ] {
+            let encoded = serde_json::to_value(format).unwrap();
+            assert_eq!(name, encoded.as_str().unwrap());
+            assert_eq!(format, serde_json::from_value(encoded).unwrap());
         }
     }
 

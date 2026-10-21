@@ -101,7 +101,6 @@ impl SeriesIndexWriterMetrics {
 
 #[derive(Debug)]
 struct SeriesIndexRow {
-    primary_key: Vec<u8>,
     min_ts: i64,
     max_ts: i64,
     row_count: u64,
@@ -460,7 +459,6 @@ pub fn series_index_schema(metadata: &RegionMetadataRef) -> Result<SchemaRef> {
             .into_iter()
             .map(|(_, name)| Field::new(name, DataType::Utf8, true)),
     );
-    fields.push(Field::new("__primary_key", DataType::Binary, false));
     Ok(Arc::new(Schema::new(fields)))
 }
 
@@ -609,7 +607,6 @@ fn decode_primary_key(
     }
 
     Ok(SeriesIndexRow {
-        primary_key: primary_key.to_vec(),
         min_ts,
         max_ts,
         row_count,
@@ -650,14 +647,11 @@ fn rows_to_batch(
             rows.iter().map(|row| row.tsid),
         )),
     ];
-    for tag_idx in 0..schema.fields().len() - 6 {
+    for tag_idx in 0..schema.fields().len() - 5 {
         arrays.push(Arc::new(StringArray::from_iter(
             rows.iter().map(|row| row.tags[tag_idx].as_deref()),
         )));
     }
-    arrays.push(Arc::new(BinaryArray::from_iter_values(
-        rows.iter().map(|row| row.primary_key.as_slice()),
-    )));
     RecordBatch::try_new(schema.clone(), arrays).context(NewRecordBatchSnafu)
 }
 
@@ -764,7 +758,6 @@ mod tests {
                 "__tsid",
                 "tag_0",
                 "tag_1",
-                "__primary_key",
             ]
         );
         assert!(!schema.field(4).is_nullable());

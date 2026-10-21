@@ -12,30 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Artifact lifecycle and prepared-source wiring tests; fake formats have no codec.
+//! Artifact lifecycle tests; fake formats have no codec.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
+use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{
-    BoundTag, QueryScanContext, RawLabelSource, RegionEngine, RegionScanner,
-};
-use store_api::storage::{FileId, ScanRequest, TimeSeriesDistribution};
+use store_api::region_engine::RegionEngine;
+use store_api::storage::FileId;
 
 use crate::config::MitoConfig;
 use crate::error::{OpenDalSnafu, Result, UnexpectedSnafu};
-use crate::read::scan_region::Scanner;
-use crate::series_index::artifact::ArtifactMetadata;
-use crate::series_index::catalog::load_version_control;
-use crate::series_index::format::{FormatWriter, SamplesFormat, SeriesFormats};
+use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata};
+use crate::series_index::catalog::{SeriesIndexEntry, load_version_control};
+use crate::series_index::format::{FormatWriter, SamplesFormat, SeriesFormats, SeriesIndexFormat};
 use crate::series_index::maintenance::reconcile_series_indexes;
 use crate::series_index::purger::series_index_channel;
 use crate::series_index::tests::prepare_region_with_config;
@@ -76,8 +73,8 @@ impl FormatWriter for FakeWriter {
 
 #[async_trait]
 impl SamplesFormat for FakeSamples {
-    fn name(&self) -> &str {
-        "fake-samples"
+    fn format(&self) -> ArtifactFormat {
+        ArtifactFormat::FakeSamples
     }
     async fn writer(
         &self,
@@ -93,7 +90,7 @@ impl SamplesFormat for FakeSamples {
         Ok(Box::new(FakeWriter {
             store,
             artifact: ArtifactMetadata {
-                format: self.name().into(),
+                format: self.format(),
                 generation,
                 objects,
                 file_size: 8,
@@ -104,7 +101,7 @@ impl SamplesFormat for FakeSamples {
 }
 
 #[tokio::test]
-async fn format_skeleton_build_reopen_and_prepare() {
+async fn format_skeleton_build_reopen_and_retire() {
     let mut env = TestEnv::with_prefix("format-skeleton").await;
     let (engine, region) = prepare_region_with_config(
         &mut env,
@@ -156,131 +153,12 @@ async fn format_skeleton_build_reopen_and_prepare() {
     .unwrap();
     assert_eq!(0, stats.built_samples);
 
-    let Scanner::Series(scanner) = engine
-        .scanner(
-            region.region_id,
-            ScanRequest {
-                distribution: Some(TimeSeriesDistribution::PerSeries),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("expected series scanner")
-    };
-    let metadata = scanner.input().region_metadata().clone();
-    let labels = RawLabelSource::PrimaryKey {
-        metric_name: "metric".into(),
-        physical_metadata: metadata.clone(),
-        logical_tags: metadata
-            .column_metadatas
-            .iter()
-            .filter(|c| c.column_schema.name.starts_with("tag_"))
-            .map(|c| BoundTag {
-                column_id: c.column_id,
-                name: c.column_schema.name.clone().into(),
-            })
-            .collect::<Vec<_>>()
-            .into(),
-    };
-    let source = scanner
-        .prepare_series_partition(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-            &labels,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(1, source.num_series());
-    let key = source.series_info(0).unwrap().primary_key;
-    assert!(key.len() > 22, "prepared identity retains labels");
-    assert!(source.series_info(1).is_err());
-    assert!(source.read_series(0..2).is_err());
-    assert!(source.read_series(1..0).is_err());
-    assert!(
-        source
-            .read_series(0..0)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let left = source.read_series(0..1).unwrap();
-    let right = source.read_series(0..1).unwrap();
-    // A prepared source must retain the old view across both flush and subsequent writes.
-    put_points(&engine, &region, &[(2500, 5)]).await;
-    crate::test_util::flush_region(&engine, region.region_id, None).await;
-    put_points(&engine, &region, &[(2000, 7), (3000, 9)]).await;
-    drop(source);
-    drop(scanner);
-    let left = left.try_collect::<Vec<_>>().await.unwrap();
-    let right = right.try_collect::<Vec<_>>().await.unwrap();
-    assert_eq!(
-        vec![1000, 2000],
-        left.iter()
-            .flat_map(|c| c.time.as_buffer().iter().copied())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(2, right.iter().map(|c| c.time.len()).sum::<usize>());
-    assert!(left.iter().all(|c| c.primary_key == key));
-    assert!(left.last().unwrap().is_last);
-
     // Rebuilding a missing sidecar replaces its generation but retains old readers' files.
     let old = snapshot.samples.values().next().unwrap().clone();
     store
         .delete(&old.entry().artifact.objects[0])
         .await
         .unwrap();
-    let Scanner::Series(mixed_scanner) = engine
-        .scanner(
-            region.region_id,
-            ScanRequest {
-                distribution: Some(TimeSeriesDistribution::PerSeries),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("expected series scanner")
-    };
-    let mixed = mixed_scanner
-        .prepare_series_partition(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-            &labels,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    let output = mixed
-        .read_series(0..mixed.num_series())
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    let mut points = Vec::new();
-    for chunk in output {
-        for i in 0..chunk.time.len() {
-            let datatypes::series::samples::SampleRef::Float(value) =
-                chunk.fields.get(0).unwrap().sample(i)
-            else {
-                panic!("expected float")
-            };
-            points.push((chunk.time.timestamp(i).unwrap(), value));
-        }
-    }
-    assert_eq!(
-        vec![(1000, 1.0), (2000, 7.0), (2500, 5.0), (3000, 9.0)],
-        points
-    );
-    drop(mixed);
-    drop(mixed_scanner);
     let stats = reconcile_series_indexes(
         0,
         store.clone(),
@@ -293,7 +171,7 @@ async fn format_skeleton_build_reopen_and_prepare() {
     )
     .await
     .unwrap();
-    assert_eq!(2, stats.built_samples);
+    assert_eq!(1, stats.built_samples);
     assert!(purges.try_recv().is_err());
     drop(snapshot);
     assert!(purges.try_recv().is_err());
@@ -301,58 +179,6 @@ async fn format_skeleton_build_reopen_and_prepare() {
     let request = purges.try_recv().unwrap();
     assert_eq!(2, request.objects.unwrap().len());
     engine.stop().await.unwrap();
-}
-
-async fn put_points(
-    engine: &crate::engine::MitoEngine,
-    region: &crate::region::MitoRegionRef,
-    points: &[(i64, u64)],
-) {
-    use api::v1::helper::row;
-    use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, Rows, SemanticType, WriteHint};
-    use store_api::region_request::{RegionPutRequest, RegionRequest};
-    let metadata = region.metadata();
-    let mut request = crate::test_util::CreateRequestBuilder::new().build();
-    request.column_metadatas = metadata.column_metadatas.clone();
-    let full = crate::test_util::rows_schema(&request);
-    let mut pk = full[0].clone();
-    pk.column_name = "__primary_key".into();
-    pk.datatype = ColumnDataType::Binary.into();
-    pk.semantic_type = SemanticType::Tag.into();
-    engine
-        .handle_request(
-            region.region_id,
-            RegionRequest::Put(RegionPutRequest {
-                skip_wal: false,
-                rows: Rows {
-                    schema: vec![pk, full[5].clone(), full[4].clone()],
-                    rows: points
-                        .iter()
-                        .map(|(time, value)| {
-                            row(vec![
-                                ValueData::BinaryValue(
-                                    crate::test_util::sst_util::new_sparse_primary_key(
-                                        &["a", "x"],
-                                        &metadata,
-                                        10,
-                                        0,
-                                    ),
-                                ),
-                                ValueData::TimestampMillisecondValue(*time),
-                                ValueData::U64Value(*value),
-                            ])
-                        })
-                        .collect(),
-                },
-                hint: Some(WriteHint {
-                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
-                }),
-                partition_expr_version: None,
-            }),
-        )
-        .await
-        .unwrap();
 }
 
 #[tokio::test]
@@ -392,212 +218,223 @@ async fn format_skeleton_abort_removes_all_objects() {
     engine.stop().await.unwrap();
 }
 
-/// A native source can expose raw streams without index search or flat-batch reads.
-#[derive(Debug)]
-struct FakeSourceFactory {
-    mode: u8,
-    calls: Arc<AtomicUsize>,
-}
+#[derive(Debug, Default)]
+struct FakeIndex;
 
 #[async_trait]
-impl crate::read::series_scan::prepared::PreparedSeriesSourceFactory for FakeSourceFactory {
-    async fn prepare(
-        &self,
-        request: crate::read::series_scan::prepared::PrepareSeriesRequest,
-    ) -> Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        match self.mode {
-            0 => Ok(Some(Arc::new(FakePreparedSource {
-                labels: request.labels,
-            }))),
-            1 => Ok(None),
-            _ => UnexpectedSnafu {
-                reason: "native preparation failed",
-            }
-            .fail(),
-        }
+impl SeriesIndexFormat for FakeIndex {
+    fn format(&self) -> ArtifactFormat {
+        ArtifactFormat::FakeIndex
     }
-}
 
-struct FakePreparedSource {
-    labels: RawLabelSource,
-}
-
-impl store_api::region_engine::PreparedSeriesSource for FakePreparedSource {
-    fn num_series(&self) -> usize {
-        0
-    }
-    fn label_source(&self) -> &RawLabelSource {
-        &self.labels
-    }
-    fn series_info(
+    async fn writer(
         &self,
-        _ordinal: usize,
-    ) -> std::result::Result<store_api::region_engine::SeriesInfo, common_error::ext::BoxedError>
-    {
-        Err(common_error::ext::BoxedError::new(
-            UnexpectedSnafu {
-                reason: "invalid ordinal",
-            }
-            .build(),
-        ))
-    }
-    fn read_series(
-        &self,
-        range: std::ops::Range<usize>,
-    ) -> std::result::Result<
-        store_api::region_engine::SendableRawSeriesStream,
-        common_error::ext::BoxedError,
-    > {
-        if range != (0..0) {
-            return Err(common_error::ext::BoxedError::new(
-                UnexpectedSnafu {
-                    reason: "invalid range",
-                }
-                .build(),
-            ));
-        }
-        Ok(Box::pin(FakeRawStream {
-            schema: Arc::new(datatypes::series::samples::SeriesSchema {
-                fields: vec![].into(),
-                eval_grid: None,
-            }),
-            labels: self.labels.clone(),
+        metadata: RegionMetadataRef,
+        store: ObjectStore,
+        entry: &SeriesIndexEntry,
+    ) -> Result<Box<dyn FormatWriter>> {
+        let path = format!(
+            "{}/series/{}.fake",
+            metadata.region_id.as_u64(),
+            entry.index_uuid
+        );
+        store.write(&path, "fake").await.context(OpenDalSnafu)?;
+        Ok(Box::new(FakeWriter {
+            store,
+            artifact: ArtifactMetadata {
+                format: self.format(),
+                generation: entry.index_uuid,
+                objects: vec![path],
+                file_size: 4,
+            },
+            fail: Arc::new(AtomicBool::new(false)),
         }))
     }
 }
 
-struct FakeRawStream {
-    schema: Arc<datatypes::series::samples::SeriesSchema>,
-    labels: RawLabelSource,
-}
-
-impl futures::Stream for FakeRawStream {
-    type Item =
-        std::result::Result<datatypes::series::raw::RawSeriesChunk, common_error::ext::BoxedError>;
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::task::Poll::Ready(None)
-    }
-}
-
-impl store_api::region_engine::RawSeriesStream for FakeRawStream {
-    fn schema(&self) -> &Arc<datatypes::series::samples::SeriesSchema> {
-        &self.schema
-    }
-    fn label_source(&self) -> &RawLabelSource {
-        &self.labels
-    }
-    fn ordering(&self) -> datatypes::series::SeriesOrdering {
-        datatypes::series::SeriesOrdering::KeyThenTime
-    }
-}
-
 #[tokio::test]
-async fn prepared_source_factory_bypasses_default_adapter() {
-    let mut env = TestEnv::with_prefix("native-source-factory").await;
+async fn format_index_rebuild_is_scoped_and_scans_fall_back_to_ssts() {
+    let mut env = TestEnv::with_prefix("format-index").await;
     let (engine, region) = prepare_region_with_config(
         &mut env,
-        &[1000],
+        &[1000, 101000],
         MitoConfig {
             experimental_enable_series_index: true,
+            experimental_series_scan_v2: true,
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+            min_compaction_interval: Duration::from_secs(3600),
             ..Default::default()
         },
     )
     .await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    for mode in 0..3 {
-        *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
-            prepared_source: Some(Arc::new(FakeSourceFactory {
-                mode,
-                calls: calls.clone(),
-            })),
-            ..Default::default()
-        });
-        let Scanner::Series(scanner) = engine
-            .scanner(
-                region.region_id,
-                ScanRequest {
-                    distribution: Some(TimeSeriesDistribution::PerSeries),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap()
-        else {
-            panic!("expected series scanner")
-        };
-        if mode == 0 {
-            assert!(
-                scanner
-                    .prepare_series_partition(
-                        &QueryScanContext::default(),
-                        &ExecutionPlanMetricsSet::new(),
-                        usize::MAX,
-                        &RawLabelSource::Explicit,
-                    )
-                    .await
-                    .is_err()
-            );
-            assert_eq!(0, calls.load(Ordering::Relaxed));
-        }
-        let labels = if mode == 1 {
-            RawLabelSource::PrimaryKey {
-                metric_name: "metric".into(),
-                physical_metadata: scanner.input().region_metadata().clone(),
-                logical_tags: vec![].into(),
-            }
-        } else {
-            RawLabelSource::Explicit
-        };
-        // Explicit labels are unsupported by the default adapter, but not by this factory.
-        let result = scanner
-            .prepare_series_partition(
-                &QueryScanContext::default(),
-                &ExecutionPlanMetricsSet::new(),
-                0,
-                &labels,
-            )
-            .await;
-        match mode {
-            0 => {
-                let source = result.unwrap().unwrap();
-                assert_eq!(0, source.num_series());
-                assert!(matches!(source.label_source(), RawLabelSource::Explicit));
-                assert!(source.series_info(0).is_err());
-                assert!(source.read_series(0..1).is_err());
-                let left = source.read_series(0..0).unwrap();
-                let right = source.read_series(0..0).unwrap();
-                drop(source);
-                drop(scanner);
-                assert!(left.try_collect::<Vec<_>>().await.unwrap().is_empty());
-                assert!(right.try_collect::<Vec<_>>().await.unwrap().is_empty());
-            }
-            1 => {
-                let source = result.unwrap().unwrap();
-                assert_eq!(1, source.num_series());
-                let chunks = source
-                    .read_series(0..1)
-                    .unwrap()
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    1,
-                    chunks.iter().map(|chunk| chunk.time.len()).sum::<usize>()
-                );
-            }
-            _ => assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("native preparation failed")
-            ),
-        }
+    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
+        index: Some(Arc::new(FakeIndex)),
+        ..Default::default()
+    });
+    let store = region.series_index_store.clone().unwrap();
+    let (purger, mut purges) = series_index_channel(store.clone());
+    let reconcile = || {
+        reconcile_series_indexes(
+            0,
+            store.clone(),
+            region.clone(),
+            Duration::from_secs(100),
+            0,
+            purger.clone(),
+            false,
+            true,
+        )
+    };
+    assert_eq!(2, reconcile().await.unwrap().built_series);
+    let before = region.series_index_version();
+    assert!(
+        before
+            .series_indexes
+            .values()
+            .all(|h| h.entry().format() == ArtifactFormat::FakeIndex)
+    );
+    assert_eq!(0, reconcile().await.unwrap().built_series);
+    let scanner = engine
+        .scanner(
+            region.region_id,
+            store_api::storage::ScanRequest {
+                distribution: Some(store_api::storage::TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = scanner
+        .scan()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        2,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+    drop(scanner);
+
+    let missing = before.series_indexes.values().next().unwrap();
+    store
+        .delete(&missing.entry().artifact.as_ref().unwrap().objects[0])
+        .await
+        .unwrap();
+    assert_eq!(1, reconcile().await.unwrap().built_series);
+    let after = region.series_index_version();
+    assert_eq!(
+        1,
+        after
+            .series_indexes
+            .keys()
+            .filter(|id| before.series_indexes.contains_key(id))
+            .count()
+    );
+    assert!(purges.try_recv().is_err());
+    drop(before);
+    assert!(purges.try_recv().is_ok());
+
+    // Disabling the injected writer restores ordinary Parquet artifacts without a read adapter.
+    *region.series_index_version_control.formats.write().unwrap() =
+        Arc::new(SeriesFormats::default());
+    assert_eq!(2, reconcile().await.unwrap().built_series);
+    assert!(
+        region
+            .series_index_version()
+            .series_indexes
+            .values()
+            .all(|h| h.entry().artifact.is_none())
+    );
+    assert_eq!(0, reconcile().await.unwrap().built_series);
+    engine.stop().await.unwrap();
+}
+
+struct FailedCatalogWriter(oio::Writer);
+
+impl mock::Write for FailedCatalogWriter {
+    async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+        self.0.write(buffer).await
     }
-    assert_eq!(3, calls.load(Ordering::Relaxed));
+    async fn close(&mut self) -> mock::Result<mock::Metadata> {
+        Err(mock::Error::new(
+            mock::ErrorKind::Unexpected,
+            "injected artifact catalog failure",
+        ))
+    }
+    async fn abort(&mut self) -> mock::Result<()> {
+        self.0.abort().await
+    }
+}
+
+#[tokio::test]
+async fn format_catalog_failure_preserves_published_artifacts() {
+    let mut env = TestEnv::with_prefix("format-catalog-failure").await;
+    let (engine, region) = crate::series_index::tests::prepare_region(&mut env).await;
+    *region.series_index_version_control.formats.write().unwrap() = Arc::new(SeriesFormats {
+        index: Some(Arc::new(FakeIndex)),
+        samples: Some(Arc::new(FakeSamples::default())),
+    });
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let (purger, mut purges) = series_index_channel(store.clone());
+    reconcile_series_indexes(
+        0,
+        store.clone(),
+        region.clone(),
+        Duration::from_secs(100),
+        0,
+        purger.clone(),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let before = region.series_index_version();
+    let catalog_path = crate::series_index::catalog::samples_catalog_path(region.region_id);
+    let catalog = store.read(&catalog_path).await.unwrap().to_bytes();
+    let old = before.samples.values().next().unwrap();
+    store
+        .delete(&old.entry().artifact.objects[0])
+        .await
+        .unwrap();
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(|path, _, inner| {
+            if path.ends_with("samples.json") {
+                Box::new(FailedCatalogWriter(inner))
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let error = reconcile_series_indexes(
+        0,
+        store.clone().layer(layer),
+        region.clone(),
+        Duration::from_secs(100),
+        0,
+        purger.clone(),
+        false,
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:?}").contains("injected artifact catalog failure"));
+    assert!(Arc::ptr_eq(&before, &region.series_index_version()));
+    assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
+    let cleanup = purges.try_recv().unwrap().objects.unwrap();
+    assert_eq!(2, cleanup.len());
+    assert!(
+        cleanup
+            .iter()
+            .all(|path| !old.entry().artifact.objects.contains(path))
+    );
+    assert!(purges.try_recv().is_err());
+    let reopened = load_version_control(&store, region.region_id, &purger).await;
+    assert_eq!(
+        old.entry(),
+        reopened.current().samples[&old.entry().file_id].entry()
+    );
+    engine.stop().await.unwrap();
 }

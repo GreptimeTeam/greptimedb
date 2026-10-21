@@ -223,38 +223,37 @@ async fn build_index_version(
         .read()
         .unwrap()
         .clone();
-    let mut matching_format = true;
+    let selected_format = formats.index.as_ref().map_or(
+        crate::series_index::artifact::ArtifactFormat::Parquet,
+        |backend| backend.format(),
+    );
+    let mut unusable = HashSet::new();
     for handle in current.series_indexes.values() {
         let entry = handle.entry();
-        if let Some(artifact) = &entry.artifact {
-            matching_format &= artifact.format == formats.index.name();
+        let mut reusable = entry.format() == selected_format;
+        // Legacy Parquet indexes retain their existing maintenance behavior.
+        if reusable && let Some(artifact) = &entry.artifact {
             for object in &artifact.objects {
-                matching_format &= store
+                reusable &= store
                     .exists(object)
                     .await
                     .context(crate::error::OpenDalSnafu)?;
             }
-        } else {
-            matching_format &= formats.index.name() == "parquet";
-            matching_format &= store
-                .exists(&crate::series_index::catalog::series_index_path(
-                    region.region_id,
-                    entry.index_uuid,
-                ))
-                .await
-                .context(crate::error::OpenDalSnafu)?;
+        }
+        if !reusable {
+            unusable.insert(entry.index_uuid);
         }
     }
-    let plan = plan_series_indexes(
-        buckets,
-        if matching_format {
-            current.index_buckets.clone()
-        } else {
-            Default::default()
-        },
-        version.options.ttl,
-        now_ms,
-    );
+    let mut index_buckets = current.index_buckets.clone();
+    for bucket in index_buckets.values_mut() {
+        if bucket.index_ids.iter().any(|id| unusable.contains(id)) {
+            // Force replacement only for the affected bucket. Retain its geometry and
+            // handles until a replacement is built and its catalog is published.
+            bucket.compaction_window_secs = 0;
+            bucket.window_sequences.clear();
+        }
+    }
+    let plan = plan_series_indexes(buckets, index_buckets, version.options.ttl, now_ms);
     stats.computed_buckets = plan.computed_buckets;
     stats.skipped_buckets = plan.skipped_buckets;
     let mut next = prune_index_version(&current, &visible, &plan.expired_index_ids, &mut stats);
@@ -283,15 +282,12 @@ async fn build_index_version(
         index_buckets: Default::default(),
     });
     let index_buckets = plan.index_buckets;
-    if !matching_format {
-        series_indexes.clear();
-    }
     if let Some(backend) = &formats.samples {
         for file in &files {
             let id = file.file_id().file_id();
             let reusable = if let Some(handle) = samples.get(&id) {
                 let artifact = &handle.entry().artifact;
-                let mut exists = artifact.format == backend.name();
+                let mut exists = artifact.format == backend.format();
                 for path in &artifact.objects {
                     exists &= store
                         .exists(path)
@@ -335,8 +331,16 @@ async fn build_index_version(
                 range_indexes.insert(entry.file_id, entry);
             }
         }
-        let series_handle =
-            build_series_index(store, region, version, &bucket, &expected, purger).await?;
+        let series_handle = build_series_index(
+            store,
+            region,
+            version,
+            &bucket,
+            &expected,
+            formats.index.as_deref(),
+            purger,
+        )
+        .await?;
         unpublished.0.push(series_handle.clone());
         stats.built_series += 1;
         series_indexes.insert(expected.index_uuid, series_handle);

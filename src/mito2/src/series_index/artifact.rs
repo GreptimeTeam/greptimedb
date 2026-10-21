@@ -23,10 +23,23 @@ use store_api::storage::FileId;
 use crate::series_index::purger::IndexFilePurger;
 use crate::sst::file::RegionFileId;
 
+/// Persisted artifact identifiers. Concrete codecs are added with their implementations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ArtifactFormat {
+    #[serde(rename = "parquet")]
+    Parquet,
+    #[cfg(test)]
+    #[serde(rename = "fake-samples")]
+    FakeSamples,
+    #[cfg(test)]
+    #[serde(rename = "fake-index")]
+    FakeIndex,
+}
+
 /// Identifies the exact bytes produced by one backend build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ArtifactMetadata {
-    pub(crate) format: String,
+    pub(crate) format: ArtifactFormat,
     pub(crate) generation: FileId,
     /// Every object owned by this build, including metadata and auxiliary files.
     pub(crate) objects: Vec<String>,

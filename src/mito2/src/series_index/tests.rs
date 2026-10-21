@@ -726,7 +726,7 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
                 .unwrap();
             ranges.insert(entry.file_id, entry);
         }
-        let handle = build_series_index(store, &region, &version, bucket, entry, purger)
+        let handle = build_series_index(store, &region, &version, bucket, entry, None, purger)
             .await
             .unwrap();
         let reused_path = series_index_path(region.region_id, entry.index_uuid);

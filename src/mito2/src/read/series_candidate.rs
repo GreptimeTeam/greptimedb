@@ -54,7 +54,7 @@ use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
 use crate::series_index::{
     METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream, SeriesIndexFileHandle,
-    SeriesIndexReadContext,
+    SeriesIndexReadContext, SeriesIndexSearcher,
 };
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::PrimaryKeyArray;
@@ -139,13 +139,6 @@ impl SeriesCandidateScanner {
 
     /// Builds a globally sorted stream of candidate metric-series IDs.
     pub(crate) async fn build_stream(&self) -> Result<MetricSeriesIdStream> {
-        decode_metric_series(
-            self.build_primary_key_stream().await?,
-            self.stream_ctx.input.region_metadata().clone(),
-        )
-    }
-
-    pub(crate) async fn build_primary_key_stream(&self) -> Result<BoxedRecordBatchStream> {
         let all_ranges = self
             .partitions
             .iter()
@@ -213,7 +206,7 @@ impl SeriesCandidateScanner {
             self.partitions.len(),
             "SeriesCandidateScanner::final_merge",
         )?;
-        Ok(merged)
+        decode_metric_series(merged, self.stream_ctx.input.region_metadata().clone())
     }
 
     /// Returns the partition pruner shared with the data phase.
@@ -250,13 +243,9 @@ impl SeriesIndexCoverage {
             .version
             .series_indexes
             .values()
+            // Unimplemented formats cannot replace authoritative SST candidates.
             .filter(|index| {
-                index
-                    .entry()
-                    .artifact
-                    .as_ref()
-                    .map_or("parquet", |a| a.format.as_str())
-                    == context.formats.index.name()
+                index.entry().format() == crate::series_index::artifact::ArtifactFormat::Parquet
             })
             .map(|index| {
                 let files: HashSet<_> = uncovered
@@ -322,15 +311,37 @@ fn index_primary_key_stream(
 ) -> BoxedRecordBatchStream {
     Box::pin(try_stream! {
         let metadata = stream_ctx.input.region_metadata();
-        let mut keys = context.formats.index.search(
-            metadata.clone(), context.store.clone(), index,
-            stream_ctx.input.predicate_group().predicate().cloned(), stream_ctx.input.time_range,
-        ).await?;
-        while let Some(batch) = keys.try_next().await? {
+        let codec = SparsePrimaryKeyCodec::new(metadata);
+        let mut series = {
             let _permit = semaphore.acquire().await.map_err(|error| UnexpectedSnafu {
                 reason: format!("failed to acquire candidate index permit: {error}"),
             }.build())?;
-            yield batch;
+            SeriesIndexSearcher::try_new(
+                metadata.clone(),
+                context.store.clone(),
+                index,
+                stream_ctx.input.predicate_group().predicate(),
+                stream_ctx.input.time_range,
+            ).await?.search()?
+        };
+        loop {
+            let batch = {
+                let _permit = semaphore.acquire().await.map_err(|error| UnexpectedSnafu {
+                    reason: format!("failed to acquire candidate index permit: {error}"),
+                }.build())?;
+                series.try_next().await?
+            };
+            let Some(batch) = batch else { break };
+            let mut builder = BinaryBuilder::new();
+            let mut key = Vec::new();
+            for series in batch {
+                key.clear();
+                codec.encode_internal(series.table_id, series.tsid, &mut key)
+                    .context(crate::error::EncodeSnafu)?;
+                builder.append_value(&key);
+            }
+            yield RecordBatch::try_new(primary_key_schema(), vec![Arc::new(builder.finish())])
+                .context(NewRecordBatchSnafu)?;
         }
     })
 }
@@ -823,10 +834,8 @@ mod tests {
         let (purger, _receiver) = series_index_channel(store.clone());
         let handle = SeriesIndexFileHandle::new(metadata.region_id, entry.clone(), purger);
         let context = SeriesIndexReadContext {
-            formats: Default::default(),
             store,
             version: Arc::new(SeriesIndexVersion {
-                samples: Default::default(),
                 series_indexes: [(entry.index_uuid, handle)].into(),
                 ..Default::default()
             }),
@@ -958,6 +967,48 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn index_merge_releases_permits_before_yielding() {
+        let (_env, scanner, _pruner) = indexed_scanner().await;
+        let semaphore = Arc::new(Semaphore::new(1));
+        let context = scanner.stream_ctx.input.series_index.clone().unwrap();
+        let streams = (0..3)
+            .map(|_| {
+                index_primary_key_stream(
+                    scanner.stream_ctx.clone(),
+                    context.clone(),
+                    scanner.coverage.indexes[0].clone(),
+                    semaphore.clone(),
+                )
+            })
+            .collect();
+        let merged = merge_primary_key_streams(
+            streams,
+            scanner.memory_pool.clone(),
+            &scanner.metrics_set,
+            0,
+            "permit-regression",
+        )
+        .unwrap();
+        let series =
+            decode_metric_series(merged, scanner.stream_ctx.input.region_metadata().clone())
+                .unwrap();
+        let batches = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            series.try_collect::<Vec<_>>(),
+        )
+        .await
+        .expect("index streams must not hold permits across yield")
+        .unwrap();
+        assert_eq!(
+            (0..1001)
+                .map(|tsid| MetricSeriesId { table_id: 1, tsid })
+                .collect::<Vec<_>>(),
+            batches.into_iter().flatten().collect::<Vec<_>>()
+        );
+        assert_eq!(1, semaphore.available_permits());
     }
 
     #[tokio::test]
