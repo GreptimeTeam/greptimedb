@@ -3130,3 +3130,267 @@ fn sparse_wide_results_are_charged_their_index_columns() {
         "peak {peak} is far more than the {columns} bytes of columns the result holds"
     );
 }
+
+
+/// A comparison filters, so the histogram it keeps is the left operand's, payload included.
+///
+/// A non-`bool` `==` or `!=` between two histograms keeps the left sample where the comparison
+/// holds, so the histogram that leaves is the one that arrived on the left, start timestamp
+/// included, and never the right operand's timestamp. `==` holds only for equal values, so that
+/// pair differs in reset hint and start timestamp alone; `!=` holds for differing values, so its
+/// pair differs in count and sum as well. What this pins is that a comparison passes the stored
+/// payload through, not a Prometheus result. A `bool` comparison answers in floats, so nothing it
+/// hands out is a histogram and no start timestamp leaves it.
+#[test]
+fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 3).unwrap()).unwrap());
+    let schema = Arc::new(schema(1, &grid));
+    // The start timestamp each operand was read with: written into its samples by `operand` below
+    // and repeated in every expectation, never read back through the operators under test.
+    const LEFT_START: i64 = 1_500;
+    const RIGHT_START: i64 = 2_500;
+    // count 4, sum 6, one span of two buckets holding 1 and 3, reset hint 2 (`NotCounterReset`).
+    let left = "0/0/0/4010000000000000/4018000000000000/2/0_2/3ff0000000000000,4008000000000000///";
+    // The same value with reset hint 1 (`CounterReset`): `==` ignores the hint, so the pair is kept
+    // and only the hint and the start timestamp say which side survived.
+    let equal =
+        "0/0/0/4010000000000000/4018000000000000/1/0_2/3ff0000000000000,4008000000000000///";
+    // count 5, sum 8: a value that differs, which is what `!=` keeps.
+    let other =
+        "0/0/0/4014000000000000/4020000000000000/2/0_2/4000000000000000,4008000000000000///";
+    let operand = |name: &str, job: &str, text: &str, start: i64| -> Series {
+        let labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), job.to_string()),
+        ]);
+        let histogram = OwnedHistogram::parse(text);
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        for point in [0, 2] {
+            let mut read = FloatHistogram::try_from_view(&histogram.view()).unwrap();
+            read.start_timestamp = Some(start);
+            builder
+                .push_samples(point, &[Some(GridSample::Histogram(Box::new(read)))])
+                .unwrap();
+        }
+        builder.finish(metric(&labels)).unwrap().unwrap()
+    };
+    // Two pairs, one match group each: `job=eq` holds histograms `==` keeps, `job=ne` ones `!=`
+    // keeps, so each comparison passes exactly one pair and its result is named by that pair.
+    let lhs = [
+        operand("eq", "eq", left, LEFT_START),
+        operand("ne", "ne", left, LEFT_START),
+    ];
+    let rhs = [
+        operand("eq_right", "eq", equal, RIGHT_START),
+        operand("ne_right", "ne", other, RIGHT_START),
+    ];
+    // Every histogram a comparison handed out, by the series and point it sits at, with the reset
+    // hint as the number the fixtures wrote.
+    let kept = |series: &[Series]| -> Vec<(String, usize, f64, f64, Option<i64>, i32)> {
+        let mut kept: Vec<(String, usize, f64, f64, Option<i64>, i32)> = Vec::new();
+        for series in series {
+            let name = series.metric.name().unwrap_or_default().to_string();
+            let mut cursor = series.fields.as_slice()[0].cursor();
+            for (point, row) in series.time.positions() {
+                match cursor.at(row).expect("the axis and the fields are aligned") {
+                    SampleRef::Histogram(view) => kept.push((
+                        name.clone(),
+                        point,
+                        view.count,
+                        view.sum,
+                        view.start_timestamp,
+                        i32::from(view.reset_hint),
+                    )),
+                    _ => panic!("a comparison handed out a sample that is not a histogram"),
+                }
+            }
+        }
+        kept.sort_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
+        kept
+    };
+    let matching = |op: BinaryOp| BinaryMatching {
+        op,
+        return_bool: false,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
+    };
+
+    let eq = binary_vectors(&matching(BinaryOp::Eq), &schema, &lhs, &schema, &rhs).unwrap();
+    assert_eq!(
+        kept(&eq),
+        [
+            ("eq".to_string(), 0, 4.0, 6.0, Some(LEFT_START), 2),
+            ("eq".to_string(), 2, 4.0, 6.0, Some(LEFT_START), 2),
+        ],
+        "`==` did not hand back the left histogram it kept: {eq:?}"
+    );
+
+    let ne = binary_vectors(&matching(BinaryOp::Ne), &schema, &lhs, &schema, &rhs).unwrap();
+    assert_eq!(
+        kept(&ne),
+        [
+            ("ne".to_string(), 0, 4.0, 6.0, Some(LEFT_START), 2),
+            ("ne".to_string(), 2, 4.0, 6.0, Some(LEFT_START), 2),
+        ],
+        "`!=` did not hand back the left histogram it kept: {ne:?}"
+    );
+
+    // The right operand's start timestamp is never what comes out, at any point of either
+    // comparison.
+    for series in eq.iter().chain(&ne) {
+        let mut cursor = series.fields.as_slice()[0].cursor();
+        for (point, row) in series.time.positions() {
+            let SampleRef::Histogram(view) =
+                cursor.at(row).expect("the axis and the fields are aligned")
+            else {
+                panic!("a comparison handed out a sample that is not a histogram");
+            };
+            assert_ne!(
+                view.start_timestamp,
+                Some(RIGHT_START),
+                "the right operand's start timestamp came out at {point}: {series:?}"
+            );
+        }
+    }
+
+    // A `bool` comparison answers in floats, so nothing it hands out is a histogram and no start
+    // timestamp leaves it: `job=eq` holds equal histograms, so it answers 1, and `job=ne` differs
+    // in count and sum, so it answers 0.
+    let bool_matching = BinaryMatching {
+        return_bool: true,
+        ..matching(BinaryOp::Eq)
+    };
+    let compared = binary_vectors(&bool_matching, &schema, &lhs, &schema, &rhs).unwrap();
+    let answers = |series: &[Series]| -> Vec<(String, usize, f64)> {
+        let mut answers: Vec<(String, usize, f64)> = Vec::new();
+        for series in series {
+            let job = series.metric.get("job").unwrap_or_default().to_string();
+            let mut cursor = series.fields.as_slice()[0].cursor();
+            for (point, row) in series.time.positions() {
+                match cursor.at(row).expect("the axis and the fields are aligned") {
+                    SampleRef::Float(value) => answers.push((job.clone(), point, value)),
+                    _ => panic!("a `bool` comparison handed out a sample that is not a float"),
+                }
+            }
+        }
+        answers.sort_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
+        answers
+    };
+    assert_eq!(
+        answers(&compared),
+        [
+            ("eq".to_string(), 0, 1.0),
+            ("eq".to_string(), 2, 1.0),
+            ("ne".to_string(), 0, 0.0),
+            ("ne".to_string(), 2, 0.0),
+        ],
+        "a `bool` comparison of histograms did not answer in floats: {compared:?}"
+    );
+}
+
+/// A set operation hands back the sample it kept, start timestamp included.
+///
+/// `and`, `unless` and `or` choose samples rather than compute them, so each histogram that leaves
+/// them is the histogram that arrived, payload included. The two operands were read with different
+/// start timestamps and hold different counts and sums, so the count, the sum and the timestamp
+/// together name the side and the point a kept sample came from. The one exception is `or` at a
+/// point where the left side holds no sample: the sample kept is the right side's, and it carries
+/// the right side's own start timestamp. What this pins is that the operators pass the stored
+/// payload through, not a Prometheus result.
+#[test]
+fn a_set_operation_keeps_the_payload_of_the_sample_it_keeps() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 4).unwrap()).unwrap());
+    let schema = Arc::new(schema(1, &grid));
+    // The start timestamp each operand was read with: written into its samples by `operand` below
+    // and repeated in every expectation, never read back through the operators under test.
+    const LHS_START: i64 = 1_500;
+    const RHS_START: i64 = 2_500;
+    // count 4, sum 6, one span of two buckets holding 1 and 3.
+    let lhs_text =
+        "0/0/0/4010000000000000/4018000000000000/2/0_2/3ff0000000000000,4008000000000000///";
+    // count 5, sum 8, so the count and the sum name the side a kept sample came from as well.
+    let rhs_text =
+        "0/0/0/4014000000000000/4020000000000000/2/0_2/4000000000000000,4008000000000000///";
+    let operand = |name: &str, text: &str, start: i64, points: &[usize]| -> Series {
+        let labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+        ]);
+        let histogram = OwnedHistogram::parse(text);
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        for &point in points {
+            let mut read = FloatHistogram::try_from_view(&histogram.view()).unwrap();
+            read.start_timestamp = Some(start);
+            builder
+                .push_samples(point, &[Some(GridSample::Histogram(Box::new(read)))])
+                .unwrap();
+        }
+        builder.finish(metric(&labels)).unwrap().unwrap()
+    };
+    // The left side holds 0 and 1, the right side 0 and 2, so each operator keeps a different set:
+    // the shared point for `and`, the left-only point for `unless`, and the union for `or`.
+    let lhs = operand("l", lhs_text, LHS_START, &[0, 1]);
+    let rhs = operand("r", rhs_text, RHS_START, &[0, 2]);
+    // Every histogram an operator handed out, by the series and point it sits at.
+    let kept = |series: &[Series]| -> Vec<(String, usize, f64, f64, Option<i64>)> {
+        let mut kept: Vec<(String, usize, f64, f64, Option<i64>)> = Vec::new();
+        for series in series {
+            let name = series.metric.name().unwrap_or_default().to_string();
+            let mut cursor = series.fields.as_slice()[0].cursor();
+            for (point, row) in series.time.positions() {
+                match cursor.at(row).expect("the axis and the fields are aligned") {
+                    SampleRef::Histogram(view) => kept.push((
+                        name.clone(),
+                        point,
+                        view.count,
+                        view.sum,
+                        view.start_timestamp,
+                    )),
+                    _ => panic!("a set operator handed out a sample that is not a histogram"),
+                }
+            }
+        }
+        kept.sort_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
+        kept
+    };
+    let labels = MatchingLabels::Ignoring(Vec::new());
+    let eval = |op: SetOp| {
+        set_vectors(
+            op,
+            &labels,
+            &schema,
+            std::slice::from_ref(&lhs),
+            &schema,
+            std::slice::from_ref(&rhs),
+        )
+        .unwrap()
+    };
+
+    let and = eval(SetOp::And);
+    assert_eq!(
+        kept(&and),
+        [("l".to_string(), 0, 4.0, 6.0, Some(LHS_START))],
+        "`and` did not hand back the left sample it kept: {and:?}"
+    );
+
+    let unless = eval(SetOp::Unless);
+    assert_eq!(
+        kept(&unless),
+        [("l".to_string(), 1, 4.0, 6.0, Some(LHS_START))],
+        "`unless` did not hand back the left sample it kept: {unless:?}"
+    );
+
+    // The right side comes back at point 2, where the left side holds no sample, and carries the
+    // right side's own start timestamp -- the one case where the payload kept is not the left one.
+    let or = eval(SetOp::Or);
+    assert_eq!(
+        kept(&or),
+        [
+            ("l".to_string(), 0, 4.0, 6.0, Some(LHS_START)),
+            ("l".to_string(), 1, 4.0, 6.0, Some(LHS_START)),
+            ("r".to_string(), 2, 5.0, 8.0, Some(RHS_START)),
+        ],
+        "`or` did not hand back each side's own sample: {or:?}"
+    );
+}

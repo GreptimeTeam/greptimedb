@@ -273,10 +273,9 @@ fn limit_operators_keep_histogram_samples() {
 ///
 /// `limitk` and `limit_ratio` choose samples rather than compute them, so a histogram that arrives
 /// with a start timestamp leaves with it. The count and the sum are compared too, so a computed
-/// value that happened to carry a timestamp would not pass for the sample selected. The timestamp
-/// is read downstream -- an extrapolated rate uses it to find where a counter reset fell -- so a
-/// selected sample that lost it would look like one whose reset cannot be placed. A histogram
-/// computed from samples carries none, as
+/// value that happened to carry a timestamp would not pass for the sample selected. What this pins
+/// is that the selection passes the stored payload through, not a Prometheus result and not a
+/// downstream rate that reads the field. A histogram computed from samples carries none, as
 /// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
 /// pins for the operations that build one.
 #[test]

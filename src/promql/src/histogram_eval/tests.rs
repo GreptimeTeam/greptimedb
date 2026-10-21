@@ -388,12 +388,12 @@ fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
 
 /// The start timestamp is payload of a histogram that was read, and not of one that was computed.
 ///
-/// It is read off a sample ([`FloatHistogram::try_from_view`]) and written back
-/// ([`FloatHistogram::push_to`]), which is what a selection needs to hand a sample on unchanged;
-/// every operation that derives a value from its input leaves it `None`, as Go's `FloatHistogram`,
-/// which has no such field, does. Nothing else depends on the field: the type derives `Debug` and
-/// `Clone` only, so it has no equality, hash or serialized form that could compare it, and
-/// [`FloatHistogram::equals`] is Go `Equals` on counts and bucket layout.
+/// This pins GreptimeDB's own payload policy, not a Prometheus expectation: the timestamp is read
+/// off a sample ([`FloatHistogram::try_from_view`]) and written back
+/// ([`FloatHistogram::push_to`]), which is what a selection needs to hand a sample on unchanged,
+/// and every operation that derives a value from its input clears it. Nothing else depends on the
+/// field: the type derives `Debug` and `Clone` only, so it has no equality, hash or serialized form
+/// that could compare it, and [`FloatHistogram::equals`] is Go `Equals` on counts and bucket layout.
 #[test]
 fn a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one() {
     let offsets = [0];
