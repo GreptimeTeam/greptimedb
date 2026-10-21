@@ -1792,6 +1792,25 @@ fn the_optimizer_inserts_no_exchange_between_the_input_and_this_node() {
         "the optimizer inserted {exchanges:?} between the input and the node, and an exchange \
          reorders a series' chunks: the node would close a series it has not finished"
     );
+    // No exchange is not the same as no change: a rule that raised the count some other way would
+    // still split a series. The count is the input's, which is what the node reports and what it
+    // runs one evaluator per.
+    assert_eq!(
+        2,
+        optimized
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "the optimizer kept no exchange but changed how many partitions the node runs"
+    );
+    assert_eq!(
+        2,
+        optimized.children()[0]
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "the input's own partition count changed under the node"
+    );
 }
 
 /// The `RepartitionExec`s in `plan` that sit above `stop` and below no other `RepartitionExec`.
