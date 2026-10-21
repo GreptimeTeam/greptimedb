@@ -124,7 +124,7 @@ const SUPPORTED: &str = "a selector, a range function over a range selector — 
 /// its last chunk before the next, so chunks of different series may not interleave, and an
 /// `Interleaved` declaration is refused here for every shape this compiler accepts. That is where
 /// the refusal belongs: no accepted shape can consume interleaved chunks, so a tree declaring one
-/// cannot be built here at all. [`NativeTree::validate`]'s window branch checks the same thing, so
+/// cannot be built here at all. [`NativeNode::validate`]'s window branch checks the same thing, so
 /// if both land this refusal comes first and the tree check is a backstop for a tree built some
 /// other way.
 ///
@@ -214,7 +214,7 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
 ///
 /// The grid is the statement's rather than the constant's own: a constant has no timestamps, so the
 /// only positions it can be broadcast over are the ones the statement is evaluated at, and
-/// [`NativeTree::validate`] compares a binary operation's two grids by spec rather than by
+/// [`NativeNode::validate`] compares a binary operation's two grids by spec rather than by
 /// allocation.
 fn scalar_node(context: &Context, value: f64) -> Result<NativeNode> {
     Ok(NativeNode {
@@ -332,7 +332,7 @@ fn broadcast(left: NativeNode, right: NativeNode, op: BinaryOp, return_bool: boo
 
 /// The matching a vector-and-constant operation records.
 ///
-/// Nothing is matched: a scalar carries no labels, so [`NativeTree::validate`] broadcasts it and
+/// Nothing is matched: a scalar carries no labels, so [`NativeNode::validate`] broadcasts it and
 /// reads neither `labels` nor `cardinality`. They carry the default a vector–vector operation of the
 /// same operator would have, which is also the only matching PromQL allows here — it rejects
 /// `on`, `ignoring`, `group_left` and `group_right` on a scalar–vector operation. `return_bool` is
@@ -494,7 +494,7 @@ fn window_call(
 ///
 /// The output is the input's own type: a pointwise function moves no value to another grid point
 /// and reports one value per field it was given, so the map's schema is the input's allocation
-/// rather than a copy that merely agrees with it. [`NativeTree::validate`] does not require that
+/// rather than a copy that merely agrees with it. [`NativeNode::validate`] does not require that
 /// sharing: it compares the map's grid with its input's by [`EvalGrid::spec`] and its field count
 /// with its input's, so a map that allocated an equal grid of its own would validate the same way.
 /// The only comparison by identity is an input node's, whose output has to be the very binding it

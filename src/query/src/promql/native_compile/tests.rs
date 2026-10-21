@@ -1022,7 +1022,7 @@ fn a_math_function_maps_over_the_node_its_argument_compiles_to() {
 ///
 /// The maps are separate nodes because the arguments nest, not because the compiler knows
 /// `clamp_min(abs(...))`: a compiler that bound the pair to one node would fail the tree assertions
-/// here. The grids are compared by their spec, which is what [`NativeTree::validate`] compares: a
+/// here. The grids are compared by their spec, which is what [`NativeNode::validate`] compares: a
 /// map that allocated a second, equal grid would still be the window's layout, while one that
 /// reported a different grid or different fields would not.
 #[test]
