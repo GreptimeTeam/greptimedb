@@ -26,13 +26,22 @@
 //! <expression> <operator> <constant>                e.g. x * 100, x > bool 0
 //! <constant> <operator> <expression>                e.g. 1 / x, 0 < x
 //! -<expression>                                     e.g. -x
+//! <aggregator> [(by|without)(<labels>)] (<expression>)
+//!                                                   e.g. avg by(job)(rate(x[5m]) * 100)
+//! <aggregator> (<expression>) [(by|without)(<labels>)]
+//!                                                   e.g. count (x) by(job)
+//! quantile(<constant>, <expression>) [(by|without)(<labels>)]
+//!                                                   e.g. quantile(0.9, x) by(job)
 //! ```
+//!
+//! where `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev` or `stdvar`.
 //!
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
 //! `Input` (raw samples) → `Window` (the range function over the statement's grid),
 //! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to) and, over
-//! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side) and
-//! `Scalar` (that constant). A selector may carry
+//! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side),
+//! `Scalar` (that constant) and `Aggregate` (one of the nine aggregators that fold a group's values
+//! into one value per grid point, optionally grouped). A selector may carry
 //! `offset` in either selection shape and, in the window shape, an `@` anchor. Everything else is a
 //! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
 //! because rejecting a query the compiler does not understand is the only honest alternative to
@@ -61,6 +70,14 @@
 //! value is a scalar has nothing to read, so it is refused as well: a constant is bound next to a
 //! vector that gives it something to broadcast over.
 //!
+//! An aggregate is bound as [`AggregateStage::Complete`], which is a claim about the whole execution
+//! rather than about the node: it says that every contribution to every group is in this execution's
+//! input. The caller has to keep that claim. One tree per partition does not: handing every
+//! partition the same `Complete` tree sums each partition's part and reports it as the group's
+//! whole, so a partitioned caller has to feed whole groups to one execution or split the aggregation
+//! into `Partial` and `Final` instead. What a `Complete` node guarantees here is only the arithmetic
+//! — that the values it folded are all the values it was given.
+//!
 //! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
 //! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
 //! single authority on that, so a node added later cannot be legal in one place and illegal in
@@ -77,16 +94,17 @@ use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use promql::map::{ArithmeticOp, MathOp};
 use promql::native::plan::{
-    BoundInput, BoundInstant, BoundMap, BoundScalar, BoundWindow, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
+    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
 use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AtModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral,
-    Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
+    AggregateExpr, AtModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, LabelModifier,
+    MatrixSelector, NumberLiteral, Offset, VectorMatchCardinality, VectorMatchFillValues,
+    VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -95,10 +113,13 @@ use crate::promql::label_values::signed_millis_since_epoch;
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
                          the selector as in `quantile_over_time(0.9, x[5m])` — a math function over \
-                         any of them, a binary operation between one of them and a constant, or a \
-                         negation of one of them, as in `x`, `rate(x[5m])`, \
-                         `quantile_over_time(0.9, x[5m])`, `abs(rate(x[5m]))`, `2 / (x + 1)` or \
-                         `-x`";
+                         any of them, a binary operation between one of them and a constant, a \
+                         negation of one of them, or one of the aggregators that folds a group's \
+                         values into one value per grid point — `sum`, `avg`, `count`, `min`, `max`, \
+                         `group`, `stddev`, `stdvar` and `quantile(<constant>, ...)` — over any of \
+                         them, optionally grouped by `by` or `without`, as in `x`, `rate(x[5m])`, \
+                         `quantile_over_time(0.9, x[5m])`, `abs(rate(x[5m]))`, `2 / (x + 1)`, \
+                         `-x`, `avg by(job)(rate(x[5m]) * 100)` or `quantile(0.9, x)`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -195,6 +216,7 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
         PromExpr::VectorSelector(selector) => instant_selection(context, selector),
         PromExpr::Unary(unary) => negate(context, &unary.expr),
         PromExpr::Binary(binary) => binary_operation(context, binary),
+        PromExpr::Aggregate(aggregate) => aggregate_expr(context, aggregate),
         found => Err(not_implemented(&format!("the expression `{found}`"))),
     }
 }
@@ -361,6 +383,123 @@ fn binary_op(op: &TokenType) -> Option<BinaryOp> {
         token::T_GTE => Some(BinaryOp::Ge),
         token::T_LTE => Some(BinaryOp::Le),
         _ => None,
+    }
+}
+
+/// Compiles an aggregation into an aggregate node over the expression it groups.
+///
+/// Every aggregator that folds a group's values into one value per grid point binds, whether or not
+/// its kernel exists yet: `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and
+/// `quantile`. Binding a shape the compiler can describe and letting the runtime refuse a kind it
+/// cannot execute keeps this the one place that says what an aggregate means, so a kernel landing
+/// later changes no binding.
+///
+/// The rest of the parser's aggregates are a different shape, and are refused with the reason rather
+/// than folded into a kind that would compute something else: `topk`, `bottomk`, `limitk` and
+/// `limit_ratio` select some of the input's series, so they do not report one value per group per
+/// grid point, and `count_values` writes one output label per distinct value rather than folding a
+/// group's values at all.
+///
+/// The grouping is bound in the tree's own terms, because `by` and `without` are not each other's
+/// inverse: `by(job)` keeps `job` and drops every other label, while `without(instance)` keeps every
+/// label it does not name and drops `__name__` as well, so a list of the surviving labels could not
+/// say the same thing. A bare `sum(x)` groups by no label at all, which is Prometheus's reading of
+/// "no modifier": every label is dropped, `__name__` included, and every series of the input falls
+/// into one group.
+///
+/// The stage is [`AggregateStage::Complete`], which says that every contribution to each group is in
+/// this execution's input. The module documentation says what keeping that claim costs a caller.
+fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<NativeNode> {
+    let AggregateExpr {
+        op,
+        expr,
+        param,
+        modifier,
+    } = aggregate;
+    let kind = match op.id() {
+        token::T_SUM => AggregateKind::Sum,
+        token::T_AVG => AggregateKind::Avg,
+        token::T_COUNT => AggregateKind::Count,
+        token::T_MIN => AggregateKind::Min,
+        token::T_MAX => AggregateKind::Max,
+        token::T_GROUP => AggregateKind::Group,
+        token::T_STDDEV => AggregateKind::Stddev,
+        token::T_STDVAR => AggregateKind::Stdvar,
+        token::T_QUANTILE => {
+            // `quantile` is the only one of the nine with a parameter, and the parser always gives
+            // it one: a `quantile` with no quantile written is refused before the compiler sees it.
+            // The quantile is the call's first argument, so a parameter that is not a constant is
+            // refused under that name rather than answered from a number bound too early.
+            let param = param.as_ref().ok_or_else(|| {
+                not_implemented(&format!(
+                    "the aggregate `{op}` in `{aggregate}`, which takes its quantile as its first \
+                     argument"
+                ))
+            })?;
+            AggregateKind::Quantile {
+                quantile: constant_argument(&op.to_string(), param, 0)?,
+            }
+        }
+        // A ranking aggregate keeps some of the input's series, so what it reports is not one value
+        // per group per grid point: `topk(3, x)` answers with three series, not with the groups'
+        // folded values.
+        token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO => {
+            return Err(not_implemented(&format!(
+                "the aggregate `{op}` in `{aggregate}`, which selects some of its input's series \
+                 rather than folding each group's values into one value per grid point"
+            )));
+        }
+        // `count_values` folds nothing: it writes one output label per distinct value it saw, which
+        // is a shape no folded value can spell.
+        token::T_COUNT_VALUES => {
+            return Err(not_implemented(&format!(
+                "the aggregate `{op}` in `{aggregate}`, which writes one output label per distinct \
+                 value rather than folding each group's values into one value per grid point"
+            )));
+        }
+        // The parser's `aggregate_op` rule lists exactly the fourteen names above, so this arm is
+        // an operator this compiler was not taught rather than one it means to fold.
+        _ => {
+            return Err(not_implemented(&format!(
+                "the aggregate `{op}` in `{aggregate}`"
+            )));
+        }
+    };
+    let input = compile_expr(context, expr)?;
+    // A complete aggregate folds each group's values and reports them on its input's grid, one value
+    // per input field, so its layout is its input's.
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op: BoundAggregate {
+                kind,
+                group: grouping(modifier.as_ref()),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output,
+    })
+}
+
+/// How a `by` or `without` modifier identifies a group, in the tree's own terms.
+///
+/// The labels keep the order they were written in: a grouping is a set, and the tree records the
+/// query rather than a key it derived from one.
+fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
+    /// The written labels, as the tree stores them.
+    fn labels(labels: &[String]) -> Arc<[Arc<str>]> {
+        labels
+            .iter()
+            .map(|label| Arc::<str>::from(label.as_str()))
+            .collect()
+    }
+    match modifier {
+        // No modifier and `by()` ask for the same grouping: no label is kept, so every series of the
+        // input falls into one group.
+        None => Grouping::By(Arc::new([])),
+        Some(LabelModifier::Include(by)) => Grouping::By(labels(&by.labels)),
+        Some(LabelModifier::Exclude(without)) => Grouping::Without(labels(&without.labels)),
     }
 }
 
