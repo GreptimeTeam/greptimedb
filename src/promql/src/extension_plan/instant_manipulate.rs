@@ -760,7 +760,6 @@ impl InstantManipulateStream {
                 return self.take_record_batch_optional(input, indices, evaluation_timestamps);
             }
         }
-        let scale = nanoseconds_per_native_tick(self.time_unit);
         let stale_sample_columns = self.field_indices.map(|index| {
             index.and_then(|index| prometheus_stale_sample_column(input.column(index).as_ref()))
         });
@@ -776,43 +775,8 @@ impl InstantManipulateStream {
         let timestamp_null_count = timestamps.null_count();
         let timestamps = timestamps.values();
         let len = timestamps.len();
-        // Shift the native-tick timeline in i128 before comparing samples. Doing
-        // this in the Arrow storage unit can overflow even when the shifted
-        // PromQL millisecond evaluation time is representable.
-        let to_nanoseconds =
-            |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
-        let first_ns = to_nanoseconds(timestamps[0]);
-        let last_ns = to_nanoseconds(timestamps[len - 1]);
-        // An exact sample remains useful with zero lookback. Otherwise the lower
-        // boundary is exclusive, so subtract one nanosecond from its final window.
-        let last_useful = if self.lookback_delta == 0 {
-            last_ns
-        } else {
-            last_ns + (self.lookback_delta as i128) * 1_000_000 - 1
-        };
-        let first_ms = (first_ns + 999_999).div_euclid(1_000_000);
-        let last_ms = last_useful.div_euclid(1_000_000);
-        let query_start = self.start as i128;
-        let query_end = self.end as i128;
-        let interval = self.interval as i128;
-        let max_start = first_ms.max(query_start);
-        let min_end = last_ms.min(query_end);
-        let (aligned_start, aligned_end) = if max_start > min_end {
-            (1, 0)
-        } else {
-            (
-                query_start + (max_start - query_start) / interval * interval,
-                query_end - (query_end - min_end) / interval * interval,
-            )
-        };
-        let estimated_points = if aligned_end >= aligned_start {
-            (aligned_end - aligned_start) / interval + 1
-        } else {
-            0
-        };
-        let estimated_points = estimated_points as usize;
-        let aligned_start = aligned_start as i64;
-        let aligned_end = aligned_end as i64;
+        let (aligned_start, aligned_end) = self.clipped_range(timestamps);
+        let estimated_points = self.range_points(aligned_start, aligned_end);
         // Narrow `i64` nanoseconds whenever the batch fits them, exact `i128` otherwise.
         let narrow = (timestamp_null_count == 0)
             .then(|| {
@@ -827,8 +791,19 @@ impl InstantManipulateStream {
             })
             .flatten();
         if let Some(scan) = &narrow {
-            debug_assert_eq!(i64::try_from(first_ns), Ok(scan.shift(timestamps[0])));
-            debug_assert_eq!(i64::try_from(last_ns), Ok(scan.shift(timestamps[len - 1])));
+            // The clip converted the series bounds to milliseconds; this asserts the scan the
+            // selection walks agrees with them on those two samples.
+            let scale = nanoseconds_per_native_tick(self.time_unit);
+            let to_nanoseconds =
+                |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
+            debug_assert_eq!(
+                i64::try_from(to_nanoseconds(timestamps[0])),
+                Ok(scan.shift(timestamps[0]))
+            );
+            debug_assert_eq!(
+                i64::try_from(to_nanoseconds(timestamps[len - 1])),
+                Ok(scan.shift(timestamps[len - 1]))
+            );
         }
         let (take_indices, aligned_ts) = match narrow {
             Some(scan) => self.scan_instants::<i64>(
@@ -1016,42 +991,61 @@ impl InstantManipulateStream {
         let Some((timestamps, _)) = timestamp_array_to_primitive(time) else {
             return 0;
         };
-        let ticks = timestamps.values();
-        // Milliseconds are the frame `select_instants` clips in. The first tick is rounded up and
-        // the last one down, as the wide scan of [`Self::manipulate`] rounds the ticks it converts,
-        // so a tick that is not a whole millisecond widens the bounds rather than narrowing the
-        // range either selection can reach.
+        let (start, end) = self.clipped_range(timestamps.values());
+        self.range_points(start, end)
+    }
+
+    /// This operator's grid clipped to the instants one series is selected at.
+    ///
+    /// `ticks` are that series' sample times in the operator's native tick unit, sorted and
+    /// non-empty, and the interval must be positive. The lower bound moves to the first instant at
+    /// or after the first sample and the upper bound to the last instant at or before the last
+    /// sample widened by the lookback, both rounded onto the grid. An instant outside the returned
+    /// range has no sample to select, so [`Self::scan_instants`] never walks it and nothing is
+    /// allocated for it. Returns `(1, 0)` -- an empty range -- when nothing is left.
+    ///
+    /// [`Self::manipulate`] and [`Self::clipped_points`] both call this. They used to carry the
+    /// same arithmetic twice, on the reasoning that the reservation must mirror the selection; one
+    /// copy is the stronger guarantee, because the two cannot drift apart at all.
+    fn clipped_range(&self, ticks: &[i64]) -> (Millisecond, Millisecond) {
+        // Shift the native-tick timeline in i128 before comparing samples. Doing this in the Arrow
+        // storage unit can overflow even when the shifted PromQL millisecond evaluation time is
+        // representable.
         let scale = nanoseconds_per_native_tick(self.time_unit);
-        let offset_ns = self.offset as i128 * 1_000_000;
-        let first = (ticks[0] as i128 * scale + offset_ns + 999_999).div_euclid(1_000_000);
-        let last_ns = ticks[ticks.len() - 1] as i128 * scale + offset_ns;
-        // An exact sample remains useful with zero lookback. Otherwise the lower boundary of the
-        // window is exclusive, so the final window ends one nanosecond early.
-        let useful_last_ns = if self.lookback_delta == 0 {
+        let to_nanoseconds =
+            |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
+        let first_ns = to_nanoseconds(ticks[0]);
+        let last_ns = to_nanoseconds(ticks[ticks.len() - 1]);
+        // An exact sample remains useful with zero lookback. Otherwise the lower boundary is
+        // exclusive, so subtract one nanosecond from its final window.
+        let last_useful = if self.lookback_delta == 0 {
             last_ns
         } else {
-            last_ns + self.lookback_delta as i128 * 1_000_000 - 1
+            last_ns + (self.lookback_delta as i128) * 1_000_000 - 1
         };
-        let useful_last = useful_last_ns.div_euclid(1_000_000);
+        let first_ms = (first_ns + 999_999).div_euclid(1_000_000);
+        let last_ms = last_useful.div_euclid(1_000_000);
         let query_start = self.start as i128;
         let query_end = self.end as i128;
-        let step = self.interval as i128;
-        // The clip and the alignment of `select_instants`, which stays the source of truth: a change
-        // there must be mirrored here, or the reservation stops covering what it allocates.
-        let max_start = first.max(query_start);
-        let min_end = useful_last.min(query_end);
-        let (aligned_start, aligned_end) = if max_start > min_end {
-            (1_i128, 0_i128)
-        } else {
-            (
-                query_start + (max_start - query_start) / step * step,
-                query_end - (query_end - min_end) / step * step,
-            )
-        };
-        if aligned_end < aligned_start {
+        let interval = self.interval as i128;
+        let max_start = first_ms.max(query_start);
+        let min_end = last_ms.min(query_end);
+        if max_start > min_end {
+            return (1, 0);
+        }
+        (
+            (query_start + (max_start - query_start) / interval * interval) as i64,
+            (query_end - (query_end - min_end) / interval * interval) as i64,
+        )
+    }
+
+    /// The number of instants in `start..=end`, stepping by the interval.
+    fn range_points(&self, start: Millisecond, end: Millisecond) -> usize {
+        if end < start || self.interval <= 0 {
             return 0;
         }
-        usize::try_from((aligned_end - aligned_start) / step + 1).unwrap_or(usize::MAX)
+        usize::try_from((end as i128 - start as i128) / self.interval as i128 + 1)
+            .unwrap_or(usize::MAX)
     }
 }
 
