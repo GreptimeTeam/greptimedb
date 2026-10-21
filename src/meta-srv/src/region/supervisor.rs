@@ -22,6 +22,7 @@ use common_meta::DatanodeId;
 use common_meta::affinity::{AffinityFallback, AffinityReference, AffinityResolverRef};
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
+use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::table_route::{TableRouteKey, TableRouteValue};
 use common_meta::key::{MetadataKey, MetadataValue};
@@ -45,7 +46,7 @@ use crate::discovery::utils::accept_ingest_workload;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
-use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
+use crate::metrics::{METRIC_META_HEARTBEAT_DROPPED, METRIC_META_RESTART_GRACE_SKIPPED_DETECTIONS};
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
 };
@@ -54,6 +55,7 @@ use crate::procedure::region_migration::{
     DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask,
 };
 use crate::region::failure_detector::RegionFailureDetector;
+use crate::region::restart_grace::{DatanodeRestartGrace, DatanodeRestartGraceRef};
 use crate::selector::SelectorOptions;
 use crate::state::StateRef;
 
@@ -303,6 +305,8 @@ pub struct RegionSupervisor {
     kv_backend: KvBackendRef,
     /// The meta state, used to check if the current metasrv is the leader.
     state: Option<StateRef>,
+    /// Startup handshakes of restarting datanodes.
+    restart_grace: DatanodeRestartGraceRef,
 }
 
 /// Controller for managing failure detectors for regions.
@@ -421,6 +425,9 @@ impl RegionSupervisor {
             peer_resolver,
             kv_backend,
             state: None,
+            restart_grace: Arc::new(DatanodeRestartGrace::new(
+                default_distributed_time_constants().region_lease,
+            )),
         }
     }
 
@@ -433,6 +440,12 @@ impl RegionSupervisor {
     /// Sets the meta state.
     pub(crate) fn with_state(mut self, state: StateRef) -> Self {
         self.state = Some(state);
+        self
+    }
+
+    /// Sets the startup handshakes the heartbeat service records.
+    pub(crate) fn with_restart_grace(mut self, restart_grace: DatanodeRestartGraceRef) -> Self {
+        self.restart_grace = restart_grace;
         self
     }
 
@@ -904,11 +917,25 @@ impl RegionSupervisor {
                 // Besides, it might reduce the false positive of failure detection,
                 // because during the iteration, heartbeats are coming in as usual,
                 // and the `phi`s are still updating.
-                if !e.failure_detector().is_available(current_time_millis()) {
-                    Some(*e.region_ident())
-                } else {
-                    None
+                let now = current_time_millis();
+                let detector = e.failure_detector();
+                if detector.is_available(now) {
+                    return None;
                 }
+                let (datanode_id, region_id) = *e.region_ident();
+                if let Some(last_heartbeat_millis) = detector.last_heartbeat_millis()
+                    && self
+                        .restart_grace
+                        .is_restarting(datanode_id, last_heartbeat_millis, now)
+                {
+                    METRIC_META_RESTART_GRACE_SKIPPED_DETECTIONS.inc();
+                    debug!(
+                        "Skipping failure detection of region {} on restarting datanode {}",
+                        region_id, datanode_id
+                    );
+                    return None;
+                }
+                Some((datanode_id, region_id))
             })
             .collect::<Vec<_>>()
     }
@@ -1670,5 +1697,96 @@ pub(crate) mod tests {
         acceptor.accept(filler_heartbeat());
         assert_eq!(dropped(), dropped_before + 1);
         assert_eq!(sender.capacity(), 0);
+    }
+
+    mod restart_grace {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use common_meta::ddl::DetectingRegion;
+        use common_time::util::current_time_millis;
+        use store_api::storage::RegionId;
+
+        use super::new_test_supervisor;
+        use crate::failure_detector::PhiAccrualFailureDetectorOptions;
+        use crate::region::failure_detector::RegionFailureDetector;
+        use crate::region::restart_grace::DatanodeRestartGrace;
+        use crate::region::supervisor::RegionSupervisor;
+
+        fn supervisor_with(
+            region_lease: Duration,
+            options: PhiAccrualFailureDetectorOptions,
+        ) -> (RegionSupervisor, Arc<DatanodeRestartGrace>) {
+            let restart_grace = Arc::new(DatanodeRestartGrace::new(region_lease));
+            let (mut supervisor, _) = new_test_supervisor();
+            supervisor.failure_detector = RegionFailureDetector::new(options);
+            (
+                supervisor.with_restart_grace(restart_grace.clone()),
+                restart_grace,
+            )
+        }
+
+        /// Samples the region's detector every `interval_millis`, the last time at `last`.
+        fn sample(
+            supervisor: &RegionSupervisor,
+            region: DetectingRegion,
+            interval_millis: i64,
+            last: i64,
+        ) {
+            let mut detector = supervisor.failure_detector.region_failure_detector(region);
+            for i in (0..20).rev() {
+                detector.heartbeat(last - i * interval_millis);
+            }
+        }
+
+        fn region(datanode_id: u64) -> DetectingRegion {
+            (datanode_id, RegionId::new(1, datanode_id as u32))
+        }
+
+        fn detected(supervisor: &RegionSupervisor) -> HashSet<DetectingRegion> {
+            supervisor.detect_region_failure().into_iter().collect()
+        }
+
+        #[test]
+        fn test_restart_grace_skips_detection_until_a_newer_sample() {
+            let (supervisor, restart_grace) =
+                supervisor_with(Duration::from_secs(10), Default::default());
+            let now = current_time_millis();
+            // Every datanode stopped heartbeating 20 s ago, past the detection threshold.
+            for datanode_id in 1..=3 {
+                sample(&supervisor, region(datanode_id), 3000, now - 20_000);
+            }
+            // 1 restarted since its last sample. Its newer sample has not reached the
+            // detector: it is still queued, or was dropped.
+            restart_grace.record_startup(1, now - 15_000);
+            // 2's startup handshake came before its last sample, which ended the grace.
+            restart_grace.record_startup(2, now - 25_000);
+            // 3's startup handshake has not arrived, so it fails over as before.
+            // 4's only sample came after a leader change.
+            supervisor
+                .failure_detector
+                .maybe_init_region_failure_detector(region(4), now - 20_000);
+            restart_grace.record_startup(4, now - 15_000);
+
+            assert_eq!(detected(&supervisor), HashSet::from([region(2), region(3)]));
+        }
+
+        #[test]
+        fn test_restart_grace_ends_three_leases_after_last_sample() {
+            let options = PhiAccrualFailureDetectorOptions {
+                acceptable_heartbeat_pause: Duration::from_secs(6),
+                ..Default::default()
+            };
+            // A 5 s heartbeat interval gives a 16 s region lease.
+            let (supervisor, restart_grace) = supervisor_with(Duration::from_secs(16), options);
+            let now = current_time_millis();
+            sample(&supervisor, region(1), 5000, now - 15_000);
+            sample(&supervisor, region(2), 5000, now - 49_000);
+            restart_grace.record_startup(1, now - 10_000);
+            restart_grace.record_startup(2, now - 10_000);
+
+            assert_eq!(detected(&supervisor), HashSet::from([region(2)]));
+        }
     }
 }

@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common_meta::cache_invalidator::{
     CacheInvalidator, CacheInvalidatorRef, Context as InvalidationContext, DummyCacheInvalidator,
 };
-use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
+use common_meta::distributed_time_constants::{
+    BASE_HEARTBEAT_INTERVAL, default_distributed_time_constants,
+};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -30,6 +32,7 @@ use common_meta::stats::topic::{TopicStatsRegistry, TopicStatsRegistryRef};
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::handler::{HeartbeatMailbox, Pushers};
 use crate::metasrv::Context;
+use crate::region::restart_grace::{DatanodeRestartGrace, DatanodeRestartGraceRef};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 
@@ -43,6 +46,7 @@ pub struct TestEnv {
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
     topic_stats_registry: TopicStatsRegistryRef,
+    datanode_restart_grace: DatanodeRestartGraceRef,
 }
 
 impl Default for TestEnv {
@@ -77,6 +81,9 @@ impl TestEnv {
             cache_invalidator: Arc::new(DummyCacheInvalidator),
             leader_region_registry: Arc::new(LeaderRegionRegistry::new()),
             topic_stats_registry: Arc::new(TopicStatsRegistry::default()),
+            datanode_restart_grace: Arc::new(DatanodeRestartGrace::new(
+                default_distributed_time_constants().region_lease,
+            )),
         }
     }
 
@@ -98,6 +105,8 @@ impl TestEnv {
             heartbeat_interval: BASE_HEARTBEAT_INTERVAL,
             gc_enabled: false,
             is_handshake: false,
+            datanode_unverified: false,
+            datanode_restart_grace: self.datanode_restart_grace.clone(),
         }
     }
 }

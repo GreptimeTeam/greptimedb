@@ -65,6 +65,12 @@
 //! 13. Topic name to region map key `__topic_region/{topic_name}/{region_id}`
 //!     - Mapping {topic_name} to {region_id}
 //!
+//! 14. Datanode epoch key: `__datanode_epoch/{datanode_id}`
+//!     - The value is a [DatanodeEpochValue](crate::key::datanode_epoch::DatanodeEpochValue)
+//!       struct; it contains the highest `node_epoch` the metasrv leader has accepted from the
+//!       datanode. A datanode process reporting a lower one has been replaced by a newer process
+//!       with the same node id.
+//!
 //! All keys have related managers. The managers take care of the serialization and deserialization
 //! of keys and values, and the interaction with the underlying KV store backend.
 //!
@@ -98,6 +104,7 @@
 //!            {partition_id}
 
 pub mod catalog_name;
+pub mod datanode_epoch;
 pub mod datanode_table;
 pub mod flow;
 pub mod node_address;
@@ -149,6 +156,7 @@ use topic_region::{TopicRegionKey, TopicRegionManager};
 use view_info::{ViewInfoKey, ViewInfoManager, ViewInfoValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
+use self::datanode_epoch::DatanodeEpochValue;
 use self::datanode_table::RegionInfo;
 use self::flow::flow_info::FlowInfoValue;
 use self::flow::flow_name::FlowNameValue;
@@ -179,6 +187,7 @@ pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
 pub const RECOVERY_MODE_KEY: &str = "__switches/recovery";
 
 pub const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
+pub const DATANODE_EPOCH_KEY_PREFIX: &str = "__datanode_epoch";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const VIEW_INFO_KEY_PREFIX: &str = "__view_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
@@ -1886,7 +1895,8 @@ impl_metadata_value! {
     SchemaNameValue,
     FlowStateValue,
     PoisonValue,
-    TopicRegionValue
+    TopicRegionValue,
+    DatanodeEpochValue
 }
 
 impl_optional_metadata_value! {

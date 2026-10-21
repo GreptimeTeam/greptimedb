@@ -161,7 +161,6 @@ impl PhiAccrualFailureDetector {
         self.acceptable_heartbeat_pause_millis
     }
 
-    #[cfg(test)]
     pub(crate) fn last_heartbeat_millis(&self) -> Option<i64> {
         self.last_heartbeat_millis
     }

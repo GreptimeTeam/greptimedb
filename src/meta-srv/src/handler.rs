@@ -32,7 +32,7 @@ use collect_cluster_info_handler::{
 use collect_leader_region_handler::CollectLeaderRegionHandler;
 use collect_stats_handler::CollectStatsHandler;
 use common_base::Plugins;
-use common_meta::datanode::Stat;
+use common_meta::datanode::{NodeEpochFence, Stat};
 use common_meta::instruction::InstructionReply;
 use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, warn};
@@ -56,6 +56,7 @@ use tokio::sync::{Notify, RwLock, oneshot, watch};
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::handler::collect_topic_stats_handler::CollectTopicStatsHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
+use crate::handler::node_epoch::{NodeEpochCheck, check_node_epoch};
 use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::metasrv::Context;
 use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
@@ -75,6 +76,7 @@ pub mod filter_inactive_region_stats;
 pub mod flow_state_handler;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
+pub(crate) mod node_epoch;
 pub mod on_leader_start_handler;
 pub mod persist_stats_handler;
 pub mod publish_heartbeat_handler;
@@ -198,6 +200,8 @@ pub struct Pusher {
     deregister_signal_receiver: DeregisterSignalReceiver,
 
     res_header: ResponseHeader,
+    /// The `node_epoch` of the datanode process that registered the pusher; 0 for other roles.
+    node_epoch: u64,
 }
 
 impl Drop for Pusher {
@@ -220,7 +224,14 @@ impl Pusher {
             deregister_signal_sender,
             deregister_signal_receiver,
             res_header,
+            node_epoch: 0,
         }
+    }
+
+    /// Sets the `node_epoch` of the datanode process that registers the pusher.
+    pub(crate) fn with_node_epoch(mut self, node_epoch: u64) -> Self {
+        self.node_epoch = node_epoch;
+        self
     }
 
     #[inline]
@@ -327,12 +338,49 @@ impl Pushers {
         Ok(())
     }
 
-    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> Option<Pusher> {
-        self.0.write().await.insert(pusher_id, pusher)
+    /// Inserts the pusher unless the slot holds one registered with a higher node epoch, so
+    /// an older datanode process cannot take over a newer one's pusher. Returns whether the
+    /// pusher was inserted.
+    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
+        let mut pushers = self.0.write().await;
+        if let Some(existing) = pushers.get(&pusher_id)
+            && existing.node_epoch > pusher.node_epoch
+        {
+            return false;
+        }
+        pushers.insert(pusher_id, pusher);
+        true
     }
 
-    async fn remove(&self, pusher_id: PusherId) -> Option<Pusher> {
-        self.0.write().await.remove(&pusher_id)
+    /// Removes the pusher if it pushes to `sender`'s channel, keeping one that another stream
+    /// has registered since.
+    async fn remove_own(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) -> Option<Pusher> {
+        let mut pushers = self.0.write().await;
+        if pushers
+            .get(&pusher_id)
+            .is_some_and(|pusher| pusher.sender.same_channel(sender))
+        {
+            pushers.remove(&pusher_id)
+        } else {
+            None
+        }
+    }
+
+    /// Removes the pusher if it was registered with a node epoch lower than `node_epoch`.
+    async fn remove_older(&self, pusher_id: PusherId, node_epoch: u64) -> Option<Pusher> {
+        let mut pushers = self.0.write().await;
+        if pushers
+            .get(&pusher_id)
+            .is_some_and(|pusher| pusher.node_epoch < node_epoch)
+        {
+            pushers.remove(&pusher_id)
+        } else {
+            None
+        }
     }
 }
 
@@ -360,17 +408,47 @@ pub struct HeartbeatHandlerGroup {
 }
 
 impl HeartbeatHandlerGroup {
-    /// Registers the heartbeat response [`Pusher`] with the given key to the group.
+    /// Registers the heartbeat response [`Pusher`] with the given key to the group, unless
+    /// the group holds one registered with a higher node epoch.
     pub async fn register_pusher(&self, pusher_id: PusherId, pusher: Pusher) {
-        METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
-        info!("Pusher register: {}", pusher_id);
-        let _ = self.pushers.insert(pusher_id, pusher).await;
+        let node_epoch = pusher.node_epoch;
+        if self.pushers.insert(pusher_id, pusher).await {
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
+            info!("Pusher register: {}, node epoch: {}", pusher_id, node_epoch);
+        } else {
+            info!(
+                "Pusher register: {} skipped, a pusher with a higher node epoch than {} exists",
+                pusher_id, node_epoch
+            );
+        }
     }
 
-    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
-    pub async fn deregister_push(&self, pusher_id: PusherId) {
-        if self.pushers.remove(pusher_id).await.is_some() {
+    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group if
+    /// `sender` registered it.
+    pub async fn deregister_push(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) {
+        if self.pushers.remove_own(pusher_id, sender).await.is_some() {
             info!("Pusher unregister: {}", pusher_id);
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
+        }
+    }
+
+    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group if it
+    /// was registered with a node epoch lower than `node_epoch`.
+    pub(crate) async fn deregister_older_push(&self, pusher_id: PusherId, node_epoch: u64) {
+        if self
+            .pushers
+            .remove_older(pusher_id, node_epoch)
+            .await
+            .is_some()
+        {
+            info!(
+                "Pusher unregister: {}, replaced by node epoch {}",
+                pusher_id, node_epoch
+            );
             METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         }
     }
@@ -382,17 +460,40 @@ impl HeartbeatHandlerGroup {
         pushers.contains_key(pusher_id)
     }
 
+    #[cfg(test)]
+    /// Returns the node epoch of the [`Pusher`] with the given key if `sender` registered it.
+    pub(crate) async fn pusher_epoch_of(
+        &self,
+        pusher_id: &PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) -> Option<u64> {
+        let pushers = self.pushers.0.read().await;
+        pushers
+            .get(pusher_id)
+            .filter(|pusher| pusher.sender.same_channel(sender))
+            .map(|pusher| pusher.node_epoch)
+    }
+
     /// Returns the [`Pushers`] of the group.
     pub fn pushers(&self) -> Pushers {
         self.pushers.clone()
     }
 
     /// Handles the heartbeat request.
-    pub async fn handle(
+    pub async fn handle(&self, req: HeartbeatRequest, ctx: Context) -> Result<HeartbeatResponse> {
+        self.handle_checked(req, ctx).await.map(|(res, _)| res)
+    }
+
+    /// Handles the heartbeat request, and returns the result of its node epoch check.
+    ///
+    /// The check runs here rather than as a handler, so replacing the handlers cannot bypass
+    /// it. A stale datanode request skips the handlers. A datanode request that does not pass
+    /// the check gets no region lease, and its mailbox reply is not delivered.
+    pub(crate) async fn handle_checked(
         &self,
         req: HeartbeatRequest,
         mut ctx: Context,
-    ) -> Result<HeartbeatResponse> {
+    ) -> Result<(HeartbeatResponse, NodeEpochCheck)> {
         let mut acc = HeartbeatAccumulator::default();
         let role = req
             .header
@@ -404,17 +505,39 @@ impl HeartbeatHandlerGroup {
 
         let is_handshake = ctx.is_handshake;
 
-        for NameCachedHandler { name, handler } in self.handlers.iter() {
-            if !handler.is_acceptable(role) {
-                continue;
+        let epoch_check = check_node_epoch(&req, role, &ctx).await;
+        match epoch_check {
+            NodeEpochCheck::NotLeader => {
+                acc.header = Some(ResponseHeader {
+                    protocol_version: PROTOCOL_VERSION,
+                    error: Some(api::v1::meta::Error::is_not_leader()),
+                });
             }
+            NodeEpochCheck::Checked(NodeEpochFence::Stale) => {
+                acc.header = Some(ResponseHeader {
+                    protocol_version: PROTOCOL_VERSION,
+                    ..Default::default()
+                });
+            }
+            _ => {
+                ctx.datanode_unverified = role == Role::Datanode
+                    && epoch_check != NodeEpochCheck::Checked(NodeEpochFence::Accepted);
+                for NameCachedHandler { name, handler } in self.handlers.iter() {
+                    if !handler.is_acceptable(role) {
+                        continue;
+                    }
 
-            let _timer = METRIC_META_HANDLER_EXECUTE
-                .with_label_values(&[*name])
-                .start_timer();
+                    let _timer = METRIC_META_HANDLER_EXECUTE
+                        .with_label_values(&[*name])
+                        .start_timer();
 
-            if handler.handle(&req, &mut ctx, &mut acc).await? == HandleControl::Done {
-                break;
+                    if handler.handle(&req, &mut ctx, &mut acc).await? == HandleControl::Done {
+                        break;
+                    }
+                }
+                if ctx.datanode_unverified {
+                    acc.region_lease = None;
+                }
             }
         }
         let header = std::mem::take(&mut acc.header);
@@ -435,14 +558,19 @@ impl HeartbeatHandlerGroup {
             None
         };
 
+        let mut extensions = std::mem::take(&mut acc.extensions);
+        if let NodeEpochCheck::Checked(fence) = epoch_check {
+            fence.into_extensions(&mut extensions);
+        }
+
         let res = HeartbeatResponse {
             header,
             region_lease: acc.region_lease,
             mailbox_message,
             heartbeat_config,
-            extensions: std::mem::take(&mut acc.extensions),
+            extensions,
         };
-        Ok(res)
+        Ok((res, epoch_check))
     }
 }
 

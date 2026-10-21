@@ -20,8 +20,10 @@ use api::v1::meta::{
     AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, Peer, RequestHeader,
     ResponseHeader, Role, heartbeat_server,
 };
+use common_meta::datanode::NodeEpochFence;
 use common_meta::election::LeaderChangeMessage;
 use common_telemetry::{debug, error, info, warn};
+use common_time::util::current_time_millis;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use snafu::{OptionExt, ResultExt};
@@ -32,6 +34,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error::{self, Result};
+use crate::handler::node_epoch::{NodeEpochCheck, is_startup_handshake};
 use crate::handler::{HeartbeatHandlerGroup, Pusher, PusherId};
 use crate::metasrv::{Context, ElectionRef, Metasrv};
 use crate::metrics::METRIC_META_HEARTBEAT_RECV;
@@ -109,6 +112,9 @@ struct HeartbeatSession<R, L> {
     handler_group: Arc<HeartbeatHandlerGroup>,
     ctx: Context,
     sender_id: PusherId,
+    /// Whether the stream has yet to register its pusher. A datanode stream registers it on
+    /// its first request that passes the node epoch check, other streams on the handshake.
+    pusher_pending: bool,
 }
 
 impl<R, L> HeartbeatSession<R, L>
@@ -144,7 +150,13 @@ where
             return None;
         };
 
-        let sender_id = register_pusher(&handler_group, header, tx.clone()).await;
+        let sender_id = PusherId::new(header.role(), get_node_id(header));
+        let pusher_pending = sender_id.role == Role::Datanode;
+        if !pusher_pending {
+            handler_group
+                .register_pusher(sender_id, Pusher::new(tx.clone()))
+                .await;
+        }
         let mut session = Self {
             requests,
             tx,
@@ -152,6 +164,7 @@ where
             handler_group,
             ctx,
             sender_id,
+            pusher_pending,
         };
 
         if session.handle_request(req, true).await {
@@ -219,14 +232,23 @@ where
             .with_label_values(&[sender_id.as_str()])
             .inc();
 
-        let res = self
+        let node_epoch = req.node_epoch;
+        let is_startup = is_startup_handshake(&req, is_handshake);
+        let res = match self
             .handler_group
-            .handle(req, self.ctx.clone().with_handshake(is_handshake))
+            .handle_checked(req, self.ctx.clone().with_handshake(is_handshake))
             .await
-            .inspect_err(
-                |e| warn!(e; "Failed to handle heartbeat request, sender: {}", self.sender_id),
-            )
-            .map_err(|e| e.into());
+        {
+            Ok((res, epoch_check)) => {
+                self.on_node_epoch_check(epoch_check, node_epoch, is_startup)
+                    .await;
+                Ok(res)
+            }
+            Err(e) => {
+                warn!(e; "Failed to handle heartbeat request, sender: {}", self.sender_id);
+                Err(e.into())
+            }
+        };
 
         let is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
 
@@ -257,6 +279,44 @@ where
         true
     }
 
+    /// Updates the pushers by the node epoch check of a datanode request.
+    async fn on_node_epoch_check(
+        &mut self,
+        epoch_check: NodeEpochCheck,
+        node_epoch: u64,
+        is_startup: bool,
+    ) {
+        match epoch_check {
+            // A startup handshake comes before the process opens regions. It registers no
+            // pusher, and removes the pushers of the processes it replaces.
+            NodeEpochCheck::Checked(NodeEpochFence::Accepted) if is_startup => {
+                self.ctx
+                    .datanode_restart_grace
+                    .record_startup(self.sender_id.id, current_time_millis());
+                self.handler_group
+                    .deregister_older_push(self.sender_id, node_epoch)
+                    .await;
+            }
+            NodeEpochCheck::Checked(NodeEpochFence::Accepted) if self.pusher_pending => {
+                self.pusher_pending = false;
+                self.handler_group
+                    .register_pusher(
+                        self.sender_id,
+                        Pusher::new(self.tx.clone()).with_node_epoch(node_epoch),
+                    )
+                    .await;
+            }
+            // Keeps the stream open: a datanode that does not understand the fence would
+            // only reconnect.
+            NodeEpochCheck::Checked(NodeEpochFence::Stale) => {
+                self.handler_group
+                    .deregister_push(self.sender_id, &self.tx)
+                    .await;
+            }
+            _ => {}
+        }
+    }
+
     async fn send_not_leader_error(&mut self) {
         let _ = self
             .tx
@@ -279,7 +339,9 @@ where
 
     async fn cleanup(&self) {
         info!("Heartbeat stream closed, sender: {}", self.sender_id);
-        let _ = self.handler_group.deregister_push(self.sender_id).await;
+        self.handler_group
+            .deregister_push(self.sender_id, &self.tx)
+            .await;
     }
 }
 
@@ -398,19 +460,6 @@ fn get_node_id(header: &RequestHeader) -> u64 {
         Role::Frontend => next_id(),
         Role::Datanode | Role::Flownode => header.member_id,
     }
-}
-
-async fn register_pusher(
-    handler_group: &HeartbeatHandlerGroup,
-    header: &RequestHeader,
-    sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-) -> PusherId {
-    let role = header.role();
-    let id = get_node_id(header);
-    let pusher_id = PusherId::new(role, id);
-    let pusher = Pusher::new(sender);
-    handler_group.register_pusher(pusher_id, pusher).await;
-    pusher_id
 }
 
 #[cfg(test)]
@@ -596,9 +645,9 @@ mod tests {
     async fn test_heartbeat_session_init_registers_sender() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests =
-            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
+            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Flownode, 42))]);
 
         let session = init_session(
             requests,
@@ -619,9 +668,9 @@ mod tests {
     async fn test_heartbeat_session_run_deregisters_sender_on_stream_close() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests =
-            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
+            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Flownode, 42))]);
         let session = init_session(
             requests,
             tx,
@@ -641,9 +690,9 @@ mod tests {
     async fn test_heartbeat_session_run_forwards_stream_error_after_init() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests = MockHeartbeatRequestStream::new(vec![
-            Ok(heartbeat_request(Role::Datanode, 42)),
+            Ok(heartbeat_request(Role::Flownode, 42)),
             Err(Status::unavailable("temporary")),
         ]);
         let session = init_session(
@@ -668,9 +717,9 @@ mod tests {
     async fn test_heartbeat_session_leader_step_down_sends_aborted_and_deregisters() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests = MockHeartbeatRequestStream::pending_after(vec![Ok(heartbeat_request(
-            Role::Datanode,
+            Role::Flownode,
             42,
         ))]);
         let session = init_session(
@@ -694,9 +743,9 @@ mod tests {
     async fn test_heartbeat_session_leader_watcher_closed_sends_unavailable_and_deregisters() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests = MockHeartbeatRequestStream::pending_after(vec![Ok(heartbeat_request(
-            Role::Datanode,
+            Role::Flownode,
             42,
         ))]);
         let session = init_session(
@@ -766,6 +815,221 @@ mod tests {
         };
         for i in 10..20 {
             assert_eq!(i, get_node_id(&header));
+        }
+    }
+
+    mod node_epoch_fence {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use api::v1::meta::{HeartbeatRequest, MailboxMessage, Role};
+        use common_meta::key::MetadataValue;
+        use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
+        use common_meta::kv_backend::memory::MemoryKvBackend;
+        use common_meta::rpc::store::PutRequest;
+        use common_meta::sequence::SequenceBuilder;
+        use common_time::util::current_time_millis;
+        use tokio::sync::mpsc;
+
+        use super::{MockHeartbeatRequestStream, MockLeaderStepDown};
+        use crate::handler::node_epoch::tests::{
+            NODE_ID, fence, handshake, heartbeat, new_group, startup_handshake,
+        };
+        use crate::handler::test_utils::TestEnv;
+        use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher, PusherId};
+        use crate::metasrv::Context;
+        use crate::service::heartbeat::{HeartbeatResponseResult, HeartbeatSession};
+        use crate::service::mailbox::Channel;
+
+        type Session = HeartbeatSession<MockHeartbeatRequestStream, MockLeaderStepDown>;
+
+        /// A datanode stream that has sent its handshake.
+        struct Stream {
+            session: Session,
+            tx: mpsc::Sender<HeartbeatResponseResult>,
+            rx: mpsc::Receiver<HeartbeatResponseResult>,
+        }
+
+        impl Stream {
+            async fn open(
+                group: &Arc<HeartbeatHandlerGroup>,
+                ctx: &Context,
+                handshake: HeartbeatRequest,
+            ) -> Self {
+                let (tx, mut rx) = mpsc::channel(8);
+                let session = HeartbeatSession::init(
+                    MockHeartbeatRequestStream::new(vec![Ok(handshake)]),
+                    tx.clone(),
+                    None,
+                    group.clone(),
+                    ctx.clone(),
+                )
+                .await
+                .unwrap();
+                let res = rx.recv().await.unwrap().unwrap();
+                assert!(res.heartbeat_config.is_some());
+                Self { session, tx, rx }
+            }
+
+            /// Sends a request, and returns the response and whether the stream stays open.
+            async fn send(
+                &mut self,
+                req: HeartbeatRequest,
+            ) -> (api::v1::meta::HeartbeatResponse, bool) {
+                let open = self.session.handle_request(req, false).await;
+                (self.rx.recv().await.unwrap().unwrap(), open)
+            }
+
+            /// Returns the node epoch of the datanode pusher if this stream registered it.
+            async fn pusher_epoch(&self, group: &HeartbeatHandlerGroup) -> Option<u64> {
+                group
+                    .pusher_epoch_of(&PusherId::new(Role::Datanode, NODE_ID), &self.tx)
+                    .await
+            }
+        }
+
+        fn epochs() -> (u64, u64) {
+            let now = current_time_millis() as u64;
+            (now - 1000, now)
+        }
+
+        #[tokio::test]
+        async fn test_datanode_pusher_is_registered_after_epoch_check() {
+            let group = Arc::new(new_group());
+            let ctx = TestEnv::new().ctx();
+            let (e1, _) = epochs();
+
+            // A datanode that sends no epoch on its handshake is not fenced, and gets its
+            // pusher on its first heartbeat that passes the check.
+            let mut a1 = Stream::open(&group, &ctx, handshake(0)).await;
+            assert_eq!(a1.pusher_epoch(&group).await, None);
+            let (res, open) = a1.send(heartbeat(e1, "a1")).await;
+            assert!(open);
+            assert_eq!(fence(&res), Some("accepted"));
+            assert!(res.region_lease.is_some());
+            assert_eq!(a1.pusher_epoch(&group).await, Some(e1));
+        }
+
+        #[tokio::test]
+        async fn test_stale_stream_stays_open_without_pusher() {
+            let group = Arc::new(new_group());
+            let ctx = TestEnv::new().ctx();
+            let (e1, e2) = epochs();
+            let mut a1 = Stream::open(&group, &ctx, handshake(0)).await;
+            a1.send(heartbeat(e1, "a1")).await;
+
+            // A higher epoch takes over the pusher on its handshake, a lower one does not.
+            let a2 = Stream::open(&group, &ctx, handshake(e2)).await;
+            assert_eq!(a2.pusher_epoch(&group).await, Some(e2));
+            let a1_reconnected = Stream::open(&group, &ctx, handshake(e1)).await;
+            assert_eq!(a1_reconnected.pusher_epoch(&group).await, None);
+            assert_eq!(a2.pusher_epoch(&group).await, Some(e2));
+
+            // A1 is told it is stale without an error, so it does not reconnect, and its
+            // stream stays open.
+            let (res, open) = a1.send(heartbeat(e1, "a1")).await;
+            assert!(open);
+            assert_eq!(fence(&res), Some("stale"));
+            assert!(res.header.unwrap().error.is_none());
+            assert!(res.region_lease.is_none());
+            assert_eq!(a2.pusher_epoch(&group).await, Some(e2));
+
+            // A lower epoch cannot overwrite the pusher, and A1's stream ending leaves it.
+            group
+                .register_pusher(
+                    PusherId::new(Role::Datanode, NODE_ID),
+                    Pusher::new(a1.tx.clone()).with_node_epoch(e1),
+                )
+                .await;
+            assert_eq!(a2.pusher_epoch(&group).await, Some(e2));
+            a1.session.run().await;
+            assert_eq!(a2.pusher_epoch(&group).await, Some(e2));
+
+            // A2 reconnects: the new stream takes over the pusher with the same epoch, and the
+            // old one ending removes only its own.
+            let a2_reconnected = Stream::open(&group, &ctx, handshake(e2)).await;
+            assert_eq!(a2_reconnected.pusher_epoch(&group).await, Some(e2));
+            a2.session.run().await;
+            assert_eq!(a2_reconnected.pusher_epoch(&group).await, Some(e2));
+        }
+
+        #[tokio::test]
+        async fn test_startup_handshake_replaces_older_pushers() {
+            let group = Arc::new(new_group());
+            let ctx = TestEnv::new().ctx();
+            let (e1, e2) = epochs();
+            let mut a1 = Stream::open(&group, &ctx, handshake(0)).await;
+            a1.send(heartbeat(e1, "a1")).await;
+            let seq = SequenceBuilder::new("test_seq", Arc::new(MemoryKvBackend::new())).build();
+            let mailbox = HeartbeatMailbox::create(group.pushers(), seq);
+            let waiting = mailbox
+                .send(
+                    &Channel::Datanode(NODE_ID),
+                    MailboxMessage::default(),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap();
+
+            let before = current_time_millis();
+            let a2 = Stream::open(&group, &ctx, startup_handshake(e2)).await;
+            // The startup handshake registers no pusher, and removes A1's: instructions
+            // waiting on A1 fail at once.
+            assert_eq!(a2.pusher_epoch(&group).await, None);
+            assert!(
+                !group
+                    .contains_pusher(&PusherId::new(Role::Datanode, NODE_ID))
+                    .await
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), waiting)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(ctx.datanode_restart_grace.is_restarting(
+                NODE_ID,
+                before - 1,
+                current_time_millis()
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_old_datanode_after_epoch_is_recorded() {
+            let group = Arc::new(new_group());
+            let ctx = TestEnv::new().ctx();
+            let (e1, e2) = epochs();
+            ctx.kv_backend
+                .put(PutRequest {
+                    key: DatanodeEpochKey::new(NODE_ID).to_bytes(),
+                    value: DatanodeEpochValue { node_epoch: e1 }
+                        .try_as_raw_value()
+                        .unwrap(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+
+            // The old datanode reconnects with the recorded epoch.
+            let mut a1 = Stream::open(&group, &ctx, handshake(0)).await;
+            let (res, _) = a1.send(heartbeat(e1, "a1")).await;
+            assert_eq!(fence(&res), Some("accepted"));
+            assert!(res.region_lease.is_some());
+            assert_eq!(a1.pusher_epoch(&group).await, Some(e1));
+
+            // It restarts while the previous process is still connected.
+            let mut a2 = Stream::open(&group, &ctx, handshake(0)).await;
+            let (res, _) = a2.send(heartbeat(e2, "a2")).await;
+            assert_eq!(fence(&res), Some("accepted"));
+            assert!(res.region_lease.is_some());
+            assert_eq!(a2.pusher_epoch(&group).await, Some(e2));
+
+            // The previous process keeps its stream, without lease or pusher.
+            let (res, open) = a1.send(heartbeat(e1, "a1")).await;
+            assert!(open);
+            assert!(res.header.unwrap().error.is_none());
+            assert!(res.region_lease.is_none());
+            assert_eq!(a2.pusher_epoch(&group).await, Some(e2));
         }
     }
 }

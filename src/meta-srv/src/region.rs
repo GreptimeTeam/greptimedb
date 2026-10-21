@@ -15,6 +15,7 @@
 pub mod failure_detector;
 pub mod flush_trigger;
 pub mod lease_keeper;
+pub mod restart_grace;
 pub mod supervisor;
 
 pub use lease_keeper::RegionLeaseKeeper;

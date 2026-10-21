@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
+use common_telemetry::warn;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
@@ -35,6 +36,14 @@ impl HeartbeatHandler for MailboxHandler {
         let Some(message) = &req.mailbox_message else {
             return Ok(HandleControl::Continue);
         };
+        if ctx.datanode_unverified {
+            warn!(
+                "Dropped mailbox message {} from datanode {:?}: its node epoch is not verified",
+                message.id,
+                req.header.as_ref().map(|header| header.member_id)
+            );
+            return Ok(HandleControl::Done);
+        }
 
         ctx.mailbox.on_recv(message.id, Ok(message.clone())).await?;
 

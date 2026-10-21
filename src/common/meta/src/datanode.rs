@@ -433,6 +433,50 @@ impl EnvVars {
     }
 }
 
+/// The request extension that marks a datanode's startup handshake: the handshake a datanode
+/// process sends before it opens regions, carrying its `node_epoch` but no peer.
+pub const STARTUP_HANDSHAKE_KEY: &str = "__startup_handshake";
+
+/// The result of checking a datanode request's `node_epoch` against the highest epoch the
+/// metasrv leader has accepted for the node id.
+///
+/// The metasrv puts it in the response extensions under [NodeEpochFence::NODE_EPOCH_FENCE_KEY]
+/// for every request it checks, so a handshake response carrying it also tells the datanode
+/// that the metasrv fences stale processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeEpochFence {
+    /// The epoch is the highest one recorded for the node id.
+    Accepted,
+    /// A newer process with the same node id has been accepted. The response carries no grant.
+    Stale,
+    /// The epoch could not be checked, for example the kv backend timed out. The response
+    /// carries no grant.
+    Unverified,
+    /// The epoch is too far ahead of the metasrv's clock to be recorded. The response carries
+    /// no grant.
+    ClockAhead,
+}
+
+impl NodeEpochFence {
+    pub const NODE_EPOCH_FENCE_KEY: &str = "__node_epoch_fence";
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeEpochFence::Accepted => "accepted",
+            NodeEpochFence::Stale => "stale",
+            NodeEpochFence::Unverified => "unverified",
+            NodeEpochFence::ClockAhead => "clock_ahead",
+        }
+    }
+
+    pub fn into_extensions(self, extensions: &mut HashMap<String, Vec<u8>>) {
+        extensions.insert(
+            Self::NODE_EPOCH_FENCE_KEY.to_string(),
+            self.as_str().as_bytes().to_vec(),
+        );
+    }
+}
+
 /// The key of the datanode stat in the memory store.
 ///
 /// The format is `__meta_datanode_stat-0-{node_id}`.

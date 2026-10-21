@@ -80,6 +80,7 @@ use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManag
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::flush_trigger::RegionFlushTickerRef;
+use crate::region::restart_grace::DatanodeRestartGraceRef;
 use crate::region::supervisor::RegionSupervisorTickerRef;
 use crate::selector::{RegionStatAwareSelector, Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
@@ -447,6 +448,10 @@ pub struct Context {
     pub heartbeat_interval: Duration,
     pub gc_enabled: bool,
     pub is_handshake: bool,
+    /// Whether the request is from a datanode whose `node_epoch` was not verified. Handlers
+    /// must not act on its behalf, such as delivering its mailbox reply.
+    pub datanode_unverified: bool,
+    pub datanode_restart_grace: DatanodeRestartGraceRef,
 }
 
 impl Context {
@@ -604,6 +609,7 @@ pub struct Metasrv {
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
     topic_stats_registry: TopicStatsRegistryRef,
+    datanode_restart_grace: DatanodeRestartGraceRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
     region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_allocator: ResourceIdAllocatorRef,
@@ -949,6 +955,7 @@ impl Metasrv {
         let cache_invalidator = self.cache_invalidator.clone();
         let leader_region_registry = self.leader_region_registry.clone();
         let topic_stats_registry = self.topic_stats_registry.clone();
+        let datanode_restart_grace = self.datanode_restart_grace.clone();
 
         Context {
             server_addr,
@@ -966,6 +973,8 @@ impl Metasrv {
             heartbeat_interval: self.options().heartbeat_interval,
             gc_enabled: self.options().gc.enable,
             is_handshake: false,
+            datanode_unverified: false,
+            datanode_restart_grace,
         }
     }
 }

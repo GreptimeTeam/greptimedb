@@ -51,6 +51,16 @@ lazy_static! {
     /// Heartbeats dropped by metasrv.
     pub static ref METRIC_META_HEARTBEAT_DROPPED: IntCounterVec =
         register_int_counter_vec!("greptime_meta_heartbeat_dropped", "heartbeats dropped by metasrv", &["reason"]).unwrap();
+    /// Datanode heartbeat requests checked against the highest node epoch, by request kind and result.
+    /// `result="unverified"` counts requests left without grants because the kv backend failed or timed out.
+    pub static ref METRIC_META_NODE_EPOCH_CHECK: IntCounterVec =
+        register_int_counter_vec!("greptime_meta_node_epoch_check", "datanode requests checked against the highest node epoch", &["request", "result"]).unwrap();
+    /// Elapsed time to read, and raise, a datanode's highest node epoch in the kv backend.
+    pub static ref METRIC_META_NODE_EPOCH_CHECK_ELAPSED: Histogram =
+        register_histogram!("greptime_meta_node_epoch_check_elapsed", "meta node epoch check elapsed").unwrap();
+    /// Region failure detections skipped because the datanode is restarting.
+    pub static ref METRIC_META_RESTART_GRACE_SKIPPED_DETECTIONS: IntCounter =
+        register_int_counter!("greptime_meta_restart_grace_skipped_detections", "region failure detections skipped for restarting datanodes").unwrap();
     /// The migration execute histogram.
     pub static ref METRIC_META_REGION_MIGRATION_EXECUTE: HistogramVec =
         register_histogram_vec!("greptime_meta_region_migration_execute", "meta region migration execute", &["state"]).unwrap();

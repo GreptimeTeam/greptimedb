@@ -80,6 +80,7 @@ use crate::procedure::repartition::{
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::region::flush_trigger::RegionFlushTrigger;
+use crate::region::restart_grace::DatanodeRestartGrace;
 use crate::region::supervisor::{
     DEFAULT_INITIALIZATION_RETRY_PERIOD, DEFAULT_TICK_INTERVAL, HeartbeatAcceptor,
     RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
@@ -363,6 +364,9 @@ impl MetasrvBuilder {
             }
         }
 
+        let datanode_restart_grace = Arc::new(DatanodeRestartGrace::new(
+            default_distributed_time_constants().region_lease,
+        ));
         let (tx, rx) = RegionSupervisor::channel();
         let (region_failure_detector_controller, region_supervisor_ticker): (
             RegionFailureDetectorControllerRef,
@@ -422,7 +426,8 @@ impl MetasrvBuilder {
                 meta_peer_client.clone(),
                 leader_cached_kv_backend.clone(),
             )
-            .with_state(state.clone());
+            .with_state(state.clone())
+            .with_restart_grace(datanode_restart_grace.clone());
             let region_supervisor = if let Some(resolver) = &affinity_resolver {
                 region_supervisor.with_affinity_resolver(resolver.clone())
             } else {
@@ -676,6 +681,7 @@ impl MetasrvBuilder {
             table_id_allocator,
             reconciliation_manager,
             topic_stats_registry,
+            datanode_restart_grace,
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
             database_operator,
