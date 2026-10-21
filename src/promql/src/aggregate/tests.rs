@@ -945,3 +945,30 @@ fn quantile_without_q_at_a_point_has_no_result() {
     let (start, values) = values_of(&output, 0, 128);
     assert_eq!((start, values), (10, vec![Some(2.0), None, Some(2.0)]));
 }
+
+/// Listing the value label in `by` repeats what `count_values` adds to the grouping, also when an
+/// input field has that name; listing another field name is still unsupported.
+#[test]
+fn count_values_accepts_its_own_label_in_by() {
+    let schema = schema(&["value"]);
+    let series = [
+        input(&schema, metric("m", &[("i", "0")]), 10, &[vec![Some(1.0)]]),
+        input(&schema, metric("m", &[("i", "1")]), 10, &[vec![Some(2.0)]]),
+    ];
+    let rendered = |grouping| {
+        let mut output: Vec<_> = count_values(&schema, &series, "value", grouping)
+            .unwrap()
+            .iter()
+            .map(|series| (format!("{:?}", series.metric), values(series, 0)))
+            .collect();
+        output.sort_by(|a, b| a.0.cmp(&b.0));
+        output
+    };
+    let implicit = rendered(Grouping::By(&[]));
+    assert_eq!(implicit.len(), 2);
+    assert_eq!(implicit, rendered(Grouping::By(&["value"])));
+    assert!(matches!(
+        count_values(&schema, &series, "c", Grouping::By(&["value"])),
+        Err(DataFusionError::NotImplemented(_))
+    ));
+}

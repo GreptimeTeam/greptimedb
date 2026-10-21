@@ -195,7 +195,21 @@ pub fn count_values(
     label: &str,
     grouping: Grouping<'_>,
 ) -> Result<Vec<Series>> {
-    validate_input(schema, input, grouping)?;
+    // `by` may list the value label, which this operator writes itself, even when an input field
+    // has that name; grouping by any other field name stays unsupported.
+    let other_labels: Vec<&str>;
+    let checked = match grouping {
+        Grouping::By(labels) => {
+            other_labels = labels
+                .iter()
+                .copied()
+                .filter(|name| *name != label)
+                .collect();
+            Grouping::By(&other_labels)
+        }
+        without => without,
+    };
+    validate_input(schema, input, checked)?;
     if label.is_empty() {
         return Err(DataFusionError::Execution(format!(
             "invalid label name {label:?}"
