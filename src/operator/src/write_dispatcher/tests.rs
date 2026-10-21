@@ -293,9 +293,19 @@ impl RegionTestServer {
             hints
                 .into_iter()
                 .map(|hint| {
-                    let mut status = Status::failed_precondition(format!(
-                        "region {region_id} rejected the write"
-                    ));
+                    let code = match hint {
+                        RetryHint::Retryable => StatusCode::RegionBusy,
+                        RetryHint::RetryAfterRouteRefresh => StatusCode::RegionNotFound,
+                        RetryHint::NonRetryable => StatusCode::InvalidArguments,
+                    };
+                    let mut status = Status::new(
+                        common_error::status_code::status_to_tonic_code(code),
+                        format!("region {region_id} rejected the write"),
+                    );
+                    status.metadata_mut().insert(
+                        common_error::GREPTIME_DB_HEADER_ERROR_CODE,
+                        (code as u32).to_string().parse().unwrap(),
+                    );
                     status.metadata_mut().insert(
                         common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
                         hint.as_str().parse().unwrap(),
@@ -564,6 +574,13 @@ async fn test_write_retry_stops_when_a_sibling_is_nonretryable() {
                 .unwrap_err();
             let terminal_region = RegionId::new(1, 2).as_u64();
             assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
+            assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+            assert!(
+                error
+                    .output_msg()
+                    .contains(&format!("region {terminal_region} rejected the write")),
+                "{error:?}"
+            );
             assert_eq!(
                 server.attempt_counts(),
                 HashMap::from([(RegionId::new(1, 1).as_u64(), 1), (terminal_region, 1),])
