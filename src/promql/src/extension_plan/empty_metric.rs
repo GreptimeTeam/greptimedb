@@ -107,6 +107,11 @@ impl EmptyMetric {
         })
     }
 
+    /// Returns the expression used to generate metric values.
+    pub fn expr(&self) -> Option<&Expr> {
+        self.expr.as_ref()
+    }
+
     pub const fn name() -> &'static str {
         "EmptyMetric"
     }

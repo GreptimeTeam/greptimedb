@@ -16,6 +16,7 @@ pub mod const_normalization;
 pub mod constant_term;
 pub mod count_nest_aggr;
 pub mod count_wildcard;
+pub(crate) mod expr_depth;
 pub mod global_limit;
 pub(crate) mod insert_assignment;
 pub(crate) mod json_schema_concretize;
