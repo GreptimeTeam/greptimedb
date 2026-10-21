@@ -90,20 +90,21 @@ cargo sqlness bare -t <case>        # PromQL cases live under tests/cases/standa
 
 ## Not wired up yet
 
-Two gaps stand between what is implemented and what a query can reach. Both are
-structural, not bugs: closing them is what turns the pieces below into a path.
+The storage side of the raw path exists; what is missing is planner wiring. Both
+gaps below are structural, not bugs.
 
 - **The native tree has no planner entry point.** `native_compile::compile` has no
   caller, and a `NativeTree` becomes a physical plan only once something builds it
   while it still holds the AST and the selector binding — the point where the
   matchers, `__field__` and the lookback are still available. Compiling later, from
   a plan, loses them.
-- **A raw scan cannot be planned.** `RegionScanner::raw_series_schema` defaults to
-  `Ok(None)`, so any scanner that does not override it refuses the raw path, and
-  `RegionScanExec::try_to_series_scan` therefore returns `None` against it.
-  `SeriesScanExec::children()` is empty, so wrapping a `RegionScanExec` before
-  partition preparation leaves `ParallelizeScan` unable to assign partitions. A
-  raw scan needs that scanner-side override, and either of two routes past the
-  partition problem: give the partitioner a child it can see, or convert to the
-  native leaf only after partition preparation — the second is the contract
+- **No planner reaches a raw scan.** mito2 implements
+  `RegionScanner::raw_series_schema` (`mito2/src/read/series_scan.rs`), so
+  `RegionScanExec::try_to_series_scan` can build `SeriesScanExec` from a prepared
+  scanner; the trait's `Ok(None)` default only refuses engines that have not
+  implemented it. What is missing is the planner side: nothing selects that
+  conversion, and `SeriesScanExec::children()` is empty, so wrapping a
+  `RegionScanExec` before partition preparation leaves `ParallelizeScan` unable to
+  assign partitions. Either give the partitioner a child it can see, or convert to
+  the native leaf only after partition preparation — the second is the contract
   `RegionScanExec::try_to_series_scan` documents.
