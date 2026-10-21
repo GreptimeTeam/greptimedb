@@ -41,6 +41,7 @@ use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ToDFSchema;
+use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
@@ -50,8 +51,9 @@ use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, Unbounded
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
@@ -788,8 +790,8 @@ fn zone_chunks() -> Vec<RawSeriesChunk> {
 }
 
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
-const CLOSED_LABEL_SET: &str =
-    "the node at root already closed the label set [(\"host\", \"web-1\")]";
+const DUPLICATE_LABEL_SET: &str =
+    "the node at root produces two series under the label set [(\"host\", \"web-1\")]";
 
 /// Two raw series that are already one Prometheus identity are refused by the runtime that would
 /// have to answer both.
@@ -799,8 +801,8 @@ const CLOSED_LABEL_SET: &str =
 /// What the two *raw* keys differ in is the empty `zone` against the absent one, which the scan
 /// encodes differently and the decoder therefore opens two input series for. `rate` drops the
 /// metric name and the empty value, so the second raw series arrives on the canonical label set the
-/// runtime has already closed; the refusal names that label set rather than answering it, because
-/// answering would report one series twice.
+/// first one already occupies; the refusal names that label set rather than answering it, because
+/// answering would report one point twice.
 #[tokio::test]
 async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
     let exec = plan_of(zone_node(), memory_exec(frames(&zone_chunks())))
@@ -809,7 +811,7 @@ async fn differing_raw_keys_that_close_on_one_label_set_are_refused() {
         .await
         .expect_err("the second raw key cannot be answered under the first one's label set");
     assert!(
-        error.to_string().contains(CLOSED_LABEL_SET),
+        error.to_string().contains(DUPLICATE_LABEL_SET),
         "refused for another reason: {error}"
     );
 }
@@ -846,7 +848,7 @@ async fn a_runtime_error_after_rows_releases_the_input() {
         }
     };
     assert!(
-        error.to_string().contains(CLOSED_LABEL_SET),
+        error.to_string().contains(DUPLICATE_LABEL_SET),
         "refused for another reason: {error}"
     );
     // The first series' rows were handed out before the error, and the input is gone although the
@@ -910,9 +912,9 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
         .expect("the second series is a legal raw chunk");
     let error = execution
         .next_chunk()
-        .expect_err("the second series lands on the label set the first one closed");
+        .expect_err("the second series puts a value where the first one already holds one");
     assert!(
-        error.to_string().contains(CLOSED_LABEL_SET),
+        error.to_string().contains(DUPLICATE_LABEL_SET),
         "refused for another reason: {error}"
     );
 }
@@ -1285,7 +1287,9 @@ fn a_frame_whose_labels_are_encoded_is_rejected_when_the_plan_is_built() {
 ///
 /// A frame holds raw series: its rows are samples, not grid positions, and the grid every output
 /// row is addressed on is the tree's own. A schema that declares a grid is one this node would
-/// read positions out of, so it is refused rather than decoded.
+/// read positions out of, so it is refused rather than decoded. The source below is one partition,
+/// which is the shape the node accepts, so what refuses the plan here is the frame's own
+/// declaration and not the node's partition count: the refusal has to name the grid.
 #[test]
 fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
     let mut metadata = frame_schema().metadata().clone();
@@ -1294,11 +1298,22 @@ fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
         frame_schema().fields().clone(),
         metadata,
     ));
-    let error = plan(rate_tree(), memory_exec_with(gridded, Vec::new()))
-        .expect_err("the frame declares a grid");
+    // One empty partition: every check but the frame's passes.
+    let source = memory_exec_with(gridded, Vec::new());
+    assert_eq!(
+        1,
+        source.properties().output_partitioning().partition_count(),
+        "the node only looks at the frame when its input has a partition"
+    );
+    let error = plan(rate_tree(), source).expect_err("the frame declares a grid");
+    let message = error_chain(&error);
     assert!(
-        error.to_string().contains("raw frame"),
-        "refused for another reason: {error}"
+        message.contains("raw series schema cannot have an evaluation grid"),
+        "refused for another reason: {message}"
+    );
+    assert!(
+        !message.contains("no partitions"),
+        "the partition count is not what refuses this plan: {message}"
     );
 }
 
@@ -1319,11 +1334,12 @@ fn a_frame_of_another_series_schema_is_rejected_when_the_plan_is_built() {
     );
 }
 
-/// An input with no partitions is refused when the plan is built.
+/// An input with no partitions is refused when the plan is built, and no other count is.
 ///
 /// The node runs one evaluator per input partition and adds none of its own, so an input with no
 /// partition is one that could answer nothing: the plan is refused rather than built as a node that
-/// would report an empty result for data it never read.
+/// would report an empty result for data it never read. Any non-zero count is the input's to
+/// choose: the node takes it and answers each partition's own series.
 #[test]
 fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
     let schema = frame_schema();
@@ -1333,8 +1349,17 @@ fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
     )));
     let error = plan(rate_tree(), empty).expect_err("there is no partition to run");
     assert!(
-        error.to_string().contains("no partitions"),
+        error.to_string().contains("input has no partitions"),
         "refused for another reason: {error}"
+    );
+    // The only count refused is zero: two partitions build and answer, which is what the
+    // multi-partition tests below run.
+    let two = plan(rate_tree(), memory_exec_partitioned(vec![vec![], vec![]]))
+        .expect("a two-partition input is not refused");
+    assert_eq!(
+        2,
+        two.properties().output_partitioning().partition_count(),
+        "the node takes the input's count"
     );
 }
 
@@ -1727,28 +1752,117 @@ async fn every_partition_evaluates_its_own_series() {
     }
 }
 
-/// The node asks the optimizer to keep each series in one partition.
+/// The optimizer inserts no exchange between a two-partition scan and this node.
 ///
-/// The node runs one window per series and closes it on the chunk carrying `is_last`, so a series
-/// the optimizer split across partitions would be answered as two halves by two trees. What it
-/// declares is a key requirement on the frame's key column, which is the column a producer writes
-/// one series' encoded identity into: the same key then has to reach the same partition, while the
-/// parallelism of an input that already owns whole series per partition is left alone.
+/// This is the claim the whole arrangement rests on, so it is checked against the real rule rather
+/// than against the flags that are supposed to satisfy it: a plan that reports the right
+/// requirements can still be repartitioned, and that is exactly how the previous `KeyPartitioned`
+/// requirement failed - a hash requirement is classed as necessary for any child with more than one
+/// partition, so a hash exchange was inserted even though the child already satisfied it.
+///
+/// The input here is a two-partition source, and `target_partitions` is raised above it because
+/// that is when an optimizer is most willing to repartition. Both are the conditions under which the
+/// old requirement broke, so a plan that survives them is one where the guarantee the scan makes
+/// arrives at this node intact.
 #[test]
-fn the_input_is_required_to_be_key_partitioned() {
+fn the_optimizer_inserts_no_exchange_between_the_input_and_this_node() {
+    let exec = plan(
+        rate_tree(),
+        memory_exec_partitioned(vec![
+            vec![frame(&series_chunk("web-0", &series_samples(1.0), true))],
+            vec![frame(&series_chunk("web-1", &series_samples(2.0), true))],
+        ]),
+    )
+    .expect("the runtime executes a rate tree");
+    assert_eq!(
+        2,
+        exec.properties().output_partitioning().partition_count(),
+        "this test needs a child with more than one partition"
+    );
+
+    let mut config = ConfigOptions::new();
+    config.execution.target_partitions = 8;
+    let optimized = EnsureRequirements::new()
+        .optimize(Arc::clone(&exec), &config)
+        .expect("the rule accepts the plan");
+
+    let exchanges = exchanges_between(&optimized, &exec);
+    assert!(
+        exchanges.is_empty(),
+        "the optimizer inserted {exchanges:?} between the input and the node, and an exchange \
+         reorders a series' chunks: the node would close a series it has not finished"
+    );
+}
+
+/// The `RepartitionExec`s in `plan` that sit above `stop` and below no other `RepartitionExec`.
+///
+/// Named by the kind the rule chose, so a failure says whether it was a hash or a round-robin
+/// exchange: the two are inserted for different reasons and only the hash one is the trap.
+fn exchanges_between(plan: &Arc<dyn ExecutionPlan>, stop: &Arc<dyn ExecutionPlan>) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![Arc::clone(plan)];
+    while let Some(node) = stack.pop() {
+        if Arc::ptr_eq(&node, stop) {
+            continue;
+        }
+        if let Some(exchange) =
+            node.downcast_ref::<datafusion::physical_plan::repartition::RepartitionExec>()
+        {
+            found.push(format!(
+                "{}({:?})",
+                exchange.name(),
+                exchange.partitioning()
+            ));
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    found
+}
+
+/// The node asks the optimizer for nothing, so no exchange can be inserted under it.
+///
+/// A window holds the state of the series it is reading and closes it on the chunk carrying
+/// `is_last`, so it can answer a series only if the whole series arrives in the partition it reads.
+/// What makes that true is the input: a raw series frame comes from `SeriesScan`, whose contract is
+/// that the same series (primary key) always reaches the same partition
+/// (`src/mito2/src/read/series_scan.rs`), and the frame decoder keeps each series' chunks contiguous
+/// within that partition. The node therefore needs the input's own layout kept, not a particular
+/// layout of its own.
+///
+/// The trap is the requirement writing that as `KeyPartitioned`, which reads like the honest
+/// description of the guarantee. A `Hash|KeyPartitioned` requirement is classed as a hash
+/// requirement, and a hash requirement forces a hash exchange whenever the child has more than one
+/// partition - even where the child already satisfies it, and even when the partition counts match.
+/// A hash exchange does not preserve order, so it would interleave one series' chunks across
+/// partitions and the decoder would close a series it has not finished. Asking for
+/// [`Distribution::UnspecifiedDistribution`] is what leaves the child alone, and declining extra
+/// partitioning is the second half of the same thing: no round-robin is added to raise parallelism
+/// either. The node is not pinned to one partition — it runs one tree per input partition and keeps
+/// the input's count.
+#[test]
+fn the_input_is_left_alone_so_no_exchange_can_be_inserted() {
     let exec = plan(rate_tree(), memory_exec_partitioned(vec![vec![], vec![]]))
         .expect("the runtime executes a rate tree");
     let distributions = exec.input_distribution_requirements().into_per_child();
-    assert_eq!(1, distributions.len(), "one requirement, one child");
-    let Distribution::KeyPartitioned(keys) = &distributions[0] else {
-        panic!("a single partition would give up the input's parallelism: {distributions:?}");
-    };
-    let key = keys
-        .first()
-        .and_then(|key| (key.as_ref() as &dyn std::any::Any).downcast_ref::<ColumnExpr>())
-        .expect("the key requirement names a column of the frame");
-    assert_eq!("read_key", key.name(), "one read_key is one series");
-    assert_eq!(0, key.index(), "read_key is the frame's first column");
+    // `Distribution` has no equality of its own, so the exact requirement is matched structurally:
+    // one child, and what it asks for is that the child's layout is left alone.
+    assert!(
+        matches!(
+            distributions.as_slice(),
+            [Distribution::UnspecifiedDistribution]
+        ),
+        "anything but leaving the child alone makes a hash exchange necessary: {distributions:?}"
+    );
+    assert_eq!(
+        vec![false],
+        exec.benefits_from_input_partitioning(),
+        "raising the partition count would add a round-robin exchange"
+    );
+    assert_eq!(
+        2,
+        exec.properties().output_partitioning().partition_count(),
+        "the node's own count is its input's"
+    );
 }
 
 /// A partition index the input does not have is refused rather than answered.

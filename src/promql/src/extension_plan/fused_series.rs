@@ -427,6 +427,69 @@ fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
     Ok(TreeInput { path, schema })
 }
 
+/// Refuses a tree whose logical series can be split across the partitions this node runs.
+///
+/// A window that drops `__name__`, or a map, can turn two raw series into one logical series. A
+/// stateful node above it needs both halves together, and the runtime does provide that within one
+/// execution: a window whose input can hold two series under one label set collects the fragments,
+/// merges each label set once, and only then evaluates.
+///
+/// That merge is per execution, and this node runs one execution per partition. Two raw series that
+/// become one label set can land in different partitions - the scan keeps a *series* in one
+/// partition, which says nothing about two different series that later become indistinguishable -
+/// so each execution merges only the half it was given. The consumer above then answers from one
+/// half and reports nothing for the other, which is an empty result rather than an error.
+///
+/// Reading that tree needs an exchange above this node that merges a logical series across
+/// partitions, which does not exist yet. Until it does the tree is refused where it can hurt: over
+/// one partition there is nothing to split, so only a tree run over more than one is checked. The
+/// compiler cannot build the shape today - an outer window reaches an evaluated input only through
+/// a subquery, and [`compile`](crate::promql::native_compile::compile) refuses subqueries - so this
+/// costs no executable query. It is checked because [`FusedSeriesExec::try_new`] accepts any
+/// well-formed tree, and a tree it accepts is a tree it must answer correctly.
+fn reject_a_split_logical_series(
+    tree: &NativeTree,
+    partition_count: usize,
+) -> DataFusionResult<()> {
+    if partition_count == 1 {
+        return Ok(());
+    }
+    // The walk is outermost first, so it meets nodes in the reverse of the order data flows: a
+    // consumer met before a rewriter is one that the rewriter feeds.
+    let mut consumer: Option<String> = None;
+    let mut rejection: Option<(String, String)> = None;
+    metrics::walk(tree.root(), &mut |node, path| {
+        if rejection.is_some() {
+            return;
+        }
+        // A window keeps the metric name only for the functions that return the sample as it was
+        // stored, and only the others can leave two raw series apart. A map always drops it.
+        let rewrites = match &node.expr {
+            NativeExpr::Window { op, .. } => op.function.drops_metric_name(),
+            NativeExpr::Map { .. } => true,
+            _ => false,
+        };
+        if rewrites && let Some(above) = &consumer {
+            rejection = Some((path.as_str().to_string(), above.clone()));
+            return;
+        }
+        let consumes = matches!(node.expr, NativeExpr::Window { .. });
+        if consumes && consumer.is_none() {
+            consumer = Some(path.as_str().to_string());
+        }
+    });
+    let Some((rewriter, above)) = rejection else {
+        return Ok(());
+    };
+    Err(DataFusionError::Plan(format!(
+        "FusedSeries runs a tree where `{rewriter}` rewrites the series identity and `{above}` \
+         above it reads a whole series, over {partition_count} partitions: two raw series that \
+         become one label set are evaluated in different partitions, so `{above}` would read one \
+         half and answer an empty result. Reading this tree needs an exchange between `{rewriter}` \
+         and `{above}` that merges a logical series across partitions, which is not implemented"
+    )))
+}
+
 /// Checks that `tree` reads the schema `binding` declares, on the grid it declares.
 ///
 /// The output grid is compared by [`EvalGrid::spec`], not by allocation: that is the rule
@@ -695,6 +758,16 @@ impl FusedSeriesExec {
         )?;
         let classification =
             classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
+        // Read here rather than below, because whether the split below can happen decides whether
+        // the tree shape is one this node may run at all.
+        let input_properties = input.properties();
+        let partition_count = input_properties.partitioning.partition_count();
+        if partition_count == 0 {
+            return Err(DataFusionError::Plan(
+                "FusedSeriesExec input has no partitions".into(),
+            ));
+        }
+        reject_a_split_logical_series(&tree, partition_count)?;
         // The frame states its own label layout and series ordering; this plan's binding is an
         // expectation checked against that declaration, not an input to decoding.
         ensure_frame_matches_label_source(input.schema().as_ref(), &label_source)?;
@@ -727,14 +800,6 @@ impl FusedSeriesExec {
         // layout alone, and `benefits_from_input_partitioning` is false so no round-robin is added
         // to raise parallelism either. Between them no exchange can appear between the scan and this
         // node, and the scan's guarantee arrives intact.
-        let input_properties = input.properties();
-        let partition_count = input_properties.partitioning.partition_count();
-        if partition_count == 0 {
-            return Err(DataFusionError::Plan(
-                "FusedSeriesExec input has no partitions".into(),
-            ));
-        }
-
         // As many partitions as the input hands over: the node runs one evaluator per partition and
         // answers each as it settles.
         let properties = Arc::new(PlanProperties::new(
@@ -1099,7 +1164,8 @@ impl LabelSets {
                     .iter()
                     .zip(&runs)
                     .map(|(stored, new)| {
-                        (stored.len() + new.len()).saturating_sub(stored.capacity().max(stored.len()))
+                        (stored.len() + new.len())
+                            .saturating_sub(stored.capacity().max(stored.len()))
                     })
                     .sum::<usize>()
                     * size_of::<(usize, usize)>();
