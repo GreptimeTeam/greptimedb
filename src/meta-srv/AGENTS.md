@@ -43,13 +43,14 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   `handler/utils.rs` for per-node address persistence. Datanode address
   updates retain the statistics handler's per-node ordering. Address epochs are
   confirmed only after a successful save; cache invalidation remains best effort.
-- **Datanode process fence**: `HeartbeatHandlerGroup::handle_checked` checks
+- **Datanode process fence**: `HeartbeatHandlerGroup::check_request` checks
   every datanode request carrying a `node_epoch` against the highest epoch in
   the KV backend (`handler/node_epoch.rs`, read uncached, outside the handler
-  chain) before running the chain. Stale and clock-ahead requests skip the
-  chain; unverified ones get no region lease and no mailbox delivery. A datanode stream
-  registers its pusher on its first request that passes the check; startup
-  handshakes register none and feed the restart grace in
+  chain). The session then updates its pusher and calls `handle_checked`,
+  which runs the chain. Stale and clock-ahead requests skip the chain;
+  unverified ones get no region lease and no mailbox delivery. A datanode
+  stream registers its pusher on its first request that passes the check;
+  startup handshakes register none and feed the restart grace in
   `region/restart_grace.rs`.
 - **DDL**: `service/procedure.rs` (`ddl`) is leader-only and hands off to
   `common-meta`'s `DdlManager`, executed via `common-procedure`.
