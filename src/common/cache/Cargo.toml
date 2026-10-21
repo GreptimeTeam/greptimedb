@@ -8,9 +8,12 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+common-base.workspace = true
+futures.workspace = true
 moka = { workspace = true, features = ["future"] }
 prometheus.workspace = true
 
 [dev-dependencies]
-futures.workspace = true
+async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
