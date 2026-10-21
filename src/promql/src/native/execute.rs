@@ -36,6 +36,12 @@
 //! as one chunk addressed on its own grid. Nothing is decided for a series before it ends, which is
 //! the price of the kernel taking one axis rather than a chunk of one.
 //!
+//! A vector–vector binary node is the one kind that reads two inputs: it retains the chunks of both
+//! operands and runs the matching kernel once the input has ended, because the operation pairs two
+//! whole vectors point by point and nothing is decided for a point until both sides are complete.
+//! The chunks of one logical series are assembled into the single series the kernel matches before it
+//! runs, so a series that arrived in many chunks is one candidate, not one per chunk.
+//!
 //! A node kind this runtime does not execute yet is rejected when the execution is built, naming
 //! the kind and its position. An unsupported tree therefore never starts, rather than answering
 //! half a query or panicking halfway through one.
@@ -67,7 +73,7 @@
 //! collects the root's chunks and merges them with the same helper.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -80,7 +86,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::grid_series::{
@@ -90,8 +96,11 @@ use crate::instant_eval::select_instants;
 use crate::map::{MathOp, drop_metric_name, map_math};
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{NodeMetrics, NodePath};
-use crate::native::plan::{BoundInstant, NativeExpr, NativeTree};
+use crate::native::plan::{BoundInstant, NativeExpr, NativeNode, NativeTree};
 use crate::range_eval::RangeEvaluator;
+use crate::vector_match::{
+    BinaryMatching, binary_vectors_with_reservation, validate_binary_operand,
+};
 
 #[cfg(test)]
 mod tests;
@@ -189,6 +198,98 @@ fn series_bytes(series: &Series) -> usize {
         .saturating_add(metric_bytes(&series.metric))
 }
 
+/// The bytes one chunk a binary operand retains holds on its own.
+///
+/// It is [`series_bytes`] with the samples a chunk's rows occupy in place of the allocations they
+/// are slices of: a series delivered in a thousand chunks holds a thousand slices of one buffer, so
+/// counting that buffer once per chunk would make the operand's figure grow with the number of
+/// chunks rather than with the data in them. The slices of one series add up to the allocation they
+/// share, which is the figure a deduplication across the chunks would arrive at.
+///
+/// The histogram tables a chunk's segments reference are not part of the figure: a table is one
+/// allocation however many chunks index into it, so it is not a per-chunk cost at all. Dropping it
+/// here is therefore only half the story -- it must not become a figure the operand never charges.
+/// [`unbilled_tables`] is the other half, and the operand bills each table once through it.
+fn operand_chunk_bytes(series: &Series) -> usize {
+    series_bytes(series)
+        .saturating_sub(fields_bytes(&series.fields))
+        .saturating_add(sample_slice_bytes(&series.fields))
+}
+
+/// The bytes the samples of one series' fields take as the slices they are.
+///
+/// A dense segment is counted by the rows it holds -- not by the buffer its slice belongs to -- and a
+/// field of native histograms by its column of indices, because the table those indices point into
+/// is one allocation the chunks of the series share. A nested segment holds rows of its own in the
+/// chunks it is made of, so it is left to them.
+fn sample_slice_bytes(fields: &SeriesFields) -> usize {
+    fields
+        .iter()
+        .flat_map(|field| field.segments())
+        .map(|segment| match segment.dense() {
+            Some(DenseSamplesRef::Float(values)) => {
+                values.len().saturating_mul(std::mem::size_of::<f64>())
+            }
+            Some(DenseSamplesRef::Histogram(histograms)) => histograms
+                .indices()
+                .len()
+                .saturating_mul(std::mem::size_of::<u32>()),
+            Some(DenseSamplesRef::Mixed(mixed)) => mixed
+                .floats()
+                .len()
+                .saturating_mul(std::mem::size_of::<f64>())
+                .saturating_add(
+                    mixed
+                        .histograms()
+                        .indices()
+                        .len()
+                        .saturating_mul(std::mem::size_of::<u32>()),
+                ),
+            // `segments` hands out dense segments only, so a nested chunk never reaches here.
+            None => 0,
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+/// The histogram tables `series` is the first to reference, and the bytes they hold.
+///
+/// A table is one allocation the chunks of a series share, so it is neither a per-chunk cost --
+/// counting it per chunk would make a series delivered in a thousand chunks cost a thousand tables
+/// -- nor no cost at all, which is what leaving it out of every chunk leaves the figure at. What it
+/// is, is a cost of the operand that first retains a chunk referencing it: the identities it returns
+/// are the tables `billed` does not hold yet, and the figure is what those tables hold
+/// ([`table_bytes`]). The caller bills the figure as it stands and adds the identities to `billed`
+/// once the chunk is retained, which is what makes the two halves of the figure agree.
+///
+/// The identity is the address of the allocation behind the `Arc`. It names one table for as long as
+/// it is remembered, because a chunk referencing a table keeps it alive and no later allocation can
+/// be given the same address. A table two segments or two fields of the one chunk reference is
+/// listed once. Each identity is also one slot in the set that remembers it, which is charged as it
+/// is written -- one entry at a time, like the boundary list's, and not from the capacity the set
+/// grows to -- so remembering a table is paid for beside the table itself.
+fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usize) {
+    let mut fresh: Vec<usize> = Vec::new();
+    let mut bytes = 0usize;
+    for field in series.fields.iter() {
+        for segment in field.segments() {
+            let table = match segment.dense() {
+                Some(DenseSamplesRef::Histogram(histograms)) => histograms.batch(),
+                Some(DenseSamplesRef::Mixed(mixed)) => mixed.histograms().batch(),
+                _ => continue,
+            };
+            let identity = Arc::as_ptr(table) as usize;
+            if billed.contains(&identity) || fresh.contains(&identity) {
+                continue;
+            }
+            fresh.push(identity);
+            bytes = bytes
+                .saturating_add(table_bytes(table))
+                .saturating_add(std::mem::size_of::<usize>());
+        }
+    }
+    (fresh, bytes)
+}
+
 /// A rough workspace estimate for merging fragments that hold `rows` rows between them.
 ///
 /// It allows for sorted row indices, readers, sample descriptors and output headers. Like the
@@ -276,6 +377,8 @@ enum NodeTag {
     Window,
     /// Applies point-wise operations to its input chunks.
     Map,
+    /// Matches two evaluated vectors and applies one operation to every matched pair of series.
+    Binary,
 }
 
 impl NodeTag {
@@ -286,6 +389,7 @@ impl NodeTag {
             Self::Instant => "instant selection",
             Self::Window => "window",
             Self::Map => "map",
+            Self::Binary => "binary",
         }
     }
 }
@@ -294,7 +398,8 @@ impl NodeTag {
 #[derive(Clone, Copy, Debug)]
 struct NodeSpec {
     tag: NodeTag,
-    /// The index of this node's input, which is the node the build pass reaches next.
+    /// The index of this node's input, which is the node the build pass reaches next: the one
+    /// input of a unary node, the left operand of a binary node, and none for an input node.
     input: Option<usize>,
 }
 
@@ -1138,6 +1243,488 @@ impl InstantRuntime {
     }
 }
 
+/// One operand of a binary node, chunk by chunk, until it ends.
+///
+/// What is kept is the series each chunk carries, not a concatenation of them: a chunk is retained
+/// as it arrives and nothing is copied on the way in, because the chunks of a series can share an
+/// allocation and the figure the operand charges for is the data it holds rather than a running copy
+/// of it.
+///
+/// The kernel matches whole series by label set, so the chunks are assembled into one series per
+/// logical series once the input has ended: a series that arrived in a thousand chunks is otherwise
+/// a thousand candidates on this side for every candidate of the other, and its own rows would be
+/// paired a chunk at a time.
+#[derive(Default)]
+struct BinaryOperand {
+    /// The series whose last chunk did not close it, with the position after its last row.
+    ///
+    /// `None` when no series is open: nothing has arrived yet, or the last series closed. A label
+    /// set may be closed more than once -- a node that rewrites labels can make two series one --
+    /// so a chunk that starts a series again is not an error, only one that starts it before the
+    /// series already open ended, or names another series while it is open.
+    open: Option<(MetricName, usize)>,
+    /// The chunks this operand handed over, in arrival order.
+    series: Vec<Series>,
+    /// The chunk count at which each logical series closed, exclusive, in arrival order.
+    ///
+    /// The chunks `start..end` of one entry are one logical series: a label set that closes and
+    /// starts again is two of them, so a list of ends is what keeps the two apart where a label set
+    /// alone would read them as one. Only a chunk carrying `is_last` records an end, and it does so
+    /// whether or not it carries a row.
+    ends: Vec<usize>,
+    /// The histogram tables the chunks this operand holds index into, by the address of the
+    /// allocation behind their `Arc`.
+    ///
+    /// A table is one allocation however many chunks of a series index into it, so it is billed
+    /// once -- by the first chunk that references it -- rather than once per chunk, and the tables
+    /// this set names are the ones already billed. That is what keeps a series delivered in a
+    /// thousand chunks from costing a thousand tables, and what keeps a table from costing nothing:
+    /// a chunk's own figure leaves its tables out ([`operand_chunk_bytes`]), so a table billed by
+    /// neither this operand nor this set is a table no reservation covers. One slot per billed
+    /// table is charged with it, so the set's own storage is not a figure no reservation covers
+    /// either.
+    tables: HashSet<usize>,
+    /// The bytes `series` and `ends` hold, folded in as chunks arrive.
+    ///
+    /// Each chunk is measured once, with the figure of what it holds on its own
+    /// ([`operand_chunk_bytes`]): the samples its rows occupy and the descriptors it keeps, not the
+    /// allocation those samples are slices of, so a series delivered in many chunks is charged the
+    /// data it holds rather than the same buffer once per chunk. The histogram tables the chunks
+    /// reference are the other half of that figure: one allocation the chunks share, billed once --
+    /// with the one slot that remembers it -- the first time a chunk referencing it arrives
+    /// ([`unbilled_tables`]).
+    held: usize,
+}
+
+impl BinaryOperand {
+    /// The bytes `chunk` would add to what this operand holds, read without retaining it.
+    ///
+    /// It is what [`Self::enqueue`] adds for the same chunk: what the chunk holds on its own, the
+    /// histogram tables it is the first to reference, and the one entry a chunk that closes its
+    /// series records in the boundary list. The boundary list holds one `usize` per closed series and
+    /// is charged one entry at a time as it is written, rather than from the capacity it grows to --
+    /// following that `Vec`'s first-four-then-double policy would be a second copy of it to keep in
+    /// step, and one entry within a factor of two is the granularity the accounting aims at. The
+    /// figure is what a caller reserves before it retains the chunk, so the pool admits it before
+    /// the operand holds it.
+    fn pending(&self, chunk: &EvaluatedChunk) -> usize {
+        let end = if chunk.is_last {
+            std::mem::size_of::<usize>()
+        } else {
+            0
+        };
+        let (_, tables) = unbilled_tables(&chunk.series, &self.tables);
+        tables
+            .saturating_add(operand_chunk_bytes(&chunk.series))
+            .saturating_add(end)
+    }
+
+    /// Retains one chunk, folding the estimate it is charged with into what the operand holds.
+    fn enqueue(&mut self, chunk: EvaluatedChunk) {
+        let closing = chunk.is_last;
+        // The tables this chunk is the first to reference, read before they are recorded: the same
+        // figure `pending` billed, so what is reserved for the chunk and what it grows the operand
+        // by are one.
+        let (tables, bytes) = unbilled_tables(&chunk.series, &self.tables);
+        // The boundary list is storage the operand keeps, and it grows before the chunk is recorded
+        // in it: an end is charged for before it exists, the same figure `pending` reported.
+        self.held = self
+            .held
+            .saturating_add(if closing {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            })
+            .saturating_add(operand_chunk_bytes(&chunk.series))
+            .saturating_add(bytes);
+        // From here the operand keeps those tables alive itself, so a chunk arriving later that
+        // references one is charged its own slices and not the table again.
+        self.tables.extend(tables);
+        self.series.push(chunk.series);
+        if closing {
+            self.ends.push(self.series.len());
+        }
+    }
+
+    /// The chunk ranges of the logical series this operand closed, in arrival order.
+    ///
+    /// Read after the input ended: a series that is still open has no end, and
+    /// [`BinaryRuntime::closed`] refuses such an input before anything is assembled.
+    fn boundaries(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        self.ends.iter().scan(0, |start, &end| {
+            let range = *start..end;
+            *start = end;
+            Some(range)
+        })
+    }
+
+    /// The bytes assembling this operand's chunks into logical series allocate, before they do.
+    ///
+    /// One series per closed logical series, on `schema`'s grid, and nothing that copies a sample:
+    /// the descriptors the chunks' fields are made of are collected and shared. What is counted is
+    /// therefore metadata only, and it is a rough figure per field, per segment and per run rather
+    /// than a model of the containers the work builds:
+    ///
+    /// - per series, the assembled entry and the field list ([`SeriesFields`] takes a one-field list
+    ///   out of its vector and boxes a wider one, so neither copies);
+    /// - per chunk and field, the descriptor collected out of it;
+    /// - per segment, three descriptors: the one the flatten copies out, the slot the `Arc<[Samples]>`
+    ///   it is copied into holds, and the doubling of the vector it is copied out of;
+    /// - per run the boundary covers, the span [`Self::assemble`] collects and the span and
+    ///   row-offset arrays [`TimeAxis::from_grid_spans`] copies them into.
+    ///
+    /// No term follows how a `Vec` happens to grow -- there is no branch on a capacity here and no
+    /// first-allocation floor -- so a change to the flatten's growth policy cannot make this figure
+    /// wrong. What it is instead is a rough per-field, per-segment and per-run estimate, within a
+    /// small factor of what the assembly holds at its peak, which is the granularity a reservation
+    /// is made at.
+    fn assembly_bytes(&self, schema: &SeriesSchema) -> Option<usize> {
+        let samples = std::mem::size_of::<Samples>();
+        let grids = std::mem::size_of::<GridSpan>();
+        let width = schema.fields.len();
+        let mut bytes = 0usize;
+        for boundary in self.boundaries() {
+            let chunks = &self.series[boundary];
+            // The runs the boundary covers, and the segments its fields hold: a chunk's field can
+            // itself be chunked, and flattening it copies one descriptor per segment.
+            let mut runs = 0usize;
+            let mut segments = 0usize;
+            for chunk in chunks {
+                runs = runs.checked_add(chunk.time.runs().count())?;
+                for field in chunk.fields.iter() {
+                    segments = segments.checked_add(field.segments().len())?;
+                }
+            }
+            // The descriptors of a field's chunks, the flatten's descriptors and the `Arc` they are
+            // copied into; a field with no segment still builds an empty `Samples`, which is one
+            // descriptor.
+            let descriptors = chunks
+                .len()
+                .checked_mul(width)?
+                .checked_add(segments.checked_mul(3)?.checked_add(width)?)?;
+            // The axis: the spans collected, and the span and offset arrays a run layout copies
+            // them into.
+            let axis = runs.checked_mul(
+                grids
+                    .checked_mul(2)?
+                    .checked_add(std::mem::size_of::<usize>())?,
+            )?;
+            bytes = bytes
+                .checked_add(std::mem::size_of::<Series>())?
+                .checked_add(width.checked_mul(samples)?)?
+                .checked_add(descriptors.checked_mul(samples)?)?
+                .checked_add(axis)?;
+        }
+        Some(bytes)
+    }
+
+    /// The logical series this operand closed, each as one series on `schema`'s grid.
+    ///
+    /// The chunks of a logical series are collected, not concatenated: the fields keep one
+    /// descriptor per segment of every chunk, the axis keeps the runs the chunks cover, and the
+    /// buffers behind both are shared with the chunks this operand still holds. The series is what
+    /// the kernel matches and reads, so it must be on the schema's grid and hold as many rows as its
+    /// axis places, which is what [`Series::try_new`] checks. What it allocates is
+    /// [`Self::assembly_bytes`], which a caller reserves before this runs.
+    fn assemble(&self, schema: &SeriesSchema, path: &NodePath, side: usize) -> Result<Vec<Series>> {
+        let grid = schema.eval_grid.clone().ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "the binary node at {path} assembles its {} operand on an evaluation grid, and the \
+                 operand's schema names none",
+                side_name(side)
+            ))
+        })?;
+        let mut assembled = Vec::with_capacity(self.ends.len());
+        for boundary in self.boundaries() {
+            let chunks = &self.series[boundary];
+            let metric = chunks.first().map(|chunk| chunk.metric.clone()).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "the binary node at {path} closed a logical series of its {} operand without a \
+                     chunk to assemble",
+                    side_name(side)
+                ))
+            })?;
+            let runs = chunks
+                .iter()
+                .map(|chunk| chunk.time.runs().count())
+                .fold(0usize, usize::saturating_add);
+            let mut spans = Vec::with_capacity(runs);
+            for chunk in chunks {
+                for run in chunk.time.runs() {
+                    spans.push(GridSpan::new(run.position, run.len));
+                }
+            }
+            let mut fields = Vec::with_capacity(schema.fields.len());
+            for index in 0..schema.fields.len() {
+                let mut segments = Vec::with_capacity(chunks.len());
+                for chunk in chunks {
+                    let field = chunk.fields.get(index).ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "the binary node at {path} cannot assemble its {} operand: a chunk of \
+                             it carries {} fields, not {}",
+                            side_name(side),
+                            chunk.fields.len(),
+                            schema.fields.len()
+                        ))
+                    })?;
+                    segments.push(field.clone());
+                }
+                fields.push(Samples::try_from_chunks(segments).map_err(series_error)?);
+            }
+            let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
+            let time = TimeAxis::from_grid_spans(grid.clone(), spans).map_err(series_error)?;
+            assembled.push(Series::try_new(schema, metric, time, fields).map_err(series_error)?);
+        }
+        Ok(assembled)
+    }
+
+    /// Drops the retained chunks, giving back what they hold.
+    fn release(&mut self) {
+        self.open = None;
+        self.series.clear();
+        self.series.shrink_to_fit();
+        self.ends.clear();
+        self.ends.shrink_to_fit();
+        // The tables the cleared chunks were keeping alive are gone with them, so their addresses
+        // name nothing this operand holds any more.
+        self.tables.clear();
+        self.tables.shrink_to_fit();
+        self.held = 0;
+    }
+}
+
+/// What a binary node holds: both operands until they end.
+///
+/// The operation pairs two whole vectors point by point, so this node cannot answer from the chunks
+/// in hand the way a map does: it retains every chunk each operand hands over, assembles the chunks
+/// of each logical series into the one series the kernel matches, and runs the kernel once, after the
+/// input has ended and both operands closed. The chunks it produces are queued in the node's own
+/// output queue and handed over from there.
+struct BinaryRuntime {
+    /// The operation and its modifiers, bound by the compiler.
+    matching: Arc<BinaryMatching>,
+    /// The layout each operand is bound to, what a chunk of it is checked against: `0` is the left
+    /// operand and `1` the right one, the order the tree declares them in.
+    schemas: [Arc<SeriesSchema>; 2],
+    /// The retained chunks of each operand, in the same order.
+    operands: [BinaryOperand; 2],
+    /// Whether the kernel has run. It runs at most once: the operands it read are gone afterwards.
+    computed: bool,
+}
+
+/// What side `index` is called in an error.
+fn side_name(index: usize) -> &'static str {
+    match index {
+        0 => "left",
+        _ => "right",
+    }
+}
+
+impl BinaryRuntime {
+    /// The run-time state of the binary operation `matching` over its two operands.
+    fn new(matching: Arc<BinaryMatching>, schemas: [Arc<SeriesSchema>; 2]) -> Self {
+        Self {
+            matching,
+            schemas,
+            operands: [BinaryOperand::default(), BinaryOperand::default()],
+            computed: false,
+        }
+    }
+
+    /// The bytes the retained operands hold.
+    fn retained_bytes(&self) -> usize {
+        self.operands
+            .iter()
+            .map(|operand| operand.held)
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// The bytes assembling both operands into logical series allocates, before it does.
+    fn assembly_bytes(&self) -> Option<usize> {
+        let [left, right] = &self.operands;
+        let [left_schema, right_schema] = &self.schemas;
+        left.assembly_bytes(left_schema)?
+            .checked_add(right.assembly_bytes(right_schema)?)
+    }
+
+    /// The logical series both operands closed, ready for the kernel to match.
+    fn assemble(&self, path: &NodePath) -> Result<[Vec<Series>; 2]> {
+        let [left, right] = &self.operands;
+        let [left_schema, right_schema] = &self.schemas;
+        Ok([
+            left.assemble(left_schema, path, 0)?,
+            right.assemble(right_schema, path, 1)?,
+        ])
+    }
+
+    /// The bytes the chunk of `side` would add to that operand's retention.
+    ///
+    /// It is read from the operand before the chunk is retained, so the figure is the one the
+    /// operand grows by: what the chunk holds on its own and the room its end takes in the operand's
+    /// boundary list.
+    fn pending(&self, path: &NodePath, side: usize, chunk: &EvaluatedChunk) -> Result<usize> {
+        self.operands
+            .get(side)
+            .map(|operand| operand.pending(chunk))
+            .ok_or_else(|| no_binary(path))
+    }
+
+    /// Reports an operand that ended inside a series.
+    ///
+    /// A side hands over one series at a time, so the only series that can be open is the last one
+    /// it handed over: a chunk that did not say `is_last` leaves it open, and nothing came after it
+    /// to close it. The kernel is not run over such an operand: it would answer the pairs of a
+    /// series whose remaining rows were never read.
+    fn closed(&self, path: &NodePath) -> Result<()> {
+        for (side, operand) in self.operands.iter().enumerate() {
+            let Some((metric, _)) = &operand.open else {
+                continue;
+            };
+            return Err(DataFusionError::Execution(format!(
+                "the input of the binary node at {path} ended before the last chunk of a series: \
+                 its {} operand handed over {metric:?} without the chunk that closes it",
+                side_name(side)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Retains one chunk of the operand at `side`, checking it against that operand's binding.
+    fn retain(&mut self, path: &NodePath, side: usize, chunk: EvaluatedChunk) -> Result<()> {
+        // What a bound tree says an operand produces is not proof of what a chunk carries: a
+        // `Series` keeps its fields public, so a chunk built by struct literal can carry another
+        // number of fields, or fewer samples than its axis places rows. The kernel's own check is
+        // run here, before the chunk enters the buffer, and the position and side are added to what
+        // it reports.
+        let Some(schema) = self.schemas.get(side) else {
+            return Err(no_binary(path));
+        };
+        validate_binary_operand(schema.as_ref(), std::slice::from_ref(&chunk.series)).map_err(
+            |error| {
+                DataFusionError::Execution(format!(
+                    "the binary node at {path} rejected its {} operand: {error}",
+                    side_name(side)
+                ))
+            },
+        )?;
+        // An empty chunk closes a series without holding a row, so it says nothing about where that
+        // series ended: only a chunk that carries rows can be read as going backwards.
+        let (first, last) = (
+            chunk.series.time.first_position(),
+            chunk.series.time.last_position(),
+        );
+        let metric = chunk.series.metric.clone();
+        let Some(operand) = self.operands.get_mut(side) else {
+            return Err(no_binary(path));
+        };
+        // The position a chunk of the open series may start at: the row after the last one that
+        // series handed over. Nothing is open after a series closed, so the next one starts over.
+        let end = operand.open.as_ref().map_or(0, |(_, end)| *end);
+        if let Some((open, _)) = &operand.open
+            && *open != metric
+        {
+            return Err(DataFusionError::Execution(format!(
+                "the binary node at {path} combines whole series, and its {} operand handed over \
+                 {metric:?} before {open:?} ended",
+                side_name(side)
+            )));
+        }
+        if let Some(first) = first
+            && first < end
+        {
+            return Err(DataFusionError::Execution(format!(
+                "the chunks of {metric:?} handed to the {} operand of the binary node at {path} do \
+                 not continue each other: one starts at position {first}, after the series already \
+                 reached {end}",
+                side_name(side)
+            )));
+        }
+        operand.open = (!chunk.is_last).then(|| (metric, last.map_or(end, |last| last + 1)));
+        operand.enqueue(chunk);
+        Ok(())
+    }
+
+    /// Runs the kernel over both operands and returns the series it produced.
+    ///
+    /// The chunks of each operand are assembled into the logical series they make up first, because
+    /// the kernel matches whole series by label set: a series that arrived in many chunks would
+    /// otherwise be a candidate per chunk on its own side and be paired with every candidate of the
+    /// other, which is quadratic in the chunk count of one series rather than in the series count.
+    ///
+    /// The reservation covers the retained chunks, the assembled series the kernel reads and the
+    /// kernel's own live workspace, and it is what the pool admits before each of them allocates.
+    /// The kernel reports that workspace coarsely -- where a long-lived result buffer grows, once per
+    /// phase of its walk, and in the blocks a growing output buffer is reserved in -- rather than per
+    /// grid point, and the total is resized as a phase's storage is released. It keeps covering the
+    /// returned results until the caller queues them.
+    fn compute(&mut self, path: &NodePath, buffer: &mut NodeBuffer) -> Result<Option<Vec<Series>>> {
+        // The kernel reads the operands once and drops them, so a second call has nothing to read
+        // and nothing left to produce: what it produced the first time is in the node's queue, and
+        // the reservation is already the queue's.
+        if self.computed {
+            return Ok(None);
+        }
+        self.closed(path)?;
+        let [left_schema, right_schema] = &self.schemas;
+        let retained = self.retained_bytes();
+        // The assembled series are live while the kernel reads them and share the buffers the
+        // retained chunks hold, so what they add is metadata, and it is reserved before it exists:
+        // the assembly allocates as it goes, and a figure read from it afterwards would be a figure
+        // the pool never admitted.
+        let assembly = self
+            .assembly_bytes()
+            .ok_or_else(|| reservation_overflow(path))?;
+        buffer.grow(assembly)?;
+        let assembled = match self.assemble(path) {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                // Nothing the assembly allocated outlives this call, so the node falls back to what
+                // it still holds. A failure of that resize is the pool's to report; the driver stops
+                // the execution either way and releases every node.
+                buffer.resize(retained)?;
+                return Err(error);
+            }
+        };
+        let [left, right] = &assembled;
+        // The operands are still held while the kernel runs, so what this node holds is the operands,
+        // the assembled series and the workspace the kernel reports; the callback resizes the
+        // reservation to that sum as the live workspace changes.
+        let metrics = Arc::clone(&buffer.metrics);
+        let output = {
+            // The timer covers this node's own work only: it is dropped before the driver polls
+            // the input again.
+            let _timer = metrics.timer();
+            binary_vectors_with_reservation(
+                &self.matching,
+                left_schema,
+                left,
+                right_schema,
+                right,
+                &mut |workspace| {
+                    let bytes = retained
+                        .checked_add(assembly)
+                        .and_then(|held| held.checked_add(workspace))
+                        .ok_or_else(|| reservation_overflow(path))?;
+                    buffer.resize(bytes)
+                },
+            )
+        };
+        // The operands and the assembled series have been handed to the kernel and the reservation
+        // covers the workspace it allocated past them, so a failure is the driver's to release: it
+        // stops the execution and every node with it.
+        let output = output?;
+        // The assembled series were the kernel's input and are read by nothing after it, so they go
+        // before the chunks they share their buffers with: what this node holds from here on is what
+        // the kernel returned, and the pool is not charged for a vector nothing reads again.
+        drop(assembled);
+        for operand in &mut self.operands {
+            operand.release();
+        }
+        self.computed = true;
+        Ok(Some(output))
+    }
+}
+
 /// The buffered chunks as the one source axis they make up: their timestamps in arrival order.
 ///
 /// The axis type validates the result as strictly increasing, which is also what refuses a series
@@ -1285,10 +1872,10 @@ struct NodeRuntime {
     buffer: NodeBuffer,
     /// The chunks this node holds for its consumer, each with the estimate it was queued with.
     ///
-    /// An input node's queue is filled by the caller, and a window's by the chunks it computed while
-    /// flushing its collected input; no node uses it for both. A chunk is measured once, as it
-    /// enters, and the figure it was queued with is given back as it leaves, so neither the queue
-    /// nor the handover walks it.
+    /// An input node's queue is filled by the caller, a window's by the chunks it computed while
+    /// flushing its collected input, and a binary node's by the results its kernel produced; no node
+    /// uses it for both. A chunk is measured once, as it enters, and the figure it was queued with
+    /// is given back as it leaves, so neither the queue nor the handover walks it.
     queued: VecDeque<(NativeChunk, usize)>,
     /// What an instant node holds: the chunks of the series it is selecting, and, while it gathers
     /// that series, the workspace the gather reserved for. `None` for every other kind of node.
@@ -1298,6 +1885,13 @@ struct NodeRuntime {
     window: Option<RangeEvaluator>,
     /// What a map node applies.
     map: Option<MapRuntime>,
+    /// What a binary node holds.
+    binary: Option<BinaryRuntime>,
+    /// The layout the caller's chunks of an input node are checked against.
+    ///
+    /// A tree with a binary node reads two inputs, and each of them is bound to its own layout, so
+    /// the binding is kept per input rather than once for the tree.
+    source_schema: Option<Arc<SeriesSchema>>,
     /// What this node has already handed out under each output label set, for a node that rewrites
     /// labels: a window drops the metric name and the empty-valued labels, a map drops the name.
     emitted: Option<Emitted>,
@@ -1339,12 +1933,14 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// Hands over the next queued source chunk, if there is one.
+    /// Hands over the next queued chunk, if there is one, giving back what it was queued with.
     ///
-    /// The handover is what [`Self::open_source_series`] follows: after this call the flag says
-    /// whether the series the consumer just received a chunk of is still open, which is what closing
-    /// the execution reads to tell a truncated input from one that ended cleanly.
-    fn pop_source(&mut self) -> Result<Option<NativeChunk>> {
+    /// It is the one way a chunk leaves this node's queue: an input node hands over what the caller
+    /// queued, and a binary node hands over what its kernel produced. `values` is how that node
+    /// counts the values it hands over, because the two do not count the same thing: an input's
+    /// figure has always been its positions, while a binary result holds one value per field and a
+    /// field may have none at a position it decided.
+    fn pop_queued(&mut self, values: fn(&NativeChunk) -> usize) -> Result<Option<NativeChunk>> {
         let Some((chunk, bytes)) = self.queued.pop_front() else {
             return Ok(None);
         };
@@ -1356,17 +1952,31 @@ impl NodeRuntime {
             let _timer = metrics.timer();
             self.buffer.shrink(bytes)?;
         }
-        metrics.record_output(1, chunk.positions());
-        // An evaluated source is already addressed on its grid, so its decided positions are grid
-        // points; a raw source carries timestamps, which are not positions on any grid.
+        metrics.record_output(1, values(&chunk));
+        // An evaluated chunk is addressed on its grid, so its decided positions are grid points; a
+        // raw source carries timestamps, which are not positions on any grid.
         if let NativeChunk::Evaluated(chunk) = &chunk {
             metrics.record_grid_points(chunk.series.time.len());
         }
+        Ok(Some(chunk))
+    }
+
+    /// Hands over the next queued source chunk, if there is one.
+    ///
+    /// The handover is what [`Self::open_source_series`] follows: after this call the flag says
+    /// whether the series the consumer just received a chunk of is still open, which is what closing
+    /// the execution reads to tell a truncated input from one that ended cleanly. Only an input node
+    /// follows that flag, so only it reads the handover this way: a binary node's queue holds the
+    /// results of series that already closed on their way in.
+    fn pop_source(&mut self) -> Result<Option<NativeChunk>> {
+        let Some(chunk) = self.pop_queued(NativeChunk::positions)? else {
+            return Ok(None);
+        };
         // Assigned rather than only set: a chunk that closes its series is what says no series is
         // open any more, so the flag follows the handover and not the history of handovers.
         self.open_source_series = !chunk.is_last();
         if chunk.is_last() {
-            metrics.record_completed_series(1);
+            self.buffer.metrics.record_completed_series(1);
         }
         Ok(Some(chunk))
     }
@@ -1474,6 +2084,82 @@ impl NodeRuntime {
         let emitted = self.emitted_bytes();
         self.buffer.resize(retained.saturating_add(emitted))?;
         Ok(output)
+    }
+
+    /// Retains one operand chunk of this node's binary operation.
+    ///
+    /// Nothing is decided for a point yet: the kernel needs both operands whole, so a chunk is only
+    /// kept until the input ends. What the node holds is the estimate of every chunk it retained,
+    /// and the reservation is set to that figure once the chunk is in: the operand's own total is
+    /// what the node keeps, so a second chunk does not have to be admitted beside the first one's
+    /// estimate again.
+    ///
+    /// The chunk is reserved for before it is retained, by the figure the operand reports for it, so
+    /// the pool admits the memory before the node holds it and a refused chunk leaves the operand
+    /// where it was.
+    fn retain_binary(&mut self, path: &NodePath, side: usize, chunk: NativeChunk) -> Result<()> {
+        let NativeChunk::Evaluated(chunk) = chunk else {
+            return Err(DataFusionError::Execution(format!(
+                "the binary node at {path} consumes evaluated chunks, not raw samples"
+            )));
+        };
+        // The figure is read before the chunk is retained, because reserving after the fact would be
+        // reserving for memory the node already holds.
+        let pending = self
+            .binary
+            .as_ref()
+            .ok_or_else(|| no_binary(path))?
+            .pending(path, side, &chunk)?;
+        let positions = chunk.series.time.len();
+        self.buffer.grow(pending)?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        {
+            let _timer = metrics.timer();
+            let binary = self.binary.as_mut().ok_or_else(|| no_binary(path))?;
+            binary.retain(path, side, chunk)?;
+            let retained = binary.retained_bytes();
+            self.buffer.resize(retained)?;
+        }
+        metrics.record_input(1, positions);
+        Ok(())
+    }
+
+    /// Runs this node's binary kernel and queues the chunks it produced.
+    fn compute_binary(&mut self, path: &NodePath) -> Result<()> {
+        let output = {
+            let binary = self.binary.as_mut().ok_or_else(|| no_binary(path))?;
+            binary.compute(path, &mut self.buffer)?
+        };
+        // A kernel that already ran has moved its result into the queue, which the handover below
+        // charges for: leaving the reservation alone here is what keeps a queued result covered.
+        let Some(output) = output else {
+            return Ok(());
+        };
+        // The results are queued the way a node that produces a chunk per input queues what it
+        // hands on: the queue is the one source of chunk order and of the bytes queued chunks hold.
+        let mut closed = 0usize;
+        for series in output {
+            // The kernel decided every point of a result series at once, so the one chunk it is
+            // handed over as closes it.
+            let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
+            // The result is already admitted: the kernel kept it inside the workspace its callback
+            // reserved. What the queue keeps is the estimate of the chunk that holds it.
+            let bytes = chunk.bytes();
+            self.queued.push_back((chunk, bytes));
+            closed += 1;
+        }
+        // This node's own accounting of closed series is the results it closed, one per matched
+        // series: an operand chunk that closed its input series is a closure of the node below, and
+        // counting it here as well would report the same work twice.
+        self.buffer.metrics.record_completed_series(closed);
+        // The operands the reservation covered are gone and the queue holds what the kernel
+        // returned, so the reservation settles on the queue: what a queued result is given back
+        // with as it leaves is exactly the figure it is held for here.
+        let queued = self
+            .queued
+            .iter()
+            .fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
+        self.buffer.resize(queued)
     }
 
     /// Feeds one chunk to this node's instant selection.
@@ -1667,6 +2353,8 @@ impl NodeRuntime {
         // handed out and the fragments it collected go with it.
         self.window = None;
         self.instant = None;
+        self.binary = None;
+        self.source_schema = None;
         self.emitted = None;
         self.merge = None;
         // A node that holds no chunk holds no series either, so nothing it handed over is still
@@ -1693,10 +2381,13 @@ pub struct NativeExecutionState {
     paths: Vec<NodePath>,
     /// The per-node state, in the same order.
     runtimes: Vec<NodeRuntime>,
-    /// The index of the tree's input node.
-    source: usize,
-    /// Whether the source hands over evaluated chunks rather than raw samples.
-    source_is_evaluated: bool,
+    /// The index of every node, so a caller names a node the way the metrics do.
+    by_path: HashMap<NodePath, usize>,
+    /// The index of every input node, in traversal order: where a caller's chunks enter.
+    ///
+    /// A tree of unary nodes has one, and a binary node adds one per operand: a tree of nested
+    /// binary nodes has as many as it has leaves, and a queued chunk names the one it belongs to.
+    sources: Vec<usize>,
 }
 
 impl NativeExecutionState {
@@ -1710,25 +2401,25 @@ impl NativeExecutionState {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<Self> {
-        // One pass down the tree names and registers every node in the order
+        // One pass over the tree names and registers every node in the order
         // `crate::native::metrics::walk` gives it: the same rule `EXPLAIN` uses, so a node cannot be
-        // shown at one position and registered at another. Every node this runtime executes is
-        // unary, so that order is the chain from the root to the input, and a node's input is the
-        // next one the pass reaches.
+        // shown at one position and registered at another. That order reaches a node's left operand
+        // before its right one, so the input a spec names -- the one input of a unary node, the left
+        // operand of a binary node -- is the node the pass reaches next.
         let mut nodes: Vec<NodeSpec> = Vec::new();
         let mut paths: Vec<NodePath> = Vec::new();
         let mut runtimes: Vec<NodeRuntime> = Vec::new();
         // The bound expression of each node, in the same order: the pass below reads the node it
         // configures from here, so nothing about an operation is copied onto the node's spec.
         let mut exprs: Vec<&NativeExpr> = Vec::new();
-        let mut source: Option<(usize, Arc<SeriesSchema>)> = None;
-        let mut node = tree.root();
-        let mut path = NodePath::root();
-        loop {
+        // The nodes the pass has not reached yet, the next one last: a node pushes its inputs back
+        // to front, so the one popped next is the one its parent's spec names.
+        let mut pending: Vec<(&NativeNode, NodePath)> = vec![(tree.root(), NodePath::root())];
+        while let Some((node, path)) = pending.pop() {
             let index = nodes.len();
             let handles = Arc::new(NodeMetrics::default());
             handles.register(&path, metrics_set, partition);
-            let (tag, child) = match &node.expr {
+            let tag = match &node.expr {
                 NativeExpr::Input(bound) => {
                     // Every node here reads one series at a time and assumes its chunks arrive
                     // together: a window feeds a series to its evaluator up to the chunk carrying
@@ -1742,24 +2433,21 @@ impl NativeExecutionState {
                     if bound.ordering == SeriesOrdering::Interleaved {
                         return Err(unsupported_ordering(bound.ordering, &path));
                     }
-                    let samples = node.output.samples().cloned().ok_or_else(|| {
-                        DataFusionError::Execution(format!(
-                            "the input node at {path} does not produce samples"
-                        ))
-                    })?;
-                    source = Some((index, samples));
-                    (NodeTag::Input, None)
+                    NodeTag::Input
                 }
-                NativeExpr::Instant { input, .. } => (NodeTag::Instant, Some(input.as_ref())),
-                NativeExpr::Window { input, .. } => (NodeTag::Window, Some(input.as_ref())),
-                NativeExpr::Map { input, .. } => (NodeTag::Map, Some(input.as_ref())),
+                NativeExpr::Instant { .. } => NodeTag::Instant,
+                NativeExpr::Window { .. } => NodeTag::Window,
+                NativeExpr::Map { .. } => NodeTag::Map,
+                // A binary node is built here and narrowed below: legality is a wider set of operand
+                // types than the kernel takes, so the shape is checked where the operands' layouts
+                // are read.
+                NativeExpr::Binary { .. } => NodeTag::Binary,
                 // The kinds below are legal in a bound tree, and `validate` stays the authority on
                 // that; this runtime simply does not execute them yet. Rejected before a single
                 // chunk is read: a tree the runtime cannot execute must not start, because a
                 // partial answer would be one the caller never asked for.
                 NativeExpr::Scalar(_) => return Err(not_implemented("Scalar", &path)),
                 NativeExpr::Aggregate { .. } => return Err(not_implemented("Aggregate", &path)),
-                NativeExpr::Binary { .. } => return Err(not_implemented("Binary", &path)),
             };
             let buffer = NodeBuffer::new(&path, handles, &pool);
             let mut runtime = NodeRuntime {
@@ -1768,12 +2456,18 @@ impl NativeExecutionState {
                 instant: None,
                 window: None,
                 map: None,
+                binary: None,
+                source_schema: None,
                 emitted: None,
                 merge: None,
                 open_source_series: false,
             };
             match &node.expr {
-                NativeExpr::Input(_) => {}
+                NativeExpr::Input(_) => {
+                    // What the caller's chunks of this input are checked against: a raw source
+                    // carries timestamps, an evaluated one is addressed on a grid.
+                    runtime.source_schema = node.output.samples().cloned();
+                }
                 NativeExpr::Instant { input, op } => {
                     let input_schema = input.output.samples().ok_or_else(|| {
                         DataFusionError::Execution(format!(
@@ -1821,26 +2515,64 @@ impl NativeExecutionState {
                     // from two series.
                     runtime.emitted = Some(Emitted::default());
                 }
-                NativeExpr::Scalar(_)
-                | NativeExpr::Aggregate { .. }
-                | NativeExpr::Binary { .. } => {
+                NativeExpr::Binary {
+                    left,
+                    right,
+                    matching,
+                } => {
+                    // The one shape this runtime executes is two evaluated vectors: a scalar side is
+                    // a broadcast the kernel does not take, and a raw side has no positions to be
+                    // matched at. Both are rejected as this node, before the pass reaches the
+                    // operand that produced them, so the position named is the one that asked for
+                    // them.
+                    match (left.output.samples(), right.output.samples()) {
+                        (Some(left), Some(right))
+                            if left.eval_grid.is_some() && right.eval_grid.is_some() =>
+                        {
+                            // Each operand's layout is the one its own child produces, and the walk
+                            // only built this node when both produce evaluated samples.
+                            runtime.binary = Some(BinaryRuntime::new(
+                                Arc::new(matching.clone()),
+                                [Arc::clone(left), Arc::clone(right)],
+                            ));
+                        }
+                        _ => return Err(not_implemented("Binary", &path)),
+                    }
+                    // A binary operation matches by label set, so a result label set may be
+                    // produced at points that do not collide; the kernel groups and merges them
+                    // itself, which is why this node keeps no ledger of what it handed out.
+                }
+                NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => {
                     // Rejected above, where the pass has the position to name.
                 }
             }
-            // The input is the node the pass reaches next: the chain has no other node between
-            // this one and its input, and nothing is read off the positions afterwards.
+            // The inputs this node reads, in the order the tree declares them: a unary node's one
+            // input, a binary node's left and right operand, and none for an input node. They are
+            // pushed back to front, so the node the spec names is the one the pass reaches next and
+            // nothing but its own subtree lies between the two.
+            let reads_input = match &node.expr {
+                NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => {
+                    false
+                }
+                NativeExpr::Instant { input, .. }
+                | NativeExpr::Window { input, .. }
+                | NativeExpr::Map { input, .. } => {
+                    pending.push((input.as_ref(), path.input()));
+                    true
+                }
+                NativeExpr::Binary { left, right, .. } => {
+                    pending.push((right.as_ref(), path.right()));
+                    pending.push((left.as_ref(), path.left()));
+                    true
+                }
+            };
             nodes.push(NodeSpec {
                 tag,
-                input: child.map(|_| index + 1),
+                input: reads_input.then_some(index + 1),
             });
             exprs.push(&node.expr);
             paths.push(path.clone());
             runtimes.push(runtime);
-            let Some(child) = child else {
-                break;
-            };
-            node = child;
-            path = path.input();
         }
 
         // One reverse pass sets where a merge has to happen, from the input upwards: the pass above
@@ -1883,6 +2615,14 @@ impl NativeExecutionState {
                         holds_shared[index] = input_holds_shared;
                     }
                     NodeTag::Map => holds_shared[index] = true,
+                    NodeTag::Binary => {
+                        // The kernel matches its operands by label set and files one result row per
+                        // label set and point, merging the rows of one set whatever piece they came
+                        // from: what it hands out is one series per label set, so nothing above has
+                        // to join pieces of a series. Its own operands are read whole -- it retains
+                        // them until the input ends -- so its flag is false whatever theirs are.
+                        holds_shared[index] = false;
+                    }
                     NodeTag::Window => {
                         let (drops_metric_name, input_schema) = match expr {
                             NativeExpr::Window { input, op } => (
@@ -1934,17 +2674,45 @@ impl NativeExecutionState {
             }
         }
 
-        // The supported nodes are unary, so a tree of them has exactly one input node; it is where
-        // the caller's chunks enter.
-        let (source, source_schema) = source.ok_or_else(|| {
-            DataFusionError::Execution("the native tree has no input node".to_string())
-        })?;
+        // A caller names a node by the position the metrics give it, and a chunk it queues is bound
+        // to the input that position names, so every position is indexed once the pass has given the
+        // whole tree one.
+        let by_path: HashMap<NodePath, usize> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.clone(), index))
+            .collect();
+        // Every input node is where a caller's chunks can enter, and each of them is named by its
+        // own position when a caller queues a chunk. A tree of unary nodes has one input; a binary
+        // node adds one per operand, so a tree of nested binary nodes has as many as it has leaves.
+        let sources: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.tag == NodeTag::Input)
+            .map(|(index, _)| index)
+            .collect();
+        if sources.is_empty() {
+            return Err(DataFusionError::Execution(
+                "the native tree has no input node".to_string(),
+            ));
+        }
+        // A caller's chunks are samples: a source that hands over aggregate state is not something
+        // this runtime can be handed, and it is refused when the state is built rather than when the
+        // first chunk is queued at it.
+        for &source in &sources {
+            if runtimes[source].source_schema.is_none() {
+                return Err(DataFusionError::Execution(format!(
+                    "the input node at {} does not produce samples",
+                    paths[source]
+                )));
+            }
+        }
         Ok(Self {
             nodes,
             paths,
             runtimes,
-            source,
-            source_is_evaluated: source_schema.eval_grid.is_some(),
+            by_path,
+            sources,
         })
     }
 
@@ -1952,6 +2720,20 @@ impl NativeExecutionState {
     pub fn metrics(&self, path: &NodePath) -> Option<&Arc<NodeMetrics>> {
         let index = self.paths.iter().position(|candidate| candidate == path)?;
         Some(&self.runtimes[index].buffer.metrics)
+    }
+
+    /// The position of the right operand of the binary node at `index`.
+    ///
+    /// A spec names one input, the node the build pass reaches next: a unary node's only input and a
+    /// binary node's left operand. The right operand is the one input a spec cannot name, so it is
+    /// read from the position the node itself sits at, which the pass resolved and indexed.
+    fn right_input(&self, index: usize) -> Result<usize> {
+        let path = &self.paths[index];
+        self.by_path.get(&path.right()).copied().ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "the native tree has no node at the right input of {path}"
+            ))
+        })
     }
 
     /// The bytes this execution currently reserves from the pool.
@@ -1988,6 +2770,19 @@ impl NativeExecutionState {
             .count()
     }
 
+    /// How many nodes still hold the operands a binary operation retained.
+    ///
+    /// Test-only, and for the same reason as [`Self::nodes_holding_windows`]: an execution that
+    /// stopped has to drop the vectors it retained, not only the number that says how many bytes
+    /// they were reserved for.
+    #[cfg(test)]
+    pub(crate) fn nodes_holding_binary(&self) -> usize {
+        self.runtimes
+            .iter()
+            .filter(|runtime| runtime.binary.is_some())
+            .count()
+    }
+
     /// The input that ended before its last chunk, if there is one.
     ///
     /// It is read before anything is merged: a window that collects its input closes every series
@@ -1999,6 +2794,28 @@ impl NativeExecutionState {
             .zip(self.runtimes.iter())
             .find(|(_, runtime)| runtime.open_source_series)
             .map(|(path, _)| truncated_input(path))
+    }
+
+    /// Reports a stream that ended inside a series, without closing any node.
+    ///
+    /// Closing is destructive -- a window's evaluator takes itself apart -- and the binary nodes
+    /// still have to compute after this check, so what is read here is only the state that follows
+    /// what each node was handed: an input node reports the series it handed over without the chunk
+    /// that ends it, and a binary node reports an operand that is still open on either side. A
+    /// truncation is therefore refused before a binary kernel allocates its workspace, rather than
+    /// after one has already been computed on half a vector.
+    fn unclosed(&self) -> Result<()> {
+        // A source series that never ended is refused before anything is merged: the close a merge
+        // synthesises would make it look like one that did.
+        if let Some(error) = self.truncated() {
+            return Err(error);
+        }
+        for (path, runtime) in self.paths.iter().zip(&self.runtimes) {
+            if let Some(binary) = &runtime.binary {
+                binary.closed(path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Closes every node, reporting an input that ended mid-series.
@@ -2040,6 +2857,21 @@ impl NativeExecutionState {
 pub struct NativeExecutor {
     state: NativeExecutionState,
     phase: Phase,
+    /// Whether the caller ended the input.
+    ///
+    /// Until then a pull that finds nothing means nothing has settled yet, and a binary node
+    /// retains what its operands hand over without computing: the whole vector has to be there
+    /// before a point of it is answered. [`NativeExecutor::finish`] drains once, checks that every
+    /// stream closed, and only then sets this flag and drains again, which is what lets a binary
+    /// node answer its result -- and a binary node beneath another one do the same in turn.
+    inputs_finished: bool,
+    /// Whether the caller ended the input.
+    ///
+    /// Until then a pull that finds nothing means nothing has settled yet. After it, the same pull
+    /// runs the next stage of the ending -- the truncation check, a binary node's computation, the
+    /// merge a collecting window owes -- and only a pull that finds every stage done closes the
+    /// nodes and returns their reservations.
+    ended: bool,
 }
 
 /// Whether the execution can still produce chunks.
@@ -2059,6 +2891,8 @@ impl NativeExecutor {
         Self {
             state,
             phase: Phase::Running,
+            inputs_finished: false,
+            ended: false,
         }
     }
 
@@ -2067,21 +2901,40 @@ impl NativeExecutor {
         &self.state
     }
 
-    /// Queues one raw source chunk.
+    /// Queues one raw source chunk at the tree's only input.
+    ///
+    /// A tree with a binary node reads two inputs, and a chunk queued at "the input" would be one
+    /// the caller cannot say the source of: such a tree is refused here rather than answered from a
+    /// source the caller did not name, and [`Self::push_raw_at`] is what names one.
     pub fn push_raw(&mut self, chunk: RawSeriesChunk) -> Result<()> {
-        self.push_source(NativeChunk::Raw(chunk))
+        self.push_source(None, NativeChunk::Raw(chunk))
     }
 
-    /// Queues one evaluated source chunk.
+    /// Queues one evaluated source chunk at the tree's only input.
     pub fn push_evaluated(&mut self, chunk: EvaluatedChunk) -> Result<()> {
-        self.push_source(NativeChunk::Evaluated(chunk))
+        self.push_source(None, NativeChunk::Evaluated(chunk))
+    }
+
+    /// Queues one raw source chunk at the input node at `path`.
+    ///
+    /// The path is the position the metrics and `EXPLAIN` name the node by, so a caller that reads
+    /// either can say which of the two inputs a chunk belongs to.
+    pub fn push_raw_at(&mut self, path: &NodePath, chunk: RawSeriesChunk) -> Result<()> {
+        self.push_source(Some(path), NativeChunk::Raw(chunk))
+    }
+
+    /// Queues one evaluated source chunk at the input node at `path`.
+    pub fn push_evaluated_at(&mut self, path: &NodePath, chunk: EvaluatedChunk) -> Result<()> {
+        self.push_source(Some(path), NativeChunk::Evaluated(chunk))
     }
 
     /// The next chunk the root produces, or `None` when nothing has settled yet.
     ///
-    /// Every node takes whole chunks from its input, so a caller that keeps pushing and pulling
-    /// materialises nothing beyond the chunk in hand -- except below a window that collects its
-    /// input, which holds that input until [`Self::finish`].
+    /// A window and a map take whole chunks from their input, so nothing beyond the chunk in hand
+    /// is materialised on their edge -- except below a window that collects its input, which holds
+    /// that input until [`Self::finish`]. A binary node is the other exception: it pairs two whole
+    /// vectors point by point, so it retains every chunk each operand hands over and reports `None`
+    /// until [`Self::finish`] ends the input, which is when it computes its result.
     ///
     /// A chunk's `is_last` says the series whose data it carries ended. It does not say its label
     /// set is finished: two source series whose labels were rewritten into one set are two pieces
@@ -2091,65 +2944,120 @@ impl NativeExecutor {
     /// at the root hands over pieces, and a caller that needs one series per label set merges them.
     pub fn next_chunk(&mut self) -> Result<Option<EvaluatedChunk>> {
         self.check_running()?;
-        // The root is the node the state was built from, which the pass puts first.
-        let result = self.pull(0).and_then(|chunk| match chunk {
-            Some(NativeChunk::Evaluated(chunk)) => Ok(Some(chunk)),
-            // Rejected when the state was built; kept as an error rather than a panic so an
-            // impossible tree cannot take the process down.
-            Some(NativeChunk::Raw(_)) => Err(DataFusionError::Execution(
-                "the native runtime produces evaluated chunks, but its root produced raw samples"
-                    .to_string(),
-            )),
-            None => Ok(None),
-        });
-        if let Err(error) = &result {
-            self.stop(error);
+        // The end of the input is walked here rather than in one call, so a chunk is handed over as
+        // soon as the tree settles it: the caller pulls the answer instead of receiving it as one
+        // collected value, and what it has not pulled yet stays charged to the node holding it.
+        loop {
+            // The root is the node the state was built from, which the pass puts first.
+            let pulled: Option<NativeChunk> = match self.pull(0) {
+                Ok(Some(NativeChunk::Evaluated(chunk))) => return Ok(Some(chunk)),
+                // Rejected when the state was built; kept as an error rather than a panic so an
+                // impossible tree cannot take the process down.
+                Ok(Some(NativeChunk::Raw(_))) => {
+                    let error = DataFusionError::Execution(
+                        "the native runtime produces evaluated chunks, but its root produced raw \
+                         samples"
+                            .to_string(),
+                    );
+                    self.stop(&error);
+                    return Err(error);
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    self.stop(&error);
+                    return Err(error);
+                }
+            };
+            let _ = pulled;
+            // Nothing has settled. While the caller is still pushing, that is a stall and the
+            // answer is simply not ready; once it has ended the input, each stage below runs on the
+            // first pull that finds the tree quiet, and the loop looks for what it produced.
+            if !self.ended {
+                return Ok(None);
+            }
+            if !self.inputs_finished {
+                // The source queues are empty and every node has consumed what it was given, so a
+                // series the caller never closed is still open here and nowhere else. It is
+                // refused before a binary node computes: half a vector is not a vector, so the
+                // kernel must not allocate a workspace to match one.
+                if let Err(error) = self.state.unclosed() {
+                    self.stop(&error);
+                    return Err(error);
+                }
+                self.inputs_finished = true;
+                continue;
+            }
+            // A window that collects its input answers only once its own input is finished, and
+            // what a binary node above it reads is that answer. Flushing the deepest ready window
+            // first is what keeps the two in order: the window produces, the pull that follows
+            // carries its output to whoever reads it, and only then can a binary node decide
+            // whether both of its operands are complete.
+            match self.flush_ready_merges() {
+                // A window answered: what it queued is pulled on the next turn, and that pull is
+                // also what carries its answer to a node above it.
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    self.stop(&error);
+                    return Err(error);
+                }
+            }
+            if self.any_merge_pending() {
+                // A window still holds collected input, so something below it has not finished:
+                // pulling again is what gives that node its turn.
+                continue;
+            }
+            // Every node has answered everything it can. Closing them is what hands back the
+            // reservations they were charged, so pulling to exhaustion leaves the pool as it found
+            // it.
+            return match self.state.close() {
+                Ok(()) => {
+                    self.phase = Phase::Finished;
+                    Ok(None)
+                }
+                Err(error) => {
+                    self.stop(&error);
+                    Err(error)
+                }
+            };
         }
-        result
     }
 
-    /// Ends the input: drains what has settled, merges what the windows that collect their input
-    /// hold, closes every node and releases every reservation.
+    /// Ends the input, which is what tells the tree that nothing more will be pushed.
     ///
-    /// Every series must have closed by now, in every tree: a window's evaluator reports the series
-    /// it is still holding, and a tree with no window has its input node report one it handed over
-    /// without the chunk that ends it. An input that ends mid-series is an error here rather than a
-    /// series the caller never sees close, and it is refused before any collected input is merged:
-    /// merging closes what it merges.
+    /// It hands nothing over: [`Self::next_chunk`] runs the ending stage by stage as the caller
+    /// pulls, so a chunk reaches the caller as soon as it settles and the chunks not pulled yet
+    /// stay charged to the node holding them. A caller that wants the whole answer at once calls
+    /// [`Self::finish`] instead.
+    pub fn end_of_input(&mut self) -> Result<()> {
+        if self.ended {
+            return Err(DataFusionError::Execution(
+                "the native execution already ended its input".to_string(),
+            ));
+        }
+        self.ended = true;
+        Ok(())
+    }
+
+    /// Ends the input and collects everything the tree answers.
     ///
-    /// The merge comes next, deepest window first, and what it hands up is drained as it is
-    /// produced. What the root hands over is therefore a piece stream: a chunk's `is_last` says the
-    /// source series it carries ended, and two of them can share one label set. A caller that needs
-    /// one series per label set from the root merges them with
-    /// [`crate::grid_series::merge_same_labelset`] as well, exactly as this runtime merges the input
-    /// of the windows it collects for.
+    /// It is [`Self::end_of_input`] followed by a drain, kept for callers that want the whole
+    /// answer in one value. A caller that would rather stream it calls `end_of_input` and then
+    /// pulls with [`Self::next_chunk`] until it returns `None`, which is also when the execution
+    /// closes and returns its reservations.
     pub fn finish(&mut self) -> Result<Vec<EvaluatedChunk>> {
+        self.end_of_input()?;
+        self.drain()
+    }
+
+    /// Pulls what has settled until nothing is left.
+    fn drain(&mut self) -> Result<Vec<EvaluatedChunk>> {
         let mut drained = Vec::new();
         loop {
             match self.next_chunk() {
                 Ok(Some(chunk)) => drained.push(chunk),
-                Ok(None) => break,
+                Ok(None) => return Ok(drained),
                 Err(error) => return Err(error),
-            }
-        }
-        // A source series that never ended is refused before anything is merged: the close a merge
-        // synthesises would make it look like one that did.
-        if let Some(error) = self.state.truncated() {
-            self.stop(&error);
-            return Err(error);
-        }
-        if let Err(error) = self.flush_merges(&mut drained) {
-            self.stop(&error);
-            return Err(error);
-        }
-        match self.state.close() {
-            Ok(()) => {
-                self.phase = Phase::Finished;
-                Ok(drained)
-            }
-            Err(error) => {
-                self.stop(&error);
-                Err(error)
             }
         }
     }
@@ -2158,30 +3066,80 @@ impl NativeExecutor {
     /// merged series.
     ///
     /// Deeper windows go first: a window above one of them collects the chunks the one below hands
-    /// up, so flushing the shallow one first would merge an input it has not received yet. The
-    /// queue of a flushed node is emptied by the root drain that follows each of its merged series,
-    /// so a chunk it produced never stands beside the fragments it was computed from.
-    fn flush_merges(&mut self, drained: &mut Vec<EvaluatedChunk>) -> Result<()> {
+    /// up, so flushing the shallow one first would merge an input it has not received yet. What a
+    /// flush queues is handed up by the caller's own pulls, which is why nothing here collects the
+    /// answer into a value of its own.
+    fn flush_ready_merges(&mut self) -> Result<bool> {
+        let mut flushed = false;
         for index in (0..self.state.runtimes.len()).rev() {
             // A window that collects its input is the one node holding a [`MergeInput`], and the
             // flush takes it: the same node is not visited twice.
             if self.state.runtimes[index].merge.is_none() {
                 continue;
             }
-            self.flush_merge(index, drained)?;
+            // Its input has to be finished before it is merged: a node below still holding collected
+            // input has not answered yet, and merging what it has not sent would answer a series
+            // from half of its contributions.
+            let Some(child) = self.state.nodes[index].input else {
+                continue;
+            };
+            if !self.settled(child) {
+                continue;
+            }
+            self.flush_merge(index)?;
+            flushed = true;
         }
-        Ok(())
+        Ok(flushed)
+    }
+
+    /// Whether any window still holds collected input that has not been merged.
+    fn any_merge_pending(&self) -> bool {
+        self.state
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.merge.is_some())
+    }
+
+    /// Whether the node at `index` has produced everything it ever will.
+    ///
+    /// A pull that finds nothing does not answer it: a collecting window reports nothing until it
+    /// is flushed, and a binary node reports nothing until both nodes it reads from are finished.
+    /// Each node therefore answers from its own state and from its children's, which is what keeps
+    /// a binary node from computing on an operand a window below it has not handed over yet.
+    fn settled(&self, index: usize) -> bool {
+        let runtime = &self.state.runtimes[index];
+        if !runtime.queued.is_empty() || runtime.merge.is_some() {
+            return false;
+        }
+        match self.state.nodes[index].tag {
+            NodeTag::Input => true,
+            NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
+                .input
+                .is_none_or(|child| self.settled(child)),
+            NodeTag::Binary => {
+                runtime
+                    .binary
+                    .as_ref()
+                    .is_some_and(|binary| binary.computed)
+                    && self.state.nodes[index]
+                        .input
+                        .is_none_or(|child| self.settled(child))
+                    && self
+                        .state
+                        .right_input(index)
+                        .is_ok_and(|right| self.settled(right))
+            }
+        }
     }
 
     /// Merges the collected input of the node at `index` and evaluates it, one merged series at a
     /// time.
     ///
     /// Each merged series is a whole series: it is handed to the evaluator as one closing series, so
-    /// the window reports on it once, and its chunk is queued and drained up the tree before the
-    /// next one is evaluated. That is what keeps the reservation honest: the fragments and the
-    /// merge's workspace stay charged while the flush runs, and the queue of a node never holds an
-    /// earlier series beside the fragments of a later one.
-    fn flush_merge(&mut self, index: usize, drained: &mut Vec<EvaluatedChunk>) -> Result<()> {
+    /// the window reports on it once, and its chunk waits in the node's queue at its own estimate.
+    /// The fragments and the merge's workspace stay charged for the whole flush and go back when it
+    /// ends; the queued answers stay charged until the caller pulls them.
+    fn flush_merge(&mut self, index: usize) -> Result<()> {
         let path = self.state.paths[index].clone();
         let Some(merge) = self.state.runtimes[index].merge.take() else {
             return Ok(());
@@ -2189,7 +3147,7 @@ impl NativeExecutor {
         if merge.fragments.is_empty() {
             // Nothing arrived, so there is nothing to merge and nothing to answer: the window's
             // evaluator never read a series and the charge goes back.
-            return self.settle_merge(index);
+            return self.settle_merge(index, merge.bytes);
         }
         // The workspace the merge allocates is charged before it runs, from the rows, segments and
         // fields of the fragments as they were collected.
@@ -2232,37 +3190,20 @@ impl NativeExecutor {
                     .resize(retained.saturating_add(emitted).saturating_add(held))?;
                 runtime.enqueue_output(output)?;
             }
-            self.drain_root(drained)?;
         }
-        self.settle_merge(index)
+        // The fragments and the merge's workspace go back, and whatever the flush produced stays
+        // charged in the node's queue until the caller pulls it.
+        self.settle_merge(index, held)
     }
 
-    /// Sets the reservation of the node at `index` to what it holds once its flush is over.
-    fn settle_merge(&mut self, index: usize) -> Result<()> {
-        let runtime = &mut self.state.runtimes[index];
-        let retained = runtime
-            .window
-            .as_ref()
-            .map_or(0, RangeEvaluator::retained_bytes);
-        let emitted = runtime.emitted_bytes();
-        runtime.buffer.resize(retained.saturating_add(emitted))
-    }
-
-    /// Hands the root's outputs to `drained` until the tree has nothing settled.
-    fn drain_root(&mut self, drained: &mut Vec<EvaluatedChunk>) -> Result<()> {
-        loop {
-            match self.pull(0)? {
-                Some(NativeChunk::Evaluated(chunk)) => drained.push(chunk),
-                Some(NativeChunk::Raw(_)) => {
-                    return Err(DataFusionError::Execution(
-                        "the native runtime produces evaluated chunks, but its root produced raw \
-                         samples"
-                            .to_string(),
-                    ));
-                }
-                None => return Ok(()),
-            }
-        }
+    /// Gives back the `give_back` bytes the flush took, leaving the rest of the node's
+    /// reservation alone.
+    ///
+    /// It must not resize to a figure computed here: the chunks the flush queued are still charged
+    /// to this node, and they stay charged until the pull that hands each of them up returns its
+    /// estimate.
+    fn settle_merge(&mut self, index: usize, give_back: usize) -> Result<()> {
+        self.state.runtimes[index].buffer.shrink(give_back)
     }
 
     /// The next chunk of the node at `index`.
@@ -2316,6 +3257,32 @@ impl NativeExecutor {
                     }
                 }
             }
+            NodeTag::Binary => {
+                // The spec names the left operand, the node the build pass reaches next; the right
+                // one is the input a spec of two fields would have had to carry.
+                let left = input.ok_or_else(|| missing_input(tag))?;
+                let right = self.state.right_input(index)?;
+                // Both operands are read to the end of what they hand over: before the input ends a
+                // binary node only retains the chunks, because a pair is not decided until both
+                // sides are whole, and after it ends this is the drain that empties the two.
+                for (side, child) in [left, right].into_iter().enumerate() {
+                    while let Some(chunk) = self.pull(child)? {
+                        let path = &self.state.paths[index];
+                        self.state.runtimes[index].retain_binary(path, side, chunk)?;
+                    }
+                }
+                // Nothing has settled for a point that has an operand still arriving, and an
+                // operand below a collecting window has not arrived until that window is flushed.
+                if !self.inputs_finished || !self.settled(left) || !self.settled(right) {
+                    return Ok(None);
+                }
+                let path = &self.state.paths[index];
+                let runtime = &mut self.state.runtimes[index];
+                runtime.compute_binary(path)?;
+                // A result holds one value per field, and a field may hold none where another
+                // does, so its values are counted rather than read as its positions.
+                runtime.pop_queued(evaluated_values)
+            }
         }
     }
 
@@ -2346,29 +3313,70 @@ impl NativeExecutor {
         runtime.instant(path, chunk)
     }
 
-    /// Queues a source chunk at the tree's input node.
-    fn push_source(&mut self, chunk: NativeChunk) -> Result<()> {
+    /// Queues a source chunk at the input node `path` names, or at the tree's only one.
+    fn push_source(&mut self, path: Option<&NodePath>, chunk: NativeChunk) -> Result<()> {
         self.check_running()?;
-        let evaluated = matches!(chunk, NativeChunk::Evaluated(_));
-        if evaluated != self.state.source_is_evaluated {
-            let error = DataFusionError::Execution(format!(
-                "the native source is bound to {}, but an {} chunk was queued at it",
-                if self.state.source_is_evaluated {
-                    "an evaluated series"
-                } else {
-                    "raw samples"
-                },
-                if evaluated { "evaluated" } else { "raw" },
-            ));
-            self.stop(&error);
-            return Err(error);
-        }
-        let source = self.state.source;
-        let result = self.state.runtimes[source].enqueue(chunk);
+        let result = self.queue_source(path, chunk);
         if let Err(error) = &result {
             self.stop(error);
         }
         result
+    }
+
+    /// Queues a source chunk at one input node, checking it against that input's binding.
+    fn queue_source(&mut self, path: Option<&NodePath>, chunk: NativeChunk) -> Result<()> {
+        let source = self.source_index(path)?;
+        let at = &self.state.paths[source];
+        let Some(binding) = self.state.runtimes[source].source_schema.as_ref() else {
+            return Err(DataFusionError::Execution(format!(
+                "the input node at {at} does not produce samples"
+            )));
+        };
+        let bound = binding.eval_grid.is_some();
+        let evaluated = matches!(chunk, NativeChunk::Evaluated(_));
+        if evaluated != bound {
+            return Err(DataFusionError::Execution(format!(
+                "the native source at {at} is bound to {}, but {} chunk was queued at it",
+                if bound {
+                    "an evaluated series"
+                } else {
+                    "raw samples"
+                },
+                if evaluated { "an evaluated" } else { "a raw" },
+            )));
+        }
+        self.state.runtimes[source].enqueue(chunk)
+    }
+
+    /// The input node at `path`, or the tree's only input when the caller named none.
+    ///
+    /// A tree with a binary node has two inputs, and a chunk queued at "the input" of such a tree
+    /// cannot be assigned to either of them: the caller's chunks would be matched as the wrong
+    /// operand, so the ambiguity is refused instead of answered from the first input found.
+    fn source_index(&self, path: Option<&NodePath>) -> Result<usize> {
+        let Some(path) = path else {
+            return match self.state.sources.as_slice() {
+                [only] => Ok(*only),
+                _ => Err(DataFusionError::Execution(format!(
+                    "the native execution has {} inputs, so a queued chunk has to name the input it \
+                     belongs to",
+                    self.state.sources.len()
+                ))),
+            };
+        };
+        let index = *self.state.by_path.get(path).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "the native tree has no node at {path} to queue a chunk at"
+            ))
+        })?;
+        let tag = self.state.nodes[index].tag;
+        if tag != NodeTag::Input {
+            return Err(DataFusionError::Execution(format!(
+                "the node at {path} is a {} node, and only an input node takes queued chunks",
+                tag.describe()
+            )));
+        }
+        Ok(index)
     }
 
     /// Refuses to continue an execution that finished or stopped.
@@ -2460,6 +3468,18 @@ fn valid_values(chunk: &EvaluatedChunk) -> usize {
         .sum()
 }
 
+/// The values a chunk a binary node hands over holds.
+///
+/// A binary result is an evaluated chunk, so this is [`valid_values`]: one value per field sample
+/// that holds one. A raw chunk cannot reach a binary node's queue, and is answered as its positions
+/// so an impossible queue cannot under-count.
+fn evaluated_values(chunk: &NativeChunk) -> usize {
+    match chunk {
+        NativeChunk::Evaluated(chunk) => valid_values(chunk),
+        NativeChunk::Raw(chunk) => chunk.time.len(),
+    }
+}
+
 /// The rejection of a node kind this runtime does not execute yet.
 ///
 /// It names the kind and the node's position: the position is what the metrics and `EXPLAIN` call
@@ -2548,6 +3568,24 @@ fn truncated_input(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!(
         "the input at {path} ended before the last chunk of a series: the last chunk it handed over \
          did not say `is_last`"
+    ))
+}
+
+/// The error for a node asked to compute without the runtime its kind holds.
+fn no_binary(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!("the node at {path} holds no binary operation"))
+}
+
+/// The error for a reservation the platform cannot express.
+///
+/// The binary node reserves its retained operands and the kernel's live workspace together, and
+/// the kernel reports the second as a size of its own. A sum of the two that does not fit an
+/// address space cannot be reserved, so the execution is refused rather than run with a figure
+/// that wrapped.
+fn reservation_overflow(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the operands and the kernel's workspace of the binary node at {path} do not fit one \
+         address space: the bytes it would reserve overflow"
     ))
 }
 
