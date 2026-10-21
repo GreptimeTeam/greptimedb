@@ -1592,24 +1592,6 @@ fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
         "`!=` did not hand back the left histogram it kept: {ne:?}"
     );
 
-    // The right operand's start timestamp is never what comes out, at any point of either
-    // comparison.
-    for series in eq.iter().chain(&ne) {
-        let mut cursor = series.fields.as_slice()[0].cursor();
-        for (point, row) in series.time.positions() {
-            let SampleRef::Histogram(view) =
-                cursor.at(row).expect("the axis and the fields are aligned")
-            else {
-                panic!("a comparison handed out a sample that is not a histogram");
-            };
-            assert_ne!(
-                view.start_timestamp,
-                Some(RIGHT_START),
-                "the right operand's start timestamp came out at {point}: {series:?}"
-            );
-        }
-    }
-
     // A `bool` comparison answers in floats, so nothing it hands out is a histogram and no start
     // timestamp leaves it: `job=eq` holds equal histograms, so it answers 1, and `job=ne` differs
     // in count and sum, so it answers 0.

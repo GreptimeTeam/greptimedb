@@ -2600,8 +2600,8 @@ fn an_interleaved_input_is_refused_without_a_window() {
 /// never reaches [`NativeExecutionState::try_new`]. The ordering check there stays for the shape
 /// the binding cannot see through: it only looks at a window's own input, so a window over a map
 /// over the source still reads an interleaved stream, which is
-/// [`a_window_over_an_interleaved_input_is_rejected`]. The shape with a map between the input and
-/// the selection is [`an_interleaved_input_is_refused_under_a_map_over_a_selection`].
+/// [`a_window_over_an_interleaved_input_is_rejected`]. The shape with a map above the selection is
+/// [`an_interleaved_input_is_refused_under_a_map_over_a_selection`].
 #[test]
 fn an_interleaved_input_is_refused_under_a_selection() {
     let out_grid = grid(0, 60_000, 2);
@@ -2623,13 +2623,15 @@ fn an_interleaved_input_is_refused_under_a_selection() {
     );
 }
 
-/// The same refusal with a map between the input and the selection.
+/// The same refusal with a map above the selection.
 ///
-/// A map passes chunks through in the order they arrive, so the selection still reads an
-/// interleaved stream even though the node below it is a map: the ordering is a property of the
-/// input, and the binding records it there rather than at the node that reads it. `validate`
-/// descends through the map to the selection, whose own arm then checks the input it reads, so the
-/// tree is refused at the same point as [`an_interleaved_input_is_refused_under_a_selection`].
+/// The tree here is `Input -> Instant -> Map`: the map sits above the selection, and the selection
+/// reads the interleaved input directly. A map between the input and the selection is not a tree
+/// this compiler can build at all -- a `Map` produces an evaluated vector while an instant
+/// selection requires raw samples, and the plan's `Instant` arm rejects evaluated values -- so what
+/// this test pins is the recursion: `validate` descends through the outer map to the selection
+/// below it, whose own arm then refuses the input it reads, and the tree is refused at the same
+/// point as [`an_interleaved_input_is_refused_under_a_selection`].
 #[test]
 fn an_interleaved_input_is_refused_under_a_map_over_a_selection() {
     let out_grid = grid(0, 60_000, 2);

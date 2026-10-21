@@ -987,9 +987,9 @@ impl InstantRuntime {
     /// refuses the gather. The clipping below is [`select_instants`]' own, repeated rather than
     /// approximated: an estimate that disagrees with the kernel is a bug here rather than a
     /// conservative bound. It is the kernel's own candidate count -- the one it sizes its arrays
-    /// with and refuses against a point limit -- so it bounds the rows it can report even though a
-    /// candidate at the lookback edge itself selects nothing. Both ends come from chunks the node
-    /// already holds, so the count reads two timestamps rather than the rows.
+    /// with -- so it bounds the rows it can report even though a candidate at the lookback edge
+    /// itself selects nothing. Both ends come from chunks the node already holds, so the count
+    /// reads two timestamps rather than the rows.
     fn selected_points(&self, closing: &RawSeriesChunk) -> usize {
         let spec = self.selection.output_grid.spec();
         // The selection refuses these itself, before it can decide anything.
