@@ -81,3 +81,5 @@ docs/specs/
 
 # Claude Code personal/local overrides (keep shared .claude/ content tracked)
 .claude/*.local.* 
+
+output/
