@@ -20,7 +20,8 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::map::MathOp;
 use promql::native::plan::{
-    BoundInstant, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
+    NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp};
@@ -184,6 +185,14 @@ fn scalar_grid(node: &NativeNode) -> (i64, i64, u64) {
     };
     let spec = grid.spec();
     (spec.start_ms, spec.step_ms, spec.len)
+}
+
+/// The input and the operation of an `Aggregate` node.
+fn aggregate_parts(node: &NativeNode) -> (&NativeNode, &BoundAggregate) {
+    let NativeExpr::Aggregate { input, op } = &node.expr else {
+        panic!("the node is not an aggregate: {:?}", node.expr);
+    };
+    (input, op)
 }
 
 /// The grid spec a node's evaluated output carries, as `(start_ms, step_ms, len)`.
@@ -888,7 +897,18 @@ fn the_display_of_a_compiled_tree_is_the_tree() {
 /// a line rather than only in an assertion over the tree.
 #[test]
 fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
-    let cases: [(&str, &[&str]); 2] = [
+    let cases: [(&str, &[&str]); 3] = [
+        (
+            "sum by(job)(rate(x[5m]) * 100)",
+            &[
+                "NativeTree",
+                "  root Aggregate sum by [job] complete",
+                "    input Binary * ignoring [] one-to-one",
+                "      left Window rate [300000ms] offset 0 anchor - on grid 0/5000x21",
+                "        input Input raw samples",
+                "      right Scalar 100",
+            ],
+        ),
         (
             "-x",
             &[
@@ -1483,7 +1503,7 @@ fn an_operation_between_two_vectors_is_refused_for_the_missing_selector_identity
         "a + b",
         "a > b",
         "rate(a[5m]) * rate(b[5m])",
-        "abs(a) + abs(b)",
+        "sum(a) + sum(b)",
     ] {
         let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .expect_err(&format!("`{query}` compiled, and it should not have"));
@@ -1604,6 +1624,204 @@ fn a_vector_matching_modifier_over_a_constant_is_refused() {
     }
 }
 
+/// The labels of a `by` or `without` modifier, in the order they were written.
+fn grouping_labels(op: &BoundAggregate) -> Vec<String> {
+    let labels = match &op.group {
+        Grouping::By(labels) | Grouping::Without(labels) => labels,
+    };
+    labels.iter().map(|label| label.to_string()).collect()
+}
+
+/// Asserts that `op`'s grouping names exactly `expected`, in the order it was written.
+fn assert_grouping_labels(op: &BoundAggregate, expected: &[&str]) {
+    let expected: Vec<String> = expected.iter().map(|label| label.to_string()).collect();
+    assert_eq!(
+        grouping_labels(op),
+        expected,
+        "the grouping names the wrong labels"
+    );
+}
+
+/// A bare `sum(x)` groups by no label at all, which is how Prometheus reads an aggregate with no
+/// modifier: every label is dropped, `__name__` included, so every series of the input falls into one
+/// group. The tree records that as `By` with no label rather than as `Without` of everything, which
+/// is why the modifier's shape is asserted and not only its label list.
+#[test]
+fn a_bare_sum_groups_by_no_label() {
+    let tree = compile(
+        &eval_stmt("sum(x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`sum(x)` was refused: {error}"));
+
+    let (input, op) = aggregate_parts(tree.root());
+    assert_eq!(op.kind, AggregateKind::Sum);
+    assert_eq!(op.stage, AggregateStage::Complete);
+    let Grouping::By(labels) = &op.group else {
+        panic!("a bare `sum` grouped without labels: {:?}", op.group);
+    };
+    assert!(labels.is_empty(), "a bare `sum` kept the labels {labels:?}");
+
+    // A complete aggregate folds each group's values and reports them on its input's grid, one value
+    // per input field, so its layout and grid are its input's.
+    assert_eq!(evaluated(tree.root()).fields.len(), 1);
+    assert_eq!(grid_of(tree.root()), (0, 5_000, 21));
+    assert_eq!(
+        grid_of(input),
+        (0, 5_000, 21),
+        "the aggregate's input is not on the statement's grid"
+    );
+}
+
+/// `by` keeps the labels it names and drops the rest, and the tree records them in the order they
+/// were written: a grouping is a set, so both orders group the same way, but a display that reordered
+/// them would not be the query.
+#[test]
+fn a_sum_by_keeps_the_labels_it_names() {
+    let cases = [
+        ("sum by(job)(x)", &["job"][..]),
+        ("sum by(job, instance)(x)", &["job", "instance"][..]),
+        // The modifier is accepted after the call body as well, and binds the same way.
+        ("sum(x) by (job)", &["job"][..]),
+    ];
+
+    for (query, expected) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = aggregate_parts(tree.root());
+        assert!(
+            matches!(&op.group, Grouping::By(_)),
+            "`{query}` did not group by labels: {:?}",
+            op.group
+        );
+        assert_grouping_labels(op, expected);
+    }
+}
+
+/// `without` keeps every label it does not name, which no list of kept labels can spell: `without`
+/// also drops `__name__`, so a compiler that turned it into a `by` of the surviving labels would
+/// group a query by labels it meant to remove. The tree records the labels to drop.
+#[test]
+fn a_sum_without_records_the_labels_to_drop() {
+    let cases = [
+        ("sum without(instance)(x)", &["instance"][..]),
+        ("sum without(instance, job)(x)", &["instance", "job"][..]),
+        ("sum(x) without (instance)", &["instance"][..]),
+    ];
+
+    for (query, expected) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = aggregate_parts(tree.root());
+        assert!(
+            matches!(&op.group, Grouping::Without(_)),
+            "`{query}` did not group without labels: {:?}",
+            op.group
+        );
+        assert_grouping_labels(op, expected);
+    }
+}
+
+/// An aggregate is an expression like any other, so it nests: `abs(sum(x))` is a map over an
+/// aggregate, and `sum by(job)(rate(x[5m]) * 100)` is an aggregate over a multiplication over a
+/// window. The assertions go all the way down, because a compiler that stopped at the top node would
+/// still compile both queries.
+#[test]
+fn an_aggregate_nests_wherever_a_value_can() {
+    let tree = compile(
+        &eval_stmt("abs(sum(x))"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`abs(sum(x))` was refused: {error}"));
+    assert!(
+        matches!(map_op(tree.root()), MathOp::Abs),
+        "`abs(sum(x))` is not an abs over the sum: {:?}",
+        map_parts(tree.root()).1.ops
+    );
+    let (aggregate, _) = map_parts(tree.root());
+    let (_, sum) = aggregate_parts(aggregate);
+    assert_eq!(sum.kind, AggregateKind::Sum);
+
+    let tree = compile(
+        &eval_stmt("sum by(job)(rate(x[5m]) * 100)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`sum by(job)(rate(x[5m]) * 100)` was refused: {error}"));
+    let (input, op) = aggregate_parts(tree.root());
+    assert_grouping_labels(op, &["job"]);
+    let (left, right, matching) = binary_parts(input);
+    assert_eq!(matching.op, BinaryOp::Mul);
+    assert_eq!(constant(right), Some(100.0), "the factor was not bound");
+    let NativeExpr::Window { op: window, .. } = &left.expr else {
+        panic!(
+            "the multiplication's left operand is not a window: {:?}",
+            left.expr
+        );
+    };
+    assert_eq!(window.function, RangeFunction::Rate);
+    assert_eq!(window.window.range_ms, 300_000);
+}
+
+/// `sum without(instance)(abs(x))` composes a grouping with a pointwise function, and the grouping is
+/// the one the query wrote rather than the complement of it.
+#[test]
+fn a_grouping_composes_with_a_math_function() {
+    let tree = compile(
+        &eval_stmt("sum without(instance)(abs(x))"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`sum without(instance)(abs(x))` was refused: {error}"));
+
+    let (input, op) = aggregate_parts(tree.root());
+    assert!(
+        matches!(&op.group, Grouping::Without(_)),
+        "the grouping became {:?}",
+        op.group
+    );
+    assert_grouping_labels(op, &["instance"]);
+    assert!(
+        matches!(map_op(input), MathOp::Abs),
+        "`abs(x)` is not an abs over the selector: {:?}",
+        map_parts(input).1.ops
+    );
+    let (instant, _) = map_parts(input);
+    let NativeExpr::Instant { .. } = &instant.expr else {
+        panic!("the map's input is not the selector: {:?}", instant.expr);
+    };
+}
+
+/// An aggregate with no kernel here is refused by name, rather than compiled into the one aggregate
+/// that does have one: `avg(x)` and `sum(x)` are different answers, so folding one into the other
+/// would compile a query into something it did not ask for.
+#[test]
+fn an_aggregate_with_no_kernel_is_refused_by_name() {
+    for (query, name) in [
+        ("avg(x)", "avg"),
+        ("count(x)", "count"),
+        ("min(x)", "min"),
+        ("max(x)", "max"),
+        ("stddev(x)", "stddev"),
+        ("topk(3, x)", "topk"),
+        ("count_values(\"v\", x)", "count_values"),
+    ] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("the aggregate `{name}` in")),
+            "`{query}` did not name the aggregate it found: {message}"
+        );
+    }
+}
+
 /// The shared acceptance queries of this batch, compiled whole: each one combines the shapes the
 /// batch added, so a compiler that bound any of them wrongly would fail here rather than in a
 /// narrower test.
@@ -1616,6 +1834,10 @@ fn the_batch_acceptance_queries_compile() {
         "x > 0",
         "0 < x",
         "x > bool 0",
+        // Window, scalar arithmetic and aggregation in one tree.
+        "sum by(job)(rate(x[5m]) * 100)",
+        // Grouping over a pointwise function.
+        "sum without(instance)(abs(x))",
         // A negation.
         "-x",
     ];
@@ -1623,8 +1845,8 @@ fn the_batch_acceptance_queries_compile() {
     for query in cases {
         let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
-        // Every tree the compiler accepts reports a grid, whether it ends in a comparison or a
-        // scalar broadcast.
+        // Every tree the compiler accepts reports a grid, whether it ends in an aggregate, a
+        // comparison or a scalar broadcast.
         assert_eq!(
             grid_of(tree.root()),
             (0, 5_000, 21),
