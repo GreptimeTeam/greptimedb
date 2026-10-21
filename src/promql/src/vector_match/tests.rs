@@ -3131,7 +3131,6 @@ fn sparse_wide_results_are_charged_their_index_columns() {
     );
 }
 
-
 /// A comparison filters, so the histogram it keeps is the left operand's, payload included.
 ///
 /// A non-`bool` `==` or `!=` between two histograms keeps the left sample where the comparison
