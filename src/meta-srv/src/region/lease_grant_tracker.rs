@@ -26,8 +26,8 @@ pub type LeaseGrantTrackerRef = Arc<LeaseGrantTracker>;
 ///
 /// It only holds the grants since this metasrv became the leader. For the grants it misses, it
 /// assumes that a former leader stops granting within [`META_LEASE_SECS`] after that, as its
-/// election lease has expired by then. This is not enforced: a former leader that stalls before
-/// it notices the loss of its leadership can grant later.
+/// election lease has expired by then. The election backends do not enforce this: a former
+/// leader that stalls before it notices the loss of its leadership can grant later.
 #[derive(Debug)]
 pub struct LeaseGrantTracker {
     inner: RwLock<LeaseGrants>,

@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests that a region acknowledges only the writes that reach the WAL within its leader lease.
+//! Tests that a region acknowledges only writes whose WAL append completed within its leader
+//! lease.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

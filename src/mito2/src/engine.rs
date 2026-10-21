@@ -327,7 +327,7 @@ impl MitoEngine {
     }
 
     /// Requires regions to hold a valid lease from the metasrv when they take a write and when
-    /// the write reaches the WAL.
+    /// its WAL append completes.
     ///
     /// A datanode the metasrv controls calls it before it serves requests.
     pub fn require_write_lease(&self) {

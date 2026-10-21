@@ -272,7 +272,8 @@ impl DowngradeLeaderRegion {
     ///
     /// They expire one lease after this metasrv last granted them. A former metasrv leader is
     /// assumed to grant none later than [`META_LEASE_SECS`](common_meta::distributed_time_constants::META_LEASE_SECS)
-    /// after this metasrv became the leader, as `LeaseGrantTracker` describes.
+    /// after this metasrv became the leader, which the election backends do not enforce (see
+    /// `LeaseGrantTracker`).
     fn update_leader_region_lease_deadline(&self, ctx: &mut Context) {
         let leader = &ctx.persistent_ctx.from_peer;
         let region_lease = default_distributed_time_constants().region_lease;

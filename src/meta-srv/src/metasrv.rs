@@ -540,7 +540,8 @@ pub struct MetaStateHandler {
 impl MetaStateHandler {
     pub async fn on_leader_start(&self) {
         // Before any migration starts: grants of the previous terms are forgotten, and former
-        // leaders are assumed to stop granting within `META_LEASE_SECS` after this instant.
+        // leaders are assumed to stop granting within `META_LEASE_SECS` after this instant,
+        // which the election backends do not enforce.
         self.lease_grant_tracker.reset();
         self.state.write().unwrap().next_state(become_leader(false));
 
