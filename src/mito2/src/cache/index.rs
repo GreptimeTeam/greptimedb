@@ -270,23 +270,6 @@ where
     }
 }
 
-/// Finds a typed shared error through the range-reader I/O wrappers.
-fn find_shared_page_source<E: std::error::Error + Send + Sync + 'static>(
-    mut error: &io::Error,
-) -> Option<Arc<E>> {
-    loop {
-        let source = error.get_ref()?;
-        if let Some(source) = source.downcast_ref::<Arc<E>>() {
-            return Some(source.clone());
-        }
-        if let Some(nested) = source.downcast_ref::<Arc<io::Error>>() {
-            error = nested;
-        } else {
-            error = source.downcast_ref::<io::Error>()?;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use tokio::sync::Notify;
@@ -534,7 +517,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        let retained = find_shared_page_source::<Error>(&error).unwrap();
+        let retained = crate::cache::find_shared_page_source::<Error>(&error).unwrap();
         assert_eq!(
             retained.status_code(),
             common_error::status_code::StatusCode::InvalidArguments

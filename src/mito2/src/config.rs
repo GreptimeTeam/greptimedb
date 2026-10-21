@@ -46,8 +46,6 @@ const PREFILTER_RESULT_CACHE_SIZE_FACTOR: u64 = 32;
 const INDEX_METADATA_CACHE_SIZE_FACTOR: u64 = 32;
 /// Use `1/MEM_CACHE_SIZE_FACTOR` of OS memory size as mem cache size in default mode
 const MEM_CACHE_SIZE_FACTOR: u64 = 16;
-/// Use `1/PAGE_CACHE_SIZE_FACTOR` of OS memory size as page cache size in default mode
-const PAGE_CACHE_SIZE_FACTOR: u64 = 8;
 /// Use `1/INDEX_CREATE_MEM_THRESHOLD_FACTOR` of OS memory size as mem threshold for creating index
 const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
 
@@ -68,7 +66,7 @@ pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 /// Before using the config, call [`MitoConfig::sanitize()`] to validate and normalize it.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(default)]
+#[serde(remote = "Self", default)]
 pub struct MitoConfig {
     // Worker configs:
     /// Number of region workers (default: 1/2 of cpu cores).
@@ -148,8 +146,8 @@ pub struct MitoConfig {
     pub sst_meta_cache_size: ReadableSize,
     /// Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
     pub vector_cache_size: ReadableSize,
-    /// Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
-    pub page_cache_size: ReadableSize,
+    /// In-memory Parquet byte-page cache configuration.
+    pub parquet_page: ParquetPageConfig,
     /// Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
     pub selector_result_cache_size: ReadableSize,
     /// Cache size for flat range scan results. Setting it to 0 to disable the cache.
@@ -225,6 +223,77 @@ pub struct MitoConfig {
     pub gc: GcConfig,
 }
 
+/// In-memory cache of fixed byte blocks from immutable Parquet files.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct ParquetPageConfig {
+    /// Total cache capacity. Zero disables the cache; defaults to 512 MiB.
+    // Omit the default so a legacy environment key does not conflict with a
+    // canonical value injected by the layered loader's serialized defaults.
+    #[serde(skip_serializing_if = "ParquetPageConfig::is_default_content_cache_size")]
+    pub content_cache_size: ReadableSize,
+    /// Cache byte-block size, independent of encoded Parquet data pages.
+    pub content_cache_page_size: ReadableSize,
+}
+
+impl ParquetPageConfig {
+    fn is_default_content_cache_size(value: &ReadableSize) -> bool {
+        *value == ReadableSize::mb(512)
+    }
+}
+
+impl Default for ParquetPageConfig {
+    fn default() -> Self {
+        Self {
+            content_cache_size: ReadableSize::mb(512),
+            content_cache_page_size: ReadableSize(crate::cache::parquet_page::PAGE_SIZE),
+        }
+    }
+}
+
+impl Serialize for MitoConfig {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        MitoConfig::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MitoConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // The remote derive provides the ordinary field deserializer without
+        // duplicating MitoConfig. Normalize the legacy name before defaults are applied.
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(fields) = value.as_object_mut()
+            && let Some(legacy) = fields.remove("page_cache_size")
+        {
+            let legacy_size: ReadableSize =
+                serde_json::from_value(legacy.clone()).map_err(serde::de::Error::custom)?;
+            let page = fields
+                .entry("parquet_page")
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
+            let page = page.as_object_mut().ok_or_else(|| {
+                serde::de::Error::custom("parquet_page must be a configuration table")
+            })?;
+            if let Some(capacity) = page.get("content_cache_size") {
+                let capacity: ReadableSize =
+                    serde_json::from_value(capacity.clone()).map_err(serde::de::Error::custom)?;
+                if capacity != legacy_size {
+                    return Err(serde::de::Error::custom(
+                        "page_cache_size conflicts with parquet_page.content_cache_size",
+                    ));
+                }
+            } else {
+                page.insert("content_cache_size".to_string(), legacy);
+            }
+        }
+        MitoConfig::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl Default for MitoConfig {
     fn default() -> Self {
         let mut mito_config = MitoConfig {
@@ -253,7 +322,7 @@ impl Default for MitoConfig {
             default_region_write_buffer_size: ReadableSize::mb(0),
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
-            page_cache_size: ReadableSize::mb(512),
+            parquet_page: ParquetPageConfig::default(),
             selector_result_cache_size: ReadableSize::mb(512),
             range_result_cache_size: ReadableSize::mb(512),
             prefilter_result_cache_size: ReadableSize::mb(128),
@@ -297,6 +366,18 @@ impl MitoConfig {
     ///
     /// Returns an error if there is a configuration that unable to sanitize.
     pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
+        snafu::ensure!(
+            (1..=crate::cache::parquet_page::MAX_PAGE_SIZE)
+                .contains(&self.parquet_page.content_cache_page_size.as_bytes()),
+            crate::error::InvalidConfigSnafu {
+                reason: format!(
+                    "parquet_page.content_cache_page_size {} is outside 1..={} bytes",
+                    self.parquet_page.content_cache_page_size.as_bytes(),
+                    crate::cache::parquet_page::MAX_PAGE_SIZE
+                )
+            }
+        );
+
         if matches!(
             self.scan_memory_on_exhausted,
             OnExhaustedPolicy::Wait { .. }
@@ -412,13 +493,11 @@ impl MitoConfig {
         );
         // shouldn't be greater than 512MB in default mode.
         let mem_cache_size = cmp::min(sys_memory / MEM_CACHE_SIZE_FACTOR, ReadableSize::mb(512));
-        let page_cache_size = sys_memory / PAGE_CACHE_SIZE_FACTOR;
 
         self.global_write_buffer_size = global_write_buffer_size;
         self.global_write_buffer_reject_size = global_write_buffer_reject_size;
         self.sst_meta_cache_size = sst_meta_cache_size;
         self.vector_cache_size = mem_cache_size;
-        self.page_cache_size = page_cache_size;
         self.selector_result_cache_size = mem_cache_size;
         self.range_result_cache_size = mem_cache_size;
         // Use a smaller cache size because prefilter result usually should be small.
@@ -446,6 +525,105 @@ impl MitoConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parquet_page_capacity_compatibility() {
+        for (input, expected) in [
+            ("", ReadableSize::mb(512)),
+            ("page_cache_size = '0B'", ReadableSize(0)),
+            ("page_cache_size = '128MiB'", ReadableSize::mb(128)),
+            (
+                "[parquet_page]\ncontent_cache_size = '256MiB'",
+                ReadableSize::mb(256),
+            ),
+            (
+                "page_cache_size = '1024MiB'\n[parquet_page]\ncontent_cache_size = '1GiB'",
+                ReadableSize::gb(1),
+            ),
+            (
+                "page_cache_size = '0B'\n[parquet_page]\ncontent_cache_page_size = '37B'",
+                ReadableSize(0),
+            ),
+        ] {
+            let config: MitoConfig = toml::from_str(input).unwrap();
+            assert_eq!(config.parquet_page.content_cache_size, expected);
+            let serialized = toml::to_string(&config).unwrap();
+            assert!(
+                !serialized
+                    .lines()
+                    .any(|line| line.starts_with("page_cache_size ="))
+            );
+            assert!(serialized.contains("[parquet_page]"));
+            assert_eq!(toml::from_str::<MitoConfig>(&serialized).unwrap(), config);
+            let json = serde_json::to_value(&config).unwrap();
+            assert!(json.get("page_cache_size").is_none());
+            assert_eq!(serde_json::from_value::<MitoConfig>(json).unwrap(), config);
+        }
+        for input in [
+            "page_cache_size = '0B'\n[parquet_page]\ncontent_cache_size = '1GiB'",
+            "page_cache_size = 'invalid'",
+            "page_cache_size = '1GiB'\nparquet_page = 1",
+        ] {
+            assert!(toml::from_str::<MitoConfig>(input).is_err(), "{input}");
+        }
+        let error = toml::from_str::<MitoConfig>(
+            "page_cache_size = '0B'\n[parquet_page]\ncontent_cache_size = '1GiB'",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("page_cache_size conflicts with parquet_page.content_cache_size")
+        );
+    }
+
+    #[test]
+    fn test_parquet_page_default_is_independent_of_system_memory() {
+        let mut config = MitoConfig::default();
+        for memory in [ReadableSize::gb(1), ReadableSize::gb(64)] {
+            config.adjust_buffer_and_cache_size(memory);
+            assert_eq!(
+                config.parquet_page.content_cache_size,
+                ReadableSize::mb(512)
+            );
+            assert_eq!(
+                config.parquet_page.content_cache_page_size,
+                ReadableSize::kb(64)
+            );
+        }
+    }
+
+    #[test]
+    fn test_parquet_cache_page_size_config() {
+        let default: MitoConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            default.parquet_page.content_cache_page_size,
+            ReadableSize::kb(64)
+        );
+        for bytes in [1, 37, 65536, crate::cache::parquet_page::MAX_PAGE_SIZE] {
+            let mut config: MitoConfig = toml::from_str(&format!(
+                "[parquet_page]\ncontent_cache_page_size = '{bytes}B'"
+            ))
+            .unwrap();
+            config.sanitize("/data").unwrap();
+            assert_eq!(
+                config.parquet_page.content_cache_page_size.as_bytes(),
+                bytes
+            );
+            let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored, config);
+        }
+        for bytes in [0, crate::cache::parquet_page::MAX_PAGE_SIZE + 1, u64::MAX] {
+            let mut config = MitoConfig {
+                parquet_page: ParquetPageConfig {
+                    content_cache_page_size: ReadableSize(bytes),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert!(config.sanitize("/data").is_err());
+        }
+    }
 
     #[test]
     fn test_scan_memory_policy_upgrade() {

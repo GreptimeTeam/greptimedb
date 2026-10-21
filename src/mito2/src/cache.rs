@@ -19,14 +19,13 @@ pub(crate) mod cache_size;
 pub(crate) mod file_cache;
 pub(crate) mod index;
 pub(crate) mod manifest_cache;
+pub(crate) mod parquet_page;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
 
-use std::collections::{BTreeMap, HashMap};
-use std::mem;
-use std::ops::Range;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
+use std::{io, mem};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
@@ -59,6 +58,7 @@ pub use write_cache::{WriteCacheUploadStoreWrapper, WriteCacheUploadStoreWrapper
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
+use crate::cache::parquet_page::ParquetPageCache;
 use crate::cache::write_cache::WriteCacheRef;
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidMetadataSnafu, InvalidParquetSnafu,
@@ -74,14 +74,29 @@ use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
 
+/// Finds a typed shared error through the range-reader I/O wrappers.
+pub(crate) fn find_shared_page_source<E: std::error::Error + Send + Sync + 'static>(
+    mut error: &io::Error,
+) -> Option<Arc<E>> {
+    loop {
+        let source = error.get_ref()?;
+        if let Some(source) = source.downcast_ref::<Arc<E>>() {
+            return Some(source.clone());
+        }
+        if let Some(nested) = source.downcast_ref::<Arc<io::Error>>() {
+            error = nested;
+        } else {
+            error = source.downcast_ref::<io::Error>()?;
+        }
+    }
+}
+
 /// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
 /// Metrics type key for the optional decoded SST metadata acceleration tier.
 const SST_META_DECODED_TYPE: &str = "sst_meta_decoded";
 /// Metrics type key for vector.
 const VECTOR_TYPE: &str = "vector";
-/// Metrics type key for pages.
-const PAGE_TYPE: &str = "page";
 /// Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
 /// Metrics type key for index files (puffin) on the local store.
@@ -917,33 +932,11 @@ impl CacheStrategy {
         }
     }
 
-    /// Calls [CacheManager::get_page_ranges()].
-    /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
-    pub fn get_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-    ) -> Option<PageRangeLookup> {
+    /// Returns the Parquet byte cache for normal query reads.
+    pub(crate) fn parquet_page_cache(&self) -> Option<&Arc<ParquetPageCache>> {
         match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.get_page_ranges(file_id, row_group_idx, ranges)
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
-    }
-
-    /// Calls [CacheManager::put_page_ranges()].
-    /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
-    pub fn put_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-        pages: &[Bytes],
-    ) {
-        if let CacheStrategy::EnableAll(cache_manager) = self {
-            cache_manager.put_page_ranges(file_id, row_group_idx, ranges, pages);
+            Self::EnableAll(manager) => manager.page_cache.as_ref(),
+            Self::Compaction(_) | Self::Disabled => None,
         }
     }
 
@@ -1115,7 +1108,7 @@ pub struct CacheManager {
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
     /// Cache for SST byte ranges.
-    page_cache: Option<Arc<PageRangeCache>>,
+    page_cache: Option<Arc<ParquetPageCache>>,
     /// A Cache for writing files to object stores.
     write_cache: Option<WriteCacheRef>,
     /// Cache for inverted index.
@@ -1444,35 +1437,10 @@ impl CacheManager {
         }
     }
 
-    /// Gets cached byte fragments for the requested ranges.
-    pub fn get_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-    ) -> Option<PageRangeLookup> {
-        self.page_cache.as_ref().map(|page_cache| {
-            let lookup = page_cache.lookup(file_id, row_group_idx, ranges);
-            if lookup.cached_bytes > 0 {
-                CACHE_HIT.with_label_values(&[PAGE_TYPE]).inc();
-            }
-            if !lookup.missing_ranges.is_empty() {
-                CACHE_MISS.with_label_values(&[PAGE_TYPE]).inc();
-            }
-            lookup
-        })
-    }
-
-    /// Puts byte fragments into the page cache.
-    pub fn put_page_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-        pages: &[Bytes],
-    ) {
+    /// Removes completed Parquet byte pages when an SST is deleted.
+    pub(crate) fn invalidate_parquet_pages(&self, file: RegionFileId) {
         if let Some(cache) = &self.page_cache {
-            cache.insert_ranges(file_id, row_group_idx, ranges, pages);
+            cache.invalidate_file(file);
         }
     }
 
@@ -1614,11 +1582,11 @@ pub fn selector_result_cache_hit() {
 }
 
 /// Builder to construct a [CacheManager].
-#[derive(Default)]
 pub struct CacheManagerBuilder {
     sst_meta_cache_size: u64,
     vector_cache_size: u64,
     page_cache_size: u64,
+    parquet_cache_page_size: u64,
     index_metadata_size: u64,
     index_content_size: u64,
     index_content_page_size: u64,
@@ -1630,10 +1598,38 @@ pub struct CacheManagerBuilder {
     range_result_cache_size: u64,
 }
 
+impl Default for CacheManagerBuilder {
+    fn default() -> Self {
+        Self {
+            sst_meta_cache_size: 0,
+            vector_cache_size: 0,
+            page_cache_size: 0,
+            parquet_cache_page_size: parquet_page::PAGE_SIZE,
+            index_metadata_size: 0,
+            index_content_size: 0,
+            index_content_page_size: 0,
+            index_result_cache_size: 0,
+            prefilter_result_cache_size: 0,
+            puffin_metadata_size: 0,
+            write_cache: None,
+            selector_result_cache_size: 0,
+            range_result_cache_size: 0,
+        }
+    }
+}
+
 impl CacheManagerBuilder {
     /// Sets meta cache size.
     pub fn sst_meta_cache_size(mut self, bytes: u64) -> Self {
         self.sst_meta_cache_size = bytes;
+        self
+    }
+
+    /// Sets the Parquet byte-block size, independently of format data pages.
+    /// Defaults to 64 KiB. Invalid sizes are rejected on reads; callers should
+    /// validate configuration before building the cache.
+    pub fn parquet_cache_page_size(mut self, bytes: u64) -> Self {
+        self.parquet_cache_page_size = bytes;
         self
     }
 
@@ -1754,8 +1750,8 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-        let page_cache =
-            (self.page_cache_size != 0).then(|| PageRangeCache::new(self.page_cache_size));
+        let page_cache = (self.page_cache_size != 0)
+            .then(|| ParquetPageCache::new(self.page_cache_size, self.parquet_cache_page_size));
         let inverted_index_cache = InvertedIndexCache::new(
             self.index_metadata_size,
             self.index_content_size,
@@ -1842,10 +1838,6 @@ fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
     (mem::size_of::<ConcreteDataType>() + mem::size_of::<Value>() + v.memory_size()) as u32
 }
 
-fn page_cache_weight(k: &PageFragmentKey, v: &Bytes) -> u32 {
-    (k.estimated_size() + mem::size_of::<Bytes>() + v.len()) as u32
-}
-
 fn selector_result_cache_weight(k: &SelectorResultKey, v: &Arc<SelectorResultValue>) -> u32 {
     (mem::size_of_val(k) + v.estimated_size()) as u32
 }
@@ -1872,284 +1864,6 @@ impl SstMetaKey {
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PageFragmentGroupKey {
-    file_id: FileId,
-    row_group_idx: usize,
-}
-
-/// Cache key for one byte fragment in an SST row group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageFragmentKey {
-    /// Id of the SST file.
-    file_id: FileId,
-    /// Index of the row group.
-    row_group_idx: usize,
-    /// Start offset of the cached byte fragment.
-    start: u64,
-    /// End offset of the cached byte fragment.
-    end: u64,
-}
-
-impl PageFragmentKey {
-    fn new(file_id: FileId, row_group_idx: usize, range: &Range<u64>) -> PageFragmentKey {
-        PageFragmentKey {
-            file_id,
-            row_group_idx,
-            start: range.start,
-            end: range.end,
-        }
-    }
-
-    fn group_key(&self) -> PageFragmentGroupKey {
-        PageFragmentGroupKey {
-            file_id: self.file_id,
-            row_group_idx: self.row_group_idx,
-        }
-    }
-
-    /// Returns memory used by the key (estimated).
-    fn estimated_size(&self) -> usize {
-        mem::size_of::<Self>()
-    }
-}
-
-/// One cached byte fragment that overlaps a requested range.
-#[derive(Clone)]
-pub struct PageRangePart {
-    /// Range covered by `bytes`.
-    pub range: Range<u64>,
-    /// Bytes for `range`.
-    pub bytes: Bytes,
-}
-
-/// Result of looking up request ranges in the page range cache.
-pub struct PageRangeLookup {
-    /// Cached fragments grouped by the original requested range index.
-    pub cached_parts: Vec<Vec<PageRangePart>>,
-    /// Ranges that are not covered by cached fragments and need fetching.
-    pub missing_ranges: Vec<Range<u64>>,
-    /// Number of cached fragments used.
-    pub cached_range_count: usize,
-    /// Number of requested bytes served from cached fragments.
-    pub cached_bytes: u64,
-}
-
-impl PageRangeLookup {
-    pub fn is_fully_cached(&self) -> bool {
-        self.missing_ranges.is_empty()
-    }
-}
-
-type PageFragmentRangeIndex = BTreeMap<(u64, u64), PageFragmentKey>;
-type PageFragmentIndex = HashMap<PageFragmentGroupKey, PageFragmentRangeIndex>;
-
-/// Byte-fragment cache for Parquet row-group reads.
-pub struct PageRangeCache {
-    cache: Cache<PageFragmentKey, Bytes>,
-    index: RwLock<PageFragmentIndex>,
-}
-
-impl PageRangeCache {
-    fn new(capacity: u64) -> Arc<PageRangeCache> {
-        Arc::new_cyclic(|weak_cache: &std::sync::Weak<PageRangeCache>| {
-            let cache = Cache::builder()
-                .max_capacity(capacity)
-                .weigher(page_cache_weight)
-                .eviction_listener({
-                    let weak_cache = weak_cache.clone();
-                    move |k, v, cause| {
-                        let size = page_cache_weight(&k, &v);
-                        CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
-                        CACHE_EVICTION
-                            .with_label_values(&[PAGE_TYPE, removal_cause_str(cause)])
-                            .inc();
-
-                        if let Some(cache) = weak_cache.upgrade()
-                            && !matches!(cause, RemovalCause::Replaced)
-                        {
-                            cache.remove_index_entry(*k);
-                        }
-                    }
-                })
-                .build();
-
-            PageRangeCache {
-                cache,
-                index: RwLock::new(HashMap::new()),
-            }
-        })
-    }
-
-    fn lookup(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-    ) -> PageRangeLookup {
-        let mut cached_parts = Vec::with_capacity(ranges.len());
-        let mut missing_ranges = Vec::new();
-        let mut cached_range_count = 0;
-        let mut cached_bytes = 0;
-
-        for range in ranges {
-            if range.start >= range.end {
-                cached_parts.push(Vec::new());
-                continue;
-            }
-
-            let mut parts = Vec::new();
-            let candidates = self.find_index_candidates(file_id, row_group_idx, range);
-            let mut stale_keys = Vec::new();
-
-            for fragment_key in candidates {
-                if let Some(bytes) = self.cache.get(&fragment_key) {
-                    let part_start = range.start.max(fragment_key.start);
-                    let part_end = range.end.min(fragment_key.end);
-                    let slice_start = (part_start - fragment_key.start) as usize;
-                    let slice_end = (part_end - fragment_key.start) as usize;
-                    parts.push(PageRangePart {
-                        range: part_start..part_end,
-                        bytes: bytes.slice(slice_start..slice_end),
-                    });
-                } else {
-                    stale_keys.push(fragment_key);
-                }
-            }
-            for key in stale_keys {
-                self.remove_uncached_index_entry(key);
-            }
-
-            let mut cursor = range.start;
-            let mut compacted_parts: Vec<PageRangePart> = Vec::with_capacity(parts.len());
-            for part in parts {
-                if part.range.end <= cursor {
-                    continue;
-                }
-
-                let part = if part.range.start < cursor {
-                    let offset = (cursor - part.range.start) as usize;
-                    PageRangePart {
-                        range: cursor..part.range.end,
-                        bytes: part.bytes.slice(offset..),
-                    }
-                } else {
-                    part
-                };
-
-                if cursor < part.range.start {
-                    missing_ranges.push(cursor..part.range.start);
-                }
-                cached_bytes += part.range.end - part.range.start;
-                cached_range_count += 1;
-                cursor = part.range.end;
-                compacted_parts.push(part);
-
-                if cursor >= range.end {
-                    break;
-                }
-            }
-
-            if cursor < range.end {
-                missing_ranges.push(cursor..range.end);
-            }
-            cached_parts.push(compacted_parts);
-        }
-
-        PageRangeLookup {
-            cached_parts,
-            missing_ranges,
-            cached_range_count,
-            cached_bytes,
-        }
-    }
-
-    fn insert_ranges(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        ranges: &[Range<u64>],
-        pages: &[Bytes],
-    ) {
-        for (range, bytes) in ranges.iter().zip(pages) {
-            if range.start >= range.end || bytes.len() as u64 != range.end - range.start {
-                continue;
-            }
-
-            let key = PageFragmentKey::new(file_id, row_group_idx, range);
-            let bytes = Bytes::copy_from_slice(bytes.as_ref());
-            let size = page_cache_weight(&key, &bytes);
-            CACHE_BYTES.with_label_values(&[PAGE_TYPE]).add(size.into());
-            self.cache.insert(key, bytes);
-            let mut index = self.index.write().unwrap();
-            index
-                .entry(key.group_key())
-                .or_default()
-                .insert((key.start, key.end), key);
-        }
-    }
-
-    fn find_index_candidates(
-        &self,
-        file_id: FileId,
-        row_group_idx: usize,
-        range: &Range<u64>,
-    ) -> Vec<PageFragmentKey> {
-        let group_key = PageFragmentGroupKey {
-            file_id,
-            row_group_idx,
-        };
-        let index = self.index.read().unwrap();
-        index
-            .get(&group_key)
-            .map(|ranges| {
-                ranges
-                    .range(..(range.end, 0))
-                    .filter_map(|(_, fragment_key)| {
-                        (fragment_key.end > range.start).then_some(*fragment_key)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn remove_uncached_index_entry(&self, key: PageFragmentKey) {
-        let group_key = key.group_key();
-        let mut index = self.index.write().unwrap();
-        if self.cache.contains_key(&key) {
-            return;
-        }
-
-        Self::remove_index_entry_locked(&mut index, group_key, key);
-    }
-
-    fn remove_index_entry(&self, key: PageFragmentKey) {
-        let group_key = key.group_key();
-        let mut index = self.index.write().unwrap();
-        Self::remove_index_entry_locked(&mut index, group_key, key);
-    }
-
-    fn remove_index_entry_locked(
-        index: &mut PageFragmentIndex,
-        group_key: PageFragmentGroupKey,
-        key: PageFragmentKey,
-    ) {
-        let Some(ranges) = index.get_mut(&group_key) else {
-            return;
-        };
-
-        let removed = ranges
-            .get(&(key.start, key.end))
-            .is_some_and(|current| current == &key);
-        if removed {
-            ranges.remove(&(key.start, key.end));
-        }
-        if ranges.is_empty() {
-            index.remove(&group_key);
-        }
     }
 }
 
@@ -2349,6 +2063,24 @@ mod tests {
     };
     use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::row_selection::RowGroupSelection;
+
+    #[test]
+    fn test_find_shared_page_source() {
+        let source = Arc::new(
+            UnexpectedSnafu {
+                reason: "page read failed",
+            }
+            .build(),
+        );
+        let direct = io::Error::other(source.clone());
+        let nested = io::Error::other(Arc::new(io::Error::other(direct)));
+        let retained = find_shared_page_source::<crate::error::Error>(&nested).unwrap();
+        assert!(Arc::ptr_eq(&source, &retained));
+        assert!(
+            find_shared_page_source::<crate::error::Error>(&io::Error::other("untyped error"))
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn test_disable_cache() {
@@ -3184,174 +2916,6 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .unwrap();
         assert_eq!(vector, cached);
-    }
-
-    #[test]
-    fn test_page_cache() {
-        let cache = CacheManager::builder().page_cache_size(1000).build();
-        let file_id = FileId::random();
-        let uncached = 0..10;
-        assert_eq!(
-            vec![0..10],
-            cache
-                .get_page_ranges(file_id, 0, std::slice::from_ref(&uncached))
-                .unwrap()
-                .missing_ranges
-        );
-
-        let cached = 100..500;
-        cache.put_page_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&cached),
-            &[Bytes::from(vec![7; 400])],
-        );
-
-        let subrange = 200..300;
-        let lookup = cache
-            .get_page_ranges(file_id, 0, std::slice::from_ref(&subrange))
-            .unwrap();
-        assert!(lookup.is_fully_cached());
-        assert_eq!(100, lookup.cached_bytes);
-        assert_eq!(1, lookup.cached_parts.len());
-        assert_eq!(200..300, lookup.cached_parts[0][0].range);
-        assert_eq!(100, lookup.cached_parts[0][0].bytes.len());
-
-        let overlapping = 400..600;
-        let lookup = cache
-            .get_page_ranges(file_id, 0, std::slice::from_ref(&overlapping))
-            .unwrap();
-        assert!(!lookup.is_fully_cached());
-        assert_eq!(100, lookup.cached_bytes);
-        assert_eq!(vec![500..600], lookup.missing_ranges);
-        assert_eq!(400..500, lookup.cached_parts[0][0].range);
-    }
-
-    #[test]
-    fn test_page_cache_detaches_fragment_bytes() {
-        let cache = PageRangeCache::new(1000);
-        let file_id = FileId::random();
-        let backing = Bytes::from(vec![1; 1024]);
-        let page = backing.slice(512..522);
-        let page_ptr = page.as_ptr();
-        let range = 0..10;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            std::slice::from_ref(&page),
-        );
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(lookup.is_fully_cached());
-        assert_eq!(1, lookup.cached_parts[0].len());
-        assert_eq!(&page[..], &lookup.cached_parts[0][0].bytes[..]);
-        assert_ne!(page_ptr, lookup.cached_parts[0][0].bytes.as_ptr());
-    }
-
-    #[test]
-    fn test_page_cache_replaces_fragment() {
-        let cache = PageRangeCache::new(1000);
-        let file_id = FileId::random();
-        let range = 0..10;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![1; 10])],
-        );
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![2; 10])],
-        );
-        cache.cache.run_pending_tasks();
-        assert_eq!(
-            vec![PageFragmentKey::new(file_id, 0, &range)],
-            cache.find_index_candidates(file_id, 0, &range)
-        );
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(lookup.is_fully_cached());
-        assert_eq!(&vec![2; 10][..], &lookup.cached_parts[0][0].bytes[..]);
-    }
-
-    #[test]
-    fn test_page_cache_retains_disjoint_inserts_for_same_row_group() {
-        let cache = PageRangeCache::new(1000);
-        let file_id = FileId::random();
-        let range1 = 0..10;
-        let range2 = 20..30;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range1),
-            &[Bytes::from(vec![1; 10])],
-        );
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range2),
-            &[Bytes::from(vec![2; 10])],
-        );
-
-        let lookup = cache.lookup(file_id, 0, &[range1, range2]);
-        assert!(lookup.is_fully_cached());
-        assert_eq!(2, lookup.cached_range_count);
-        assert_eq!(&vec![1; 10][..], &lookup.cached_parts[0][0].bytes[..]);
-        assert_eq!(&vec![2; 10][..], &lookup.cached_parts[1][0].bytes[..]);
-    }
-
-    #[test]
-    fn test_page_cache_fragment_eviction() {
-        let file_id = FileId::random();
-        let range = 0..10;
-        let key = PageFragmentKey::new(file_id, 0, &range);
-        let page = Bytes::from(vec![1; 10]);
-        let cache = PageRangeCache::new(page_cache_weight(&key, &page) as u64);
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![1; 10])],
-        );
-        assert!(
-            cache
-                .lookup(file_id, 0, std::slice::from_ref(&range))
-                .is_fully_cached()
-        );
-
-        cache.cache.invalidate(&key);
-        cache.cache.run_pending_tasks();
-        assert!(cache.find_index_candidates(file_id, 0, &range).is_empty());
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(!lookup.is_fully_cached());
-        assert_eq!(vec![0..10], lookup.missing_ranges);
-    }
-
-    #[test]
-    fn test_page_cache_rejects_oversized_fragment() {
-        let cache = PageRangeCache::new(1);
-        let file_id = FileId::random();
-        let range = 0..10;
-
-        cache.insert_ranges(
-            file_id,
-            0,
-            std::slice::from_ref(&range),
-            &[Bytes::from(vec![1; 10])],
-        );
-        cache.cache.run_pending_tasks();
-
-        let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
-        assert!(!lookup.is_fully_cached());
-        assert_eq!(vec![0..10], lookup.missing_ranges);
     }
 
     #[test]
