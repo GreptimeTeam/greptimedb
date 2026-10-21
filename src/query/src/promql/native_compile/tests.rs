@@ -262,6 +262,15 @@ fn the_supported_range_functions_map_to_their_kernels() {
         ("resets", RangeFunction::Resets),
         ("changes", RangeFunction::Changes),
         ("deriv", RangeFunction::Deriv),
+        // The six Prometheus marks experimental. `RangeFunction` names all of them and the kernels
+        // answer all of them, so the compiler binds them like any other name; a test per name is
+        // what keeps a rename or a drop from passing as a typo.
+        ("first_over_time", RangeFunction::FirstOverTime),
+        ("mad_over_time", RangeFunction::MadOverTime),
+        ("ts_of_first_over_time", RangeFunction::TsOfFirstOverTime),
+        ("ts_of_last_over_time", RangeFunction::TsOfLastOverTime),
+        ("ts_of_min_over_time", RangeFunction::TsOfMinOverTime),
+        ("ts_of_max_over_time", RangeFunction::TsOfMaxOverTime),
     ];
 
     for (name, kernel) in cases {
@@ -838,13 +847,10 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
         // function arguments, so `rate(x)` never gets past parsing.
         (
             "rate(x[5m:])",
-            "a call to `rate` whose argument is `x[5m:]`",
+            "a call to `rate` whose range selector is `x[5m:]`",
         ),
-        // A function with no kernel, whether or not it takes a constant argument.
-        (
-            "predict_linear(x[5m], 300)",
-            "a call to `predict_linear`, which has no native kernel",
-        ),
+        // A function with no kernel. `predict_linear` used to stand here as the parameterised case
+        // and is now bound, so what is left is a name this compiler has no kernel for at all.
         (
             "absent(x)",
             "a call to `absent`, which has no native kernel",
@@ -1853,4 +1859,169 @@ fn the_batch_acceptance_queries_compile() {
             "`{query}` does not land on the statement's grid"
         );
     }
+}
+
+/// `predict_linear` reads its horizon before its range selector, so the number the query wrote is the
+/// horizon the kernel extrapolates to. The value is asserted apart from the window, because a
+/// compiler that bound the horizon on the wrong side of the call would still produce a window.
+#[test]
+fn a_predict_linear_binds_its_horizon_and_its_window() {
+    let tree = compile(
+        &eval_stmt("predict_linear(x[5m], 300)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`predict_linear(x[5m], 300)` was refused: {error}"));
+
+    let (_, op) = root_window(&tree);
+    assert_eq!(op.function, RangeFunction::PredictLinear(300.0));
+    assert_eq!(op.window.range_ms, 300_000, "the window was not bound");
+    assert!(op.input_grid.is_none(), "raw input has no grid to declare");
+}
+
+/// `double_exponential_smoothing` reads two constants, and both reach the kernel in the order they
+/// were written: swapping them would smooth with the trend factor and trend with the smoothing one,
+/// which is a different series rather than an error.
+///
+/// The pair is asserted with two different numbers, because a compiler that bound the second
+/// constant twice would agree with a test that passed the same number twice.
+#[test]
+fn a_double_exponential_smoothing_binds_both_factors_in_order() {
+    let cases = [
+        ("double_exponential_smoothing(x[5m], 0.5, 0.1)", 0.5, 0.1),
+        ("double_exponential_smoothing(x[5m], 0.1, 0.5)", 0.1, 0.5),
+        // The constants are folded like every other constant this compiler binds.
+        (
+            "double_exponential_smoothing(x[5m], 1 / 2, 0.1 + 0.2)",
+            0.5,
+            0.30000000000000004,
+        ),
+    ];
+
+    for (query, smoothing, trend) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = root_window(&tree);
+        assert_eq!(
+            op.function,
+            RangeFunction::DoubleExponentialSmoothing { smoothing, trend },
+            "`{query}` bound its factors wrongly"
+        );
+        assert_eq!(op.window.range_ms, 300_000, "`{query}` lost its window");
+    }
+}
+
+/// The kernel needs both smoothing factors, so a call that wrote one is refused and the rejection
+/// says what the function reads. The parser enforces the same count, so the only way to hand the
+/// compiler such a call is to edit a tree it accepted: the same shape as the arity test above,
+/// applied to a function whose constants follow its selector.
+#[test]
+fn a_smoothing_with_one_factor_is_refused_and_names_what_it_reads() {
+    let stmt = with_call_arguments("double_exponential_smoothing(x[5m], 0.5, 0.1)", |args| {
+        args.pop();
+    });
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("a smoothing with one factor compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the refusal is not NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("with 2 argument(s), where it takes 3"),
+        "the refusal did not name the count the function takes: {message}"
+    );
+    assert!(
+        message.contains("its range selector and two numbers"),
+        "the refusal did not say what the function reads: {message}"
+    );
+}
+
+/// A parameter computed at query time is refused for a two-constant function too, and the rejection
+/// names which argument it found: a smoothing factor that only exists at run time has no field in the
+/// tree, the same as a quantile.
+#[test]
+fn a_computed_smoothing_factor_is_refused_and_names_its_position() {
+    let cases = [
+        (
+            "double_exponential_smoothing(x[5m], time(), 0.1)",
+            "first argument",
+        ),
+        (
+            "double_exponential_smoothing(x[5m], 0.5, time())",
+            "second argument",
+        ),
+        ("predict_linear(x[5m], time())", "first argument"),
+    ];
+
+    for (query, position) in cases {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(position),
+            "`{query}` did not name which argument it found: {message}"
+        );
+        assert!(
+            message.contains("constant expression"),
+            "`{query}` did not say what the argument has to be: {message}"
+        );
+    }
+}
+
+/// The parameterised functions keep the anchor and the offset a function without parameters binds,
+/// because the parameters decide what folds the window rather than which window is folded.
+#[test]
+fn a_two_constant_function_binds_an_anchor_and_an_offset_too() {
+    let tree = compile(
+        &eval_stmt("double_exponential_smoothing(x[5m] @ 1234 offset 1m, 0.5, 0.1)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("a smoothed window with an anchor was refused: {error}"));
+
+    let (_, op) = root_window(&tree);
+    assert_eq!(
+        op.function,
+        RangeFunction::DoubleExponentialSmoothing {
+            smoothing: 0.5,
+            trend: 0.1,
+        }
+    );
+    assert_eq!(op.window.range_ms, 300_000);
+    assert_eq!(op.window.anchor_ms, Some(1_234_000), "the anchor was lost");
+    assert_eq!(op.window.offset_ms, 60_000, "the offset was lost");
+}
+
+/// The two parameterised functions nest under the rest of the compiler, so a smoothed window can be
+/// compared or aggregated like any other: an aggregate over a smoothing is a tree, not a shape the
+/// compiler knows by name.
+#[test]
+fn a_parameterised_window_nests_under_a_comparison_and_an_aggregate() {
+    let tree = compile(
+        &eval_stmt("sum by(job)(predict_linear(x[5m], 300) > 0)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| {
+        panic!("`sum by(job)(predict_linear(x[5m], 300) > 0)` refused: {error}")
+    });
+
+    let (input, aggregate) = aggregate_parts(tree.root());
+    assert_eq!(aggregate.kind, AggregateKind::Sum);
+    let (left, right, matching) = binary_parts(input);
+    assert_eq!(matching.op, BinaryOp::Gt);
+    assert!(!matching.return_bool, "`>` without `bool` filters");
+    assert_eq!(constant(right), Some(0.0));
+    let NativeExpr::Window { op, .. } = &left.expr else {
+        panic!(
+            "the comparison's left operand is not a window: {:?}",
+            left.expr
+        );
+    };
+    assert_eq!(op.function, RangeFunction::PredictLinear(300.0));
 }
