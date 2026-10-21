@@ -935,11 +935,12 @@ mod test {
         let (region_server, _engine) = lease_region_server(&mut env, None).await;
         let alive_keeper =
             RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
-        let lease = Duration::from_secs(2);
+        let lease = Duration::from_secs(4);
         handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
         let renewed = Instant::now();
         // The region is created half a lease after that response.
         tokio::time::sleep(lease / 2).await;
+        let creating = Instant::now();
         let region_id = RegionId::new(1024, 1);
         let schema = create_region(&region_server, region_id).await;
         put_row(&region_server, region_id, &schema).await.unwrap();
@@ -959,6 +960,8 @@ mod test {
             format!("{err:?}").contains("does not hold a valid leader lease"),
             "{err:?}"
         );
+        // The write was rejected within one lease of the creation.
+        assert!(creating.elapsed() < lease);
     }
 
     #[tokio::test(flavor = "multi_thread")]
