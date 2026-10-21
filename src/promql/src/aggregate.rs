@@ -372,7 +372,9 @@ fn count_series(schema: &Arc<SeriesSchema>, groups: Counts) -> Result<Vec<Series
 /// Go's `strconv.FormatFloat(value, 'f', -1, 64)`: the fewest significant digits that round-trip,
 /// in positional notation. When two candidates of that length are equally close, Go takes the
 /// even one while Rust's shortest formatting rounds up, so the digits are recomputed with Rust's
-/// exact formatting, which rounds half to even.
+/// exact formatting, which rounds half to even. The recomputed digits only count when they still
+/// parse back to `value`: just above a power of two the lower neighbour is half as far away, so
+/// the even candidate can name that neighbour, and only the other one round-trips.
 fn format_value(value: f64) -> String {
     match value {
         f64::INFINITY => return "+Inf".to_string(),
@@ -384,7 +386,12 @@ fn format_value(value: f64) -> String {
     let mantissa = shortest.split_once('e').expect("exponent format").0;
     let significant = mantissa.chars().filter(char::is_ascii_digit).count();
     let exact = format!("{value:.precision$e}", precision = significant - 1);
-    let (mantissa, exponent) = exact.split_once('e').expect("exponent format");
+    let digits = if exact.parse::<f64>() == Ok(value) {
+        &exact
+    } else {
+        &shortest
+    };
+    let (mantissa, exponent) = digits.split_once('e').expect("exponent format");
     let exponent: i64 = exponent.parse().expect("integer exponent");
     let (sign, mantissa) = match mantissa.strip_prefix('-') {
         Some(unsigned) => ("-", unsigned),
