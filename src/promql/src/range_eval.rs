@@ -192,26 +192,12 @@ impl PendingBatch {
 
     /// The bytes this batch's own vectors hold, by capacity.
     fn bytes(&self) -> usize {
-        let spans = self
-            .spans
-            .iter()
-            .map(|spans| spans.capacity() * std::mem::size_of::<std::ops::Range<usize>>())
-            .fold(0usize, usize::saturating_add);
-        let columns = self
-            .columns
-            .iter()
-            .map(|column| column.capacity() * std::mem::size_of::<Option<f64>>())
-            .fold(0usize, usize::saturating_add);
-        self.indices
-            .capacity()
-            .saturating_mul(std::mem::size_of::<usize>())
-            .saturating_add(
-                self.eval_ts
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<i64>()),
-            )
-            .saturating_add(spans)
-            .saturating_add(columns)
+        let spans: usize = self.spans.iter().map(|spans| spans.capacity()).sum();
+        let columns: usize = self.columns.iter().map(|column| column.capacity()).sum();
+        self.indices.capacity() * std::mem::size_of::<usize>()
+            + self.eval_ts.capacity() * std::mem::size_of::<i64>()
+            + spans * std::mem::size_of::<Range<usize>>()
+            + columns * std::mem::size_of::<Option<f64>>()
     }
 
     /// Drops the accumulated points, keeping the allocations.
@@ -303,34 +289,23 @@ struct SeriesState {
 impl SeriesState {
     /// The bytes this series' identity holds, which the rows handed out do not cover.
     fn identity_bytes(&self) -> usize {
-        // A scan slices the primary key out of a decoded dictionary-values buffer, so the bytes the
-        // key shows are not the bytes it keeps: a key of a few bytes pins the whole buffer it was
-        // sliced out of, which `capacity` reports for the allocation behind the slice. Charging
-        // the key's length instead would show a handful of bytes for an allocation the size of a
-        // decoded batch. (A buffer that does not own its memory reports no capacity, and then the
-        // bytes it shows are all there is.)
-        //
-        // No dedupe is needed against a second slice of the same allocation: one evaluator holds
-        // one series at a time, and a window over an evaluated input holds no key at all, so a
-        // pass over this state charges one slice of one allocation rather than one per slice.
+        // A scan slices the primary key out of a decoded buffer, so the bytes the key shows are not
+        // the bytes it keeps: a key of a few bytes pins the allocation it was sliced out of.
+        // Charging the slice length instead would show a handful of bytes for an allocation the
+        // size of a decoded batch. One evaluator holds one series at a time, and an evaluated input
+        // holds no key at all, so there is no second slice of the same allocation to dedupe.
         let primary_key = self
             .primary_key
             .as_ref()
             .map_or(0, |key| key.capacity().max(key.len()));
-        let metric: usize = self
-            .metric
-            .name()
-            .map_or(0, |name| name.len())
-            .saturating_add(
-                self.metric
-                    .tags()
-                    .iter()
-                    .map(|tag| tag.name.len() + tag.value.len())
-                    .fold(0usize, usize::saturating_add),
-            );
-        std::mem::size_of::<SeriesState>()
-            .saturating_add(primary_key)
-            .saturating_add(metric)
+        let metric: usize = self.metric.name().map_or(0, |name| name.len())
+            + self
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| tag.name.len() + tag.value.len())
+                .sum::<usize>();
+        std::mem::size_of::<SeriesState>() + primary_key + metric
     }
 }
 
@@ -356,7 +331,17 @@ struct FieldSamples {
     head: usize,
     /// Native histogram samples, kept apart from the floats as Prometheus does.
     histograms: Vec<(i64, FloatHistogram)>,
+    /// Histograms before `histogram_head` are behind every remaining window; their payloads are
+    /// released by [`advance_histograms`](Self::advance_histograms).
     histogram_head: usize,
+    /// Estimated payload of the histograms this field still holds: the bucket lists and other
+    /// buffers the samples own, which no `size_of` of a slot shows.
+    ///
+    /// Measured for a histogram when it is admitted and released with it, so a retained sample is
+    /// not walked again on every push. A histogram is never modified once admitted, so the payload
+    /// its release subtracts is the one its admission added. Samples already behind every window
+    /// keep their payload in the figure until the drain releases them.
+    histogram_bytes: usize,
     /// Sequence number of `values[0]`. Absolute and monotonic across the series this evaluator
     /// evaluates, so a reset keeps its position when `head` samples are dropped instead of every
     /// index being renumbered. An empty field holds the number of samples already dropped, which
@@ -392,37 +377,14 @@ fn resets_between(resets: &[CounterReset], start: u64, end: u64) -> &[CounterRes
 }
 
 impl FieldSamples {
-    /// The bytes this field's buffers hold, by capacity.
-    ///
-    /// The histogram term is the slot of every retained sample plus the payload the histogram in
-    /// that slot owns: a slot is one `(i64, FloatHistogram)` worth of struct, and the buckets the
-    /// histogram keeps are on the heap behind it, up to tens of kilobytes per sample. Only the
-    /// retained slice is walked, which is the storage the windows still read; the samples before
-    /// `head` are gone, their payloads with them.
+    /// The bytes this field's buffers hold, by capacity: the samples, the history behind `head`
+    /// included, plus the estimated payload of the histograms still held.
     fn bytes(&self) -> usize {
-        let histograms = self.histograms[self.histogram_head..]
-            .iter()
-            .map(|(_, histogram)| histogram.heap_bytes())
-            .fold(0usize, usize::saturating_add);
-        self.timestamps
-            .capacity()
-            .saturating_mul(std::mem::size_of::<i64>())
-            .saturating_add(
-                self.values
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<f64>()),
-            )
-            .saturating_add(
-                self.histograms
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<(i64, FloatHistogram)>()),
-            )
-            .saturating_add(histograms)
-            .saturating_add(
-                self.resets
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<CounterReset>()),
-            )
+        self.timestamps.capacity() * std::mem::size_of::<i64>()
+            + self.values.capacity() * std::mem::size_of::<f64>()
+            + self.histograms.capacity() * std::mem::size_of::<(i64, FloatHistogram)>()
+            + self.resets.capacity() * std::mem::size_of::<CounterReset>()
+            + self.histogram_bytes
     }
 
     fn new(index_resets: bool) -> Self {
@@ -498,6 +460,23 @@ impl FieldSamples {
         self.resets.drain(..dropped);
     }
 
+    /// Drops the histograms before `histogram_head`, releasing the payload they held.
+    ///
+    /// The dropped samples are measured as they go, which costs one measurement per dropped
+    /// histogram in total: the retained ones are never scanned again.
+    fn advance_histograms(&mut self) {
+        let head = std::mem::take(&mut self.histogram_head);
+        if head == 0 {
+            return;
+        }
+        let dropped: usize = self.histograms[..head]
+            .iter()
+            .map(|(_, histogram)| histogram.heap_bytes())
+            .sum();
+        self.histogram_bytes = self.histogram_bytes.saturating_sub(dropped);
+        self.histograms.drain(..head);
+    }
+
     /// The resets inside the window holding `len` samples from `head`.
     fn resets_in(&self, len: usize) -> &[CounterReset] {
         let start = self.base + self.head as u64;
@@ -507,22 +486,20 @@ impl FieldSamples {
 
 /// The bytes the histograms a row holds box, beyond the slots they sit in.
 ///
-/// A slot is an `Option<GridSample>`: a pointer and a tag, which is all
-/// `size_of::<Option<GridSample>>()` is. A result that is a native histogram does not live in that
-/// slot itself: the slot points at a `FloatHistogram` on the heap, which owns its bucket
-/// lists in turn, and both are what the row keeps alive between pushes. Only slots that hold a
-/// histogram are counted, and only those the last evaluated point left in place: a push clears the
-/// row, so the slots past its length hold nothing.
+/// A slot is an `Option<GridSample>`: a pointer and a tag. A result that is a native histogram
+/// points at a [`FloatHistogram`] on the heap, which owns its bucket lists in turn, and both stay
+/// alive between pushes. Only slots the last evaluated point left in place are counted: a push
+/// clears the row.
 fn boxed_bytes(row: &[Option<GridSample>]) -> usize {
     row.iter()
         .flatten()
-        .filter_map(|sample| match sample {
+        .map(|sample| match sample {
             GridSample::Histogram(histogram) => {
-                Some(std::mem::size_of::<FloatHistogram>().saturating_add(histogram.heap_bytes()))
+                std::mem::size_of::<FloatHistogram>() + histogram.heap_bytes()
             }
-            GridSample::Float(_) => None,
+            GridSample::Float(_) => 0,
         })
-        .fold(0usize, usize::saturating_add)
+        .sum()
 }
 
 impl RangeEvaluator {
@@ -645,34 +622,30 @@ impl RangeEvaluator {
         self.batch_calls
     }
 
-    /// An accounted lower bound on the bytes this evaluator keeps between pushes.
+    /// An estimate of the bytes this evaluator keeps between pushes.
     ///
     /// Counted by capacity, so it is what the storage holds rather than what it uses: the retained
-    /// samples per field (timestamps, values and the native histograms with the payload each of
-    /// them owns), the reset index, the row a push fills with the histograms it boxes, and the
-    /// pending batch's own vectors. Left out are the kernel's scratch buffers, this struct's `Vec`
-    /// headers and the grid, which every chunk addressed on it shares.
+    /// samples per field (timestamps, values, the reset index and the native histograms with the
+    /// payload each of them owns), the row a push fills with the histograms it boxes, the identity
+    /// of the open series and the pending batch's own vectors. Left out are the kernel's scratch
+    /// buffers, this struct's `Vec` headers and the grid, which every chunk addressed on it shares.
+    ///
+    /// The figure is an estimate, not a ledger of every allocation: a histogram's payload is
+    /// measured once when it is admitted and released with it, so neither the retained samples nor
+    /// the transient allocations of a push are walked again.
     ///
     /// A push is the only caller that also holds the incoming chunk, and it charges that itself for
-    /// as long as the call runs; vector growth during a push is neither reserved nor bounded by one
-    /// doubling, so this is the storage's size, not a peak over the push. The figure must not be
-    /// per-chunk either: charging every chunk consumed would make the charge grow with the chunk
-    /// count, so a fixed window over a long series would read as an allocation failure even though
-    /// the window holds no more samples.
+    /// as long as the call runs. The figure must not be per-chunk either: charging every chunk
+    /// consumed would make the charge grow with the chunk count, so a fixed window over a long
+    /// series would read as an allocation failure even though the window holds no more samples.
     pub(crate) fn retained_bytes(&self) -> usize {
-        let per_field = self
-            .fields
-            .iter()
-            .map(FieldSamples::bytes)
-            .fold(0usize, usize::saturating_add);
+        let fields: usize = self.fields.iter().map(FieldSamples::bytes).sum();
         let row = self.row.capacity() * std::mem::size_of::<Option<GridSample>>();
-        let boxed = boxed_bytes(&self.row);
-        let series = self.series.as_ref().map_or(0, SeriesState::identity_bytes);
-        per_field
-            .saturating_add(row)
-            .saturating_add(boxed)
-            .saturating_add(series)
-            .saturating_add(self.pending.bytes())
+        fields
+            + row
+            + boxed_bytes(&self.row)
+            + self.series.as_ref().map_or(0, SeriesState::identity_bytes)
+            + self.pending.bytes()
     }
 
     /// Schema of the evaluated series: the input fields on the evaluation grid.
@@ -1054,6 +1027,8 @@ impl RangeEvaluator {
                         if !raw && h.reset_hint != CounterResetHint::Gauge {
                             h.reset_hint = CounterResetHint::Unknown;
                         }
+                        field.histogram_bytes =
+                            field.histogram_bytes.saturating_add(h.heap_bytes());
                         field.histograms.push((shifted, h));
                     }
                 }
@@ -1223,8 +1198,7 @@ impl RangeEvaluator {
                 field.histogram_head = field.histograms.len();
             }
             field.advance();
-            field.histograms.drain(..field.histogram_head);
-            field.histogram_head = 0;
+            field.advance_histograms();
         }
         Ok(())
     }
