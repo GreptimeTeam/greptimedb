@@ -82,9 +82,20 @@ Fused 阶段 B（合并后运行外层 Window）partition 0, 1
 | `NativeExpr` | 改写身份？ | 需要完整 series？ |
 |---|---|---|
 | `Map` | 是（数学映射删除 name/type/unit） | 否 |
-| `Window` | 是（输出删除 metadata labels） | **是** |
+| `Window` | **按具体函数区分**：多数函数删除 metadata；`last_over_time`、`first_over_time` 保留（`function.rs:66-68` 的 `drops_metric_name`） | **是** |
 | `Aggregate` | 按 grouping 改写 | final 需要完整 group，partial 只需本地 |
 | `Binary` | matching 输出可能删标签/保留 `on`/复制 include | vector matching 需要同 key 两侧（scalar broadcast 不适用） |
+
+### 2.3 owner key 与 canonical key 是两个 key
+
+| Key | 作用 | 可以怎样选择 |
+|---|---|---|
+| **Owner / partition key** | 决定数据送到哪个 partition | 可以更粗，让多条不同 series 放在一起 |
+| **Canonical / merge key** | 决定哪些片段属于同一条逻辑 series | **必须对应当前节点实际输出的标签身份** |
+
+把 counter 和 gauge 送到同一个 owner 本身没有问题，**把它们当成同一条 series 合并才有问题**。
+
+本版选择完整的 canonical label key 来分区，就继续保持这个简单规则；更粗 owner key 的优化以后再做。
 
 **漏判不保证报错**：分区内各自计算的非重叠窗口结果可能合法落地却数学上错误。**更糟的是结果可能完全为空**——§1.1 的反例正是如此，末端冲突检测无法兜底（没有占用位置可查）。
 
@@ -139,7 +150,20 @@ Fused 阶段 B（合并后运行外层 Window）partition 0, 1
 | **piece 生命周期** | 该**原始 series** 的 `is_last` 到达时 |
 | **逻辑 series 生命周期** | 所有可能归到这个 label set 的 **piece 都结束之后** |
 
-现在 `Emitted::occupy` 只有前者：看到 piece 的 `is_last`，就把整个 label set 标记为 closed，**它以为逻辑 series 也结束了**。于是同一分区里第二块 `{host="web-1"}` 一来就被判为「已关闭标签集又出现」而报错——但那两块本来是互补的。
+在**旧的**执行栈上，`Emitted::occupy` 只有前者：看到 piece 的 `is_last`，就把整个 label set 标记为 closed，**它以为逻辑 series 也结束了**。于是同一分区里第二块 `{host="web-1"}` 一来就被判为「已关闭标签集又出现」而报错——但那两块本来是互补的。
+
+**依赖基线（实施前必须确认）**：
+
+| 版本 | `Emitted` 行为 |
+|---|---|
+| `#9820` 当前 HEAD | 仍有 `history.closed`，拒绝已关闭标签集再次出现有效值 |
+| `#9777` `e1a631018c29` | **已采用 piece 语义**：不查询 `is_last`，只拒绝同 field、同 position 的有效值重叠 |
+
+`#9777` 新版本的注释写得很明确：
+
+> `is_last` is not consulted: it closes the source series the chunk carries, not the label set, and a later series may still fill the positions that one left empty.
+
+**所以实施前先把执行栈 restack 到包含 `#9777` 最新 piece/merge 语义的版本**，复用它的 source-piece 生命周期和有效位置冲突检查，再在其上实现跨分区 exchange 边界。不要重新实现一遍。
 
 **修法（规则，不是口号）**：
 
@@ -147,6 +171,43 @@ Fused 阶段 B（合并后运行外层 Window）partition 0, 1
 2. **不能全局删除 `Emitted` 检查。** 默认的完整-series 模式保留现有检查；只有新的 fragment 模式才放宽。
 3. **piece 的身份要单独定义**：不能用改写后的标签代替来源身份。
 4. **A 中任何后续有状态消费者都不能直接接未合并的 pieces**——这是构建期必须拒绝的形状。
+
+### 4.4 冲突检查不能被「清空有效位置」的操作吞掉
+
+上面第 1 条说「跨 piece 冲突由合并阶段验证」。**这需要一个限制：在完成冲突检查之前，不能越过会删除有效样本的操作。**
+
+**一个仍落在第一版白名单里的反例**：
+
+两条原始 series 在同一时间点都有值，只有 metadata 不同：
+
+| 分区 | 原始 series | 样本 |
+|---|---|---|
+| P0 | `M{host="web-1", __type__="counter"}` | `(0 ms, 1)` |
+| P1 | `M{host="web-1", __type__="gauge"}` | `(0 ms, 3)` |
+
+树：`Input → sum_over_time[1ms] → clamp(min=2, max=1)` ‖ exchange ‖ `Input → 外层 Window`
+
+1. `sum_over_time` 删 metadata，两条输出成为相同的 `{host="web-1"}`，**同一 field、同一 position 各有一个有效值**——这里就应该报冲突。
+2. A 内继续执行 `clamp(min=2, max=1)`。因为 `max < min`，`map_math` 返回 `None`（`map.rs:126-131`），所有有效值被清掉，只剩空 closing chunk。
+3. Merge 只看到空片段，**没有占用位置可查**——它无法知道前面曾经产生重复值。查询成功返回空。
+
+**这不是靠猜 Map 行为**：当前 Window 产出后立即 `self.track(...)`，所以单分区下第二条冲突输出会在父 Map 执行前报错。延后检查就丢了这个证据。
+
+**规则**：
+
+> 尚未完成跨 piece 冲突检查的输出，只能继续经过**保留各 field 有效位置**的逐点操作。遇到可能删除有效位置的操作，应先完成合并及冲突检查，或拒绝该切段方案。
+
+**最小修法**：把切点提前。
+
+- **A**：`Input → sum_over_time`
+- **Exchange / Merge**：检查重复值
+- **B**：`Input → clamp → 外层 Window`
+
+仍然一个 exchange、两段 Fused，不需要共享状态或新协调机制。
+
+第一版可以直接处理 `Clamp { max < min }` 这一种情况；不做通用算子效果分析框架。暂不支持就明确拒绝这类树。
+
+必须覆盖两种测试：「两来源在同一 A partition」和「不同 A partition」。
 
 ---
 
@@ -180,7 +241,9 @@ A 需要一个新的**内部 evaluated-fragment 输出模式**，与面向用户
 
 一个 series 可能整段没有值，但它的关闭信息仍然必要。frame 的**一行可以携带零长度的时间/字段数组**——这个行不能因为「没有数据」就被丢掉，否则当前展开路径会让结束信息消失。
 
-merge 阶段还要定义「全空逻辑 series 的关闭输出」：它不产生任何值，但下游仍需要知道这条 series 结束了。
+**第一版统一保留空 closing**，简单且容易实现。
+
+（注：「全空逻辑 series 的结束事件在任何情况下都必不可少」说得偏强：如果 merge 在 EOF 后确认整组为空、且从未向 B 开始交付这个组，当前 unary 计算也可以整组省略。但本版不做这个优化，不为它增加分支。）
 
 ---
 
@@ -242,6 +305,12 @@ DataFusion 已经提供了：
 
 **范围说明**：第一版是**手工绑定树**，不扩展查询编译入口。`native/plan.rs:368-373` 明确说只检查声明 grid 一致、不检查是否覆盖窗口读取范围，且编译器尚不接受 subquery。这两件事是两个交付范围，不能混。
 
+**grid 覆盖责任归属**：
+
+> 调用方负责保证 evaluated input grid 覆盖下游 Window 所需的求值范围，包括 range、offset 和 `@` 的影响；本版验证 schema/grid 一致性，未满足覆盖前提的绑定不在支持范围内。
+
+要求的**不是**「sparse holes 必须有值」，而是计算过的 grid 范围要覆盖到。
+
 **行数估计**（推断，非承诺）：
 
 | 部分 | 实现 |
@@ -254,6 +323,17 @@ DataFusion 已经提供了：
 | **合计** | **1,500–3,000** |
 
 测试需覆盖：同/跨分区、空关闭、稀疏位置、冲突、资源耗尽、错误、取消。
+
+**四个必须写成具体案例的验收项**：
+
+| 案例 | 必须满足的结果 |
+|---|---|
+| §1.1 的两个不重叠片段，经内层 Window 合成同标签集，再算外层 `idelta` | 同 A partition 和跨 A partition 都得到 **2** |
+| §4.4 的两个同位置冲突片段，后面接会清空的 `clamp` | **仍报告中间节点的冲突**，不能成功返回空 |
+| `last_over_time` / `first_over_time` 的两条输出只在 metadata 上不同 | 保持两条 logical series，不误合并 |
+| 优化器在 scan 与 A 之间引入可能交错 chunks 的物理节点 | 保持或恢复输入契约；做不到就拒绝该 native 计划 |
+
+最后一条要针对**优化后的物理路径**检查，不能只看 scan 自身的声明。
 
 ---
 
