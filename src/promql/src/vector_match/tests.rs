@@ -2563,3 +2563,294 @@ fn a_budgeted_run_reports_the_public_rejection() {
     assert_eq!(output.unwrap_err().to_string(), public.to_string());
     assert_eq!(seen.len(), 1, "{seen:?}");
 }
+
+/// A match group of one member cannot hold two rows at a point, so its duplicate scan collects
+/// nothing and the figure charges it no point list: many such groups over a long grid cost their
+/// presence flags and their table entries, not one sixteen-byte slot per row of every one-side
+/// series.
+#[test]
+fn singleton_groups_are_charged_no_duplicate_point_list() {
+    let points = 10_000;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(1, &grid));
+    let at: Vec<usize> = (0..points).collect();
+    // One left-hand series under a `job` no right-hand series carries, and `groups` right-hand
+    // series that each carry their own `job` and a value at every point: every group has one
+    // member, nothing matches and no row is filed.
+    let lhs = vec![jobbed_operand(&schema, "a", "absent", &at)];
+    let one = |groups: usize| -> Vec<Series> {
+        (0..groups)
+            .map(|group| jobbed_operand(&schema, "b", &format!("j{group}"), &at))
+            .collect()
+    };
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::On(vec![Arc::from("job")]));
+    let measure = |groups: usize| -> usize {
+        let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &one(groups), usize::MAX);
+        assert!(
+            output.expect("no group matches").is_empty(),
+            "{groups}: no `job` is shared"
+        );
+        *seen
+            .iter()
+            .max()
+            .expect("the operation asks for its workspace")
+    };
+    let single = measure(1);
+    let many = measure(16);
+    // What a run of this shape holds: the two presence flags and the intersection of them, one
+    // byte per grid point, and nothing proportional to the rows the one side carries.
+    let presence = 3 * points;
+    assert!(
+        single <= presence + 64 * 1024,
+        "single {single} for {presence} presence bytes"
+    );
+    assert!(
+        many <= presence + 64 * 1024,
+        "sixteen singleton groups {many} for {presence} presence bytes: the scan collected the \
+         rows of every group"
+    );
+    // A limit in the same order as the presence flags alone runs the wider operand: the sixteen
+    // groups' rows are sixteen times the grid, and a figure that charged their points as held
+    // storage would need megabytes of them.
+    let (output, _) = budgeted(&matching, &schema, &lhs, &schema, &one(16), 512 * 1024);
+    assert!(
+        output
+            .expect("no group matches under a small budget")
+            .is_empty(),
+        "no `job` is shared"
+    );
+}
+
+/// The duplicate scan's list of present points is one group's workspace: the next group's scan
+/// replaces it instead of adding to it, and the figure charges the points the group's members
+/// carry rather than one slot per row of every series of the field.
+#[test]
+fn a_groups_duplicate_scan_is_replaced_by_the_one_after_it() {
+    // Two members of a group hold the even and the odd points of at most the first half, so the
+    // scan collects every point of both and no point of the group is present twice: no group is
+    // reported as a duplicate whatever the other side carries.
+    let rows_max = 512;
+    let points = 2 * rows_max;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(1, &grid));
+    // The left side holds one value at the first point, whose `job` no right-hand series carries,
+    // so no group matches and no row is filed.
+    let lhs = vec![jobbed_operand(&schema, "a", "absent", &[0])];
+    let one = |groups: usize, rows: usize| -> Vec<Series> {
+        // The schema is borrowed, so the iterator below captures the reference and not the `Arc`.
+        let schema = &schema;
+        (0..groups)
+            .flat_map(|group| {
+                let job = format!("j{group}");
+                (0..2).map(move |member| {
+                    let at: Vec<usize> = (0..rows).map(|row| 2 * row + member).collect();
+                    jobbed_operand(schema, "b", &job, &at)
+                })
+            })
+            .collect()
+    };
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::On(vec![Arc::from("job")]));
+    let measure = |groups: usize, rows: usize| -> usize {
+        let (output, seen) = budgeted(
+            &matching,
+            &schema,
+            &lhs,
+            &schema,
+            &one(groups, rows),
+            usize::MAX,
+        );
+        assert!(
+            output
+                .expect("no point is present on both sides")
+                .is_empty(),
+            "{groups} groups of {rows} rows file no row"
+        );
+        *seen
+            .iter()
+            .max()
+            .expect("the operation asks for its workspace")
+    };
+    // The list is charged: a group whose two members carry `rows_max` points each costs the slots
+    // of those points, at least one per point.
+    let short = measure(1, 8);
+    let long = measure(1, rows_max);
+    assert!(
+        long >= short + 2 * (rows_max - 16) * std::mem::size_of::<usize>(),
+        "short {short}, long {long}: the scan's list is not charged"
+    );
+    // And it is replaced, not accumulated: eight groups hold the same list as one group does, so
+    // what the eight add is their table entries, never their sequences of points.
+    let eight = measure(8, rows_max);
+    assert!(
+        eight <= long + 16 * 1024,
+        "one group {long}, eight {eight}: the scans' lists added up"
+    );
+}
+
+/// A dense run of `fields` fields writes one value column and one validity bit per field at every
+/// output row, and the figure charges those columns once per row: a run four times as wide costs
+/// about four times as much, never the width's square.
+#[test]
+fn a_dense_run_charges_its_output_columns_once_per_row() {
+    let points = 32;
+    let grid = budget_grid(points);
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    // Both operands hold every field at every point, so every field of the single result series
+    // keeps every point.
+    let operands = |fields: usize| -> (Arc<SeriesSchema>, Vec<Series>, Vec<Series>) {
+        let schema = Arc::new(schema(fields, &grid));
+        let side = |name: &str, value: f64| -> Vec<Series> {
+            let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+            builder.begin_series();
+            let row = vec![Some(value); fields];
+            for point in 0..points {
+                builder.push(point, &row).unwrap();
+            }
+            builder
+                .finish(metric(&Labels::from([
+                    ("__name__".to_string(), name.to_string()),
+                    ("job".to_string(), "x".to_string()),
+                ])))
+                .unwrap()
+                .into_iter()
+                .collect()
+        };
+        let a = side("a", 1.0);
+        let b = side("b", 2.0);
+        (schema, a, b)
+    };
+    let run = |fields: usize, limit: usize| {
+        let (schema, lhs, rhs) = operands(fields);
+        budgeted(&matching, &schema, &lhs, &schema, &rhs, limit)
+    };
+    let measure = |fields: usize| -> usize {
+        let (output, seen) = run(fields, usize::MAX);
+        let output = output.expect("the fields pair");
+        assert_eq!(output.len(), 1, "{fields} fields: {output:?}");
+        assert_eq!(
+            run_ranges(&output[0]),
+            vec![(0, points)],
+            "{fields} fields answer every point"
+        );
+        // Every field of the single result series holds the sum of both operands at every point.
+        for field in 0..fields {
+            let mut cursor = output[0].fields.as_slice()[field].cursor();
+            let mut rows = 0;
+            for (_, row) in output[0].time.positions() {
+                match cursor.at(row).expect("a row never goes back") {
+                    SampleRef::Float(value) => assert_eq!(value, 3.0, "{fields} fields"),
+                    _ => panic!("a field of the sum holds no float"),
+                }
+                rows += 1;
+            }
+            assert_eq!(rows, points, "{fields} fields answer every point");
+        }
+        *seen
+            .iter()
+            .max()
+            .expect("the operation asks for its workspace")
+    };
+    // What one field of this run costs: its rows, its slices of the triples, its columns and its
+    // share of the builder. Every term grows with the width and none with its square, so the cost
+    // per field is what stays put as the run widens.
+    let narrow = measure(4);
+    let wide = measure(64);
+    assert!(
+        wide <= 2 * (64 / 4) * narrow,
+        "sixteen times the fields cost {wide} beside the {narrow} four cost: a figure that charged \
+         every field's columns to every field's sample multiplies the cost per field by the width"
+    );
+    // The columns are part of the figure, so it is not trivially small.
+    assert!(
+        narrow >= points * 4 * (std::mem::size_of::<f64>() + 1),
+        "four fields cost {narrow}, less than their columns"
+    );
+    // A run of every width is admitted by a limit in the order of its columns, not of the width's
+    // square: the widest dense result is not a phantom megabyte per field.
+    for fields in [1, 4, 16, 64] {
+        assert!(
+            run(fields, 2 * 1024 * 1024).0.is_ok(),
+            "{fields} fields are refused under two megabytes, {wide} bytes for sixty-four"
+        );
+    }
+}
+
+/// Fields that hold different points of one label set still write every field's column at every
+/// output row: the figure charges the schema's fields per row, so a run whose fields never share a
+/// point is covered as fully as a dense one, and each field keeps its own values.
+#[test]
+fn fields_holding_disjoint_points_are_charged_their_columns() {
+    let points = 64;
+    let fields = 4;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(fields, &grid));
+    // Field `f` holds a value only at the points `f` apart, so the four fields share no point and
+    // each output row fills one field's column and leaves the other three null.
+    let side = |name: &str, offset: f64| -> Vec<Series> {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.begin_series();
+        for point in 0..points {
+            let mut row = vec![None; fields];
+            row[point % fields] = Some(point as f64 + offset);
+            builder.push(point, &row).unwrap();
+        }
+        builder
+            .finish(metric(&Labels::from([
+                ("__name__".to_string(), name.to_string()),
+                ("job".to_string(), "x".to_string()),
+            ])))
+            .unwrap()
+            .into_iter()
+            .collect()
+    };
+    let lhs = side("a", 1.0);
+    let rhs = side("b", 2.0);
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    let (output, seen) = budgeted(&matching, &schema, &lhs, &schema, &rhs, usize::MAX);
+    let output = output.expect("every point of every field is kept");
+    assert_eq!(output.len(), 1, "{output:?}");
+    assert_eq!(
+        run_ranges(&output[0]),
+        vec![(0, points)],
+        "one series over every point"
+    );
+    // Each point holds the sum of both operands in the field it belongs to and nothing elsewhere.
+    let mut cursors: Vec<RowCursor<'_>> = output[0]
+        .fields
+        .iter()
+        .map(|field| field.cursor())
+        .collect();
+    for (point, row) in output[0].time.positions() {
+        for (field, cursor) in cursors.iter_mut().enumerate() {
+            let value = match cursor.at(row).expect("a row never goes back") {
+                SampleRef::Missing => None,
+                SampleRef::Float(value) => Some(value),
+                SampleRef::Histogram(_) => panic!("a float field holds no histogram"),
+            };
+            // The lhs holds `point + 1` in its field and the rhs `point + 2`, so their sum is
+            // `2 * point + 3`, in the field the point belongs to and nowhere else.
+            let expected = (field == point % fields).then_some(2.0 * point as f64 + 3.0);
+            assert_eq!(value, expected, "point {point}, field {field}");
+        }
+    }
+    // The figure covers the composite a row costs: the rows the fields filed, the triple of each
+    // kept sample and the value and validity columns every field writes at every output row --
+    // the columns of the fields a row leaves empty included, since the builder writes them too. No
+    // row filling more than one field lets the columns be divided among the fields.
+    let peak = *seen
+        .iter()
+        .max()
+        .expect("the operation asks for its workspace");
+    let filed = points * RESULT_ROW_BYTES;
+    let triples = points * 2 * std::mem::size_of::<(usize, usize, GridSample)>();
+    let columns = points * fields * (std::mem::size_of::<f64>() + 1);
+    assert!(
+        peak >= filed + triples + columns,
+        "peak {peak} below the {filed} rows, {triples} triples and {columns} columns it holds"
+    );
+    assert!(
+        peak <= points * (fields * 2 * (std::mem::size_of::<f64>() + 1) + 4 * RESULT_ROW_BYTES)
+            + 128 * 1024,
+        "peak {peak} for {points} rows of {fields} fields"
+    );
+}

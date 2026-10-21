@@ -217,7 +217,7 @@ fn binary_vectors_inner(
     earliest_error(errors)?;
     // The merge holds every field's results at once: the triples it files, the table it files them
     // in and the builder writing the series out are the last workspace of the operation.
-    if let Some(budget) = budget {
+    if let Some(budget) = budget.as_deref_mut() {
         let sets = fields
             .iter()
             .map(|results| results.series.len())
@@ -231,7 +231,7 @@ fn binary_vectors_inner(
         );
         budget.step(merge)?;
     }
-    merge_fields(fields, output)
+    merge_fields(fields, output, budget)
 }
 
 /// One label of a match key, charged twice because `group_key` grows its `Vec` by doubling.
@@ -374,10 +374,15 @@ impl<'a> Budget<'a> {
     }
 }
 
+/// The slots the duplicate scan's point list holds before it doubles: a `Vec` of `usize` starts
+/// with room for four, so a scan that collects a single point still allocates that much.
+const POINT_LIST_FIRST_SLOTS: usize = 4;
+
 /// What one field's tables, flags and messages cost before it pairs anything.
 #[derive(Default)]
 struct FieldMetadata {
-    /// The presence flags, the one side's match groups and the duplicate scan's points.
+    /// The presence flags and the one side's match groups: what the field holds beside the pairing
+    /// it walks, and the figure a step of that walk is charged on top of.
     tables: usize,
     /// The allowance for the messages the field can report, which it reserves for its sort before
     /// it knows which of them it appends; only the ones it writes are kept.
@@ -390,11 +395,12 @@ struct FieldMetadata {
 ///
 /// The presence of each side and of the points both are present at are three flags per grid point;
 /// the one side's groups are a key, the values `on(...)` matching copies and a member list per
-/// series with the table holding them and the references indexing them; the duplicate scan
-/// collects that side's present points; one series of the many side is looked up by a key of its
-/// own; and a field reports at most three messages, each a fixed frame around one rendering.
-/// Nothing here counts the pairing the field walks: which series match, where their axes overlap
-/// and which rows the operator keeps is only known as the walk reaches them.
+/// series with the table holding them and the references indexing them; one series of the many side
+/// is looked up by a key of its own; and a field reports at most three messages, each a fixed frame
+/// around one rendering. Nothing here counts the pairing the field walks: which series match, where
+/// their axes overlap and which rows the operator keeps is only known as the walk reaches them.
+/// The duplicate scan's list of present points is not part of these tables either: a group of one
+/// member collects nothing, and a wider group's list is charged by [`overlap`] as it grows it.
 fn field_metadata_bytes(
     matching: &BinaryMatching,
     include: &[Arc<str>],
@@ -410,9 +416,7 @@ fn field_metadata_bytes(
             .saturating_add(2 * std::mem::size_of::<usize>())
             .saturating_add(GROUP_SLOT_BYTES)
             .saturating_add(2 * std::mem::size_of::<&GroupKey>())
-            .saturating_add(2 * std::mem::size_of::<(&GroupKey, usize)>())
-            // The duplicate scan's point list, one point per row the side carries at most.
-            .saturating_add(2 * std::mem::size_of::<usize>() * series.time.len());
+            .saturating_add(2 * std::mem::size_of::<(&GroupKey, usize)>());
         largest_key = largest_key.max(result_key_bytes(&series.metric));
     }
     let mut lookup = 0usize;
@@ -539,11 +543,13 @@ fn result_set_bytes(metric: &MetricName, one: &MetricName, include: &[Arc<str>])
 ///
 /// The merge files every kept triple under its label set and hands one series per label set to a
 /// builder, so the triples, the table, the row it fills, the output vector and the builder's own
-/// buffers are alive together: one index per retained row, one value and validity bit per field and
-/// row, the span a run may start with, a row of the histogram table per histogram and the heap its
-/// buckets are copied to. Every term counts a value a field actually kept or a label set it filed,
-/// so a pair the operator filtered costs its label set -- the table holds one without a value --
-/// and no row at all.
+/// buffers are alive together: one triple of a label set's samples, one index per retained row, the
+/// span a run may start with, a row of the histogram table per histogram and the heap its buckets
+/// are copied to. Every term counts a value a field actually kept or a label set it filed, so a pair
+/// the operator filtered costs its label set -- the table holds one without a value -- and no row at
+/// all. The builder's value columns are not here: they hold one slot per output row and field, and a
+/// row holding only some of the fields still writes a null into the others, so [`merge_fields`]
+/// charges them per row as it pushes it.
 fn merge_bytes(
     kept: usize,
     sets: usize,
@@ -551,14 +557,11 @@ fn merge_bytes(
     histograms: usize,
     histogram_heap: usize,
 ) -> usize {
-    // One kept triple, charged twice for the capacity its vector ends at, and one row of the
-    // builder's columns: its index, its value and validity bit per field, the span it may start
-    // and its row of the histogram table's index column.
-    let values = 2 * fields.saturating_mul(std::mem::size_of::<f64>() + 1);
+    // One kept triple, charged twice for the capacity its vector ends at, one slot of the row the
+    // builder reads, the span it may start and its row of the histogram table's index column.
     let row = (2 * std::mem::size_of::<(usize, usize, GridSample)>())
         .saturating_add(2 * std::mem::size_of::<usize>())
         .saturating_add(2 * std::mem::size_of::<GridSpan>())
-        .saturating_add(values)
         .saturating_add(std::mem::size_of::<Option<u32>>());
     kept.saturating_mul(row)
         // One label set's entry in the merge table and the series it is written out as.
@@ -573,6 +576,16 @@ fn merge_bytes(
         .saturating_add(fields.saturating_mul(std::mem::size_of::<HistogramBatchBuilder>()))
         .saturating_add(histograms.saturating_mul(2 * HISTOGRAM_ROW_BYTES))
         .saturating_add(2 * histogram_heap)
+}
+
+/// The bytes one output row of the merge adds to the builder's value columns: the value and the
+/// validity bit of every field of the schema, charged twice for the capacity each column grows to.
+///
+/// A row holds a value only in the fields the results filed at its point, and the builder writes a
+/// null into every other column, so this figure counts the schema's fields rather than the row's
+/// values: fields whose samples sit at different positions still write a column each.
+fn merge_row_bytes(fields: usize) -> usize {
+    2 * fields.saturating_mul(std::mem::size_of::<f64>() + 1)
 }
 
 /// The bytes one match key holds: its label pairs and, for `on(...)`, a copy of each value.
@@ -735,7 +748,16 @@ fn binary_field(
     let one_groups = group(one, &matching.labels);
     let mut one_duplicate: Option<(usize, &GroupKey)> = None;
     for (key, members) in &one_groups {
-        if let Some(point) = overlap(one, members, |point| both_present[point])
+        // The group's list of present points is charged as this scan grows it, beside the tables
+        // the field keeps from here on.
+        let duplicate = overlap(
+            one,
+            members,
+            |point| both_present[point],
+            metadata.tables,
+            budget.as_deref_mut(),
+        )?;
+        if let Some(point) = duplicate
             && one_duplicate.is_none_or(|(first, _)| point < first)
         {
             one_duplicate = Some((point, key));
@@ -1024,7 +1046,8 @@ pub fn set_vectors(
         fields.push(results);
     }
     earliest_error(errors)?;
-    merge_fields(fields, output)
+    // A set operator accounts for no workspace, so its merge is charged nothing either.
+    merge_fields(fields, output, None)
 }
 
 fn set_field(
@@ -1085,7 +1108,15 @@ fn set_field(
 }
 
 /// Joins the per-field results into series with all fields, by label set.
-fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<Series>> {
+///
+/// The builder's value columns grow with the output rows, which only exist once the triples are
+/// being grouped, so they are reserved per row -- one row's worth before the builder takes it --
+/// when a caller accounts for the workspace.
+fn merge_fields(
+    fields: Vec<Results>,
+    schema: Arc<SeriesSchema>,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Vec<Series>> {
     let width = schema.fields.len();
     // Per label set: the metric and its `(point, field, value)` samples.
     type Merged = (MetricName, Vec<(usize, usize, GridSample)>);
@@ -1116,6 +1147,10 @@ fn merge_fields(fields: Vec<Results>, schema: Arc<SeriesSchema>) -> Result<Vec<S
             row[field] = Some(value);
             while let Some((_, field, value)) = samples.next_if(|next| next.0 == point) {
                 row[field] = Some(value);
+            }
+            // The columns of this row, admitted before the builder grows them.
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.retain(merge_row_bytes(width))?;
             }
             builder.push_samples(point, &row)?;
         }
@@ -1187,13 +1222,31 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
 }
 
 /// The first point where two `members` are present and `relevant` holds.
+///
+/// The one list of the group's present points is the whole of what this scan allocates, and it is
+/// the field's workspace beside its `tables` rather than part of them: it is reserved before a point
+/// is pushed -- one slot per row the group's members carry at most, never fewer than the four a new
+/// list starts with, doubled because the list grows by doubling -- and given back once the list is
+/// dropped. A group of one member cannot repeat a point, so it allocates nothing and is charged
+/// nothing.
 fn overlap(
     operand: &Operand<'_>,
     members: &[usize],
     relevant: impl Fn(usize) -> bool,
-) -> Option<usize> {
+    tables: usize,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Option<usize>> {
     if members.len() < 2 {
-        return None;
+        return Ok(None);
+    }
+    if let Some(budget) = budget.as_deref_mut() {
+        let rows = members
+            .iter()
+            .fold(0usize, |rows, &member| {
+                rows.saturating_add(operand.axis(member).len())
+            })
+            .max(POINT_LIST_FIRST_SLOTS);
+        budget.step(tables.saturating_add(2 * std::mem::size_of::<usize>() * rows))?;
     }
     // Sorting the present points keeps the cost proportional to them, not to the span.
     let mut points = Vec::new();
@@ -1209,12 +1262,17 @@ fn overlap(
         }
     }
     points.sort_unstable();
-    for pair in points.windows(2) {
-        if pair[0] == pair[1] && relevant(pair[0]) {
-            return Some(pair[0]);
-        }
+    let duplicate = points
+        .windows(2)
+        .find(|pair| pair[0] == pair[1] && relevant(pair[0]))
+        .map(|pair| pair[0]);
+    // The list belongs to this scan alone: it is dropped -- a duplicate found or not -- before its
+    // bytes are given back.
+    drop(points);
+    if let Some(budget) = budget {
+        budget.step(tables)?;
     }
-    None
+    Ok(duplicate)
 }
 
 fn result_metric(

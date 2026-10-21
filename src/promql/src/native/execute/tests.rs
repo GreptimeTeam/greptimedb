@@ -4939,3 +4939,115 @@ fn a_binary_counts_each_closed_result_once() {
     assert_eq!(count(&set, &root, NodeMetric::INPUT_BATCHES), 2);
     assert_eq!(count(&set, &root, NodeMetric::OUTPUT_BATCHES), 1);
 }
+
+/// A legitimate empty result over a wide operand finishes in a 4 MiB pool and holds nothing after.
+///
+/// A match group of one member collects no points in the duplicate scan, so charging a point per
+/// row of an operand reserves memory the kernel never allocates.
+#[test]
+fn an_empty_result_of_a_wide_operand_fits_its_pool() {
+    let points = 10_000;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points as u64);
+    let schema = evaluated_schema(grid);
+    let pool = bounded_pool(4 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let series = |job: &str| pod_metric("requests", job, "p");
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk_of(&schema, series("left"), 0, vec![Some(1.0); points], true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    for index in 0..32 {
+        execution
+            .push_evaluated_at(
+                &right,
+                evaluated_chunk_of(
+                    &schema,
+                    series(&format!("r{index:02}")),
+                    0,
+                    vec![Some(2.0); points],
+                    true,
+                ),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+
+    let finished = execution.finish();
+    assert!(
+        finished.is_ok(),
+        "an empty result over {points} points does not fit a 4 MiB pool: {:?}",
+        finished.as_ref().err()
+    );
+    assert!(
+        finished.unwrap().is_empty(),
+        "nothing matches, so nothing is answered"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A legitimate wide query finishes in a 32 MiB pool, keeping every field's sum and nothing else.
+///
+/// A thousand points pair all sixty-four fields of both operands, so the workspace is the rows
+/// filed and the tables beside them, not a figure far past either.
+#[test]
+fn a_dense_wide_result_fits_a_32_mib_pool() {
+    let (points, width) = (1_000usize, 64usize);
+    let grid = grid(0, 60_000, points as u64);
+    let (left_node, right_node) = (
+        evaluated_input_of(width, Arc::clone(&grid)),
+        evaluated_input_of(width, Arc::clone(&grid)),
+    );
+    let schema = left_node
+        .output
+        .samples()
+        .expect("a source of evaluated samples")
+        .clone();
+    let root = binary_of(left_node, right_node, binary_matching(BinaryOp::Add));
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = bounded_pool(32 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let columns = |value: f64| -> Vec<Vec<Option<f64>>> {
+        (0..width).map(|_| vec![Some(value); points]).collect()
+    };
+    let (left, right) = (NodePath::root().left(), NodePath::root().right());
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_columns(&schema, metric(), 0, columns(1.0), true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated_at(
+            &right,
+            evaluated_columns(&schema, metric(), 0, columns(2.0), true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    let finished = execution.finish();
+    assert!(
+        finished.is_ok(),
+        "{width} fields over {points} points do not fit a 32 MiB pool: {:?}",
+        finished.as_ref().err()
+    );
+    let out = finished.unwrap();
+    assert_eq!(out.len(), 1, "one matched label set answers one chunk");
+    let chunk = &out[0];
+    assert!(chunk.is_last, "a result series is handed over closed");
+    assert_eq!(chunk.series.time.len(), points);
+    assert_eq!(series_start(chunk), 0);
+    assert_eq!(chunk.series.fields.len(), width);
+    for field in 0..width {
+        assert_eq!(
+            field_values(chunk, field),
+            vec![Some(3.0); points],
+            "field {field}"
+        );
+    }
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
