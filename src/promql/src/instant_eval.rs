@@ -21,7 +21,7 @@ use datatypes::series::MetricName;
 use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
 
-use crate::grid_series::GridSeriesBuilder;
+use crate::grid_series::{GridSeriesBuilder, label_set, render_label_set};
 use crate::map::drop_metric_name;
 
 #[cfg(test)]
@@ -153,9 +153,13 @@ pub fn select_instants(
 /// which sample is selected but not the time reported. The metric name, `__type__` and `__unit__`
 /// are dropped.
 ///
-/// `indices` and `evaluation_timestamps` are what [`select_instants`] returns for `time` and
-/// `fields`; `schema` holds the evaluation grid the timestamps lie on and one field per field of
-/// `fields`. A field without a sample in the selected row has no result there.
+/// `indices` and `evaluation_timestamps` are a selection of `time` and `fields` as
+/// [`select_instants`] returns one: grid positions increasing, rows not decreasing. `schema` holds
+/// the evaluation grid the timestamps lie on and one field per field of `fields`. A field without a
+/// sample in the selected row has no result there.
+///
+/// `timestamp(x @ t)` selects at `t` for every point, so its selection repeats one row; Prometheus
+/// ignores an offset next to `@` here, while `info()` applies it.
 pub fn timestamp_of_selection(
     schema: &Arc<SeriesSchema>,
     metric: &MetricName,
@@ -164,9 +168,13 @@ pub fn timestamp_of_selection(
     indices: &[u64],
     evaluation_timestamps: &[i64],
 ) -> Result<Option<Series>> {
-    let selection = Selection::try_new(schema, time, fields, indices, evaluation_timestamps)?;
-    selection.project(
+    project_selection(
+        schema,
         drop_metric_name(metric)?,
+        time,
+        fields,
+        indices,
+        evaluation_timestamps,
         |_, time| Ok(time as f64 / 1000.0),
     )
 }
@@ -184,13 +192,21 @@ pub fn info_sample_times(
     indices: &[u64],
     evaluation_timestamps: &[i64],
 ) -> Result<Option<Series>> {
-    let selection = Selection::try_new(schema, time, fields, indices, evaluation_timestamps)?;
-    selection.project(metric.clone(), |sample, time| match sample {
-        SampleRef::Histogram(_) => Err(DataFusionError::Execution(format!(
-            "this should be an info metric, with float samples: {metric:?}"
-        ))),
-        _ => Ok(time as f64),
-    })
+    project_selection(
+        schema,
+        metric.clone(),
+        time,
+        fields,
+        indices,
+        evaluation_timestamps,
+        |sample, time| match sample {
+            SampleRef::Histogram(_) => Err(DataFusionError::Execution(format!(
+                "this should be an info metric, with float samples: {}",
+                render_label_set(&label_set(metric))
+            ))),
+            _ => Ok(time as f64),
+        },
+    )
 }
 
 /// `timestamp(v)` over an evaluated `v`, such as `timestamp(abs(x))`: the evaluation time in
@@ -228,94 +244,79 @@ pub fn timestamp_of_evaluated(
     builder.finish(drop_metric_name(&series.metric)?)
 }
 
-/// A checked instant selection: the grid position and source row of each selected point.
-struct Selection<'a> {
-    schema: &'a Arc<SeriesSchema>,
-    time: &'a RawTimestamps,
-    fields: &'a SeriesFields,
-    /// `(grid position, source row)` per selected point, positions increasing.
-    points: Vec<(usize, usize)>,
-}
-
-impl<'a> Selection<'a> {
-    fn try_new(
-        schema: &'a Arc<SeriesSchema>,
-        time: &'a RawTimestamps,
-        fields: &'a SeriesFields,
-        indices: &[u64],
-        evaluation_timestamps: &[i64],
-    ) -> Result<Self> {
-        let grid = schema.eval_grid.as_ref().ok_or_else(|| {
-            DataFusionError::Execution("an instant selection requires an evaluation grid".into())
-        })?;
-        if indices.len() != evaluation_timestamps.len() || fields.len() != schema.fields.len() {
-            return Err(DataFusionError::Execution(
-                "instant selection does not match its series or schema".into(),
-            ));
-        }
-        let spec = grid.spec();
-        let mut points = Vec::with_capacity(indices.len());
-        for (&row, &timestamp) in indices.iter().zip(evaluation_timestamps) {
-            let offset = timestamp as i128 - spec.start_ms as i128;
-            let position = offset / spec.step_ms as i128;
-            let row = usize::try_from(row).ok().filter(|row| *row < time.len());
-            match row {
-                Some(row)
-                    if offset % spec.step_ms as i128 == 0
-                        && (0..spec.len as i128).contains(&position)
-                        && points.last().is_none_or(|&(last, last_row)| {
-                            (last as i128) < position && last_row <= row
-                        }) =>
-                {
-                    points.push((position as usize, row));
-                }
-                _ => {
-                    return Err(DataFusionError::Execution(
-                        "instant selection points off the grid or out of the series".into(),
-                    ));
-                }
-            }
-        }
-        Ok(Self {
-            schema,
-            time,
-            fields,
-            points,
-        })
+/// One series over an instant selection, each field holding `value(sample, original time)` where
+/// the selected row has a sample for it.
+///
+/// The selection is `indices` and `evaluation_timestamps` as [`select_instants`] returns them: one
+/// source row and one grid timestamp per selected point, with positions increasing and rows not
+/// decreasing. An `@` selection, which reads one row at every point, repeats that row; it is the
+/// caller's to build. A selection off the grid, going back, or naming a row the series does not
+/// have fails.
+fn project_selection(
+    schema: &Arc<SeriesSchema>,
+    metric: MetricName,
+    time: &RawTimestamps,
+    fields: &SeriesFields,
+    indices: &[u64],
+    evaluation_timestamps: &[i64],
+    value: impl Fn(SampleRef<'_>, i64) -> Result<f64>,
+) -> Result<Option<Series>> {
+    let grid = schema.eval_grid.as_ref().ok_or_else(|| {
+        DataFusionError::Execution("an instant selection requires an evaluation grid".into())
+    })?;
+    if indices.len() != evaluation_timestamps.len()
+        || fields.len() != schema.fields.len()
+        || fields.iter().any(|field| field.len() != time.len())
+    {
+        return Err(DataFusionError::Execution(
+            "instant selection does not match its series or schema".into(),
+        ));
     }
-
-    /// One series over the selected points, each field holding `value(sample, original time)`
-    /// where its selected sample is present.
-    fn project(
-        &self,
-        metric: MetricName,
-        value: impl Fn(SampleRef<'_>, i64) -> Result<f64>,
-    ) -> Result<Option<Series>> {
-        let mut builder = GridSeriesBuilder::try_new(self.schema.clone())?;
-        let mut cursors: Vec<_> = self.fields.iter().map(|field| field.cursor()).collect();
-        // Consecutive points often select the same row, which a cursor reads only once.
-        let mut row: Vec<Option<f64>> = Vec::with_capacity(self.fields.len());
-        let mut row_index = None;
-        for &(position, index) in &self.points {
-            if row_index != Some(index) {
-                let time = self
-                    .time
-                    .timestamp(index)
-                    .expect("checked against the axis");
+    let spec = grid.spec();
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    let mut cursors: Vec<_> = fields.iter().map(|field| field.cursor()).collect();
+    // Consecutive points often select the same row, which a cursor reads only once.
+    let mut row: Vec<Option<f64>> = Vec::with_capacity(fields.len());
+    let mut last: Option<(i128, usize)> = None;
+    for (&index, &timestamp) in indices.iter().zip(evaluation_timestamps) {
+        let offset = timestamp as i128 - spec.start_ms as i128;
+        let position = offset / spec.step_ms as i128;
+        let index = usize::try_from(index)
+            .ok()
+            .filter(|index| *index < time.len());
+        let (Some(index), true) = (
+            index,
+            offset % spec.step_ms as i128 == 0
+                && (0..spec.len as i128).contains(&position)
+                && last.is_none_or(|(last_position, _)| last_position < position),
+        ) else {
+            return Err(DataFusionError::Execution(
+                "instant selection points off the grid or out of the series".into(),
+            ));
+        };
+        match last {
+            Some((_, last_index)) if last_index == index => {}
+            Some((_, last_index)) if last_index > index => {
+                return Err(DataFusionError::Execution(
+                    "instant selection rows must not go back".into(),
+                ));
+            }
+            _ => {
+                let time = time.timestamp(index).expect("checked against the axis");
                 row.clear();
                 for cursor in &mut cursors {
                     let sample = cursor
                         .at(index)
-                        .expect("selected rows only increase and lie in the fields");
+                        .expect("rows increase and lie in fields as long as the axis");
                     row.push(match sample {
                         SampleRef::Missing => None,
                         sample => Some(value(sample, time)?),
                     });
                 }
-                row_index = Some(index);
             }
-            builder.push(position, &row)?;
         }
-        builder.finish(metric)
+        last = Some((position, index));
+        builder.push(position as usize, &row)?;
     }
+    builder.finish(metric)
 }

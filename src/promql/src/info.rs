@@ -33,7 +33,9 @@ use datatypes::series::MetricName;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use regex::Regex;
 
-use crate::grid_series::{GridSample, GridSeriesBuilder, LabelSet, external, label_set, owned};
+use crate::grid_series::{
+    GridSample, GridSeriesBuilder, LabelSet, external, label_set, owned, render_label_set,
+};
 use crate::select::MatchOp;
 
 /// The labels an info series is joined on, as in Prometheus.
@@ -171,9 +173,9 @@ pub fn info(
                             format!(
                                 "found duplicate series for info metric: existing {} @ {}, new \
                                  {} @ {}",
-                                render(&label_set(&info[existing_index].metric)),
+                                render_label_set(&label_set(&info[existing_index].metric)),
                                 existing as i64,
-                                render(&label_set(&series.metric)),
+                                render_label_set(&label_set(&series.metric)),
                                 timestamp as i64
                             )
                         });
@@ -281,7 +283,7 @@ pub fn info(
                             error.record(point, 2, || {
                                 format!(
                                     "vector cannot contain metrics with the same labelset {}",
-                                    render(&label_set(metric))
+                                    render_label_set(&label_set(metric))
                                 )
                             });
                         }
@@ -338,15 +340,6 @@ impl FirstError {
             self.0 = Some((point, rank, message()));
         }
     }
-}
-
-/// A label set as Prometheus prints one.
-fn render(labels: &LabelSet) -> String {
-    let labels: Vec<String> = labels
-        .iter()
-        .map(|(name, value)| format!("{name}=\"{value}\""))
-        .collect();
-    format!("{{{}}}", labels.join(", "))
 }
 
 /// An info metric name and the identifying label values present on a series.

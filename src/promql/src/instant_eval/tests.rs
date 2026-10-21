@@ -426,8 +426,14 @@ fn info_sample_times_keep_milliseconds_labels_and_missing_fields() {
     let schema = grid_schema(1, 100, 10, 1);
     let time = axis(&[95]);
     let (indices, timestamps) = select_instants(&time, &histograms, 100..=100, 10, 20, 0).unwrap();
+    let error = info_sample_times(&schema, &metric, &time, &histograms, &indices, &timestamps)
+        .unwrap_err()
+        .to_string();
     assert!(
-        info_sample_times(&schema, &metric, &time, &histograms, &indices, &timestamps).is_err()
+        error.contains(
+            r#"this should be an info metric, with float samples: {__name__="target_info", job="x"}"#
+        ),
+        "{error}"
     );
     assert!(
         timestamp_of_selection(&schema, &metric, &time, &histograms, &indices, &timestamps)
@@ -457,4 +463,42 @@ fn selections_off_the_grid_or_going_back_are_rejected() {
             "{indices:?} {timestamps:?}"
         );
     }
+}
+
+/// Fields shorter than the time axis are refused, not read past their end.
+#[test]
+fn a_selection_over_fields_shorter_than_the_axis_fails() {
+    let schema = grid_schema(1, 100, 10, 3);
+    let time = axis(&[95, 107]);
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0])));
+    let metric = metric_of(&Labels::new());
+    assert!(timestamp_of_selection(&schema, &metric, &time, &fields, &[1], &[110]).is_err());
+}
+
+/// The evaluation time is reported per field: a field without a value at a point has no result
+/// there, while the other field does.
+#[test]
+fn evaluated_timestamps_follow_each_field() {
+    let schema = grid_schema(2, 100, 10, 3);
+    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    builder.push(0, &[Some(1.0), None]).unwrap();
+    builder.push(2, &[Some(1.0), Some(5.0)]).unwrap();
+    let evaluated = builder
+        .finish(metric_of(&Labels::from([(
+            "__name__".to_string(),
+            "a".to_string(),
+        )])))
+        .unwrap()
+        .unwrap();
+    let result = timestamp_of_evaluated(&schema, &evaluated)
+        .unwrap()
+        .unwrap();
+    assert!(result.metric.name().is_none());
+    assert_eq!(
+        values_by_position(&result),
+        [
+            (0, vec![Some(0.1f64.to_bits()), None]),
+            (2, vec![Some(0.12f64.to_bits()), Some(0.12f64.to_bits())]),
+        ]
+    );
 }

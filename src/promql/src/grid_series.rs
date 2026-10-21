@@ -302,6 +302,15 @@ pub(crate) const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__
 
 pub(crate) type LabelSet = Vec<(Arc<str>, Arc<str>)>;
 
+/// A label set as Prometheus prints one in errors: `{name="value", ...}`.
+pub(crate) fn render_label_set(labels: &LabelSet) -> String {
+    let labels: Vec<String> = labels
+        .iter()
+        .map(|(name, value)| format!("{name}=\"{value}\""))
+        .collect();
+    format!("{{{}}}", labels.join(", "))
+}
+
 /// The label set Prometheus compares, which has no empty values.
 pub(crate) fn label_set(metric: &MetricName) -> LabelSet {
     let name = metric
