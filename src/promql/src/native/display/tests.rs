@@ -24,7 +24,7 @@ use super::super::plan::{
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
@@ -324,11 +324,12 @@ fn an_aggregate_and_a_binary_name_their_binding() {
                 return_bool: false,
                 labels: MatchingLabels::Ignoring(Vec::new()),
                 cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
             },
         },
         output: evaluated(out),
     };
-    let tree = NativeTree::try_new(binary).unwrap();
+    let tree = NativeTree::try_new(binary.clone()).unwrap();
     assert_eq!(
         tree.to_string(),
         shown(&[
@@ -338,6 +339,21 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             "    right Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
             "      input Input raw samples",
         ])
+    );
+
+    // Fill values change the result, so a set one is part of the binding shown.
+    let mut filled = binary;
+    let NativeExpr::Binary { matching, .. } = &mut filled.expr else {
+        unreachable!()
+    };
+    matching.fill.rhs = Some(0.5);
+    assert_eq!(
+        NativeTree::try_new(filled)
+            .unwrap()
+            .to_string()
+            .lines()
+            .nth(1),
+        Some("  root Binary + ignoring [] one-to-one fill_right 0.5")
     );
 }
 
