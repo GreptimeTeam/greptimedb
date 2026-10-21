@@ -54,7 +54,9 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{
+    MemoryConsumer, MemoryPool, MemoryReservation, UnboundedMemoryPool,
+};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
@@ -729,9 +731,10 @@ pub struct FusedSeriesExec {
     input: Arc<dyn ExecutionPlan>,
     /// The columns this node produces.
     output_schema: SchemaRef,
-    /// The grid positions every label set in this plan's output already occupies.
+    /// The grid positions every label set in this plan's output already occupies, and what they
+    /// keep charged on the memory pool.
     ///
-    /// Plan-level rather than per-partition: see [`SharedLabelSets`].
+    /// Plan-level rather than per-partition: see [`LabelSets`].
     labels: SharedLabelSets,
     /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
@@ -793,9 +796,9 @@ impl FusedSeriesExec {
             input_properties.boundedness,
         ));
         // Shared by every partition's stream: a label set colliding is a property of the whole
-        // output vector, not of one partition. Creating it needs no pool; each stream reserves the
-        // bytes it adds in its own reservation.
-        let labels: SharedLabelSets = Arc::new(Mutex::new(HashMap::new()));
+        // output vector, not of one partition. Building it needs no pool; the owner's reservation is
+        // attached in `execute`, which is the first point that has one.
+        let labels: SharedLabelSets = Arc::new(Mutex::new(LabelSets::default()));
         Ok(Self {
             promql,
             tree,
@@ -877,6 +880,14 @@ impl ExecutionPlan for FusedSeriesExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
+        // The label-set state is the plan's, so the reservation that pays for it is attached exactly
+        // once, to the pool of the first execution. Every partition calls this and only the first
+        // takes effect: re-registering per stream would move a charge the other partitions keep
+        // growing, and would give it back when that stream ends while the entries stay.
+        self.labels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attach(&context.runtime_env().memory_pool);
         let input = self.input.execute(partition, Arc::clone(&context))?;
         let mapping = input_mapping(&self.binding, &self.input.schema())?;
         // Batches become raw series chunks through the shared frame converter, which is what groups
@@ -888,10 +899,8 @@ impl ExecutionPlan for FusedSeriesExec {
             &self.metric,
             partition,
         )?;
-        // What this stream adds to the shared label-set map is its own to account for; the map
-        // itself outlives it, so the entries are not given back with the reservation.
-        let reservation =
-            MemoryConsumer::new("FusedSeriesStream").register(&context.runtime_env().memory_pool);
+        // What the label sets hold is charged to the reservation attached above, so nothing is
+        // reserved per stream: the entries outlive every stream and are released with the plan.
         Ok(Box::pin(FusedSeriesStream {
             input: Some(input),
             executor: Some(NativeExecutor::new(state)),
@@ -900,7 +909,6 @@ impl ExecutionPlan for FusedSeriesExec {
             binding: Arc::clone(&self.binding),
             output_schema: self.output_schema.clone(),
             labels: Arc::clone(&self.labels),
-            reservation,
             ready: VecDeque::new(),
             done: false,
         }))
@@ -1062,8 +1070,75 @@ fn render_labels(metric: &MetricName) -> String {
 /// miss exactly those collisions.
 ///
 /// The map belongs to the plan, not to one stream: a partition that ends leaves what it claimed
-/// for the partitions still running, so the entries are only released with the plan itself.
-type SharedLabelSets = Arc<Mutex<HashMap<LabelsKey, Vec<(usize, usize)>>>>;
+/// for the partitions still running, so the entries are only released with the plan itself. The
+/// charge has the same lifetime, which is what makes bytes the map holds — one entry per label set
+/// of the output, kept until the plan dies — visible to the memory pool. Charging each stream for
+/// what it inserted instead returned those bytes when that stream ended, while the entries the
+/// later partitions are checked against stayed: everything the map held after the first partition
+/// was unaccounted for.
+#[derive(Default)]
+struct LabelSets {
+    /// The grid positions each final label set already occupies, as merged, sorted runs.
+    seen: HashMap<LabelsKey, Vec<(usize, usize)>>,
+    /// What `seen` keeps charged on the task's memory pool. `None` until the first execution,
+    /// since construction has no `TaskContext` and therefore no pool to register against.
+    reservation: Option<MemoryReservation>,
+}
+
+impl LabelSets {
+    /// Attaches the reservation to the pool of the first execution.
+    ///
+    /// Later executions keep the first reservation: it already pays for what `seen` holds, and
+    /// moving it to another pool would drop the bytes other partitions are still growing.
+    fn attach(&mut self, pool: &Arc<dyn MemoryPool>) {
+        if self.reservation.is_none() {
+            self.reservation =
+                Some(MemoryConsumer::new("FusedSeriesExec label sets").register(pool));
+        }
+    }
+
+    /// Claims the occupied grid positions of one chunk of a final series for its label set.
+    ///
+    /// A collision is an error only when both series hold a sample at the same evaluation
+    /// timestamp, which is Prometheus' range-query rule. Series with disjoint points are legal:
+    /// Prometheus merges them into one output series, while this node emits them as separate
+    /// batches and defers that merge to matrix assembly, so every sample survives.
+    fn claim(&mut self, series: &Series) -> DataFusionResult<()> {
+        let runs = occupied_runs(series)?;
+        let key = LabelsKey::new(&series.metric);
+        let Self { seen, reservation } = self;
+        // Nothing reaches a claim without an `execute` first, and an execution that ran attached the
+        // reservation. Claiming without one would leave the map growing uncharged, so it is refused
+        // rather than silently skipped.
+        let Some(reservation) = reservation.as_mut() else {
+            return Err(DataFusionError::Execution(
+                "FusedSeriesExec label-set state is not attached to a memory pool".to_string(),
+            ));
+        };
+        match seen.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let stored = entry.get_mut();
+                if runs_overlap(stored, &runs) {
+                    return Err(DataFusionError::Execution(format!(
+                        "vector cannot contain metrics with the same labelset: {}",
+                        render_labels(&series.metric)
+                    )));
+                }
+                merge_runs(stored, &runs);
+            }
+            Entry::Vacant(entry) => {
+                // Only the label-set state is this node's own cross-poll state that grows with
+                // the output, so it is the only thing reserved here.
+                let bytes = entry.key().len() + runs.len() * 2 * size_of::<usize>();
+                reservation.try_grow(bytes)?;
+                entry.insert(runs);
+            }
+        }
+        Ok(())
+    }
+}
+
+type SharedLabelSets = Arc<Mutex<LabelSets>>;
 
 /// The grid positions the rows of one chunk hold a value at, as sorted, disjoint runs.
 ///
@@ -1190,9 +1265,9 @@ pub struct FusedSeriesStream {
     /// The schema of every batch this stream yields.
     output_schema: SchemaRef,
     /// The label-set occupancy shared with the other partitions' streams.
+    ///
+    /// What it holds is charged to the plan's own reservation, attached by the first execution.
     labels: SharedLabelSets,
-    /// Accounts for what this stream adds to `labels`; freed when the stream ends.
-    reservation: MemoryReservation,
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
     /// Whether the input ended and everything it settled has been handed out.
@@ -1234,44 +1309,11 @@ impl FusedSeriesStream {
         self.done = true;
         self.executor = None;
         self.input = None;
-        // The label-set map is shared, so a stream stopping early must not clear entries another
-        // partition is still checking against: its own reservation is what this stream owns, and
-        // that is what it gives back.
-        self.reservation.free();
+        // The label-set map and its charge are the plan's, so a stream stopping early gives back
+        // nothing: the entries another partition is still checking against have to stay charged, and
+        // are released when the plan itself is dropped.
         // A batch queued before the error was settled by a run that has now stopped.
         self.ready.clear();
-    }
-
-    /// Claims the occupied grid positions of one chunk of a final series for its label set.
-    ///
-    /// A collision is an error only when both series hold a sample at the same evaluation
-    /// timestamp, which is Prometheus' range-query rule. Series with disjoint points are legal:
-    /// Prometheus merges them into one output series, while this node emits them as separate
-    /// batches and defers that merge to matrix assembly, so every sample survives.
-    fn claim_label_set(&mut self, series: &Series) -> DataFusionResult<()> {
-        let runs = occupied_runs(series)?;
-        let key = LabelsKey::new(&series.metric);
-        let mut seen = self.labels.lock().unwrap_or_else(|e| e.into_inner());
-        match seen.entry(key) {
-            Entry::Occupied(mut entry) => {
-                let stored = entry.get_mut();
-                if runs_overlap(stored, &runs) {
-                    return Err(DataFusionError::Execution(format!(
-                        "vector cannot contain metrics with the same labelset: {}",
-                        render_labels(&series.metric)
-                    )));
-                }
-                merge_runs(stored, &runs);
-            }
-            Entry::Vacant(entry) => {
-                // Only the label-set state is this node's own cross-poll state that grows with
-                // the output, so it is the only thing reserved here.
-                let bytes = entry.key().len() + runs.len() * 2 * size_of::<usize>();
-                self.reservation.try_grow(bytes)?;
-                entry.insert(runs);
-            }
-        }
-        Ok(())
     }
 
     /// Converts the chunks the executor settled into batches, in the order it produced them.
@@ -1279,7 +1321,10 @@ impl FusedSeriesStream {
         for chunk in &chunks {
             // The label set is claimed before its batch is queued, so a collision surfaces at the
             // chunk that reached it and nothing this plan would refuse is handed out after it.
-            self.claim_label_set(&chunk.series)?;
+            self.labels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .claim(&chunk.series)?;
             let batch = series_to_record_batch(
                 &self.classification,
                 &self.binding.tags,

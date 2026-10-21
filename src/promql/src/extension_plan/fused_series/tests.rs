@@ -42,7 +42,8 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -246,6 +247,15 @@ fn memory_exec_partitioned(partitions: Vec<Vec<RecordBatch>>) -> Arc<dyn Executi
         MemorySourceConfig::try_new(&partitions, input_schema(), None)
             .expect("every partition holds batches of the input schema"),
     )))
+}
+
+/// A task context whose memory pool is `pool`, so what the node charges can be read afterwards.
+fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::clone(pool) as Arc<dyn MemoryPool>)
+        .build()
+        .expect("the runtime environment builds");
+    Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
 }
 
 /// A physical input whose one partition's stream `make` builds.
@@ -1463,6 +1473,84 @@ async fn a_duplicate_label_set_on_disjoint_grid_points_is_emitted() {
         let value = value.expect("the point each series holds has a value");
         assert!((rate - value).abs() < 1e-9, "{value} is not {rate}");
     }
+}
+
+/// What a label set holds stays charged after the stream that first claimed it ends.
+///
+/// The map belongs to the plan: it outlives every partition and is released with the plan. Charging
+/// each stream for what it inserted returned the bytes of a label set when *that* stream ended,
+/// while the entry the next partition is checked against stayed in the map, so everything the map
+/// held after the first partition was invisible to the pool. What is charged here is therefore read
+/// between the partitions: it has to survive the first stream and grow no further when the second
+/// partition lands on the label set the first one claimed.
+#[tokio::test]
+async fn a_label_set_stays_charged_after_its_first_stream_ends() {
+    // The first series holds a value only at the first grid point and the second only at the last,
+    // so the two share a final label set without sharing an evaluation timestamp: the second
+    // partition is legal and has to be answered, and it has to find the first one's entry there.
+    let first = vec![series_batch(
+        "web-0",
+        &[(60_000, 60.0), (GRID_START, GRID_START as f64 / 1_000.0)],
+    )];
+    let last = GRID_START + (GRID_LEN as i64 - 1) * GRID_STEP;
+    let second = vec![series_batch(
+        "web-0",
+        &[
+            (GRID_START, GRID_START as f64 / 1_000.0),
+            (last, last as f64 / 1_000.0),
+        ],
+    )];
+    let exec = fused(rate_tree())
+        .to_execution_plan(memory_exec_partitioned(vec![first, second]))
+        .expect("the runtime executes a rate tree");
+    assert_eq!(
+        2,
+        exec.properties().output_partitioning().partition_count(),
+        "this test needs one series in each of two partitions"
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+
+    // The first partition claims the label set, answers it and ends.
+    let mut stream = exec
+        .execute(0, Arc::clone(&context))
+        .expect("the node executes");
+    let mut answered = Vec::new();
+    while let Some(batch) = stream.next().await {
+        answered.push(batch.expect("the first partition runs"));
+    }
+    assert_eq!(1, answered.len(), "one series over one grid point");
+    drop(stream);
+    let charged = pool.reserved();
+    assert!(
+        charged > 0,
+        "the first partition's label set is still in the plan's map, but nothing is charged for it"
+    );
+
+    // The second partition lands on that same label set on points the first one does not hold: it
+    // is answered, and what it adds to the entry is already paid for.
+    let mut stream = exec
+        .execute(1, Arc::clone(&context))
+        .expect("the node executes");
+    let mut answered = Vec::new();
+    while let Some(batch) = stream.next().await {
+        answered.push(batch.expect("the second partition runs"));
+    }
+    assert_eq!(1, answered.len(), "disjoint points are legal");
+    drop(stream);
+    assert_eq!(
+        charged,
+        pool.reserved(),
+        "a label set the map already holds is not charged a second time"
+    );
+
+    // The entries live as long as the plan, so dropping it is what gives their bytes back.
+    drop(exec);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "the plan's drop releases what its label sets held"
+    );
 }
 
 /// Each partition runs its own series and answers it, with no label set claimed twice.
