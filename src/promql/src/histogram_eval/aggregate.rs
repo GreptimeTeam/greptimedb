@@ -156,7 +156,8 @@ fn aggregate_point<'a>(
 /// The Kahan sum or the mean of `histograms` in order, without compaction; `None` when there is
 /// none or they mix exponential and custom buckets. Prometheus `sum_over_time` and
 /// `avg_over_time` run the same steps as the aggregations. Histograms are consumed one at a
-/// time, so the first error ends the fold.
+/// time, so the first error ends the fold. The result is derived, so it carries no start
+/// timestamp.
 pub(crate) fn sum_or_avg(
     op: HistogramAggregate,
     histograms: impl IntoIterator<Item = Result<FloatHistogram>>,
@@ -236,5 +237,11 @@ pub(crate) fn sum_or_avg(
             }
         },
     }
+    // The result was derived from its inputs, so it carries no start timestamp of its own, like
+    // every other operation that builds one. Clearing it here covers the fold that added nothing:
+    // the first histogram of a window becomes the result as it arrived, and the adds above are
+    // what drop the field otherwise, which would make the payload depend on the sample count.
+    // The bucket layout is left as the fold built it -- compaction belongs to the caller.
+    value.start_timestamp = None;
     Ok(Some(value))
 }

@@ -30,6 +30,12 @@
 //! outer window reads the inner result as the samples it is, not as something to be resampled onto
 //! the outer grid first.
 //!
+//! An instant selection owns no evaluator, because [`select_instants`] takes a complete source
+//! axis: the node buffers the chunks of the series it is selecting until the chunk that carries
+//! `is_last`, selects the last sample at or before each grid point of it, and hands the series over
+//! as one chunk addressed on its own grid. Nothing is decided for a series before it ends, which is
+//! the price of the kernel taking one axis rather than a chunk of one.
+//!
 //! A node kind this runtime does not execute yet is rejected when the execution is built, naming
 //! the kind and its position. An unsupported tree therefore never starts, rather than answering
 //! half a query or panicking halfway through one.
@@ -68,20 +74,23 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::{Array, Float64Array};
-use datatypes::arrow::buffer::Buffer;
-use datatypes::series::histogram::HistogramBatch;
-use datatypes::series::raw::RawSeriesChunk;
+use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+use datatypes::series::histogram::{HistogramBatch, HistogramView};
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{GridRange, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{MetricName, SeriesOrdering};
 
-use crate::grid_series::{LabelSet, label_set, merge_same_labelset};
+use crate::grid_series::{
+    GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
+};
+use crate::instant_eval::select_instants;
 use crate::map::{MathOp, drop_metric_name, map_math};
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{NodeMetrics, NodePath};
-use crate::native::plan::{NativeExpr, NativeTree};
+use crate::native::plan::{BoundInstant, NativeExpr, NativeTree};
 use crate::range_eval::RangeEvaluator;
 
 #[cfg(test)]
@@ -261,6 +270,8 @@ fn buffer_bytes(buffer: &Buffer) -> usize {
 enum NodeTag {
     /// Forwards the chunks it is given.
     Input,
+    /// Buffers one series and selects the last sample at or before each of its grid points.
+    Instant,
     /// Feeds its input to its own [`RangeEvaluator`].
     Window,
     /// Applies point-wise operations to its input chunks.
@@ -272,6 +283,7 @@ impl NodeTag {
     fn describe(self) -> &'static str {
         match self {
             Self::Input => "input",
+            Self::Instant => "instant selection",
             Self::Window => "window",
             Self::Map => "map",
         }
@@ -836,6 +848,438 @@ struct MapRuntime {
     schema: Arc<SeriesSchema>,
 }
 
+/// What an instant node holds: the chunks of the one series it is selecting, until that series ends.
+///
+/// [`select_instants`] takes a complete source axis, so this node cannot decide a grid point from
+/// the samples one chunk carries the way a window decides a range from what it has retained: it
+/// buffers a whole series and hands one chunk over for it. What it holds is therefore the series'
+/// own bytes, not a fixed window of them, and the reservation follows the buffer.
+struct InstantRuntime {
+    /// The bound selection: how far back it reads, the offset it reads at, and the grid its values
+    /// are addressed on.
+    selection: BoundInstant,
+    /// The layout the chunk it hands out is addressed on: its input's fields on that grid.
+    schema: Arc<SeriesSchema>,
+    /// Where the rows the selection picked are gathered, one series at a time.
+    output: GridSeriesBuilder,
+    /// The chunks of the series being selected, in arrival order; empty while no series is open.
+    chunks: Vec<RawSeriesChunk>,
+    /// What `chunks` hold, added as each chunk arrives and given back when the series is gathered.
+    ///
+    /// Each chunk is measured once, with the estimate a queued chunk is charged with: an allocation
+    /// two chunks of the series share is counted once per chunk, which is the over-count a figure
+    /// that keeps no state across chunks accepts.
+    held: usize,
+}
+
+impl InstantRuntime {
+    /// The run-time state of the instant selection `op`, reading the samples of `input`.
+    fn try_new(input: &SeriesSchema, op: &BoundInstant) -> Result<Self> {
+        // The chunk this node hands out is addressed on the selection's own grid, so the grid the
+        // rows are gathered on is the binding's rather than a copy of it.
+        let schema = Arc::new(SeriesSchema {
+            fields: Arc::clone(&input.fields),
+            eval_grid: Some(Arc::clone(&op.output_grid)),
+        });
+        Ok(Self {
+            selection: op.clone(),
+            output: GridSeriesBuilder::try_new(Arc::clone(&schema))?,
+            schema,
+            chunks: Vec::new(),
+            held: 0,
+        })
+    }
+
+    /// The bytes the buffered chunks of the open series hold.
+    fn buffered_bytes(&self) -> usize {
+        self.held
+    }
+
+    /// The bytes gathering the series `closing` ends is about to allocate beside its chunks.
+    ///
+    /// An upper bound derived from what the selection has in hand rather than a measurement: the
+    /// rows the series holds once `closing` has joined it, the fields it carries, the points the
+    /// selection can decide for it, and, per field, the largest histogram a row of it can carry.
+    /// Each term is one thing the gather allocates:
+    ///
+    /// - The concatenated axis ([`buffered_time`]): one `i64` per row, reserved by the row count.
+    /// - The descriptors that read it ([`buffered_fields`]): one [`Samples`] per (chunk, field) for
+    ///   the per-field vectors, three per segment for the vector [`Samples::try_from_chunks`]
+    ///   flattens them into -- the segment it came from, the vector it is flattened into and the
+    ///   `Arc<[Samples]>` the result is copied into -- and one `Vec<Samples>` header per field.
+    /// - The two arrays [`select_instants`] returns: a `u64` source row index and an `i64`
+    ///   evaluation timestamp per point, reserved by the count they can reach at most.
+    /// - The rows [`GridSeriesBuilder`] keeps: one `usize` grid index, one `f64` per field and a
+    ///   validity byte per (row, field). A field of native histograms adds one `Option<u32>` index
+    ///   per row and the payload of the histogram that index names, charged at the largest one the
+    ///   field holds and per *point* rather than per row: one source row can be selected by every
+    ///   point the selection decides, so the point count is what that payload is multiplied by.
+    /// - The row the selection fills, one [`GridSample`] slot per field, and one [`RowCursor`] per
+    ///   field to read the axis with.
+    /// - Doubling: every column the builder keeps is a `Vec` that grows by doubling, so each is
+    ///   charged twice what it ends up holding, which bounds its capacity rather than its length.
+    ///
+    /// Left out, deliberately: the headers and Arrow buffers behind the buffered chunks (the
+    /// node's own reservation already holds them, allocation by allocation), the `Vec` headers the
+    /// gather drops before it returns, `Series`' own header and the runs [`GridSeriesBuilder`]
+    /// hands the output over with, which the output chunk is charged for by whoever reads it, and
+    /// the temporaries [`FloatHistogram::push_to`] builds for one row. None of those is
+    /// proportional to the points the selection decides, which is the amplification the pool has to
+    /// be asked for, and all of them are constant per gather or already counted row by row.
+    ///
+    /// The estimate applies to every gather: nothing refuses one before it allocates, so the points
+    /// the series can be decided at are reserved for whatever their number is.
+    ///
+    /// [`FloatHistogram::push_to`]: crate::histogram_eval::float_histogram::FloatHistogram::push_to
+    fn gather_bytes(&self, closing: &RawSeriesChunk) -> usize {
+        // The points the selection decides, not the points the grid plans: the gather clips its
+        // scan to the series it holds, so a figure over the whole grid would charge the pool for
+        // rows this series can never produce.
+        let points = self.selected_points(closing);
+        let chunks = self.chunks.len().saturating_add(1);
+        let rows = self
+            .chunks
+            .iter()
+            .chain(std::iter::once(closing))
+            .map(|chunk| chunk.time.len())
+            .fold(0usize, usize::saturating_add);
+        let fields = self.schema.fields.len();
+        let descriptor = std::mem::size_of::<Samples>();
+        let segments = self
+            .chunks
+            .iter()
+            .chain(std::iter::once(closing))
+            .flat_map(|chunk| chunk.fields.as_slice())
+            .map(|field| field.segments().len())
+            .fold(0usize, usize::saturating_add);
+        let axis = rows.saturating_mul(std::mem::size_of::<i64>());
+        let layout = chunks
+            .saturating_mul(fields)
+            .saturating_mul(descriptor)
+            .saturating_add(segments.saturating_mul(3).saturating_mul(descriptor))
+            .saturating_add(fields.saturating_mul(std::mem::size_of::<Vec<Samples>>()));
+        let selection =
+            points.saturating_mul(std::mem::size_of::<u64>() + std::mem::size_of::<i64>());
+        let mut rows_of_points = points.saturating_mul(
+            std::mem::size_of::<usize>() + fields.saturating_mul(std::mem::size_of::<f64>() + 1),
+        );
+        for largest in self.largest_histograms(closing).iter().flatten() {
+            rows_of_points = rows_of_points.saturating_add(
+                points.saturating_mul(std::mem::size_of::<Option<u32>>().saturating_add(*largest)),
+            );
+        }
+        let row = fields.saturating_mul(
+            std::mem::size_of::<Option<GridSample>>() + std::mem::size_of::<RowCursor<'_>>(),
+        );
+        axis.saturating_add(layout)
+            .saturating_add(selection)
+            .saturating_add(row)
+            .saturating_add(rows_of_points.saturating_mul(2))
+    }
+
+    /// The number of grid points [`select_instants`] clips the buffered series to.
+    ///
+    /// The gather clips its scan to the series it holds instead of reading the whole planned grid:
+    /// the candidate points run from the first sample's instant to the last sample's plus the
+    /// lookback, aligned to the grid and held inside the query range. A workspace is charged per
+    /// point, so the count has to be the clipped one -- charging the planned grid charges the pool
+    /// for rows a short series can never produce, and a pool sized for what the series costs then
+    /// refuses the gather. The clipping below is [`select_instants`]' own, repeated rather than
+    /// approximated: an estimate that disagrees with the kernel is a bug here rather than a
+    /// conservative bound. It is the kernel's own candidate count -- the one it sizes its arrays
+    /// with -- so it bounds the rows it can report even though a candidate at the lookback edge
+    /// itself selects nothing. Both ends come from chunks the node already holds, so the count
+    /// reads two timestamps rather than the rows.
+    fn selected_points(&self, closing: &RawSeriesChunk) -> usize {
+        let spec = self.selection.output_grid.spec();
+        // The selection refuses these itself, before it can decide anything.
+        if spec.step_ms <= 0 || self.selection.lookback_ms < 0 {
+            return 0;
+        }
+        let query_start = i128::from(spec.start_ms);
+        let query_end = i128::from(grid_end_ms(spec));
+        if query_end < query_start {
+            return 0;
+        }
+        let series = || self.chunks.iter().chain(std::iter::once(closing));
+        let (Some(first), Some(last)) = (
+            series().find_map(|chunk| chunk.time.as_buffer().first().copied()),
+            series()
+                .rev()
+                .find_map(|chunk| chunk.time.as_buffer().last().copied()),
+        ) else {
+            // A series of no sample decides no point.
+            return 0;
+        };
+        let offset = i128::from(self.selection.offset_ms);
+        let lookback = i128::from(self.selection.lookback_ms);
+        let first = i128::from(first) + offset;
+        let last = i128::from(last) + offset;
+        let useful_last = if lookback == 0 {
+            last
+        } else {
+            last + lookback - 1
+        };
+        let max_start = first.max(query_start);
+        let min_end = useful_last.min(query_end);
+        if max_start > min_end {
+            return 0;
+        }
+        let step = i128::from(spec.step_ms);
+        let aligned_start = query_start + (max_start - query_start) / step * step;
+        let aligned_end = query_end - (query_end - min_end) / step * step;
+        let points = (aligned_end - aligned_start) / step + 1;
+        usize::try_from(points).unwrap_or(usize::MAX)
+    }
+
+    /// The largest histogram a row of each field can carry, `None` for a field of floats.
+    ///
+    /// A row of native histograms is copied into the builder once per grid point that selects it,
+    /// so what such a field costs is one histogram per point: the largest row is the one to charge,
+    /// because any row can be the one every decided point picks.
+    fn largest_histograms(&self, closing: &RawSeriesChunk) -> Vec<Option<usize>> {
+        let mut largest = vec![None; self.schema.fields.len()];
+        for chunk in self.chunks.iter().chain(std::iter::once(closing)) {
+            for (slot, field) in largest.iter_mut().zip(chunk.fields.as_slice()) {
+                if let Some(bytes) = histogram_row_bytes(field) {
+                    *slot = Some(slot.unwrap_or(0).max(bytes));
+                }
+            }
+        }
+        largest
+    }
+
+    /// Buffers one chunk of the series being selected, and gathers that series when it ends.
+    ///
+    /// `None` means the series is still open: the selection reads one whole axis, so nothing is
+    /// decided for a series until the chunk carrying `is_last` arrives.
+    fn push(&mut self, path: &NodePath, chunk: RawSeriesChunk) -> Result<Option<EvaluatedChunk>> {
+        if let Some(open) = self.chunks.first()
+            && (open.primary_key.as_slice() != chunk.primary_key.as_slice()
+                || open.metric != chunk.metric)
+        {
+            // One axis is gathered before the kernel reads any of it, so a chunk of another series
+            // has nowhere to go: it would be selected as though its samples were the open series'.
+            return Err(series_changed(path));
+        }
+        let closing = chunk.is_last;
+        self.held = self.held.saturating_add(raw_bytes(&chunk));
+        self.chunks.push(chunk);
+        if !closing {
+            return Ok(None);
+        }
+        self.gather(path).map(Some)
+    }
+
+    /// Selects the instants of the buffered series, hands it over closed, and drops the buffer.
+    fn gather(&mut self, path: &NodePath) -> Result<EvaluatedChunk> {
+        let chunk = self.select(path)?;
+        // The selection copied what it needed out of the buffered chunks, so a series that has been
+        // answered must not keep charging the pool for them.
+        self.chunks.clear();
+        self.chunks.shrink_to_fit();
+        self.held = 0;
+        Ok(chunk)
+    }
+
+    /// The last sample at or before each grid point of the buffered series, as one chunk.
+    fn select(&mut self, path: &NodePath) -> Result<EvaluatedChunk> {
+        let Some(first) = self.chunks.first() else {
+            return Err(DataFusionError::Execution(format!(
+                "the instant selection at {path} holds no series to select"
+            )));
+        };
+        let metric = first.metric.clone().ok_or_else(|| no_labels(path))?;
+        // The buffered chunks are one series, so they are read as the one axis the selection takes.
+        let time = buffered_time(&self.chunks)?;
+        let fields = buffered_fields(&self.chunks, self.schema.fields.len())?;
+        let grid = Arc::clone(&self.selection.output_grid);
+        let spec = grid.spec();
+        // The grid's own points are what the selection decides, so the range and the step it is
+        // asked for are the grid's: `start..=start + (len - 1) * step`, step by step.
+        let (indices, timestamps) = select_instants(
+            &time,
+            &fields,
+            spec.start_ms..=grid_end_ms(spec),
+            spec.step_ms,
+            self.selection.lookback_ms,
+            self.selection.offset_ms,
+        )?;
+        self.output.begin_series();
+        // One cursor per field, so a row is read as the field holds it rather than by walking the
+        // chunks of a field from its start once per row.
+        let mut cursors: Vec<RowCursor<'_>> = fields.iter().map(Samples::cursor).collect();
+        // `GridSample` is not `Clone`, so the row is filled slot by slot rather than from one value.
+        let mut row: Vec<Option<GridSample>> = (0..fields.len()).map(|_| None).collect();
+        let mut read: Option<usize> = None;
+        for (index, timestamp) in indices.iter().zip(&timestamps) {
+            let index = *index as usize;
+            // The selection steps the grid's range by its step, so every timestamp it reports is a
+            // point of the grid and the position is the point's index in it.
+            let position = grid_position(&grid, *timestamp)?;
+            // Two grid points can select one source row, and the row is read once for both.
+            if read != Some(index) {
+                for (slot, cursor) in row.iter_mut().zip(&mut cursors) {
+                    let sample = cursor.at(index).ok_or_else(|| missing_row(path, index))?;
+                    *slot = owned(sample)?;
+                }
+                read = Some(index);
+            }
+            // A position no field holds a value at is not a row: the builder drops it, which is
+            // what keeps a hole in the grid out of the result instead of padding it.
+            self.output.push_samples(position, &row)?;
+        }
+        // The rows the selection picked are the rows this series holds, and the whole series is
+        // decided at once, so this one chunk closes it.
+        match self.output.finish(metric.clone())? {
+            Some(series) => EvaluatedChunk::try_new(series, true),
+            None => no_row_chunk(&self.schema, metric),
+        }
+    }
+}
+
+/// The buffered chunks as the one source axis they make up: their timestamps in arrival order.
+///
+/// The axis type validates the result as strictly increasing, which is also what refuses a series
+/// whose chunks do not continue each other.
+fn buffered_time(chunks: &[RawSeriesChunk]) -> Result<RawTimestamps> {
+    let len = chunks.iter().map(|chunk| chunk.time.len()).sum();
+    let mut timestamps: Vec<i64> = Vec::with_capacity(len);
+    for chunk in chunks {
+        timestamps.extend_from_slice(chunk.time.as_buffer());
+    }
+    RawTimestamps::try_new(ScalarBuffer::from(timestamps)).map_err(series_error)
+}
+
+/// The buffered chunks as one axis: per field, the chunks' samples in arrival order.
+///
+/// A field retains the chunks it arrived in instead of copying them out, so the axis costs one
+/// descriptor per chunk and the selection reads the values where they already are.
+fn buffered_fields(chunks: &[RawSeriesChunk], fields: usize) -> Result<SeriesFields> {
+    let mut per_field: Vec<Vec<Samples>> = vec![Vec::with_capacity(chunks.len()); fields];
+    for chunk in chunks {
+        for (field, slot) in chunk.fields.iter().zip(&mut per_field) {
+            slot.push(field.clone());
+        }
+    }
+    let fields = per_field
+        .into_iter()
+        .map(|chunks| Samples::try_from_chunks(chunks).map_err(series_error))
+        .collect::<Result<Vec<_>>>()?;
+    SeriesFields::try_from_vec(fields).map_err(series_error)
+}
+
+/// The bytes the builder's table holds for one row of the field, `None` for a field of floats.
+///
+/// The largest row of the field rather than its total: every grid point that selects one source row
+/// copies that row, so the widest histogram the field holds is what a point can cost.
+fn histogram_row_bytes(field: &Samples) -> Option<usize> {
+    let holds_histograms = field.segments().iter().any(|segment| {
+        matches!(
+            segment.dense(),
+            Some(DenseSamplesRef::Histogram(_) | DenseSamplesRef::Mixed(_))
+        )
+    });
+    if !holds_histograms {
+        return None;
+    }
+    Some(
+        field
+            .iter()
+            .filter_map(|sample| match sample {
+                SampleRef::Histogram(view) => Some(histogram_bytes(&view)),
+                _ => None,
+            })
+            .fold(0, usize::max),
+    )
+}
+
+/// The bytes the histogram table holds for one row of `view`.
+///
+/// The row `HistogramBatchBuilder::push` writes: its scalar columns, the offset each of the seven
+/// bucket lists pays for it, and the values those lists hold -- the custom bounds, and each side's
+/// bucket counts with the span offsets and lengths that place them. The spans are the view's own,
+/// because a histogram handed on unchanged keeps its layout through
+/// [`crate::histogram_eval::float_histogram::FloatHistogram::push_to`].
+fn histogram_bytes(view: &HistogramView<'_>) -> usize {
+    // Schema, zero threshold, sum, count, zero count, reset hint and start timestamp, the narrow
+    // columns counted at the width of the widest.
+    let scalars = 7 * std::mem::size_of::<i64>();
+    // One offset per list column: custom bounds, two span columns and one bucket column per side.
+    let list_offsets = 7 * std::mem::size_of::<u32>();
+    let custom = view
+        .custom_values
+        .len()
+        .saturating_mul(std::mem::size_of::<f64>());
+    let sides = [view.positive, view.negative]
+        .iter()
+        .map(|side| {
+            side.span_offsets
+                .len()
+                .saturating_mul(2)
+                .saturating_mul(std::mem::size_of::<i32>())
+                .saturating_add(
+                    side.buckets
+                        .len()
+                        .saturating_mul(std::mem::size_of::<f64>()),
+                )
+        })
+        .fold(0usize, usize::saturating_add);
+    scalars
+        .saturating_add(list_offsets)
+        .saturating_add(custom)
+        .saturating_add(sides)
+}
+
+/// The last timestamp of `spec`, which is inclusive: its `len` points step from its start.
+///
+/// [`GridSpec::try_new`] checked that the point fits `i64`, so widening it here cannot overflow.
+fn grid_end_ms(spec: GridSpec) -> i64 {
+    (i128::from(spec.start_ms) + i128::from(spec.step_ms) * (i128::from(spec.len) - 1)) as i64
+}
+
+/// The position of the grid point at `timestamp`, which the selection reported as one of its own.
+///
+/// The selection steps the range it is given by the step it is given, so every timestamp it reports
+/// is `start_ms + position * step_ms` for one position of the grid: subtracting the start and
+/// dividing by the step gives that position back. A timestamp off that lattice, or one past the end
+/// of the grid, is a disagreement between the selection and its binding rather than a sample to
+/// skip, so it is reported instead of dropped.
+fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
+    let spec = grid.spec();
+    let offset = i128::from(timestamp) - i128::from(spec.start_ms);
+    let step = i128::from(spec.step_ms);
+    let position = offset.div_euclid(step);
+    if offset.rem_euclid(step) != 0 || position < 0 || position >= i128::from(spec.len) {
+        return Err(DataFusionError::Execution(format!(
+            "the instant selection reported the timestamp {timestamp}ms, which is not a point of \
+             its grid {spec:?}"
+        )));
+    }
+    Ok(position as usize)
+}
+
+/// A closing chunk carrying `metric` and no row at all.
+///
+/// A series whose selection picked no source row still closes exactly once, on a chunk that holds
+/// nothing: the labels say which series closed, and the address says it closed before its first
+/// point, as the empty chunk a window hands out for such a series does.
+fn no_row_chunk(schema: &SeriesSchema, metric: MetricName) -> Result<EvaluatedChunk> {
+    let grid = schema.eval_grid.clone().ok_or_else(|| {
+        DataFusionError::Execution(
+            "an instant selection produces an evaluated chunk, which is addressed on a grid"
+                .to_string(),
+        )
+    })?;
+    let empty = Samples::from_float(Float64Array::from(Vec::<f64>::new()));
+    let fields =
+        SeriesFields::try_from_vec(vec![empty; schema.fields.len()]).map_err(series_error)?;
+    let time = GridRange::try_new(grid, 0, 0).map_err(series_error)?;
+    let series =
+        Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
+    EvaluatedChunk::try_new(series, true)
+}
+
 /// The per-node run-time state of a node.
 struct NodeRuntime {
     buffer: NodeBuffer,
@@ -846,6 +1290,9 @@ struct NodeRuntime {
     /// enters, and the figure it was queued with is given back as it leaves, so neither the queue
     /// nor the handover walks it.
     queued: VecDeque<(NativeChunk, usize)>,
+    /// What an instant node holds: the chunks of the series it is selecting, and, while it gathers
+    /// that series, the workspace the gather reserved for. `None` for every other kind of node.
+    instant: Option<InstantRuntime>,
     /// A window node's evaluator, with its own input and output grid; `None` before it is built and
     /// once it is closed.
     window: Option<RangeEvaluator>,
@@ -1029,6 +1476,95 @@ impl NodeRuntime {
         Ok(output)
     }
 
+    /// Feeds one chunk to this node's instant selection.
+    ///
+    /// `None` means the series this chunk belongs to has not ended: the selection reads one whole
+    /// axis, so it decides nothing until the chunk carrying `is_last` arrives.
+    fn instant(&mut self, path: &NodePath, chunk: NativeChunk) -> Result<Option<EvaluatedChunk>> {
+        let NativeChunk::Raw(chunk) = chunk else {
+            return Err(DataFusionError::Execution(format!(
+                "the instant selection at {path} consumes raw samples, not an evaluated chunk"
+            )));
+        };
+        let (positions, closing) = (chunk.time.len(), chunk.is_last);
+        // The chunk is held from here on: a selection keeps every chunk of a series until the one
+        // that closes it, so what this node reserves for is the series it has buffered.
+        self.buffer.grow(raw_bytes(&chunk))?;
+        // The chunk that closes the series gathers it in one go, and the gather allocates a
+        // workspace of its own beside the buffered chunks: the axis it concatenates, the descriptors
+        // that read it, the two arrays the selection returns and the rows the builder keeps. That
+        // workspace is reserved here, before it exists, so a pool too small for it refuses the
+        // gather instead of learning about it afterwards. Without this the reservation would fall
+        // back to the buffered chunks alone -- nothing at all, on the chunk that ends the series --
+        // and a selection over a million grid points would take its tens of megabytes without
+        // asking. [`InstantRuntime::gather_bytes`] derives the figure, because the chunks it counts
+        // are that node's.
+        let Some(instant) = self.instant.as_ref() else {
+            return Err(DataFusionError::Execution(format!(
+                "the node at {path} holds no instant selection"
+            )));
+        };
+        let scratch = if closing {
+            instant.gather_bytes(&chunk)
+        } else {
+            0
+        };
+        self.buffer.grow(scratch)?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        let outcome = {
+            // The timer covers this node's own work only: it is dropped before the driver polls
+            // the input again.
+            let _timer = metrics.timer();
+            match self.instant.as_mut() {
+                Some(instant) => instant.push(path, chunk),
+                // Rejected when the state was built, since a selection reads raw samples; kept as
+                // an error rather than a panic so an impossible tree cannot take the process down.
+                None => Err(DataFusionError::Execution(format!(
+                    "the node at {path} holds no instant selection"
+                ))),
+            }
+        };
+        metrics.record_input(1, positions);
+        if closing {
+            // A series closes exactly once, on the chunk carrying `is_last`: the selection gathers
+            // the whole series on it, so it is counted here rather than on the chunk handed out.
+            metrics.record_completed_series(1);
+        }
+        // A failed gather gives its workspace back here rather than leaving it to the driver: the
+        // driver releases every node when the execution stops, but the workspace is this call's and
+        // not something the node keeps, so holding the pool's budget for it until the stopped
+        // executor is dropped would charge the pool for memory nothing reads any more.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.settle_buffered()?;
+                return Err(error);
+            }
+        };
+        if let Some(output) = &output {
+            metrics.record_grid_points(output.series.time.len());
+            metrics.record_output(1, valid_values(output));
+        }
+        // What this node still holds is the chunks of the series it is selecting: a whole series is
+        // held until it ends, so the reservation is what those chunks hold rather than a figure
+        // that grows with the chunk count of anything already answered. The chunk just consumed and
+        // the workspace of the gather it closed are both gone, so this is what gives them back.
+        self.settle_buffered()?;
+        Ok(output)
+    }
+
+    /// Sets this node's reservation to the chunks of the series it is still gathering.
+    ///
+    /// The chunk the node just consumed and the workspace of a gather it closed are not part of it:
+    /// the first has left the buffer and the second has been handed to the output.
+    fn settle_buffered(&mut self) -> Result<()> {
+        let buffered = self
+            .instant
+            .as_ref()
+            .map_or(0, InstantRuntime::buffered_bytes);
+        self.buffer.resize(buffered)
+    }
+
     /// Keeps one fragment of this node's collected input, charged for as it arrives.
     ///
     /// The fragment is measured once, here, and its estimate stands until the flush that merges it
@@ -1124,12 +1660,13 @@ impl NodeRuntime {
 
     /// Returns everything this node holds, including queued chunks.
     fn release(&mut self) {
-        // The window goes first: dropping the evaluator is what gives back the memory its
-        // reservation was taken for. Returning the reservation while the evaluator still held the
-        // samples would let the pool admit memory the process has not released, for as long as the
-        // caller keeps the stopped executor alive. The label sets this node handed out and the
-        // fragments it collected go with it.
+        // A node's own state goes first: dropping the evaluator and the buffered series is what
+        // gives back the memory their reservation was taken for. Returning the reservation while
+        // they still held the samples would let the pool admit memory the process has not released,
+        // for as long as the caller keeps the stopped executor alive. The label sets this node
+        // handed out and the fragments it collected go with it.
         self.window = None;
+        self.instant = None;
         self.emitted = None;
         self.merge = None;
         // A node that holds no chunk holds no series either, so nothing it handed over is still
@@ -1213,6 +1750,7 @@ impl NativeExecutionState {
                     source = Some((index, samples));
                     (NodeTag::Input, None)
                 }
+                NativeExpr::Instant { input, .. } => (NodeTag::Instant, Some(input.as_ref())),
                 NativeExpr::Window { input, .. } => (NodeTag::Window, Some(input.as_ref())),
                 NativeExpr::Map { input, .. } => (NodeTag::Map, Some(input.as_ref())),
                 // The kinds below are legal in a bound tree, and `validate` stays the authority on
@@ -1220,7 +1758,6 @@ impl NativeExecutionState {
                 // chunk is read: a tree the runtime cannot execute must not start, because a
                 // partial answer would be one the caller never asked for.
                 NativeExpr::Scalar(_) => return Err(not_implemented("Scalar", &path)),
-                NativeExpr::Instant { .. } => return Err(not_implemented("Instant", &path)),
                 NativeExpr::Aggregate { .. } => return Err(not_implemented("Aggregate", &path)),
                 NativeExpr::Binary { .. } => return Err(not_implemented("Binary", &path)),
             };
@@ -1228,6 +1765,7 @@ impl NativeExecutionState {
             let mut runtime = NodeRuntime {
                 buffer,
                 queued: VecDeque::new(),
+                instant: None,
                 window: None,
                 map: None,
                 emitted: None,
@@ -1236,6 +1774,19 @@ impl NativeExecutionState {
             };
             match &node.expr {
                 NativeExpr::Input(_) => {}
+                NativeExpr::Instant { input, op } => {
+                    let input_schema = input.output.samples().ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "the instant selection at {path} consumes samples, but its input \
+                             produces none"
+                        ))
+                    })?;
+                    runtime.instant = Some(InstantRuntime::try_new(input_schema, op)?);
+                    // A selection keeps the labels of the series it reads, empty-valued ones
+                    // included, so it is not one of the nodes that can turn two series into one
+                    // label set and it keeps no table of what it handed out: the node that drops a
+                    // label is the one that can collide, and it records its own.
+                }
                 NativeExpr::Map { op, .. } => {
                     let schema = node.output.samples().cloned().ok_or_else(|| {
                         DataFusionError::Execution(format!(
@@ -1271,7 +1822,6 @@ impl NativeExecutionState {
                     runtime.emitted = Some(Emitted::default());
                 }
                 NativeExpr::Scalar(_)
-                | NativeExpr::Instant { .. }
                 | NativeExpr::Aggregate { .. }
                 | NativeExpr::Binary { .. } => {
                     // Rejected above, where the pass has the position to name.
@@ -1321,6 +1871,17 @@ impl NativeExecutionState {
                     nodes[index].input.is_some_and(|child| holds_shared[child]);
                 match nodes[index].tag {
                     NodeTag::Input => {}
+                    NodeTag::Instant => {
+                        // A selection keeps the labels it read, so it is not where two series
+                        // become one label set and its own output carries its input's flag. Its
+                        // input is the source -- `validate` binds a selection to raw samples, and
+                        // no node above a source produces them -- and a source hands each series'
+                        // chunks over together, so the flag is false there in every tree this
+                        // runtime runs. Should the pass ever compute it true, the selection still
+                        // needs no collected input: it reads one series at a time and refuses a
+                        // chunk of another before it is buffered.
+                        holds_shared[index] = input_holds_shared;
+                    }
                     NodeTag::Map => holds_shared[index] = true,
                     NodeTag::Window => {
                         let (drops_metric_name, input_schema) = match expr {
@@ -1411,6 +1972,19 @@ impl NativeExecutionState {
         self.runtimes
             .iter()
             .filter(|runtime| runtime.window.is_some())
+            .count()
+    }
+
+    /// How many nodes still hold the chunks of a series an instant selection was gathering.
+    ///
+    /// Test-only, and for the same reason as [`Self::nodes_holding_windows`]: the buffered chunks
+    /// have to be dropped, not only the bytes they were reserved for, and that is not observable
+    /// from the pool.
+    #[cfg(test)]
+    pub(crate) fn nodes_holding_instants(&self) -> usize {
+        self.runtimes
+            .iter()
+            .filter(|runtime| runtime.instant.is_some())
             .count()
     }
 
@@ -1729,6 +2303,19 @@ impl NativeExecutor {
                     }
                 }
             }
+            NodeTag::Instant => {
+                let child = input.ok_or_else(|| missing_input(tag))?;
+                // A selection decides a whole series at once, so every chunk before the one that
+                // closes it yields nothing and the selection asks its input again.
+                loop {
+                    let Some(chunk) = self.pull(child)? else {
+                        return Ok(None);
+                    };
+                    if let Some(output) = self.instant_node(index, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
         }
     }
 
@@ -1750,6 +2337,13 @@ impl NativeExecutor {
         let path = &self.state.paths[index];
         let runtime = &mut self.state.runtimes[index];
         runtime.window(path, chunk)
+    }
+
+    /// Feeds one chunk to the instant selection at `index`.
+    fn instant_node(&mut self, index: usize, chunk: NativeChunk) -> Result<Option<EvaluatedChunk>> {
+        let path = &self.state.paths[index];
+        let runtime = &mut self.state.runtimes[index];
+        runtime.instant(path, chunk)
     }
 
     /// Queues a source chunk at the tree's input node.
@@ -1879,6 +2473,39 @@ fn not_implemented(kind: &str, path: &NodePath) -> DataFusionError {
 /// The error for a window whose evaluator this execution already closed.
 fn closed(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!("the window at {path} is already closed"))
+}
+
+/// The error for a chunk of another series arriving while one is being selected.
+///
+/// [`select_instants`] reads one whole axis, so the buffered chunks have to be one series: a chunk
+/// of another series has nowhere to go, and appending it would select its samples as though they
+/// were the open series'.
+fn series_changed(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the instant selection at {path} combines one series into one axis, and a chunk of another \
+         series arrived before the first one ended"
+    ))
+}
+
+/// The error for a series an instant selection has no labels to report it under.
+///
+/// A source bound in label mode carries its identity encoded and no decoded labels, and a chunk
+/// that is handed on has to name the series it holds.
+fn no_labels(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the instant selection at {path} requires materialized series labels"
+    ))
+}
+
+/// The error for a source row the selection named but the series does not hold.
+///
+/// The selection returns indices into the axis it was given, so a row outside it means the two
+/// disagree rather than that a sample is missing.
+fn missing_row(path: &NodePath, index: usize) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the instant selection at {path} selected the source row {index}, which the series it read \
+         does not hold"
+    ))
 }
 
 /// The rejection of an input ordering this runtime cannot execute.
