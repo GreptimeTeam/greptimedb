@@ -35,6 +35,7 @@ use crate::series_index::bucket::SeriesBucket;
 use crate::series_index::catalog::{
     RangeIndexEntry, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
 };
+use crate::series_index::format::SeriesIndexFormat;
 use crate::series_index::purger::{IndexFilePurger, IndexFileType, file_operation};
 use crate::series_index::version::SeriesIndexFileHandle;
 use crate::series_index::{SeriesIndexWriter, SeriesIndexWriterOptions};
@@ -130,6 +131,7 @@ pub(crate) async fn build_series_index(
     version: &VersionRef,
     bucket: &SeriesBucket,
     entry: &SeriesIndexEntry,
+    backend: Option<&dyn SeriesIndexFormat>,
     purger: &IndexFilePurger,
 ) -> Result<SeriesIndexFileHandle> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
@@ -180,6 +182,35 @@ pub(crate) async fn build_series_index(
         )
     };
     // TODO(yingwen): Deduplicate update-mode rows before series indexes are used by queries.
+    if let Some(backend) = backend {
+        let mut writer = backend
+            .writer(version.metadata.clone(), store.clone(), entry)
+            .await?;
+        let result: Result<()> = async {
+            while let Some(batch) = visible.try_next().await? {
+                writer.write(&batch).await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if let Err(cleanup_error) = writer.abort().await {
+                warn!(cleanup_error; "Failed to abort series-index artifact build");
+            }
+            return Err(error);
+        }
+        let artifact = writer.finish().await?;
+        file_operation(IndexFileType::Series, "build", "success");
+        return Ok(SeriesIndexFileHandle::new(
+            region.region_id,
+            SeriesIndexEntry {
+                file_size: artifact.file_size,
+                artifact: Some(artifact),
+                ..entry.clone()
+            },
+            purger.clone(),
+        ));
+    }
     let path = series_index_path(region.region_id, entry.index_uuid);
     let mut writer = SeriesIndexWriter::try_new(
         version.metadata.clone(),
@@ -214,6 +245,79 @@ pub(crate) async fn build_series_index(
     ))
 }
 
+/// Converts one immutable SST into an independently rebuildable samples artifact.
+pub(crate) async fn build_samples(
+    store: &ObjectStore,
+    region: &MitoRegionRef,
+    version: &VersionRef,
+    file: FileHandle,
+    backend: &dyn crate::series_index::format::SamplesFormat,
+    purger: &IndexFilePurger,
+) -> Result<Option<crate::series_index::artifact::SamplesFileHandle>> {
+    use crate::series_index::artifact::{SamplesEntry, SamplesFileHandle};
+    let file_id = file.file_id();
+    let Some((context, mut selection)) = region
+        .access_layer
+        .read_sst(file)
+        .build_reader_input(&mut ReaderMetrics::default())
+        .await?
+    else {
+        return Ok(None);
+    };
+    let context = Arc::new(context);
+    let mapper = FlatProjectionMapper::new(
+        &version.metadata,
+        0..version.metadata.column_metadatas.len(),
+    )?;
+    let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
+    let generation = store_api::storage::FileId::random();
+    let prefix = format!(
+        "{}/samples/{}/{generation}/",
+        region.region_id.as_u64(),
+        file_id.file_id()
+    );
+    let mut writer = backend
+        .writer(version.metadata.clone(), store.clone(), &prefix, generation)
+        .await?;
+    let result: Result<()> = async {
+        while let Some((row_group, selection)) = selection.pop_first() {
+            let reader = context
+                .reader_builder()
+                .build(context.build_context(row_group, Some(selection), None))
+                .await?;
+            let mut reader = FlatPruneReader::new_with_row_group_reader(
+                context.clone(),
+                FlatRowGroupReader::new(context.clone(), reader),
+                context.pre_filter_mode().skip_fields(),
+            );
+            while let Some(batch) = reader.next_batch().await? {
+                let batch = match &compat {
+                    Some(compat) => compat.compat(batch)?,
+                    None => batch,
+                };
+                writer.write(&batch).await?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        if let Err(cleanup) = writer.abort().await {
+            warn!(cleanup; "Failed to abort samples build");
+        }
+        return Err(error);
+    }
+    let artifact = writer.finish().await?;
+    Ok(Some(SamplesFileHandle::new(
+        file_id,
+        SamplesEntry {
+            file_id: file_id.file_id(),
+            artifact,
+        },
+        purger.clone(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
@@ -228,7 +332,8 @@ mod tests {
     use super::*;
     use crate::series_index::bucket::{group_files_into_series_buckets, plan_series_indexes};
     use crate::series_index::catalog::{
-        SeriesIndexCatalog, load_version_control, series_catalog_path, store_catalog,
+        SeriesIndexCatalog, load_version_control, series_catalog_path, series_index_path,
+        store_catalog,
     };
     use crate::series_index::purger::series_index_channel;
     use crate::series_index::tests::prepare_region;
@@ -321,6 +426,7 @@ mod tests {
             &version,
             &bucket,
             &entry,
+            None,
             &purger,
         )
         .await;
@@ -471,7 +577,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
             .await
             .unwrap();
         let bytes = store
@@ -540,7 +646,7 @@ mod tests {
                 };
                 completed.push(entry.file_id);
             }
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
                 .await
                 .map(Some)
         }
@@ -746,7 +852,7 @@ mod tests {
                 .map(|_| ())
         } else {
             let (purger, _receiver) = series_index_channel(store.clone());
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            build_series_index(&store, &region, &version, &bucket, &entry, None, &purger)
                 .await
                 .map(|_| ())
         };

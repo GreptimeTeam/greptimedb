@@ -24,7 +24,7 @@ use super::{
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
@@ -218,6 +218,7 @@ fn add() -> BinaryMatching {
         return_bool: false,
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
     }
 }
 

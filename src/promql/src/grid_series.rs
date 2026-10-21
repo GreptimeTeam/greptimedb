@@ -88,6 +88,17 @@ pub(crate) enum GridSample {
 
 const _: () = assert!(std::mem::size_of::<Option<GridSample>>() == 16);
 
+/// `sample` as an owned value; `None` when missing.
+pub(crate) fn owned(sample: SampleRef<'_>) -> Result<Option<GridSample>> {
+    Ok(match sample {
+        SampleRef::Missing => None,
+        SampleRef::Float(value) => Some(GridSample::Float(value)),
+        SampleRef::Histogram(view) => Some(GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&view)?,
+        ))),
+    })
+}
+
 impl GridSeriesBuilder {
     /// Creates a builder for series of `schema`, which must have an evaluation grid.
     pub fn try_new(schema: Arc<SeriesSchema>) -> Result<Self> {
@@ -309,7 +320,8 @@ pub(crate) fn label_set(metric: &MetricName) -> LabelSet {
 }
 
 /// Merges series that share a label set into one, as Prometheus does after a function that
-/// rewrites labels or drops `__name__`; two of them holding one field at one point fail.
+/// rewrites labels or drops `__name__`; two of them holding one field at one point fail, whether
+/// the samples are floats or native histograms.
 pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> Result<Vec<Series>> {
     let mut groups: HashMap<LabelSet, Vec<usize>> = HashMap::with_capacity(series.len());
     let mut collided = false;
@@ -335,8 +347,7 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
     // slot indexes `members`, so the merge below picks the member's cursor directly instead of
     // searching for the member per row.
     let mut rows: Vec<(usize, usize, usize)> = Vec::new();
-    let mut values = vec![None; schema.fields.len()];
-    let mut merged = vec![None; schema.fields.len()];
+    let mut merged: Vec<Option<GridSample>> = Vec::with_capacity(schema.fields.len());
     for (labels, members) in groups {
         if let [member] = members[..] {
             output.extend(series[member].take());
@@ -361,7 +372,12 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
                 .map(|field| field.cursor())
                 .collect();
             for (point, row) in member_series.time.positions() {
-                if read_row(&mut cursors, row, &mut values)? {
+                if cursors.iter_mut().any(|cursor| {
+                    !matches!(
+                        cursor.at(row).expect("the axis and the fields are aligned"),
+                        SampleRef::Missing
+                    )
+                }) {
                     rows.push((point, member_slot, row));
                 }
             }
@@ -389,11 +405,12 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
             let point = rows[start].0;
             let end = start + rows[start..].partition_point(|&(p, _, _)| p == point);
             // Rows of one point merge field by field; only a field present twice collides.
-            merged.iter_mut().for_each(|value| *value = None);
+            merged.clear();
+            merged.resize_with(schema.fields.len(), || None);
             for &(_, member_slot, row) in &rows[start..end] {
-                read_row(&mut cursors[member_slot], row, &mut values)?;
-                for (slot, value) in merged.iter_mut().zip(&values) {
-                    if value.is_some() {
+                for (slot, cursor) in merged.iter_mut().zip(&mut cursors[member_slot]) {
+                    let sample = cursor.at(row).expect("the axis and the fields are aligned");
+                    if !matches!(sample, SampleRef::Missing) {
                         if slot.is_some() {
                             let labels: Vec<_> = labels
                                 .iter()
@@ -404,35 +421,17 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
                                 labels.join(", ")
                             )));
                         }
-                        *slot = *value;
+                        *slot = owned(sample)?;
                     }
                 }
             }
-            builder.push(point, &merged)?;
+            builder.push_samples(point, &merged)?;
             start = end;
         }
         let metric = series[members[0]].as_ref().unwrap().metric.clone();
         output.extend(builder.finish(metric)?);
     }
     Ok(output)
-}
-
-/// Reads the float fields of `row` through the member's cursors; returns whether any is present.
-fn read_row(cursors: &mut [RowCursor<'_>], row: usize, values: &mut [Option<f64>]) -> Result<bool> {
-    let mut present = false;
-    for (value, cursor) in values.iter_mut().zip(cursors) {
-        *value = match cursor.at(row).expect("the axis and the fields are aligned") {
-            SampleRef::Missing => None,
-            SampleRef::Float(value) => Some(value),
-            SampleRef::Histogram(_) => {
-                return Err(DataFusionError::NotImplemented(
-                    "merging histogram series with the same label set".into(),
-                ));
-            }
-        };
-        present |= value.is_some();
-    }
-    Ok(present)
 }
 
 pub(crate) fn external(error: datatypes::error::Error) -> DataFusionError {

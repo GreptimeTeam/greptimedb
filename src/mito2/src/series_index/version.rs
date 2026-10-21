@@ -82,9 +82,15 @@ struct SeriesIndexFileHandleInner {
 impl Drop for SeriesIndexFileHandleInner {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Acquire) {
-            self.purger.purge(PurgeRequest {
-                file_id: self.file_id,
-            });
+            if let Some(artifact) = &self.entry.artifact {
+                self.purger
+                    .purge_objects(self.file_id, artifact.objects.clone());
+            } else {
+                self.purger.purge(PurgeRequest {
+                    file_id: self.file_id,
+                    objects: None,
+                });
+            }
         }
     }
 }
@@ -94,6 +100,7 @@ impl Drop for SeriesIndexFileHandleInner {
 pub(crate) struct SeriesIndexVersion {
     /// Range indexes for visible SSTs; reconciliation removes IDs absent from its SST snapshot.
     /// Physical deletion is independently handled by the SST file purger.
+    pub(crate) samples: HashMap<FileId, crate::series_index::artifact::SamplesFileHandle>,
     pub(crate) range_indexes: HashMap<FileId, RangeIndexEntry>,
     pub(crate) series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
     pub(crate) index_buckets: BTreeMap<Timestamp, IndexBucket>,
@@ -110,6 +117,7 @@ impl SeriesIndexVersion {
             IndexBucket::from_entry(handle.entry()).insert_into(&mut index_buckets);
         }
         Self {
+            samples: Default::default(),
             range_indexes,
             series_indexes,
             index_buckets,
@@ -118,10 +126,15 @@ impl SeriesIndexVersion {
 
     /// Approximate installed usage; old snapshots and unpublished outputs are excluded.
     pub(crate) fn disk_usage(&self) -> u64 {
-        self.range_indexes
+        self.samples
             .values()
-            .map(|entry| entry.file_size)
+            .map(|handle| handle.entry().artifact.file_size)
             .sum::<u64>()
+            + self
+                .range_indexes
+                .values()
+                .map(|entry| entry.file_size)
+                .sum::<u64>()
             + self
                 .series_indexes
                 .values()
@@ -130,6 +143,9 @@ impl SeriesIndexVersion {
     }
 
     fn mark_all_deleted(&self) {
+        self.samples
+            .values()
+            .for_each(|handle| handle.mark_deleted());
         self.series_indexes
             .values()
             .for_each(SeriesIndexFileHandle::mark_deleted);
@@ -140,6 +156,7 @@ impl SeriesIndexVersion {
 #[derive(Debug, Default)]
 pub(crate) struct SeriesIndexVersionControl {
     current: RwLock<Arc<SeriesIndexVersion>>,
+    pub(crate) formats: RwLock<Arc<crate::series_index::format::SeriesFormats>>,
 }
 
 impl SeriesIndexVersionControl {

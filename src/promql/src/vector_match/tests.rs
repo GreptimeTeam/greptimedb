@@ -23,7 +23,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::{
-    BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp, binary_vectors, set_vectors,
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp, binary_vectors,
+    set_vectors,
 };
 use crate::grid_series::GridSeriesBuilder;
 use crate::grid_series::reference::{
@@ -481,6 +482,7 @@ fn binary_vectors_match_prometheus_reference() {
             return_bool,
             labels,
             cardinality,
+            fill: FillValues::default(),
         };
         let fields = lhs_fields.min(rhs_fields);
         let points = grid.timestamps().len();
@@ -555,6 +557,7 @@ fn rejects_operands_on_other_grids_and_unpaired_or_fields() {
         return_bool: false,
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
     };
     assert!(binary_vectors(&matching, &lhs.schema, &lhs.series, &schema(1, &other), &[]).is_err());
     assert!(matches!(
@@ -614,6 +617,7 @@ fn reports_the_earliest_failing_point() {
         return_bool: false,
         labels: MatchingLabels::On(vec![Arc::from("job")]),
         cardinality: Cardinality::ManyToOne(Vec::new()),
+        fill: FillValues::default(),
     };
     let error = binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
         .unwrap_err()
@@ -655,6 +659,26 @@ fn canonical_bits(value: f64) -> u64 {
 /// `prometheus_cases.txt`.
 #[test]
 fn vector_operations_match_prometheus() {
+    let (matched, failed) = check_cases(include_str!("prometheus_cases.txt"));
+    assert!(
+        matched > 100 && failed > 20,
+        "{matched} matched, {failed} failed"
+    );
+}
+
+/// Binary operations with fill modifiers, evaluated by the Prometheus v3.15.0 engine; see the
+/// header of `fill_cases.txt`.
+#[test]
+fn fill_modifiers_match_prometheus() {
+    let (matched, failed) = check_cases(include_str!("fill_cases.txt"));
+    assert!(
+        matched > 100 && failed > 20,
+        "{matched} matched, {failed} failed"
+    );
+}
+
+/// Checks each case of a fixture and returns how many matched results and how many failed.
+fn check_cases(text: &str) -> (usize, usize) {
     let parse_labels = |labels: &str| -> Labels {
         labels
             .split(',')
@@ -672,7 +696,6 @@ fn vector_operations_match_prometheus() {
             .collect()
     };
     let (mut matched, mut failed) = (0, 0);
-    let text = include_str!("prometheus_cases.txt");
     for case in text.split("end\n").filter(|case| case.contains("case ")) {
         let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
         let spec: Vec<&str> = lines[0].split_whitespace().skip(1).collect();
@@ -729,6 +752,10 @@ fn vector_operations_match_prometheus() {
                 other => panic!("unexpected line {other}"),
             }
         }
+        let fill = |value: Option<&&str>| match value {
+            None | Some(&"-") => None,
+            Some(value) => Some(value.parse::<f64>().unwrap()),
+        };
         let labels = |kind: &str, list: &str| match kind {
             "on" => MatchingLabels::On(names(list)),
             _ => MatchingLabels::Ignoring(names(list)),
@@ -759,6 +786,10 @@ fn vector_operations_match_prometheus() {
                         "left" => Cardinality::ManyToOne(names(spec[6])),
                         "right" => Cardinality::OneToMany(names(spec[6])),
                         _ => Cardinality::OneToOne,
+                    },
+                    fill: FillValues {
+                        lhs: fill(spec.get(7)),
+                        rhs: fill(spec.get(8)),
                     },
                 };
                 binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
@@ -806,10 +837,7 @@ fn vector_operations_match_prometheus() {
             (actual, expected) => panic!("{case}\ngot {actual:?}, expected error {expected:?}"),
         }
     }
-    assert!(
-        matched > 100 && failed > 20,
-        "{matched} matched, {failed} failed"
-    );
+    (matched, failed)
 }
 
 /// Results that share a label set once `__type__` is dropped fail as a grouping violation within
@@ -858,6 +886,7 @@ fn colliding_results_fail_by_where_they_collide() {
             return_bool: false,
             labels,
             cardinality: Cardinality::ManyToOne(Vec::new()),
+            fill: FillValues::default(),
         };
         let error = binary_vectors(&matching, &schema, &lhs, &schema, rhs)
             .unwrap_err()
@@ -1002,6 +1031,7 @@ fn histogram_operators_match_prometheus() {
                         "right" => Cardinality::OneToMany(Vec::new()),
                         _ => Cardinality::OneToOne,
                     },
+                    fill: FillValues::default(),
                 };
                 binary_vectors(&matching, &schema, &lhs, &schema, &rhs)
             }
@@ -1127,10 +1157,64 @@ fn colliding_reset_hints_skip_the_pair() {
             return_bool: false,
             labels: MatchingLabels::On(vec![Arc::from("job")]),
             cardinality: Cardinality::OneToOne,
+            fill: FillValues::default(),
         };
         let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
         assert_eq!(result.len(), 1, "{op:?}");
     }
+}
+
+/// A pair whose operation fails is not a match, so `fill_left` still fills for the right-hand
+/// sample of that pair; the fixtures hold floats only.
+#[test]
+fn a_failed_pair_leaves_its_sample_to_the_fill() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(grid),
+    });
+    let labels = |pairs: &[(&str, &str)]| -> Labels {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    };
+    let histogram = "0/0/0/4014000000000000/4014000000000000/0/0_1/4014000000000000///";
+    let lhs = [mixed_series(
+        &schema,
+        &labels(&[("__name__", "a"), ("job", "x")]),
+        &BTreeMap::new(),
+        &BTreeMap::from([(0, histogram.to_string())]),
+    )
+    .unwrap()];
+    let rhs = [mixed_series(
+        &schema,
+        &labels(&[("__name__", "b"), ("job", "x")]),
+        &BTreeMap::from([(0, 2.0f64.to_bits())]),
+        &BTreeMap::new(),
+    )
+    .unwrap()];
+    // A histogram plus a float is skipped, so `b` is unmatched: 10 + 2 under the match labels.
+    let matching = BinaryMatching {
+        op: BinaryOp::Add,
+        return_bool: false,
+        labels: MatchingLabels::On(vec![Arc::from("job")]),
+        cardinality: Cardinality::OneToOne,
+        fill: FillValues {
+            lhs: Some(10.0),
+            rhs: None,
+        },
+    };
+    let result = binary_vectors(&matching, &schema, &lhs, &schema, &rhs).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(labels_of(&result[0].metric), labels(&[("job", "x")]));
+    assert!(matches!(
+        result[0].fields.as_slice()[0].sample(0),
+        SampleRef::Float(value) if value == 12.0
+    ));
 }
 
 /// A binary pairing walks two operands of many single-position runs and still reports every
@@ -1170,6 +1254,7 @@ fn a_pairing_reads_many_single_position_runs_once() {
         return_bool: false,
         labels: MatchingLabels::On(vec![Arc::from("job")]),
         cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
     };
     let result = binary_vectors(
         &matching,
@@ -1218,6 +1303,7 @@ fn a_binary_pairing_of_sparse_operands_keeps_the_shared_positions() {
         return_bool: false,
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
     };
     let result = binary_vectors(
         &matching,
@@ -1249,6 +1335,7 @@ fn a_binary_pairing_of_sparse_operands_keeps_the_shared_positions() {
         return_bool: false,
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
     };
     let result = binary_vectors(
         &filtered,
@@ -1278,6 +1365,7 @@ fn a_binary_pairing_of_sparse_operands_keeps_the_shared_positions() {
         return_bool: true,
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
     };
     let result = binary_vectors(
         &booled,
