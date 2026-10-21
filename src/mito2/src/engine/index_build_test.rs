@@ -1877,6 +1877,92 @@ async fn test_index_build_type_manual_waits_for_in_flight_flush_build() {
 }
 
 #[tokio::test]
+async fn test_manual_build_treats_compacted_files_as_done() {
+    let mut env = TestEnv::with_prefix("test_manual_build_treats_compacted_files_as_done_").await;
+    let gate = Arc::new(GateIndexBuildListener::default());
+    let mut config = async_build_mode_config(false);
+    config.inverted_index.create_on_compaction = Mode::Disable;
+    config.fulltext_index.create_on_compaction = Mode::Disable;
+    config.bloom_filter_index.create_on_compaction = Mode::Disable;
+    let engine = Arc::new(
+        env.create_engine_with(config, None, Some(gate.clone()), None)
+            .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build_with_index();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
+    // The flush builds create no index.
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_begin(2))
+        .await
+        .unwrap();
+    gate.release_begin();
+    gate.release_begin();
+
+    let engine_for_build = engine.clone();
+    let manual_build = tokio::spawn(async move {
+        engine_for_build
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_begin(4))
+        .await
+        .unwrap();
+
+    // Compaction replaces both SSTs while their manual builds are blocked.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 3600,
+                }),
+                parallelism: None,
+                time_range: None,
+            }),
+        )
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        gate.release_begin();
+    }
+
+    // The build covers the SSTs that existed when it was requested, so the
+    // unindexed compaction output does not fail it.
+    tokio::time::timeout(Duration::from_secs(5), manual_build)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 0);
+}
+
+#[tokio::test]
 async fn test_reopen_waits_for_active_index_build_of_previous_incarnation() {
     let mut env =
         TestEnv::with_prefix("test_reopen_waits_for_active_index_build_of_previous_incarnation_")

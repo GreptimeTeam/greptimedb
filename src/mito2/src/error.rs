@@ -1573,7 +1573,7 @@ impl ErrorExt for Error {
                 StatusCode::StorageUnavailable
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
-            IndexBuildIncomplete { .. } => StatusCode::Internal,
+            IndexBuildIncomplete { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,

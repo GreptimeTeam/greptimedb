@@ -312,18 +312,27 @@ impl<S> RegionWorkerLoop<S> {
                 }
             }
 
-            // Aborted and dropped tasks are fine as long as another build or a
-            // compaction has left the file with the expected index.
+            // The build covers the SSTs that existed when it was requested. A file
+            // removed meanwhile, e.g. replaced by compaction, counts as done: its
+            // replacement is indexed according to the compaction index options,
+            // as any later compaction would be.
             let manifest = region.manifest_ctx.manifest().await;
-            let incomplete = file_ids
+            let (present, removed): (Vec<_>, Vec<_>) = file_ids
+                .into_iter()
+                .partition(|file_id| manifest.files.contains_key(file_id));
+            if !removed.is_empty() && build_type == IndexBuildType::Manual {
+                warn!(
+                    "Files were removed during the manual index build, their replacements follow the compaction index options, region: {}, files: {:?}",
+                    region_id, removed
+                );
+            }
+            let incomplete = present
                 .into_iter()
                 .filter(|file_id| {
-                    manifest.files.get(file_id).is_some_and(|file_meta| {
-                        !file_meta.is_index_consistent_with_region(
-                            &snapshot.metadata.column_metadatas,
-                            &snapshot.index_options,
-                        )
-                    })
+                    !manifest.files[file_id].is_index_consistent_with_region(
+                        &snapshot.metadata.column_metadatas,
+                        &snapshot.index_options,
+                    )
                 })
                 .collect::<Vec<_>>();
             let result = if incomplete.is_empty() {
