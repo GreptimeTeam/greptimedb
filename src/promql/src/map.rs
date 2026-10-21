@@ -23,7 +23,10 @@ mod go_math;
 #[cfg(test)]
 mod tests;
 
-pub use broadcast::{ScalarSeriesOperand, map_arithmetic_series, map_compare_series};
+pub use broadcast::{
+    ScalarFunction, ScalarSeriesOperand, map_arithmetic_series, map_compare_series,
+    map_scalar_function,
+};
 pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
 
 use std::f64::consts::PI;

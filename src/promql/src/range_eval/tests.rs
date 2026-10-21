@@ -721,6 +721,185 @@ fn functions_match_range_udfs() {
     }
 }
 
+/// Replaces the float sample of `field` at every row index in `rows` with a native histogram
+/// sample, so the windows holding one take the mixed-window path.
+fn mix_in_histograms(chunks: &mut [RawSeriesChunk], field: usize, rows: &BTreeSet<usize>) {
+    let histogram = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";
+    let view = OwnedHistogram::parse(histogram);
+    let mut start = 0;
+    for piece in chunks {
+        let len = piece.time.len();
+        let local: Vec<usize> = rows
+            .range(start..start + len)
+            .map(|&row| row - start)
+            .collect();
+        start += len;
+        if local.is_empty() {
+            continue;
+        }
+        let mut builder = HistogramBatchBuilder::new();
+        let indices: UInt32Array = (0..len)
+            .map(|row| {
+                local
+                    .binary_search(&row)
+                    .is_ok()
+                    .then(|| builder.push(view.view()).unwrap())
+            })
+            .collect();
+        // A position is a float or a histogram, never both, so the float sample of a mixed-in row
+        // goes.
+        let values: Float64Array = piece.fields.as_slice()[field]
+            .iter()
+            .enumerate()
+            .map(|(row, sample)| match sample {
+                _ if local.binary_search(&row).is_ok() => None,
+                SampleRef::Float(value) => Some(value),
+                SampleRef::Missing => None,
+                SampleRef::Histogram(_) => unreachable!("histograms are mixed in once"),
+            })
+            .collect();
+        let histograms = HistogramSamples::try_new(indices, builder.finish().unwrap()).unwrap();
+        let mixed = Samples::try_from_mixed(values, histograms).unwrap();
+        let fields = piece
+            .fields
+            .as_slice()
+            .iter()
+            .enumerate()
+            .map(|(index, samples)| {
+                if index == field {
+                    mixed.clone()
+                } else {
+                    samples.clone()
+                }
+            })
+            .collect();
+        piece.fields = SeriesFields::try_from_vec(fields).unwrap();
+    }
+}
+
+/// Asserts two evaluator results are identical, including native histogram samples, which the
+/// dense form [`expand`] rejects.
+fn assert_same_series(actual: Option<&Series>, expected: Option<&Series>, context: &str) {
+    match (actual, expected) {
+        (None, None) => {}
+        (Some(actual), Some(expected)) => {
+            assert_eq!(actual.metric, expected.metric, "{context}: metric");
+            let (TimeAxis::Grid(actual_range), TimeAxis::Grid(expected_range)) =
+                (&actual.time, &expected.time)
+            else {
+                panic!(
+                    "{context}: expected grid series, got {:?} and {:?}",
+                    actual.time, expected.time
+                );
+            };
+            assert_eq!(actual_range, expected_range, "{context}: grid range");
+            for (field, (got, want)) in actual
+                .fields
+                .as_slice()
+                .iter()
+                .zip(expected.fields.as_slice())
+                .enumerate()
+            {
+                for (row, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+                    let context = format!("{context}: field {field} row {row}");
+                    match (got, want) {
+                        (SampleRef::Missing, SampleRef::Missing) => {}
+                        (SampleRef::Float(got), SampleRef::Float(want)) => {
+                            assert_eq!(got.to_bits(), want.to_bits(), "{context}: {got} vs {want}")
+                        }
+                        (SampleRef::Histogram(got), SampleRef::Histogram(want)) => {
+                            let got = FloatHistogram::try_from_view(&got).unwrap();
+                            let want = FloatHistogram::try_from_view(&want).unwrap();
+                            // Both paths run the same histogram code over the same samples, so
+                            // this is an exact comparison: an epsilon of zero.
+                            assert_histogram_close(&got, &want, 0.0, &context);
+                        }
+                        (SampleRef::Missing, _) => {
+                            panic!("{context}: only the per-window path produced a sample")
+                        }
+                        (_, SampleRef::Missing) => {
+                            panic!("{context}: only the batch path produced a sample")
+                        }
+                        _ => panic!("{context}: a float on one path and a histogram on the other"),
+                    }
+                }
+            }
+        }
+        (actual, expected) => panic!(
+            "{context}: one path produced a series, the other none: {actual:?} vs {expected:?}"
+        ),
+    }
+}
+
+/// `rate` and `increase` over random input, computed twice: by the batch kernel and by the
+/// per-window path.
+///
+/// Both evaluators are built by `try_new` and differ in nothing but the dispatch shape, and both
+/// kernels reach `extrapolated_rate_of`, so the results have to be bit-identical. A difference
+/// means the batch read a different set of samples, evaluated at a different time, or corrected a
+/// different reset: a window bound that disagrees with the per-window path.
+///
+/// The rows mix gaps, stale markers, counter resets and native histogram samples, the last so
+/// that some grid points take the mixed-window fallback, where a pending batch has to flush
+/// before the point is decided on the per-window path. The random chunk splits are what make
+/// `advance` drop samples mid-series, so spans that outlived one would read shifted samples.
+#[test]
+fn batch_counter_functions_match_the_per_window_path_on_random_input() {
+    let mut batch_calls = 0;
+    for seed in 0..200 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let fields = rng.random_range(1..=3);
+        let (grid, mut window) = random_window(&mut rng);
+        // An anchored selector reads one window and installs no batch kernel, so both paths would
+        // run the same code; every seed stays on the grid-driven batch path.
+        window.anchor_ms = None;
+        let function = if rng.random_bool(0.5) {
+            RangeFunction::Rate
+        } else {
+            RangeFunction::Increase
+        };
+        let mut batched =
+            RangeEvaluator::try_new(&raw_schema(fields), grid.clone(), window, function).unwrap();
+        let mut per_window =
+            RangeEvaluator::try_new(&raw_schema(fields), grid.clone(), window, function).unwrap();
+        // The per-window path is the same evaluator without the batch kernel. `with_kernel`,
+        // which the other differential tests use, rejects native histogram samples, and these
+        // series carry some, so removing the batch form is the only switch that leaves the rest
+        // of the evaluation identical.
+        per_window.batch = None;
+        // One evaluator serves several series, so state must not leak between them.
+        for host in 0..3 {
+            let rows = random_rows(&mut rng, fields);
+            let histogram_field = rng.random_range(0..fields);
+            let histogram_rows: BTreeSet<usize> =
+                (0..rows.len()).filter(|_| rng.random_bool(0.1)).collect();
+            let mut chunks = random_chunks(&mut rng, &rows, fields, host);
+            mix_in_histograms(&mut chunks, histogram_field, &histogram_rows);
+            // A push hands out the positions it decided, not only on the last chunk, so what each
+            // path produced is every chunk it handed out, folded back into one series.
+            let batched_chunks = collect_chunks(&mut batched, &chunks);
+            let per_window_chunks = collect_chunks(&mut per_window, &chunks);
+
+            let batched_result = fold_chunks(&batched_chunks, batched.output_schema());
+            let per_window_result = fold_chunks(&per_window_chunks, per_window.output_schema());
+
+            let context = format!("seed {seed} host {host}");
+            assert_same_series(
+                batched_result.as_ref(),
+                per_window_result.as_ref(),
+                &context,
+            );
+        }
+        batch_calls += batched.batch_call_count();
+    }
+    // The comparison is worth nothing unless the batch kernel ran at all: counting the calls is
+    // what tells a batch-path comparison from one that silently fell back to per-window.
+    assert!(
+        batch_calls > 300,
+        "only {batch_calls} batch kernel calls: the batch path was barely reached"
+    );
+}
+
 /// A chunk of entirely present float columns is appended in bulk, and that is the path the test
 /// asserts: the per-sample loop produces the same output, so comparing values alone could not
 /// tell whether the bulk path ran.
@@ -784,31 +963,6 @@ fn a_chunk_with_histograms_is_not_appended_in_bulk() {
     .unwrap();
     evaluator.push(&chunk).unwrap();
     assert_eq!(evaluator.bulk_ingest_count(), 0);
-}
-
-/// `rate` over a float-only series takes the batch path. The per-window path produces the same
-/// output, so a test comparing values alone could not tell which one ran.
-#[test]
-fn rate_over_floats_is_evaluated_in_batches() {
-    let rows: Vec<Row> = (0..20)
-        .map(|index| (index as i64 * 10_000, vec![Some(index as f64)]))
-        .collect();
-    let mut evaluator = RangeEvaluator::try_new(
-        &raw_schema(1),
-        grid(0, 10_000, 20),
-        RangeWindow {
-            range_ms: 30_000,
-            offset_ms: 0,
-            anchor_ms: None,
-        },
-        RangeFunction::Rate,
-    )
-    .unwrap();
-    evaluator.push(&chunk(&rows, 1, 0, true)).unwrap();
-    assert!(
-        evaluator.batch_call_count() > 0,
-        "rate over floats must reach the batch kernel"
-    );
 }
 
 /// A batch spanning more grid points than `EVALUATION_BATCH` flushes in the middle of one
@@ -881,7 +1035,6 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
         .push(&chunk(&rows, fields, 0, true))
         .unwrap()
         .expect("the series completes");
-    assert_eq!(per_window.batch_call_count(), 0);
 
     // Fold the chunk back into one series first: a chunk's range reports the positions its push
     // decided, which can include leading and trailing positions holding no value, while the
@@ -899,8 +1052,9 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
 /// A window holding a native histogram sample keeps its grid point on the per-window path, since
 /// the batch kernel reads the floats alone and cannot reproduce the mixed-window rules.
 ///
-/// The series is laid out so every grid point's window contains the histogram: one point fewer
-/// than the first test, so no point can fall before it.
+/// The series is laid out so every grid point's window contains the histogram: three samples
+/// 10 s apart with the histogram on the first, and a window reaching 30 s back, so a window
+/// covering any grid point reaches timestamp 0.
 #[test]
 fn a_histogram_window_keeps_rate_on_the_per_window_path() {
     let histogram = "0/0/0/4014000000000000/4014000000000000/1/0_1/4014000000000000///";

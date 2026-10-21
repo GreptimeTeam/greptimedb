@@ -24,14 +24,16 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 
 use super::{
-    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, natural_less, scalar,
-    sort_instant, topk,
+    Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, limit_ratio, limitk,
+    natural_less, sample_offset, scalar, sort_instant, topk,
 };
 use crate::golden::fold_pieces;
 use crate::grid_series::reference::{
-    Dense, Labels, Points, assert_pieces_eq, assert_result_eq, piece_ranges, run_ranges,
-    sparse_series,
+    Dense, Labels, OwnedHistogram, Points, assert_pieces_eq, assert_result_eq, piece_ranges,
+    run_ranges, sparse_series,
 };
+use crate::grid_series::{GridSample, GridSeriesBuilder};
+use crate::histogram_eval::float_histogram::FloatHistogram;
 
 fn schema(points: u64, fields: usize) -> SeriesSchema {
     SeriesSchema {
@@ -117,42 +119,20 @@ fn names(list: &str) -> Vec<Arc<str>> {
 /// header of `prometheus_cases.txt`.
 #[test]
 fn select_operators_match_prometheus() {
-    let text = include_str!("prometheus_cases.txt");
-    let mut checked = 0;
-    for case in text.split("end\n").filter(|case| case.contains("case ")) {
-        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
-        let spec: Vec<&str> = lines[0].split_whitespace().skip(1).collect();
-        let points: usize = lines[1].split_whitespace().nth(3).unwrap().parse().unwrap();
-        let schema = schema(points as u64, 1);
-        let mut inputs = Vec::new();
-        let mut expected: BTreeMap<String, Dense> = BTreeMap::new();
-        for line in &lines[2..] {
-            let (kind, rest) = line.split_once(' ').unwrap();
-            let (labels, values) = rest.split_once(" ;").unwrap();
-            match kind {
-                "series" => inputs.push((metric(labels), dense(points, values))),
-                "result" => {
-                    expected.insert(labels.to_string(), dense(points, values));
-                }
-                other => panic!("unexpected line {other} in {case}"),
-            }
-        }
-        let series: Vec<Series> = inputs
-            .iter()
-            .filter_map(|(metric, dense)| build(&schema, metric.clone(), dense))
-            .collect();
-
-        let actual: Vec<Series> = match spec[0] {
+    let checked = check_cases(
+        include_str!("prometheus_cases.txt"),
+        |spec, schema, series| match spec[0] {
             "topk" => {
-                let grouping = match spec[3] {
-                    "without" => Grouping::Without(names(spec[4])),
-                    "by" => Grouping::By(names(spec[4])),
-                    _ => Grouping::By(Vec::new()),
-                };
                 let k: f64 = spec[2].parse().unwrap();
-                topk(k, spec[1] == "topk", &grouping, &schema, &series).unwrap()
+                topk(
+                    k,
+                    spec[1] == "topk",
+                    &grouping(spec[3], spec[4]),
+                    schema,
+                    series,
+                )
             }
-            "scalar" => vec![scalar(&schema, &series).unwrap()],
+            "scalar" => Ok(vec![scalar(schema, series).unwrap()]),
             "absent" => {
                 let matchers: Vec<LabelMatcher> = spec
                     .get(1)
@@ -189,12 +169,156 @@ fn select_operators_match_prometheus() {
                     })
                     .cloned()
                     .collect();
-                absent(&schema, &selected, absent_labels(&matchers).unwrap())
+                Ok(absent(schema, &selected, absent_labels(&matchers).unwrap())
                     .unwrap()
                     .into_iter()
-                    .collect()
+                    .collect())
             }
             other => panic!("unknown case {other}"),
+        },
+    );
+    assert!(checked > 200, "{checked} result series checked");
+}
+
+/// `limitk` and `limit_ratio` evaluated by the Prometheus v3.15.0 engine; see the header of
+/// `limit_cases.txt`.
+#[test]
+fn limit_operators_match_prometheus() {
+    let checked = check_cases(include_str!("limit_cases.txt"), |spec, schema, series| {
+        let param: f64 = spec[2].parse().unwrap();
+        match spec[1] {
+            "limitk" => limitk(param, &grouping(spec[3], spec[4]), schema, series),
+            _ => limit_ratio(param, schema, series),
+        }
+    });
+    assert!(checked > 200, "{checked} result series checked");
+}
+
+/// The labels of the fixtures are short; these need the long length prefix of `stringlabels`.
+/// Prometheus' offsets were computed with promql-compat `cmd/narthex-golden-labelhash`.
+#[test]
+fn sample_offset_hashes_labels_like_prometheus() {
+    let cases = [
+        ("__name__=a,job=x".to_string(), 0x3fe1c2f8b3f15aa8),
+        (
+            format!("__name__=a,long={}", "v".repeat(300)),
+            0x3fca51ed01e04434,
+        ),
+        (
+            format!(
+                "__name__=a,{}={},zone={}",
+                "n".repeat(254),
+                "v".repeat(255),
+                "z".repeat(70000)
+            ),
+            0x3fc3bf72b8300ba3,
+        ),
+        // A Prometheus label set has no empty value, so an empty label is no label.
+        ("__name__=a,empty=,job=x".to_string(), 0x3fe1c2f8b3f15aa8),
+    ];
+    for (labels, offset) in cases {
+        assert_eq!(sample_offset(&metric(&labels)).to_bits(), offset);
+    }
+}
+
+/// `limitk` and `limit_ratio` select series, so histogram samples pass through, and
+/// `limit_ratio` keeps every field of the series it keeps.
+#[test]
+fn limit_operators_keep_histogram_samples() {
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let sample = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+        ))
+    };
+    let kinds = |series: &Series, field: usize| -> Vec<(usize, &str)> {
+        let samples = &series.fields.as_slice()[field];
+        series
+            .time
+            .positions()
+            .map(|(point, row)| {
+                let kind = match samples.sample(row) {
+                    SampleRef::Missing => "missing",
+                    SampleRef::Float(_) => "float",
+                    SampleRef::Histogram(_) => "histogram",
+                };
+                (point, kind)
+            })
+            .collect()
+    };
+
+    let two_fields = schema(3, 2);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(two_fields.clone())).unwrap();
+    builder
+        .push_samples(0, &[Some(GridSample::Float(1.0)), Some(sample())])
+        .unwrap();
+    builder.push_samples(2, &[None, Some(sample())]).unwrap();
+    let series = builder.finish(metric("__name__=a")).unwrap().unwrap();
+    let kept = limit_ratio(1.0, &two_fields, std::slice::from_ref(&series)).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kinds(&kept[0], 0), [(0, "float"), (2, "missing")]);
+    assert_eq!(kinds(&kept[0], 1), [(0, "histogram"), (2, "histogram")]);
+
+    let one_field = schema(3, 1);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(one_field.clone())).unwrap();
+    builder.push_samples(1, &[Some(sample())]).unwrap();
+    let series = builder.finish(metric("__name__=a")).unwrap().unwrap();
+    let kept = limitk(1.0, &Grouping::By(Vec::new()), &one_field, &[series]).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kinds(&kept[0], 0), [(1, "histogram")]);
+}
+
+fn grouping(kind: &str, labels: &str) -> Grouping {
+    match kind {
+        "without" => Grouping::Without(names(labels)),
+        "by" => Grouping::By(names(labels)),
+        _ => Grouping::By(Vec::new()),
+    }
+}
+
+/// Evaluates each case of a fixture with `eval` and returns how many result series matched; a
+/// case with an `error` line must fail with that message.
+fn check_cases(
+    text: &str,
+    eval: impl Fn(&[&str], &SeriesSchema, &[Series]) -> Result<Vec<Series>, DataFusionError>,
+) -> usize {
+    let mut checked = 0;
+    for case in text.split("end\n").filter(|case| case.contains("case ")) {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let spec: Vec<&str> = lines[0].split_whitespace().skip(1).collect();
+        let points: usize = lines[1].split_whitespace().nth(3).unwrap().parse().unwrap();
+        let schema = schema(points as u64, 1);
+        let mut inputs = Vec::new();
+        let mut expected: BTreeMap<String, Dense> = BTreeMap::new();
+        let mut error = None;
+        for line in &lines[2..] {
+            if let Some(message) = line.strip_prefix("error ") {
+                error = Some(message);
+                continue;
+            }
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (labels, values) = rest.split_once(" ;").unwrap();
+            match kind {
+                "series" => inputs.push((metric(labels), dense(points, values))),
+                "result" => {
+                    expected.insert(labels.to_string(), dense(points, values));
+                }
+                other => panic!("unexpected line {other} in {case}"),
+            }
+        }
+        let series: Vec<Series> = inputs
+            .iter()
+            .filter_map(|(metric, dense)| build(&schema, metric.clone(), dense))
+            .collect();
+
+        let actual = match (eval(&spec, &schema, &series), error) {
+            (Ok(actual), None) => actual,
+            (Err(actual), Some(expected)) => {
+                assert_eq!(actual.message(), expected, "{case}");
+                continue;
+            }
+            (actual, expected) => panic!("{case}\ngot {actual:?}, expected error {expected:?}"),
         };
 
         // A result arrives as one series over the runs of valued positions; the fixtures pin the
@@ -213,7 +337,7 @@ fn select_operators_match_prometheus() {
             checked += 1;
         }
     }
-    assert!(checked > 200, "{checked} result series checked");
+    checked
 }
 
 /// The fixture's label rendering: `name=value` pairs in name order, `-` when empty.

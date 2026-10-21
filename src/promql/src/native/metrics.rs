@@ -452,6 +452,7 @@ mod tests {
                     return_bool: false,
                     labels: crate::vector_match::MatchingLabels::Ignoring(Vec::new()),
                     cardinality: crate::vector_match::Cardinality::OneToOne,
+                    fill: crate::vector_match::FillValues::default(),
                 },
             },
             output: {

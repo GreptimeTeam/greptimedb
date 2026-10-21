@@ -76,7 +76,9 @@
 //! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
 //! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
 //! single authority on that, so a node added later cannot be legal in one place and illegal in
-//! another.
+//! another. What is refused before a tree exists is the scan's shape: no shape below can consume
+//! chunks of different series that interleave, so an `Interleaved` ordering is refused once, at the
+//! entry, and [`NativeNode::validate`] refuses the same ordering for a tree built some other way.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,7 +93,7 @@ use promql::native::plan::{
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
-use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
+use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -122,13 +124,12 @@ const SUPPORTED: &str = "a selector, a range function over a range selector — 
 /// one.
 ///
 /// `ordering` is what the caller's scan guarantees, and the tree records it rather than assuming
-/// one. Only `Contiguous` and `KeyThenTime` are accepted: a native evaluation reads one series to
-/// its last chunk before the next, so chunks of different series may not interleave, and an
-/// `Interleaved` declaration is refused here for every shape this compiler accepts. That is where
-/// the refusal belongs: no accepted shape can consume interleaved chunks, so a tree declaring one
-/// cannot be built here at all. [`NativeNode::validate`]'s window branch checks the same thing, so
-/// if both land this refusal comes first and the tree check is a backstop for a tree built some
-/// other way.
+/// one. Only `Contiguous` and `KeyThenTime` are accepted: every shape this compiler accepts reads
+/// one series to its last chunk before the next, so an `Interleaved` declaration is refused at the
+/// entry, before any shape is built — the bare selector included, which returns before a window
+/// exists — and a shape added later inherits the refusal instead of restating it.
+/// [`NativeNode::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
+/// backstop for a tree built some other way.
 ///
 /// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
 /// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
@@ -281,9 +282,12 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
     }
     // What is left has a constant on at least one side, and a modifier is refused rather than
     // dropped: a scalar carries no labels, so there is nothing to match or name, and Prometheus
-    // rejects these words on a scalar operand for the same reason. A fill value is refused because
-    // the tree's matching has no field for one, so binding the operation would compute it without
-    // the fill the query asked for.
+    // rejects these words on a scalar operand for the same reason.
+    //
+    // A fill value is refused for a different reason: `BinaryMatching` does carry one, but the kernel
+    // reads it only where a match group could be missing, and a broadcast over a constant never
+    // misses — the constant exists at every grid point. Binding it would record a number no kernel
+    // would read, so the query is refused instead of quietly dropping what it asked for.
     if let Some(modifier) = &binary.modifier
         && (modifier.matching.is_some()
             || modifier.card != VectorMatchCardinality::OneToOne
@@ -292,7 +296,8 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
         return Err(not_implemented(&format!(
             "the vector matching in `{binary}`, which a constant operand has nothing to match: \
              `on`, `ignoring`, `group_left` and `group_right` name labels of a vector, and a fill \
-             value fills in a match group that could miss"
+             value fills in a match group that could miss, while a broadcast over a constant never \
+             does"
         )));
     }
     // Both operands are compiled before the node is built, so `2 / (x + 1)` nests. The constant side
@@ -346,6 +351,9 @@ fn scalar_matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
         return_bool,
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
+        // A fill value fills in a match group that could miss, which a broadcast over a constant never
+        // does: the constant exists at every grid point, so there is no missing side to fill.
+        fill: FillValues::default(),
     }
 }
 
