@@ -1154,8 +1154,13 @@ fn merge_fields(
         builder.begin_series();
         // The capacity each field's histogram index column has reached, `0` until its first
         // histogram. The columns are handed out inside the series, so what they are charged stays
-        // charged; only the growth of one series is charged at a time.
-        let mut index_capacity = vec![0usize; width];
+        // charged; only the growth of one series is charged at a time. Only a caller accounting for
+        // the workspace reads the ledger, so an unaccounted merge allocates nothing for it.
+        let mut index_capacity = if budget.is_some() {
+            vec![0usize; width]
+        } else {
+            Vec::new()
+        };
         samples.sort_unstable_by_key(|(point, field, _)| (*point, *field));
         let mut samples = samples.into_iter().peekable();
         let mut pushed = 0usize;
