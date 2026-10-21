@@ -234,6 +234,9 @@ fn binary_vectors_inner(
     merge_fields(fields, output, budget)
 }
 
+/// The capacity a fresh `Vec` holds: a first push allocates four entries, and a full one doubles.
+const VEC_MIN_CAPACITY: usize = 4;
+
 /// One label of a match key, charged twice because `group_key` grows its `Vec` by doubling.
 const KEY_LABEL_BYTES: usize = 2 * std::mem::size_of::<(Arc<str>, Arc<str>)>();
 
@@ -374,10 +377,6 @@ impl<'a> Budget<'a> {
     }
 }
 
-/// The slots the duplicate scan's point list holds before it doubles: a `Vec` of `usize` starts
-/// with room for four, so a scan that collects a single point still allocates that much.
-const POINT_LIST_FIRST_SLOTS: usize = 4;
-
 /// What one field's tables, flags and messages cost before it pairs anything.
 #[derive(Default)]
 struct FieldMetadata {
@@ -400,7 +399,7 @@ struct FieldMetadata {
 /// around one rendering. Nothing here counts the pairing the field walks: which series match, where
 /// their axes overlap and which rows the operator keeps is only known as the walk reaches them.
 /// The duplicate scan's list of present points is not part of these tables either: a group of one
-/// member collects nothing, and a wider group's list is charged by [`overlap`] as it grows it.
+/// member collects nothing, and a wider group's list is charged by [`overlap`] as it is pushed to.
 fn field_metadata_bytes(
     matching: &BinaryMatching,
     include: &[Arc<str>],
@@ -543,13 +542,12 @@ fn result_set_bytes(metric: &MetricName, one: &MetricName, include: &[Arc<str>])
 ///
 /// The merge files every kept triple under its label set and hands one series per label set to a
 /// builder, so the triples, the table, the row it fills, the output vector and the builder's own
-/// buffers are alive together: one triple of a label set's samples, one index per retained row, the
-/// span a run may start with, a row of the histogram table per histogram and the heap its buckets
-/// are copied to. Every term counts a value a field actually kept or a label set it filed, so a pair
-/// the operator filtered costs its label set -- the table holds one without a value -- and no row at
-/// all. The builder's value columns are not here: they hold one slot per output row and field, and a
-/// row holding only some of the fields still writes a null into the others, so [`merge_fields`]
-/// charges them per row as it pushes it.
+/// buffers are alive together: one triple of a label set's samples, the span a run may start with, a
+/// row of the histogram table per histogram and the heap its buckets are copied to. Every term counts
+/// a value a field actually kept or a label set it filed, so a pair the operator filtered costs its
+/// label set -- the table holds one without a value -- and no row at all. What grows with the output
+/// rows is charged by [`merge_fields`] as they are pushed: the value and validity column of every
+/// field, and the index column of a field whose first histogram backfills the rows before it.
 fn merge_bytes(
     kept: usize,
     sets: usize,
@@ -558,18 +556,19 @@ fn merge_bytes(
     histogram_heap: usize,
 ) -> usize {
     // One kept triple, charged twice for the capacity its vector ends at, one slot of the row the
-    // builder reads, the span it may start and its row of the histogram table's index column.
+    // builder reads and the span it may start.
     let row = (2 * std::mem::size_of::<(usize, usize, GridSample)>())
         .saturating_add(2 * std::mem::size_of::<usize>())
-        .saturating_add(2 * std::mem::size_of::<GridSpan>())
-        .saturating_add(std::mem::size_of::<Option<u32>>());
+        .saturating_add(2 * std::mem::size_of::<GridSpan>());
     kept.saturating_mul(row)
         // One label set's entry in the merge table and the series it is written out as.
         .saturating_add(
             sets.saturating_mul(MERGE_SLOT_BYTES.saturating_add(2 * std::mem::size_of::<Series>())),
         )
-        // The row the builder reads its pushes from, one slot per field.
+        // The row the builder reads its pushes from and the per-field ledger of the capacity each
+        // histogram index column has reached, one slot per field.
         .saturating_add(2 * fields.saturating_mul(std::mem::size_of::<Option<GridSample>>()))
+        .saturating_add(fields.saturating_mul(std::mem::size_of::<usize>()))
         // The histogram table of every field that carries one: the builders of its columns, the
         // scalars and list offsets of its rows, and the buckets the batch copies beside the value
         // the results still hold.
@@ -1107,11 +1106,25 @@ fn set_field(
     Ok(results)
 }
 
+/// The capacity a field's histogram index column reaches when `pushed` output rows have been pushed
+/// and the row being pushed holds `histogram`; `None` when the column does not grow.
+///
+/// [`GridSeriesBuilder::push_samples`] creates the column at the first histogram with one entry per
+/// row before it and then pushes, so that push allocates `max(2 * pushed, 4)`; every later row adds
+/// an entry, and a full column doubles.
+fn index_column_growth(pushed: usize, capacity: usize, histogram: bool) -> Option<usize> {
+    if capacity == 0 {
+        return histogram.then(|| (2 * pushed).max(VEC_MIN_CAPACITY));
+    }
+    (pushed == capacity).then(|| 2 * capacity)
+}
+
 /// Joins the per-field results into series with all fields, by label set.
 ///
-/// The builder's value columns grow with the output rows, which only exist once the triples are
-/// being grouped, so they are reserved per row -- one row's worth before the builder takes it --
-/// when a caller accounts for the workspace.
+/// The builder's columns grow with the output rows, which only exist once the triples are being
+/// grouped, so they are reserved per row -- one row's worth before the builder takes it -- when a
+/// caller accounts for the workspace: the value and validity column of every field, and the
+/// histogram index column of a field that holds one.
 fn merge_fields(
     fields: Vec<Results>,
     schema: Arc<SeriesSchema>,
@@ -1139,8 +1152,13 @@ fn merge_fields(
     for (metric, mut samples) in merged.into_values() {
         // One builder serves every label set, so each result series starts explicitly.
         builder.begin_series();
+        // The capacity each field's histogram index column has reached, `0` until its first
+        // histogram. The columns are handed out inside the series, so what they are charged stays
+        // charged; only the growth of one series is charged at a time.
+        let mut index_capacity = vec![0usize; width];
         samples.sort_unstable_by_key(|(point, field, _)| (*point, *field));
         let mut samples = samples.into_iter().peekable();
+        let mut pushed = 0usize;
         while let Some((point, field, value)) = samples.next() {
             row.clear();
             row.resize_with(width, || None);
@@ -1151,8 +1169,22 @@ fn merge_fields(
             // The columns of this row, admitted before the builder grows them.
             if let Some(budget) = budget.as_deref_mut() {
                 budget.retain(merge_row_bytes(width))?;
+                let mut index = 0usize;
+                for (capacity, value) in index_capacity.iter_mut().zip(&row) {
+                    let histogram = matches!(value, Some(GridSample::Histogram(_)));
+                    if let Some(grown) = index_column_growth(pushed, *capacity, histogram) {
+                        index = index.saturating_add(
+                            grown
+                                .saturating_sub(*capacity)
+                                .saturating_mul(std::mem::size_of::<Option<u32>>()),
+                        );
+                        *capacity = grown;
+                    }
+                }
+                budget.retain(index)?;
             }
             builder.push_samples(point, &row)?;
+            pushed += 1;
         }
         output.extend(builder.finish(metric)?);
     }
@@ -1223,12 +1255,10 @@ fn group(operand: &Operand<'_>, labels: &MatchingLabels) -> HashMap<GroupKey, Ve
 
 /// The first point where two `members` are present and `relevant` holds.
 ///
-/// The one list of the group's present points is the whole of what this scan allocates, and it is
-/// the field's workspace beside its `tables` rather than part of them: it is reserved before a point
-/// is pushed -- one slot per row the group's members carry at most, never fewer than the four a new
-/// list starts with, doubled because the list grows by doubling -- and given back once the list is
-/// dropped. A group of one member cannot repeat a point, so it allocates nothing and is charged
-/// nothing.
+/// The list of the group's present points is the only thing this scan allocates, and it is charged
+/// as a slot is pushed: the figure follows the list's capacity, so a group of one member and a group
+/// whose members carry no sample both cost nothing, however long their axes are. The list is given
+/// back once it is dropped.
 fn overlap(
     operand: &Operand<'_>,
     members: &[usize],
@@ -1239,15 +1269,6 @@ fn overlap(
     if members.len() < 2 {
         return Ok(None);
     }
-    if let Some(budget) = budget.as_deref_mut() {
-        let rows = members
-            .iter()
-            .fold(0usize, |rows, &member| {
-                rows.saturating_add(operand.axis(member).len())
-            })
-            .max(POINT_LIST_FIRST_SLOTS);
-        budget.step(tables.saturating_add(2 * std::mem::size_of::<usize>() * rows))?;
-    }
     // Sorting the present points keeps the cost proportional to them, not to the span.
     let mut points = Vec::new();
     for &member in members {
@@ -1257,6 +1278,15 @@ fn overlap(
                 cursor.at(row).expect("a row never goes back"),
                 SampleRef::Missing
             ) {
+                // The push that starts a new allocation: the capacity the list reaches is what is
+                // live beside the field's tables, charged twice for the buffer it replaces.
+                if let Some(budget) = budget.as_deref_mut()
+                    && points.len() == points.capacity()
+                {
+                    let capacity = points.capacity().saturating_mul(2).max(VEC_MIN_CAPACITY);
+                    let list = capacity.saturating_mul(2 * std::mem::size_of::<usize>());
+                    budget.step(tables.saturating_add(list))?;
+                }
                 points.push(point);
             }
         }

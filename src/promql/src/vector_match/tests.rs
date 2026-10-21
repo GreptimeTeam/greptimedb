@@ -2854,3 +2854,206 @@ fn fields_holding_disjoint_points_are_charged_their_columns() {
         "peak {peak} for {points} rows of {fields} fields"
     );
 }
+
+/// A duplicate scan is charged the points it collects: a group whose members carry no sample
+/// collects nothing, however long their axes are, while the points a group does carry are its own
+/// slots.
+#[test]
+fn a_duplicate_scan_is_charged_the_points_it_collects() {
+    let points = 100_000;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(1, &grid));
+    // A member of the group with no value at any point: its axis is the whole grid.
+    let null_member = |name: &str| -> Series {
+        Series {
+            metric: metric(&Labels::from([
+                ("__name__".to_string(), name.to_string()),
+                ("job".to_string(), "x".to_string()),
+            ])),
+            time: TimeAxis::Grid(GridRange::try_new(grid.clone(), 0, points).unwrap()),
+            fields: SeriesFields::one(Samples::from_float(Float64Array::new_null(points))),
+        }
+    };
+    let sparse_member = |name: &str, at: &[usize]| -> Series {
+        let labels = Labels::from([
+            ("__name__".to_string(), name.to_string()),
+            ("job".to_string(), "x".to_string()),
+        ]);
+        let values: Points = at
+            .iter()
+            .map(|&position| (position, f64::to_bits(position as f64)))
+            .collect();
+        sparse_series(&schema, &labels, &values).expect("the operand holds a value")
+    };
+    // The left side carries one value, at a point no member carries, so the group is never a
+    // duplicate and no row is filed.
+    let lhs = vec![sparse_member("a", &[90_000])];
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::On(vec![Arc::from("job")]));
+    // What the run holds beside the list: three presence flags per grid point.
+    let floor = 3 * points;
+    let run = |rhs: &[Series], limit: usize| -> Result<Vec<Series>, DataFusionError> {
+        budgeted(&matching, &schema, &lhs, &schema, rhs, limit).0
+    };
+    // Two members of one group, each with a value at no point: their axes are the whole grid and
+    // the list stays empty.
+    let empty_group = vec![null_member("b"), null_member("c")];
+    assert!(
+        binary_vectors(&matching, &schema, &lhs, &schema, &empty_group)
+            .expect("no member carries a sample")
+            .is_empty()
+    );
+    let output = run(&empty_group, floor + 64 * 1024).expect("an empty list costs nothing");
+    assert!(output.is_empty(), "{output:?}");
+    // A few points of each member are the list's own slots, and still fit beside the flags.
+    let few = vec![
+        sparse_member("b", &[10, 20, 30, 40]),
+        sparse_member("c", &[50, 60, 70, 80]),
+    ];
+    assert!(
+        run(&few, floor + 64 * 1024)
+            .expect("a few points cost a few slots")
+            .is_empty()
+    );
+    // Thousands of points are charged as they are collected: the same limit refuses them, since
+    // their slots alone are tens of kilobytes.
+    let many = vec![
+        sparse_member("b", &(0..4_000).collect::<Vec<_>>()),
+        sparse_member("c", &(4_000..8_000).collect::<Vec<_>>()),
+    ];
+    let error = run(&many, floor + 64 * 1024)
+        .expect_err("the collected points are charged as they are pushed");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+}
+
+/// A field's histogram index column is charged as it grows: the builder creates it over the rows
+/// before the field's first histogram and grows it with every row after, so a wide result whose
+/// fields meet their histograms late holds those columns beside its value columns.
+#[test]
+fn sparse_wide_results_are_charged_their_index_columns() {
+    let points = 1_025;
+    let fields = 64;
+    let grid = budget_grid(points);
+    let schema = Arc::new(schema(fields, &grid));
+    // The value of a field at its one histogram point.
+    let histogram = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&OwnedHistogram::parse("0/0/0/0/0/0/////").view())
+                .expect("an empty histogram is readable"),
+        ))
+    };
+    // Field `f` holds a value only at the points `f` apart: a float at every one of them but the
+    // last, and an empty histogram at its single point of the last `fields` rows. Every field meets
+    // its first histogram late and keeps the column to the end.
+    let side = |name: &str, offset: f64| -> Vec<Series> {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.begin_series();
+        for point in 0..points {
+            let mut row: Vec<Option<GridSample>> = Vec::with_capacity(fields);
+            row.resize_with(fields, || None);
+            row[point % fields] = Some(if point >= points - fields {
+                histogram()
+            } else {
+                GridSample::Float(point as f64 + offset)
+            });
+            builder.push_samples(point, &row).unwrap();
+        }
+        builder
+            .finish(metric(&Labels::from([
+                ("__name__".to_string(), name.to_string()),
+                ("job".to_string(), "x".to_string()),
+            ])))
+            .unwrap()
+            .into_iter()
+            .collect()
+    };
+    let matching = budget_matching(BinaryOp::Add, MatchingLabels::Ignoring(Vec::new()));
+    let (output, seen) = budgeted(
+        &matching,
+        &schema,
+        &side("a", 1.0),
+        &schema,
+        &side("b", 2.0),
+        usize::MAX,
+    );
+    let output = output.expect("every field adds up");
+    assert_eq!(output.len(), 1, "{output:?}");
+    // Every point keeps the field it belongs to and nothing in the others, the floats add up and
+    // the empty histograms still hold an empty histogram.
+    let mut cursors: Vec<RowCursor<'_>> = output[0]
+        .fields
+        .iter()
+        .map(|field| field.cursor())
+        .collect();
+    let mut rows = 0;
+    for (point, row) in output[0].time.positions() {
+        rows += 1;
+        for (field, cursor) in cursors.iter_mut().enumerate() {
+            let owned = field == point % fields;
+            match cursor.at(row).expect("a row never goes back") {
+                SampleRef::Float(value) => {
+                    assert!(owned, "point {point} keeps field {field}");
+                    assert!(point < points - fields, "point {point} is not a histogram");
+                    assert_eq!(value, 2.0 * point as f64 + 3.0, "point {point}");
+                }
+                SampleRef::Histogram(view) => {
+                    assert!(owned, "point {point} keeps field {field}");
+                    assert!(point >= points - fields, "point {point} is a histogram");
+                    assert_eq!(view.count, 0.0, "empty histograms add up empty");
+                    assert!(
+                        view.positive.buckets.is_empty() && view.negative.buckets.is_empty(),
+                        "point {point} keeps an empty histogram"
+                    );
+                }
+                SampleRef::Missing => assert!(!owned, "point {point} holds field {field}"),
+            }
+        }
+    }
+    assert_eq!(rows, points, "every point is a row");
+    // The capacity Rust gives these columns for this fixture, from its growth rule alone: a push
+    // into a full list allocates at least four entries and otherwise doubles. One value column per
+    // field, pushed once per row, and one index column per field, created over the rows before its
+    // first histogram and pushed once per row after.
+    let grow = |capacity: usize, len: usize| -> usize {
+        if len < capacity {
+            capacity
+        } else {
+            (2 * capacity).max(4)
+        }
+    };
+    let mut values = 0usize;
+    let mut index = vec![0usize; fields];
+    for pushed in 0..points {
+        values = grow(values, pushed);
+        let late = pushed >= points - fields;
+        for (field, capacity) in index.iter_mut().enumerate() {
+            if *capacity == 0 {
+                if late && pushed % fields == field {
+                    // Created over the `pushed` rows before the field's first histogram, then
+                    // pushed to, so its length is `pushed + 1` like every column made before it.
+                    *capacity = grow(pushed, pushed);
+                }
+            } else {
+                *capacity = grow(*capacity, pushed);
+            }
+        }
+    }
+    let columns = fields * values * std::mem::size_of::<f64>()
+        + index.iter().fold(0usize, |bytes, capacity| {
+            bytes.saturating_add(capacity.saturating_mul(std::mem::size_of::<Option<u32>>()))
+        });
+    let peak = *seen
+        .iter()
+        .max()
+        .expect("the operation asks for its workspace");
+    assert!(
+        peak >= columns,
+        "peak {peak} below the {columns} bytes of value and index columns the result holds"
+    );
+    assert!(
+        peak <= 2 * columns,
+        "peak {peak} is more than the {columns} bytes of columns the result holds"
+    );
+}

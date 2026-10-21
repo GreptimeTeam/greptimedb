@@ -5051,3 +5051,45 @@ fn a_dense_wide_result_fits_a_32_mib_pool() {
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
+
+/// An all-missing match group of two right series finishes in a 4 MiB pool and answers nothing.
+///
+/// No member carries a sample, so the duplicate scan needs no point buffer.
+#[test]
+fn an_all_missing_match_group_fits_its_pool() {
+    let points = 100_000;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points as u64);
+    let schema = evaluated_schema(grid);
+    let pool = bounded_pool(4 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(
+            &left,
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(1.0); points], true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    // Both right chunks close the one label set, so its match group has two members.
+    for _ in 0..2 {
+        execution
+            .push_evaluated_at(
+                &right,
+                evaluated_chunk_of(&schema, metric(), 0, vec![None; points], true),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+
+    let finished = execution.finish();
+    assert!(
+        finished.is_ok(),
+        "an all-missing match group over {points} points does not fit a 4 MiB pool: {:?}",
+        finished.as_ref().err()
+    );
+    assert!(
+        finished.unwrap().is_empty(),
+        "no point holds a value on both sides, so nothing is answered"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
