@@ -165,7 +165,7 @@ fn chunk(key: Buffer, times: &[i64], values: &[f64], is_last: bool) -> RawSeries
 struct TestStream {
     schema: Arc<SeriesSchema>,
     labels: RawLabelSource,
-    /// A frame-decoded input's own description; `None` is a producer-side stream.
+    /// The description this input declares; `None` means its chunks carry complete labels.
     decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     items: VecDeque<Poll<Option<Result<RawSeriesChunk, BoxedError>>>>,
@@ -236,8 +236,10 @@ fn stream_with(
     (
         Box::pin(TestStream {
             schema,
+            // Derived once from the binding this fixture stores, as a producer does; an
+            // explicit-label fixture declares none.
+            decode: label_decode_spec(&labels),
             labels,
-            decode: None,
             ordering,
             items: items.into_iter().collect(),
             deferred: VecDeque::new(),
@@ -262,8 +264,8 @@ fn gated_stream(
     (
         Box::pin(TestStream {
             schema: schema(),
+            decode: label_decode_spec(&labels),
             labels,
-            decode: None,
             ordering: SeriesOrdering::KeyThenTime,
             items: [ready(first)].into(),
             deferred: VecDeque::new(),
@@ -290,8 +292,8 @@ fn gated_resuming_stream(
     (
         Box::pin(TestStream {
             schema: schema(),
+            decode: label_decode_spec(&labels),
             labels,
-            decode: None,
             ordering: SeriesOrdering::KeyThenTime,
             items: [ready(first)].into(),
             deferred: resumed.into_iter().collect(),
@@ -337,8 +339,8 @@ fn gated_pending_stream(
     (
         Box::pin(TestStream {
             schema: schema(),
+            decode: label_decode_spec(&labels),
             labels,
-            decode: None,
             ordering: SeriesOrdering::KeyThenTime,
             items: VecDeque::new(),
             deferred: VecDeque::new(),

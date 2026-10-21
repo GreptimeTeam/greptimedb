@@ -34,7 +34,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::Label;
 use datatypes::series::MetricName;
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::{RawLabelMode, raw_series_frame_schema};
+use datatypes::series::frame::{LabelDecodeSpec, RawLabelMode, raw_series_frame_schema};
 use datatypes::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
@@ -104,6 +104,8 @@ struct RawMock {
     schema: Arc<SeriesSchema>,
     items: VecDeque<Result<RawSeriesChunk, BoxedError>>,
     binding: RawLabelSource,
+    /// The description this fixture declares, derived once from `binding`.
+    label_decode_spec: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     polls: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
@@ -146,6 +148,9 @@ impl RawSeriesStream for RawMock {
     }
     fn label_source(&self) -> &RawLabelSource {
         &self.binding
+    }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.label_decode_spec.as_ref()
     }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
@@ -242,6 +247,7 @@ fn raw_never_polled(
             schema: schema(),
             items: VecDeque::new(),
             binding: RawLabelSource::Explicit,
+            label_decode_spec: None,
             ordering,
             polls: polls.clone(),
             drops: drops.clone(),
@@ -263,11 +269,15 @@ fn raw_items(
 ) -> (SendableRawSeriesStream, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let polls = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
+    // A fixture holding a key binding declares the layout it encodes, like a real producer; a
+    // fixture with explicit labels already carries complete ones and declares none.
+    let label_decode_spec = label_decode_spec(&binding);
     (
         Box::pin(RawMock {
             schema,
             items: items.into(),
             binding,
+            label_decode_spec,
             ordering,
             polls: polls.clone(),
             drops: drops.clone(),
@@ -820,6 +830,40 @@ async fn the_declared_description_is_retained_and_no_binding_is_invented() {
     );
 }
 
+/// A key-encoded stream that stays silent about its layout is rejected, not packed as an
+/// explicit-label frame: the frame would claim its chunks carry complete labels while they carry
+/// none. The rejection happens before the source is polled.
+#[tokio::test]
+async fn key_encoded_stream_without_a_declaration_is_rejected_before_poll() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let source = Box::pin(RawMock {
+        schema: schema(),
+        items: VecDeque::new(),
+        binding: key_binding("cpu"),
+        label_decode_spec: None,
+        ordering: SeriesOrdering::Contiguous,
+        polls: polls.clone(),
+        drops: Arc::new(AtomicUsize::new(0)),
+        pending_after: None,
+        pending_reported: false,
+        panic_on_poll: false,
+        emitted: 0,
+    });
+    let error = match pack_raw_series(source) {
+        Ok(_) => panic!("a key-encoded stream must not pack without a description"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("must declare its label decode description"),
+        "expected the missing-declaration error, got: {error}"
+    );
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        0,
+        "the rejection is decided from the stream's declarations alone"
+    );
+}
+
 #[tokio::test]
 async fn explicit_mode_rejects_key_payload_and_primary_mode_rejects_explicit_metric() {
     let (input, _, _) = raw(
@@ -939,6 +983,7 @@ async fn locally_invalid_public_raw_chunk_is_rejected() {
         schema: schema(),
         items: VecDeque::from([Ok(bad)]),
         binding: RawLabelSource::Explicit,
+        label_decode_spec: None,
         ordering: SeriesOrdering::Contiguous,
         polls,
         drops: Arc::new(AtomicUsize::new(0)),
@@ -987,6 +1032,7 @@ async fn upstream_error_status_is_preserved_once_and_releases_source() {
             schema: schema(),
             items: VecDeque::from([Err(e)]),
             binding: RawLabelSource::Explicit,
+            label_decode_spec: None,
             ordering: SeriesOrdering::Contiguous,
             polls: polls.clone(),
             drops: drops.clone(),
@@ -1096,6 +1142,7 @@ async fn invalid_grid_schema_rejected_for_empty_raw_stream() {
         schema: Arc::new(invalid),
         items: VecDeque::new(),
         binding: RawLabelSource::Explicit,
+        label_decode_spec: None,
         ordering: SeriesOrdering::Contiguous,
         polls: polls.clone(),
         drops: Arc::new(AtomicUsize::new(0)),
@@ -1590,6 +1637,7 @@ async fn named_frame_fields_roundtrip_and_reject_wrong_bindings_before_polling()
         schema: expected.clone(),
         items: VecDeque::from([Ok(input_chunk)]),
         binding: RawLabelSource::Explicit,
+        label_decode_spec: None,
         ordering: SeriesOrdering::KeyThenTime,
         polls: Arc::new(AtomicUsize::new(0)),
         drops: Arc::new(AtomicUsize::new(0)),

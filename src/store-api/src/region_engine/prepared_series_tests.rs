@@ -26,11 +26,15 @@ use datatypes::error::InvalidSeriesSnafu;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::{
+    LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeSpec, LabelDecodeTag,
+};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, MetricName};
 use futures::{Stream, StreamExt};
 
+use crate::codec::PrimaryKeyEncoding;
 use crate::region_engine::{
     PreparedSeriesSource, RawLabelSource, RawSeriesStream, SendableRawSeriesStream, SeriesInfo,
 };
@@ -91,6 +95,7 @@ impl PreparedSeriesSource for MemorySource {
         Ok(Box::pin(MemoryReader {
             chunks,
             schema: self.schema.clone(),
+            label_decode_spec: declared_decode_spec(&self.label_source),
             label_source: self.label_source.clone(),
             polls: self.polls.clone(),
             drops: self.drops.clone(),
@@ -101,6 +106,8 @@ impl PreparedSeriesSource for MemorySource {
 struct MemoryReader {
     chunks: VecDeque<RawSeriesChunk>,
     schema: Arc<SeriesSchema>,
+    /// The description this fixture declares, derived once from `label_source`, as a producer does.
+    label_decode_spec: Option<LabelDecodeSpec>,
     label_source: RawLabelSource,
     polls: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
@@ -133,9 +140,56 @@ impl RawSeriesStream for MemoryReader {
         &self.label_source
     }
 
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.label_decode_spec.as_ref()
+    }
+
     fn ordering(&self) -> SeriesOrdering {
         SeriesOrdering::Contiguous
     }
+}
+
+/// Describes the key-encoded chunks a reader of `source` yields.
+///
+/// This crate cannot depend on `common-query` (which depends on it), so this fixture repeats the
+/// derivation `common_query::series_frame::label_decode_spec` performs for a producer: the metric
+/// name, the primary-key encoding, the ordered key columns with their physical types, and the
+/// logical tags in canonical order. An explicit binding already carries complete labels and
+/// declares nothing.
+fn declared_decode_spec(source: &RawLabelSource) -> Option<LabelDecodeSpec> {
+    let RawLabelSource::PrimaryKey {
+        metric_name,
+        physical_metadata,
+        logical_tags,
+    } = source
+    else {
+        return None;
+    };
+    let mut description = LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: metric_name.to_string(),
+        encoding: match physical_metadata.primary_key_encoding {
+            PrimaryKeyEncoding::Dense => LabelDecodeEncoding::Dense,
+            PrimaryKeyEncoding::Sparse => LabelDecodeEncoding::Sparse,
+        },
+        primary_key: physical_metadata
+            .primary_key_columns()
+            .map(|column| LabelDecodeColumn {
+                column_id: column.column_id,
+                name: column.column_schema.name.clone(),
+                physical_type: column.column_schema.data_type.clone(),
+            })
+            .collect(),
+        logical_tags: logical_tags
+            .iter()
+            .map(|tag| LabelDecodeTag {
+                column_id: tag.column_id,
+                name: tag.name.to_string(),
+            })
+            .collect(),
+    };
+    description.canonicalize();
+    Some(description)
 }
 
 fn metric(host: &str) -> MetricName {

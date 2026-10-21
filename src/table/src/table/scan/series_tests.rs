@@ -36,7 +36,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::RawLabelMode;
+use datatypes::series::frame::{LabelDecodeSpec, RawLabelMode};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
 use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
@@ -83,6 +83,8 @@ fn raw_error(reason: &str) -> BoxedError {
 struct RawStream {
     schema: Arc<SeriesSchema>,
     source: RawLabelSource,
+    /// The description this fixture declares, derived once from `source`, as a producer does.
+    label_decode_spec: Option<LabelDecodeSpec>,
     chunks: Vec<RawSeriesChunk>,
     state: Arc<Mutex<State>>,
     fail_first_poll: bool,
@@ -126,6 +128,9 @@ impl RawSeriesStream for RawStream {
     }
     fn label_source(&self) -> &RawLabelSource {
         &self.source
+    }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.label_decode_spec.as_ref()
     }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
@@ -212,16 +217,18 @@ impl RegionScanner for TestScanner {
             return Ok(None);
         }
         let ordering = state.stream_ordering.unwrap_or(SeriesOrdering::KeyThenTime);
+        let source = state
+            .stream_source
+            .clone()
+            .unwrap_or_else(|| source.clone());
         Ok(Some(Box::pin(RawStream {
             ordering,
             schema: state
                 .stream_schema
                 .clone()
                 .unwrap_or_else(|| self.raw_schema.clone().unwrap()),
-            source: state
-                .stream_source
-                .clone()
-                .unwrap_or_else(|| source.clone()),
+            label_decode_spec: common_query::series_frame::label_decode_spec(&source),
+            source,
             chunks: self.chunks.clone(),
             state: self.state.clone(),
             fail_first_poll: state.fail_first_poll,

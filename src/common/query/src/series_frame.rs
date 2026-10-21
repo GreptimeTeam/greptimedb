@@ -186,23 +186,26 @@ pub fn raw_series_frame_ordering(
 /// again. Producers must keep each series' chunks contiguous. Validation checks adjacent chunk
 /// conditions but does not certify nonadjacent recurrence for `Contiguous` ordering.
 ///
-/// A stream that already declares a label decode description is packed under that description, so
-/// a frame unpacked without a scan-bound [`RawLabelSource`] round trips unchanged instead of being
-/// re-declared from a binding it does not have. A producer-side stream declares none, and the
-/// description is then derived from its binding as before.
+/// The stream's own declaration is the only decode input: a frame unpacked without a scan-bound
+/// [`RawLabelSource`] round trips unchanged instead of being re-declared from a binding it does not
+/// have, and nothing is derived from a binding here. A key-encoded stream that declares no
+/// description is therefore rejected rather than packed as an explicit-label frame, which would
+/// describe chunks that carry no labels as if they carried all of them.
 pub fn pack_raw_series(
     source: SendableRawSeriesStream,
 ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
     let ordering = source.ordering();
     ensure_supported_ordering(ordering)?;
     let schema = source.schema().clone();
-    let label_source = source.label_source().clone();
-    // A frame-decoded stream already states its layout; a producer-side stream states its identity
-    // instead, and the description is derived from it exactly as before.
-    let decode = source
-        .label_decode_spec()
-        .cloned()
-        .or_else(|| label_decode_spec(&label_source));
+    let decode = source.label_decode_spec().cloned();
+    // A stream whose chunks carry key-encoded labels must declare its layout. Packing one as an
+    // explicit-label frame would describe chunks that carry no labels as if they carried all of
+    // them, so the missing declaration is an error rather than a mode.
+    if decode.is_none() && matches!(source.label_source(), RawLabelSource::PrimaryKey { .. }) {
+        return Err(invalid(
+            "a key-encoded raw series stream must declare its label decode description",
+        ));
+    }
     let mode = declared_label_mode(&decode);
     // The declared frame schema carries the producer ordering and the label decode description;
     // the shared builder's schema intentionally omits both, so every ready batch is declared under

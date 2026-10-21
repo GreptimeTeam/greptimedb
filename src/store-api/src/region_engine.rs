@@ -521,8 +521,8 @@ pub const NO_BOUND_LABEL_SOURCE: RawLabelSource = RawLabelSource::Explicit;
 /// per-input-series finalization across all related inputs, not aggregate-group finality.
 /// Label interpretation is carried by the stream: [`RawSeriesStream::label_source`] states the
 /// scan-bound identity a producer read under, and [`RawSeriesStream::label_decode_spec`] states the
-/// label layout a decoded frame declares. Stream finality applies to all related input series, not
-/// aggregate groups or vector-match state.
+/// label layout the stream's own chunks declare. Stream finality applies to all related input
+/// series, not aggregate groups or vector-match state.
 pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send {
     /// Returns the schema shared by all chunks; raw schemas have no evaluation grid.
     fn schema(&self) -> &Arc<SeriesSchema>;
@@ -539,15 +539,14 @@ pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + S
     fn label_source(&self) -> &RawLabelSource;
     /// Returns the label decode description this stream declares for key-encoded labels.
     ///
-    /// A key-encoded stream that arrived as a raw frame describes its own label layout, so a
-    /// consumer holding only that description can decode labels without a scan-bound
-    /// [`RawLabelSource`]. When the receiver has no identity it reports
-    /// [`NO_BOUND_LABEL_SOURCE`], and this description alone states that the chunks are undecoded
-    /// key chunks: the description, not the binding, describes the encoding. A stream that carries
-    /// complete labels instead answers `None`, and so does a producer-side stream that has not been
-    /// framed yet, because [`Self::label_source`] already describes that one. This is the
-    /// description the stream declares, not an authenticated statement about where the values came
-    /// from.
+    /// Every stream whose chunks carry key-encoded labels declares the description here, whether
+    /// it is a storage producer or a stream reassembled from a raw frame. A consumer holding only
+    /// that description can therefore decode labels without a scan-bound [`RawLabelSource`]: the
+    /// description, not the binding, describes the encoding, and a receiver reporting
+    /// [`NO_BOUND_LABEL_SOURCE`] still states through this description that its chunks are
+    /// undecoded key chunks. A stream that carries complete labels instead answers `None`. This is
+    /// the description the stream declares, not an authenticated statement about where the values
+    /// came from.
     fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
         None
     }

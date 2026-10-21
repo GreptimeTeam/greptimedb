@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
-use common_query::series_frame::label_decode_spec;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::LabelDecodeSpec;
@@ -92,25 +91,21 @@ fn bound_identity(stream: &dyn RawSeriesStream) -> Option<RawLabelSource> {
 
 /// Returns the label layout a stream declares, with no binding required to state it.
 ///
-/// A stream that arrived as a frame carries the description its producer wrote; a producer-side
-/// stream carries none and states its identity instead, and the description is then derived from it
-/// exactly as [`common_query::series_frame::pack_raw_series`] writes it for that stream. Either way
-/// the answer is what decoding that stream's chunks needs, so a merge can compare inputs that were
-/// framed and inputs that were not in the same terms. `None` means the stream carries complete
-/// labels and declares no key layout at all.
+/// Every key-encoded stream declares its own description — a producer derives it from the binding it
+/// read under and states it before the first poll, and a stream reassembled from a frame carries the
+/// description its producer wrote — so the answer is exactly what decoding that stream's chunks
+/// needs. A merge can therefore compare inputs that were framed and inputs that were not in the same
+/// terms. `None` means the stream carries complete labels and declares no key layout at all.
 fn declared_layout(stream: &dyn RawSeriesStream) -> Option<LabelDecodeSpec> {
-    stream
-        .label_decode_spec()
-        .cloned()
-        .or_else(|| label_decode_spec(stream.label_source()))
+    stream.label_decode_spec().cloned()
 }
 
 /// Returns the one label decode description the merged stream advertises for all inputs.
 ///
-/// The first input's declaration is forwarded unchanged, so a merge of frames advertises exactly
-/// what its inputs advertise and a merge of producer-side streams advertises what `pack_raw_series`
-/// would write for them. The declaration is validated as a decode layout before it is advertised,
-/// so a downstream consumer holding only the merged frame schema can decode it.
+/// The first input's declaration is forwarded unchanged, so a merge advertises exactly what its
+/// inputs advertise, whether they are frame-decoded or straight from a producer. The declaration is
+/// validated as a decode layout before it is advertised, so a downstream consumer holding only the
+/// merged frame schema can decode it.
 fn merged_decode_spec(stream: &dyn RawSeriesStream) -> Result<LabelDecodeSpec, BoxedError> {
     let description = declared_layout(stream).ok_or_else(|| {
         invalid("raw merge requires inputs that describe a primary-key label layout")
@@ -123,9 +118,8 @@ fn merged_decode_spec(stream: &dyn RawSeriesStream) -> Result<LabelDecodeSpec, B
 /// Requires every input to declare the advertised label layout.
 ///
 /// The merged stream advertises one description, so an input declaring another would be decoded as
-/// if it had the advertised encoding. Every input is compared through [`declared_layout`], so an
-/// input whose labels are described by its producer and one whose labels are described by its own
-/// binding are held to the same contract, and neither needs a binding to be present.
+/// if it had the advertised encoding. Every input is compared through [`declared_layout`], which
+/// reads the input's own declaration, so no input needs a binding to be present.
 fn validate_decode(
     stream: &dyn RawSeriesStream,
     decode: &LabelDecodeSpec,

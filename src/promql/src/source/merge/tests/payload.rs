@@ -19,12 +19,13 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    ensure_frame_matches_label_source, pack_raw_series, raw_series_frame_ordering,
-    unpack_raw_series,
+    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series,
+    raw_series_frame_ordering, unpack_raw_series,
 };
 use datatypes::arrow::array::{Array, Float64Array, ListArray, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
 };
@@ -170,6 +171,8 @@ fn payload_chunk(
 struct PayloadStream {
     schema: Arc<SeriesSchema>,
     labels: RawLabelSource,
+    /// The description this fixture declares, derived once from `labels`, as a producer does.
+    decode: Option<LabelDecodeSpec>,
     items: VecDeque<Result<RawSeriesChunk, BoxedError>>,
 }
 
@@ -187,6 +190,9 @@ impl RawSeriesStream for PayloadStream {
     fn label_source(&self) -> &RawLabelSource {
         &self.labels
     }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.decode.as_ref()
+    }
     fn ordering(&self) -> SeriesOrdering {
         SeriesOrdering::KeyThenTime
     }
@@ -195,6 +201,7 @@ impl RawSeriesStream for PayloadStream {
 fn payload_stream(labels: RawLabelSource, chunks: Vec<RawSeriesChunk>) -> SendableRawSeriesStream {
     Box::pin(PayloadStream {
         schema: payload_schema(),
+        decode: label_decode_spec(&labels),
         labels,
         items: chunks.into_iter().map(Ok).collect(),
     })
