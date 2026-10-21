@@ -90,5 +90,6 @@ common-event-recorder = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
 tracing = "0.1"
 tracing-subscriber.workspace = true

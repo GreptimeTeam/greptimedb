@@ -829,14 +829,18 @@ mod tests {
         use common_meta::rpc::store::PutRequest;
         use common_meta::sequence::SequenceBuilder;
         use common_time::util::current_time_millis;
+        use tokio::sync::Notify;
         use tokio::sync::mpsc;
 
         use super::{MockHeartbeatRequestStream, MockLeaderStepDown};
         use crate::handler::node_epoch::tests::{
-            NODE_ID, fence, handshake, heartbeat, new_group, startup_handshake,
+            NODE_ID, fence, handshake, heartbeat, new_group, new_group_builder, startup_handshake,
         };
         use crate::handler::test_utils::TestEnv;
-        use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher, PusherId};
+        use crate::handler::{
+            HandleControl, HeartbeatAccumulator, HeartbeatHandler, HeartbeatHandlerGroup,
+            HeartbeatMailbox, Pusher, PusherId,
+        };
         use crate::metasrv::Context;
         use crate::service::heartbeat::{HeartbeatResponseResult, HeartbeatSession};
         use crate::service::mailbox::Channel;
@@ -992,6 +996,86 @@ mod tests {
                 before - 1,
                 current_time_millis()
             ));
+        }
+
+        /// Holds the requests of one node epoch in the handler chain until released.
+        struct HoldEpoch {
+            node_epoch: u64,
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl HeartbeatHandler for HoldEpoch {
+            fn is_acceptable(&self, role: Role) -> bool {
+                role == Role::Datanode
+            }
+
+            async fn handle(
+                &self,
+                req: &HeartbeatRequest,
+                _: &mut Context,
+                _: &mut HeartbeatAccumulator,
+            ) -> crate::error::Result<HandleControl> {
+                if req.node_epoch == self.node_epoch {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(HandleControl::Continue)
+            }
+        }
+
+        #[tokio::test]
+        async fn test_request_accepted_before_startup_fence_cannot_register_pusher() {
+            let (e1, e2) = epochs();
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let mut builder = new_group_builder().add_default_handlers();
+            builder
+                .add_handler_after(
+                    "ResponseHeaderHandler",
+                    HoldEpoch {
+                        node_epoch: e1,
+                        entered: entered.clone(),
+                        release: release.clone(),
+                    },
+                )
+                .unwrap();
+            let group = Arc::new(builder.build().unwrap());
+            let ctx = TestEnv::new().ctx();
+            let Stream {
+                mut session,
+                tx: a1_tx,
+                rx: mut a1_rx,
+            } = Stream::open(&group, &ctx, handshake(0)).await;
+
+            // A1's first heartbeat passes the check, then waits in the handler chain while
+            // A2's startup handshake fences A1 off.
+            let a1 = tokio::spawn(async move {
+                session.handle_request(heartbeat(e1, "a1"), false).await;
+                session
+            });
+            entered.notified().await;
+            let _a2 = Stream::open(&group, &ctx, startup_handshake(e2)).await;
+            release.notify_one();
+            let _a1_session = a1.await.unwrap();
+            let res = a1_rx.recv().await.unwrap().unwrap();
+            assert_eq!(fence(&res), Some("accepted"));
+
+            assert_eq!(
+                group
+                    .pusher_epoch_of(&PusherId::new(Role::Datanode, NODE_ID), &a1_tx)
+                    .await,
+                None
+            );
+            let seq = SequenceBuilder::new("test_seq", Arc::new(MemoryKvBackend::new())).build();
+            let mailbox = HeartbeatMailbox::create(group.pushers(), seq);
+            assert!(
+                mailbox
+                    .send_oneway(&Channel::Datanode(NODE_ID), MailboxMessage::default())
+                    .await
+                    .is_err()
+            );
         }
 
         #[tokio::test]

@@ -45,7 +45,6 @@ const NODE_EPOCH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 /// a clock that jumped further ahead would fence every later process with the node id.
 const MAX_NODE_EPOCH_AHEAD: Duration = Duration::from_secs(5 * 60);
 
-/// The outcome of [check_node_epoch].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NodeEpochCheck {
     /// Not a datanode request, or a datanode request without an epoch: the handshake of a
@@ -68,11 +67,9 @@ pub(crate) fn is_startup_handshake(req: &HeartbeatRequest, is_handshake: bool) -
 pub(crate) async fn check_node_epoch(
     req: &HeartbeatRequest,
     role: Role,
+    node_id: u64,
     ctx: &Context,
 ) -> NodeEpochCheck {
-    let Some(header) = req.header.as_ref() else {
-        return NodeEpochCheck::Unchecked;
-    };
     if role != Role::Datanode {
         return NodeEpochCheck::Unchecked;
     }
@@ -91,7 +88,6 @@ pub(crate) async fn check_node_epoch(
         return NodeEpochCheck::NotLeader;
     }
 
-    let node_id = header.member_id;
     let node_epoch = req.node_epoch;
     let result = {
         let _timer = METRIC_META_NODE_EPOCH_CHECK_ELAPSED.start_timer();
@@ -245,6 +241,7 @@ pub(crate) mod tests {
         reads: AtomicUsize,
         read_delay: std::sync::Mutex<Option<Duration>>,
         fail_reads: AtomicBool,
+        cas_entered: Notify,
         cas_gate: std::sync::Mutex<Option<Arc<Notify>>>,
     }
 
@@ -326,6 +323,7 @@ pub(crate) mod tests {
             &self,
             req: CompareAndPutRequest,
         ) -> common_meta::error::Result<CompareAndPutResponse> {
+            self.cas_entered.notify_one();
             let gate = self.cas_gate.lock().unwrap().clone();
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -388,7 +386,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn new_group_builder() -> HeartbeatHandlerGroupBuilder {
+    pub(crate) fn new_group_builder() -> HeartbeatHandlerGroupBuilder {
         let lease_handler = RegionLeaseHandler::new(
             10,
             Arc::new(TableMetadataManager::new(Arc::new(MemoryKvBackend::new()))),
@@ -655,7 +653,7 @@ pub(crate) mod tests {
             let ctx = ctx.clone().with_handshake(true);
             async move { group.handle(startup_handshake(e2), ctx).await.unwrap() }
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        kv_backend.cas_entered.notified().await;
         assert!(!a2.is_finished());
 
         // Until the write commits, A1 is granted as before. Such a grant is anchored before
@@ -745,7 +743,7 @@ pub(crate) mod tests {
         assert!(receiver.await.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_slow_kv_reads() {
         let kv_backend = Arc::new(HookedKvBackend::default());
         let group = new_group();
@@ -760,7 +758,7 @@ pub(crate) mod tests {
         assert_eq!(fence(&res), Some("accepted"));
         assert!(res.region_lease.is_some());
 
-        *kv_backend.read_delay.lock().unwrap() = Some(Duration::from_secs(3));
+        *kv_backend.read_delay.lock().unwrap() = Some(Duration::from_secs(3600));
         let res = group
             .handle(heartbeat(epoch, "a"), ctx.clone())
             .await

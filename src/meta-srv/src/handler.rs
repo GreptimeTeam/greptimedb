@@ -228,7 +228,6 @@ impl Pusher {
         }
     }
 
-    /// Sets the `node_epoch` of the datanode process that registers the pusher.
     pub(crate) fn with_node_epoch(mut self, node_epoch: u64) -> Self {
         self.node_epoch = node_epoch;
         self
@@ -284,7 +283,16 @@ impl PusherHandle {
 
 /// The group of heartbeat pushers.
 #[derive(Clone, Default)]
-pub struct Pushers(Arc<RwLock<BTreeMap<PusherId, Pusher>>>);
+pub struct Pushers(Arc<RwLock<PusherSlots>>);
+
+#[derive(Default)]
+struct PusherSlots {
+    pushers: BTreeMap<PusherId, Pusher>,
+    /// The highest node epoch registered or fenced off for each datanode. A pusher with a
+    /// lower epoch is refused even when the slot is empty, so an older process whose request
+    /// was accepted before a newer one fenced it cannot register afterwards.
+    node_epochs: BTreeMap<PusherId, u64>,
+}
 
 impl Pushers {
     async fn push(
@@ -295,12 +303,14 @@ impl Pushers {
         // Releases the guard before the send below, which parks while the target's
         // channel is full. `PusherNotFound` is still reported from inside the guard.
         let handle = {
-            let pushers = self.0.read().await;
-            let pusher = pushers
-                .get(&pusher_id)
-                .with_context(|| error::PusherNotFoundSnafu {
-                    pusher_id: pusher_id.to_string(),
-                })?;
+            let slots = self.0.read().await;
+            let pusher =
+                slots
+                    .pushers
+                    .get(&pusher_id)
+                    .with_context(|| error::PusherNotFoundSnafu {
+                        pusher_id: pusher_id.to_string(),
+                    })?;
             PusherHandle::from_pusher(pusher)
         };
 
@@ -314,8 +324,9 @@ impl Pushers {
         // Collects owned handles, releasing the guard before the sends below. Collecting
         // `&Pusher` would hold it for the whole `join_all`.
         let targets = {
-            let pushers = self.0.read().await;
-            pushers
+            let slots = self.0.read().await;
+            slots
+                .pushers
                 .range(PusherId::role_range(role))
                 .map(|(_, pusher)| PusherHandle::from_pusher(pusher))
                 .collect::<Vec<_>>()
@@ -338,17 +349,20 @@ impl Pushers {
         Ok(())
     }
 
-    /// Inserts the pusher unless the slot holds one registered with a higher node epoch, so
-    /// an older datanode process cannot take over a newer one's pusher. Returns whether the
-    /// pusher was inserted.
+    /// Inserts the pusher unless a higher node epoch has been registered or fenced off for
+    /// the slot, so an older datanode process cannot take over a newer one's pusher. Returns
+    /// whether the pusher was inserted.
     pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
-        let mut pushers = self.0.write().await;
-        if let Some(existing) = pushers.get(&pusher_id)
-            && existing.node_epoch > pusher.node_epoch
-        {
-            return false;
+        let mut slots = self.0.write().await;
+        // Only datanode pushers carry an epoch.
+        if pusher.node_epoch > 0 {
+            let highest = slots.node_epochs.entry(pusher_id).or_default();
+            if pusher.node_epoch < *highest {
+                return false;
+            }
+            *highest = pusher.node_epoch;
         }
-        pushers.insert(pusher_id, pusher);
+        slots.pushers.insert(pusher_id, pusher);
         true
     }
 
@@ -359,25 +373,30 @@ impl Pushers {
         pusher_id: PusherId,
         sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     ) -> Option<Pusher> {
-        let mut pushers = self.0.write().await;
-        if pushers
+        let mut slots = self.0.write().await;
+        if slots
+            .pushers
             .get(&pusher_id)
             .is_some_and(|pusher| pusher.sender.same_channel(sender))
         {
-            pushers.remove(&pusher_id)
+            slots.pushers.remove(&pusher_id)
         } else {
             None
         }
     }
 
-    /// Removes the pusher if it was registered with a node epoch lower than `node_epoch`.
+    /// Fences off node epochs lower than `node_epoch` for the slot, and removes its pusher
+    /// if it was registered with one.
     async fn remove_older(&self, pusher_id: PusherId, node_epoch: u64) -> Option<Pusher> {
-        let mut pushers = self.0.write().await;
-        if pushers
+        let mut slots = self.0.write().await;
+        let highest = slots.node_epochs.entry(pusher_id).or_default();
+        *highest = (*highest).max(node_epoch);
+        if slots
+            .pushers
             .get(&pusher_id)
             .is_some_and(|pusher| pusher.node_epoch < node_epoch)
         {
-            pushers.remove(&pusher_id)
+            slots.pushers.remove(&pusher_id)
         } else {
             None
         }
@@ -456,8 +475,8 @@ impl HeartbeatHandlerGroup {
     #[cfg(test)]
     /// Returns whether the group contains the heartbeat response [`Pusher`] with the given key.
     pub async fn contains_pusher(&self, pusher_id: &PusherId) -> bool {
-        let pushers = self.pushers.0.read().await;
-        pushers.contains_key(pusher_id)
+        let slots = self.pushers.0.read().await;
+        slots.pushers.contains_key(pusher_id)
     }
 
     #[cfg(test)]
@@ -467,8 +486,9 @@ impl HeartbeatHandlerGroup {
         pusher_id: &PusherId,
         sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     ) -> Option<u64> {
-        let pushers = self.pushers.0.read().await;
-        pushers
+        let slots = self.pushers.0.read().await;
+        slots
+            .pushers
             .get(pusher_id)
             .filter(|pusher| pusher.sender.same_channel(sender))
             .map(|pusher| pusher.node_epoch)
@@ -495,17 +515,17 @@ impl HeartbeatHandlerGroup {
         mut ctx: Context,
     ) -> Result<(HeartbeatResponse, NodeEpochCheck)> {
         let mut acc = HeartbeatAccumulator::default();
-        let role = req
+        let (role, member_id) = req
             .header
             .as_ref()
-            .and_then(|h| Role::try_from(h.role).ok())
+            .and_then(|h| Role::try_from(h.role).ok().map(|role| (role, h.member_id)))
             .context(error::InvalidArgumentsSnafu {
                 err_msg: format!("invalid role: {:?}", req.header),
             })?;
 
         let is_handshake = ctx.is_handshake;
 
-        let epoch_check = check_node_epoch(&req, role, &ctx).await;
+        let epoch_check = check_node_epoch(&req, role, member_id, &ctx).await;
         match epoch_check {
             NodeEpochCheck::NotLeader => {
                 acc.header = Some(ResponseHeader {
