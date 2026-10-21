@@ -140,7 +140,7 @@ datafusion-functions-aggregate-common = "=55.1.0"
 datafusion-functions-window-common = "=55.1.0"
 datafusion-optimizer = "=55.1.0"
 datafusion-orc = "0.10.0"
-datafusion-pg-catalog = "0.18.3"
+datafusion-pg-catalog = "0.19.0"
 datafusion-physical-expr = "=55.1.0"
 datafusion-physical-plan = "=55.1.0"
 datafusion-proto = "=55.1.0"
@@ -364,7 +364,6 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "f743c3a5fe8c1f57363eac5866c356b7d91f9b39"
 
 [patch.crates-io]
-pgwire = { git = "https://github.com/sunng87/pgwire", branch = "master" }
 substrait = { git = "https://github.com/GreptimeTeam/substrait-rs.git", rev = "91ec978b0649417ad3da8390e7a515baec723b1b" }
 datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
@@ -381,8 +380,8 @@ datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.g
 datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
-datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
-arrow-pg = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
+datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "3ae0a6cb30b1c5131687f4637247ff4f84ac11e4" }
+arrow-pg = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "3ae0a6cb30b1c5131687f4637247ff4f84ac11e4" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
 
 # Temporary: use the GreptimeTeam fork of tikv-jemalloc-sys embedding

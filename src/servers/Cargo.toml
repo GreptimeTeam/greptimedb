@@ -24,7 +24,7 @@ api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
-arrow-pg = "0.15"
+arrow-pg = "0.16"
 arrow-schema.workspace = true
 async-trait.workspace = true
 auth.workspace = true
@@ -98,7 +98,7 @@ otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
 pg_interval = "0.6"
-pgwire = { version = "0.41", default-features = false, features = [
+pgwire = { version = "0.42", default-features = false, features = [
     "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }
