@@ -68,9 +68,9 @@ use crate::sst::primary_key::PrimaryKeyRangeMapper;
 /// bytes per SST it removes.
 const MAX_REWRITE_FILES_PER_REDUCED_FILE: u64 = 4;
 
-/// Maximum number of candidate files visited while building conflict structures
-/// for a pick. Above this, the picker falls back to a bounded file reduction
-/// instead of materializing an unbounded conflict graph.
+/// Maximum number of index nodes visited while building conflict structures for
+/// a pick. Above this, the picker falls back to a bounded file reduction instead
+/// of materializing an unbounded conflict graph.
 const CONFLICT_GRAPH_BUDGET: usize = 1 << 20;
 
 /// Output size limits and input limits shared by both picks.
@@ -603,7 +603,23 @@ impl<'a> ExtentIndex<'a> {
     /// Visits the files whose inclusive key range meets `area`'s and whose time
     /// range overlaps it, a superset of the files that conflict with or intrude
     /// on `area`. Takes O(log N) per visited file.
-    fn for_each_near(&self, area: &Extent, mut visit: impl FnMut(usize)) {
+    fn for_each_near(&self, area: &Extent, visit: impl FnMut(usize)) {
+        let mut budget = usize::MAX;
+        let _ = self.for_each_near_with_budget(area, &mut budget, visit);
+    }
+
+    /// [`for_each_near`] with a budget on visited tree nodes.
+    ///
+    /// Every node reached by the traversal consumes one unit, including nodes
+    /// pruned before any file callback. Returns `false` as soon as the budget is
+    /// exhausted, so a caller can stop a traversal whose pruning is poor even
+    /// when it finds few files.
+    fn for_each_near_with_budget(
+        &self,
+        area: &Extent,
+        budget: &mut usize,
+        mut visit: impl FnMut(usize),
+    ) -> bool {
         let leaves_end = match &area.primary_key {
             Some((_, max)) => self.by_lower_key.partition_point(|&i| {
                 self.extents[i]
@@ -613,7 +629,7 @@ impl<'a> ExtentIndex<'a> {
             }),
             None => self.by_lower_key.len(),
         };
-        self.visit_subtree(1, 0..self.leaf_base, leaves_end, area, &mut visit);
+        self.visit_subtree(1, 0..self.leaf_base, leaves_end, area, budget, &mut visit)
     }
 
     fn visit_subtree(
@@ -622,13 +638,18 @@ impl<'a> ExtentIndex<'a> {
         leaves: Range<usize>,
         leaves_end: usize,
         area: &Extent,
+        budget: &mut usize,
         visit: &mut impl FnMut(usize),
-    ) {
+    ) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
         if leaves.start >= leaves_end {
-            return;
+            return true;
         }
         let Some(bounds) = self.bounds[node] else {
-            return;
+            return true;
         };
         if bounds.min_start >= area.end
             || bounds.max_end <= area.start
@@ -637,18 +658,27 @@ impl<'a> ExtentIndex<'a> {
                 .as_ref()
                 .is_some_and(|(min, _)| bounds.max_upper_key < UpperKey::Key(min))
         {
-            return;
+            return true;
         }
         if leaves.len() == 1 {
             let i = self.by_lower_key[leaves.start];
             if self.extents[i].time_overlaps(area) {
                 visit(i);
             }
-            return;
+            return true;
         }
         let mid = leaves.start + leaves.len() / 2;
-        self.visit_subtree(2 * node, leaves.start..mid, leaves_end, area, visit);
-        self.visit_subtree(2 * node + 1, mid..leaves.end, leaves_end, area, visit);
+        if !self.visit_subtree(2 * node, leaves.start..mid, leaves_end, area, budget, visit) {
+            return false;
+        }
+        self.visit_subtree(
+            2 * node + 1,
+            mid..leaves.end,
+            leaves_end,
+            area,
+            budget,
+            visit,
+        )
     }
 }
 
@@ -717,8 +747,8 @@ impl Unit {
 /// finds near it: O((N + M) log N) for M pairs of files whose key and time
 /// ranges meet.
 ///
-/// Returns `None` once more than `work_budget` candidate files are visited, so
-/// a dense window can fall back before building a quadratic graph.
+/// Returns `None` once the index traversal has visited more than `work_budget`
+/// nodes, so a dense window can fall back before building a quadratic graph.
 fn conflict_units(
     files: &[FileHandle],
     extents: &[Extent],
@@ -727,20 +757,16 @@ fn conflict_units(
 ) -> Option<Vec<Unit>> {
     let mut sets = DisjointSet::new(extents.len());
     let mut conflicts = vec![0; extents.len()];
-    let mut visits = 0;
+    let mut budget = work_budget;
     for i in 0..extents.len() {
-        index.for_each_near(&extents[i], |j| {
-            visits += 1;
-            if visits > work_budget {
-                return;
-            }
+        let completed = index.for_each_near_with_budget(&extents[i], &mut budget, |j| {
             // Counts each pair once, from its smaller index.
             if j > i && extents[i].conflicts(&extents[j]) {
                 sets.union(i, j);
                 conflicts[i] += 1;
             }
         });
-        if visits > work_budget {
+        if !completed {
             return None;
         }
     }
@@ -864,8 +890,8 @@ struct IntervalStats<'a> {
 /// Positions of the split units each unit conflicts with, sorted. Files of
 /// different units never conflict, so only split files have any.
 ///
-/// Returns `None` once more than `work_budget` candidate files are visited, so
-/// a dense window cannot materialize an unbounded adjacency.
+/// Returns `None` once the index traversal has visited more than `work_budget`
+/// nodes, so a dense window cannot materialize an unbounded adjacency.
 fn split_conflicts(
     units: &[Unit],
     extents: &[Extent],
@@ -878,7 +904,7 @@ fn split_conflicts(
             position[unit.files[0]] = Some(p);
         }
     }
-    let mut visits = 0;
+    let mut budget = work_budget;
     let mut result = Vec::with_capacity(units.len());
     for unit in units {
         if !unit.split {
@@ -887,11 +913,7 @@ fn split_conflicts(
         }
         let i = unit.files[0];
         let mut neighbors = Vec::new();
-        index.for_each_near(&extents[i], |j| {
-            visits += 1;
-            if visits > work_budget {
-                return;
-            }
+        let completed = index.for_each_near_with_budget(&extents[i], &mut budget, |j| {
             if let Some(p) = position[j]
                 && j != i
                 && extents[i].conflicts(&extents[j])
@@ -899,7 +921,7 @@ fn split_conflicts(
                 neighbors.push(p);
             }
         });
-        if visits > work_budget {
+        if !completed {
             return None;
         }
         neighbors.sort_unstable();
@@ -1253,6 +1275,27 @@ mod tests {
                 assert!(other.intrudes(&area), "{other:?} conflicts inside {area:?}");
             }
         }
+    }
+
+    #[test]
+    fn test_extent_index_budget_counts_nodes() {
+        // The root's time bounds straddle the query, but neither leaf overlaps
+        // it. A callback-only budget would never fire; the node budget must.
+        let files = vec![file(0, 10, b"a", b"z", 1), file(90, 100, b"a", b"z", 1)];
+        let extents = extents_of(&files, &primary_key_mapper_for_test());
+        let index = ExtentIndex::new(&extents);
+        let query = extent(50, 51, b"a", b"z");
+        let mut matched = 0;
+
+        let mut budget = 2;
+        assert!(!index.for_each_near_with_budget(&query, &mut budget, |_| matched += 1));
+        assert_eq!(0, budget);
+        assert_eq!(0, matched);
+
+        let mut budget = 3;
+        assert!(index.for_each_near_with_budget(&query, &mut budget, |_| matched += 1));
+        assert_eq!(0, budget);
+        assert_eq!(0, matched);
     }
 
     #[test]
