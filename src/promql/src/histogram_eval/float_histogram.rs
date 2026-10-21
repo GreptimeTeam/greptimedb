@@ -80,18 +80,10 @@ impl FloatHistogram {
         })
     }
 
-    /// The bytes this histogram's own heap buffers hold, by capacity.
+    /// Estimates the heap held by the bucket lists, custom bounds and preserved span layout.
     ///
-    /// Everything a histogram keeps besides its scalars is on the heap: the bucket lists of both
-    /// sides, the custom bounds, and the span layout of a histogram read from a view, with the
-    /// `[Vec; 2]` array that holds the two layout vectors. No scalar of the struct shows any of it:
-    /// a histogram of 4096 positive buckets is 64 KiB of buckets, and a window that retains one
-    /// histogram per grid point retains that much per point.
-    ///
-    /// The layout array is stored inline in the histogram, so a ledger charging
-    /// `size_of::<FloatHistogram>()` per slot already pays for those 48 bytes. Counting the whole
-    /// footprint as one figure here costs a header of over-estimate on a reservation, against a
-    /// payload of tens of kilobytes that would otherwise be missing from it entirely.
+    /// A histogram can own tens of kilobytes of buckets that its struct size does not include.
+    /// Capacity slack and small header overestimates are acceptable for window reservations.
     pub(crate) fn heap_bytes(&self) -> usize {
         fn buckets(side: &Buckets) -> usize {
             side.capacity() * std::mem::size_of::<(i32, f64)>()

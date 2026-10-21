@@ -831,13 +831,15 @@ fn histogram_chunk(schema: &SeriesSchema, buckets: i32, ts: i64) -> RawSeriesChu
     .unwrap()
 }
 
-/// A window has to reserve what a native histogram it retains owns, not only the slot it sits in.
+/// A window retaining a native histogram is charged for the payload it owns, not only the slot.
 ///
 /// The histogram sample below stays ahead of the second grid point's window, so the evaluator keeps
 /// it, and the two runs differ in nothing but the number of buckets on the positive side: 4 and
 /// 4096. Those buckets are `(index, count)` pairs on the heap, which no `size_of` of the struct
-/// shows -- 64 KiB for the wider one -- so the bytes the evaluator reports have to grow by at least
-/// that payload between the two. A figure counting slots alone would report one number for both.
+/// shows -- about 64 KiB for the wider one. The property is that this payload dominates the
+/// estimate, not that it is counted to the byte: the wider histogram alone has to be reported as at
+/// least half the physical width of its buckets, and the narrow one has to stay far below that. A
+/// figure counting slots alone would report one number for both.
 #[test]
 fn a_retained_histogram_is_charged_for_its_buckets() {
     let retained = |buckets: i32| -> usize {
@@ -864,12 +866,114 @@ fn a_retained_histogram_is_charged_for_its_buckets() {
         evaluator.retained_bytes()
     };
     let (few, many) = (4, 4096);
-    let payload = usize::try_from(many - few).unwrap() * std::mem::size_of::<(i32, f64)>();
+    let physical = usize::try_from(many).unwrap() * std::mem::size_of::<(i32, f64)>();
     let (narrow, wide) = (retained(few), retained(many));
     assert!(
-        wide >= narrow + payload,
-        "a window retaining one histogram of {many} buckets reports {wide} bytes, not the {narrow} \
-         it reports for {few} buckets plus the {payload} bytes of bucket payload between them",
+        wide >= physical / 2,
+        "a window retaining one histogram of {many} buckets reports {wide} bytes, not at least half \
+         the {physical} bytes its buckets occupy",
+    );
+    assert!(
+        narrow < wide / 2,
+        "a window retaining one histogram of {few} buckets reports {narrow} bytes, not far below \
+         the {wide} bytes it reports for {many} buckets: the bucket payload is not what the \
+         estimate follows",
+    );
+}
+
+/// The payload a retained histogram is charged for is released with the sample.
+///
+/// The histogram below is most of what the evaluator holds, and it stays inside the second grid
+/// point's window: a push that only reaches the first point retains it. The chunk at 30 s is beyond
+/// the window of every later point, so the evaluation that push triggers drops the histogram while
+/// the series is still open. The estimate must come back down by its payload: one that charges at
+/// admission and never releases it would keep reporting the history of every histogram the series
+/// carried. The closing chunk then drains what is left and ends the series, so the estimate falls
+/// back to the field and row buffers' capacity, with no series identity and no histogram payload.
+#[test]
+fn an_evicted_histogram_releases_its_payload() {
+    let schema = raw_schema(1);
+    let buckets = 4096;
+    let payload = usize::try_from(buckets).unwrap() * std::mem::size_of::<(i32, f64)>();
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(0, 10_000, 3),
+        // 20 s of window over 10 s of step: the histogram at 0 is inside the window of the second
+        // point but outside the third's, so the second push evicts it.
+        RangeWindow {
+            range_ms: 20_000,
+            offset_ms: 0,
+            anchor_ms: None,
+        },
+        RangeFunction::CountOverTime,
+    )
+    .unwrap();
+    evaluator
+        .push(&histogram_chunk(&schema, buckets, 0))
+        .unwrap();
+    let retained = evaluator.retained_bytes();
+    assert!(
+        retained >= payload,
+        "a window retaining one histogram of {buckets} buckets reports {retained} bytes, less than \
+         the {payload} bytes of buckets it holds",
+    );
+
+    // The float chunk keeps the series open, so only the window drops the histogram.
+    evaluator
+        .push(&chunk(&[(30_000, vec![Some(1.0)])], 1, 0, false))
+        .unwrap();
+    let evicted = evaluator.retained_bytes();
+    assert!(
+        retained.saturating_sub(evicted) >= payload / 2,
+        "dropping one histogram of {payload} bytes left the estimate at {evicted} bytes, down from \
+         {retained}: the payload it owned is still counted",
+    );
+
+    evaluator
+        .push(&chunk(&[(40_000, vec![Some(2.0)])], 1, 0, true))
+        .unwrap();
+    let closed = evaluator.retained_bytes();
+    assert!(
+        closed < payload / 2,
+        "a closed series still reports {closed} bytes, of which the {payload} bytes of bucket \
+         payload were released with their samples",
+    );
+}
+
+/// A fixed-size window over a long series of histograms reports a fixed size.
+///
+/// Each push adds one histogram and the next point's window drops the one before it, so the
+/// payload charged at admission has to come back at eviction. A counter that only grew would make
+/// the estimate follow the length of the series instead of the window over it.
+#[test]
+fn a_fixed_window_over_histograms_keeps_the_estimate_bounded() {
+    let peak_retained = |chunks: i64| -> usize {
+        let schema = raw_schema(1);
+        let mut evaluator = RangeEvaluator::try_new(
+            &schema,
+            grid(0, 1, 1024),
+            // One millisecond of window over a one millisecond step: the next point evicts the
+            // sample of this one.
+            RangeWindow {
+                range_ms: 1,
+                offset_ms: 0,
+                anchor_ms: None,
+            },
+            RangeFunction::CountOverTime,
+        )
+        .unwrap();
+        let mut peak = 0;
+        for ts in 0..chunks {
+            // Left open: the window, not the close, is what releases the sample.
+            evaluator.push(&histogram_chunk(&schema, 64, ts)).unwrap();
+            peak = peak.max(evaluator.retained_bytes());
+        }
+        peak
+    };
+    assert_eq!(
+        peak_retained(8),
+        peak_retained(64),
+        "a fixed-size window over a series of histograms grew with the length of the series"
     );
 }
 

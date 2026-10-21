@@ -34,11 +34,10 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis}
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
-    ChargedAllocations, Emitted, History, NativeChunk, NativeExecutionState, NativeExecutor,
-    NodeBuffer, NodeRuntime, QueuedCharge, Run, absorb_rebuilds, label_bytes, map_chunk, raw_bytes,
+    Emitted, NativeChunk, NativeExecutionState, NativeExecutor, NodeBuffer, NodeRuntime,
+    absorb_rebuilds, map_chunk, raw_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
-use crate::grid_series::{LabelSet, label_set};
 use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
@@ -345,7 +344,7 @@ fn raw_shared_histogram_chunk(
     .unwrap()
 }
 
-/// A source node's runtime: the queue, its accounting and the reservation the two are held for.
+/// A source node's runtime: the queue and the reservation it is held for.
 fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
     NodeRuntime {
         buffer: NodeBuffer::new(
@@ -354,7 +353,6 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
             pool,
         ),
         queued: VecDeque::new(),
-        queued_charge: QueuedCharge::default(),
         window: None,
         map: None,
         emitted: None,
@@ -1052,6 +1050,54 @@ fn an_error_releases_the_reservation() {
     assert_eq!(pool.reserved(), 0);
 }
 
+/// A chunk the pool cannot admit fails the execution and gives back everything it already held.
+///
+/// The window holds the first chunk's samples, so the second one is refused against a reservation
+/// that is already standing: the failure has to hand that reservation back too, rather than leaving
+/// the pool full for as long as the caller keeps the stopped executor alive.
+#[test]
+fn a_pool_that_cannot_admit_a_chunk_releases_what_it_held() {
+    let tree = NativeTree::try_new(window(input(), grid(0, 60_000, 4))).unwrap();
+    let schema = raw_schema();
+    let set = ExecutionPlanMetricsSet::new();
+    // Room for the first chunk and what the window keeps of it, not for the second one.
+    let pool = bounded_pool(16 << 10);
+    let mut execution = executor(&tree, Arc::clone(&pool), &set);
+
+    execution
+        .push_raw(raw_chunk(&schema, &[0], &[1.0], false))
+        .unwrap();
+    drop(execution.next_chunk().unwrap());
+    let held = pool.reserved();
+    assert!(held > 0, "the open series has to be reserved for");
+
+    // A hundred thousand samples are hundreds of kilobytes whatever the pool already holds.
+    let timestamps: Vec<i64> = (0..100_000).collect();
+    let values = vec![1.0; 100_000];
+    let error = execution
+        .push_raw(raw_chunk(&schema, &timestamps, &values, true))
+        .expect_err("a chunk larger than the pool was admitted");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+
+    // The chunk never entered the queue, and everything the execution held went back to the pool
+    // while the executor is still alive.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    let current = NodePath::root().metric_name(NodeMetric::CURRENT_RESERVED_BYTES);
+    assert_eq!(gauge(&set, &current), 0);
+    let peak = NodePath::root().partitioned_metric_name(NodeMetric::PEAK_RESERVED_BYTES, 0);
+    assert!(gauge(&set, &peak) >= held);
+    // A stopped execution is not resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
 /// A map that drops the metric name cannot hand two series on under one label set.
 ///
 /// `a{job="x"}` and `b{job="x"}` arrive whole, so each says it is the last chunk of its own series,
@@ -1411,6 +1457,71 @@ fn two_open_series_that_share_a_label_set_are_accepted_when_no_position_collides
     );
 }
 
+/// A `NaN` is a value and a missing sample is not, so only the `NaN` occupies its position.
+///
+/// `abs` drops the metric name, so the two series below are one label set to the map, which is where
+/// the two are read against each other. A position holding no sample is a position the series never
+/// claimed, and another series may fill it; a position holding a `NaN` is decided and holds a value,
+/// like any other, so a second value there is the collision no merge resolves.
+#[test]
+fn a_nan_occupies_its_position_where_a_missing_sample_does_not() {
+    let map_grid = grid(0, 60_000, 1);
+    let tree = || {
+        NativeTree::try_new(map(
+            evaluated_input_with_ordering(Arc::clone(&map_grid), SeriesOrdering::Contiguous),
+            vec![MathOp::Abs],
+        ))
+        .unwrap()
+    };
+    let schema = evaluated_schema(Arc::clone(&map_grid));
+
+    // The first series' sample at position 0, the second series' sample there, and whether the two
+    // can share the label set `abs` leaves them.
+    let cases = [
+        (vec![Some(f64::NAN)], vec![Some(1.0)], false),
+        (vec![Some(1.0)], vec![Some(f64::NAN)], false),
+        (vec![Some(f64::NAN)], vec![None], true),
+        (vec![Some(1.0)], vec![None], true),
+        (vec![None], vec![Some(f64::NAN)], true),
+    ];
+    // Both chunks are open, so the label set is still open when the second series arrives: a closed
+    // set refuses every second series, and this test is about what occupies a position.
+    let drain = |execution: &mut NativeExecutor| -> Result<(), DataFusionError> {
+        while execution.next_chunk()?.is_some() {}
+        Ok(())
+    };
+    for (first, second, accepted) in cases {
+        let mut execution = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                first.clone(),
+                false,
+            ))
+            .unwrap();
+        drain(&mut execution).expect("the first open chunk is handed on");
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("b", "x"),
+                0,
+                second.clone(),
+                false,
+            ))
+            .unwrap();
+        let outcome = drain(&mut execution);
+        assert_eq!(
+            outcome.is_ok(),
+            accepted,
+            "{first:?} and {second:?} were {}: {:?}",
+            if accepted { "refused" } else { "handed on" },
+            outcome.err(),
+        );
+    }
+}
+
 /// One series arriving in pieces is not two series: a chunk that continues where its label set
 /// ended is handed on.
 ///
@@ -1466,15 +1577,12 @@ fn a_series_that_continues_where_it_ended_is_not_a_second_series() {
 
 /// A window reserves what it retains, not what it has consumed.
 ///
-/// A long series is fed one sample per chunk to a pool with a fixed budget, pulling and dropping
-/// the result of every chunk and closing only on the last one. The same one-sample-per-chunk input
-/// leaves the evaluator's storage at the same size however many chunks it arrives in, so the
-/// reservation reaches the same figure whether the data is split into 64 chunks or into 1024.
-///
-/// What the reservation has to be is not left to a constant: after every pull it is compared with
-/// what the same window's evaluator says it retains and what the label sets it handed out hold. A
-/// figure that merely did not grow with the chunk count would fail that, as would one that let the
-/// emitted table go.
+/// A long series is fed one sample per chunk to a pool with a fixed budget, pulling and dropping the
+/// result of every chunk and closing only on the last one. The same one-sample-per-chunk input
+/// leaves the evaluator's storage at the same size however many chunks it arrives in, so the peak
+/// reservation is the same whether the data is split into 64 chunks or into 1024, and it stays a
+/// small constant rather than the running total of what arrived. A figure charged per chunk
+/// consumed would grow with the chunk count and exhaust the budget the first chunks fit in.
 #[test]
 fn a_window_reserves_what_it_retains_not_what_it_consumed() {
     // A 1 ms window on a 1 ms grid, so every chunk's sample is out of the window of the next one.
@@ -1507,23 +1615,20 @@ fn a_window_reserves_what_it_retains_not_what_it_consumed() {
                 });
             // The output of every chunk is dropped: a consumer reading the series as it arrives
             // never holds it, and neither may the node.
-            let pulled = execution.next_chunk().unwrap_or_else(|error| {
+            drop(execution.next_chunk().unwrap_or_else(|error| {
                 panic!("chunk {index} of the {count}-chunk series did not fit: {error}")
-            });
-            drop(pulled);
+            }));
             let held = execution.state().reserved_bytes();
-            let (retained, emitted) = execution.state().window_charge(&NodePath::root());
             assert_eq!(
                 held,
-                retained.saturating_add(emitted),
-                "chunk {index} of {count} holds {held} bytes, but the window retains {retained} \
-                 and handed out {emitted}"
+                pool.reserved(),
+                "chunk {index} of {count}: the state and the pool disagree on what is held"
             );
             assert!(
-                held <= (4 << 10),
+                held <= (8 << 10),
                 "chunk {index} of {count} holds {held} bytes of a 1 ms window over one sample"
             );
-            peak = peak.max(held).max(pool.reserved());
+            peak = peak.max(held);
         }
         peak
     };
@@ -1538,11 +1643,9 @@ fn a_window_reserves_what_it_retains_not_what_it_consumed() {
 /// A window's retention is per field, as the evaluator's storage is.
 ///
 /// The same one-sample-per-chunk input goes to a window over one float field, over two and over
-/// three, and the reservation is compared with what each window retains after every pull. Every
-/// field costs its own timestamps, values and row slot, so the figure grows by the same amount per
-/// field; a figure counting one timestamp and one float per row would not. The widths are compared
-/// by their increments rather than as a multiple of one: the identity of the open series is part of
-/// the reservation and is counted once however many fields the series carries.
+/// three. Every field costs its own timestamps, values and row slot, so the reservation a window
+/// reaches grows with the width of the series; a figure counting one timestamp and one float per
+/// row, or one field per series, would not.
 #[test]
 fn a_window_retains_the_samples_of_every_field() {
     // The most the window ever retained, over the same input and the same short window.
@@ -1561,31 +1664,20 @@ fn a_window_retains_the_samples_of_every_field() {
                 ))
                 .unwrap();
             drop(execution.next_chunk().unwrap());
-            let (retained, emitted) = execution.state().window_charge(&NodePath::root());
-            let held = execution.state().reserved_bytes();
-            assert_eq!(
-                held,
-                retained.saturating_add(emitted),
-                "{width} field(s), chunk {index} of {count}: {held} bytes reserved, but the \
-                 window retains {retained} and handed out {emitted}"
-            );
-            peak = peak.max(retained);
+            peak = peak.max(execution.state().reserved_bytes());
         }
         peak
     };
     let (one, two, three) = (peak(1), peak(2), peak(3));
     assert!(
         two > one,
-        "a window over two fields retained {two} bytes, no more than the {one} bytes a window over \
-         one field retains"
+        "a window over two fields reserved {two} bytes, no more than the {one} bytes a window over \
+         one field reserves"
     );
-    assert_eq!(
-        two - one,
-        three - two,
-        "a third field costs {} bytes where a second cost {}: the retention is not one field's \
-         storage per field",
-        three - two,
-        two - one
+    assert!(
+        three > two,
+        "a window over three fields reserved {three} bytes, no more than the {two} bytes a window \
+         over two fields reserves"
     );
 }
 
@@ -1606,7 +1698,8 @@ fn a_chunk_with_no_output_keeps_charging_the_emitted_table() {
     ))
     .unwrap();
     let schema = raw_schema();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
 
     execution
         .push_raw(raw_chunk(&schema, &[0, 60_000], &[1.0, 2.0], false))
@@ -1617,16 +1710,12 @@ fn a_chunk_with_no_output_keeps_charging_the_emitted_table() {
         .expect("the first chunk decided both points");
     assert_eq!(sample_values(&first), vec![Some(1.0), Some(2.0)]);
     drop(first);
-    let (retained, emitted) = execution.state().window_charge(&NodePath::root());
+    let after_output = execution.state().reserved_bytes();
     assert!(
-        emitted > 0,
+        after_output > 0,
         "the window handed out a position, which it has to hold"
     );
-    assert_eq!(
-        execution.state().reserved_bytes(),
-        retained.saturating_add(emitted),
-        "the reservation does not cover the {emitted} bytes the window handed out"
-    );
+    assert_eq!(after_output, pool.reserved());
 
     // Both points are decided, so this chunk decides nothing and the window yields no chunk.
     execution
@@ -1636,16 +1725,11 @@ fn a_chunk_with_no_output_keeps_charging_the_emitted_table() {
         execution.next_chunk().unwrap().is_none(),
         "a chunk after every point was decided produced a chunk"
     );
-    let (retained, emitted) = execution.state().window_charge(&NodePath::root());
     assert!(
-        emitted > 0,
-        "the window's emitted table emptied itself between chunks"
+        execution.state().reserved_bytes() > 0,
+        "a chunk with no output released the bytes the emitted table still holds"
     );
-    assert_eq!(
-        execution.state().reserved_bytes(),
-        retained.saturating_add(emitted),
-        "a chunk with no output released the {emitted} bytes the emitted table still holds"
-    );
+    assert_eq!(execution.state().reserved_bytes(), pool.reserved());
 }
 
 /// A window cannot run over an interleaved input, and the runtime says so before reading a chunk.
@@ -1729,52 +1813,6 @@ fn an_interleaved_input_is_refused_without_a_window() {
     let message = error.to_string();
     assert!(message.contains("Interleaved"), "{message}");
     assert!(message.contains("root.input"), "{message}");
-}
-
-/// The charge for the label sets a node has handed out does not depend on how it is read.
-///
-/// The table only grows, so the figure is folded in as each entry changes rather than walked after
-/// every output. Folding it wrong would show up as a running total that drifts from the same figure
-/// recounted in full, so both are compared after every chunk: distinct label sets add entries, and
-/// later chunks of one set grow its run vectors and the table's own capacity.
-#[test]
-fn the_emitted_charge_is_the_same_folded_in_as_walked() {
-    let grid = grid(0, 60_000, 4);
-    let tree =
-        NativeTree::try_new(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs])).unwrap();
-    let schema = evaluated_schema(Arc::clone(&grid));
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
-
-    let chunks = [
-        ("a", "x", 0, vec![Some(-1.0), None, Some(-2.0), None], false),
-        ("a", "x", 0, vec![None, Some(-3.0), None, None], true),
-        ("b", "y", 0, vec![None, None, None, Some(-4.0)], true),
-        (
-            "c",
-            "z",
-            0,
-            vec![Some(-5.0), Some(-6.0), Some(-7.0), Some(-8.0)],
-            true,
-        ),
-    ];
-    for (name, job, start, values, is_last) in chunks {
-        execution
-            .push_evaluated(evaluated_chunk_of(
-                &schema,
-                named_metric(name, job),
-                start,
-                values,
-                is_last,
-            ))
-            .unwrap();
-        while execution.next_chunk().unwrap().is_some() {}
-        let (folded, walked) = execution.state().emitted_charge_pair(&NodePath::root());
-        assert!(folded > 0, "the node handed out nothing to charge for");
-        assert_eq!(
-            folded, walked,
-            "the folded charge of {folded} bytes is not the {walked} bytes the table holds"
-        );
-    }
 }
 
 /// A series that produced values under a label set, followed by one that produced none under the
@@ -2175,14 +2213,12 @@ fn an_input_that_ends_mid_series_is_reported_without_a_window() {
     }
 }
 
-/// A window over native histograms reserves what it retains, payload included, and the label-set
-/// ledger it charges beside that agrees with a full walk of the table.
+/// A window over native histograms reserves what it retains, payload included.
 ///
-/// The chunk accounting walks the samples a chunk holds instead of charging one float per field and
-/// row, so a histogram field -- which holds no float at all -- reaches both figures as the table its
-/// indices point into. Neither may drift from what the node says it holds: the reservation is the
-/// retained bytes plus the emitted ones, and the running total of the emitted table is the same
-/// figure recounted in full.
+/// A chunk is estimated from the samples it holds rather than from one float per field and row, so a
+/// histogram field -- which holds no float at all -- reaches the figure as the table its indices point
+/// into. A window over such a series therefore reserves for the payload it keeps, and a one-sample
+/// histogram chunk is worth more than a one-sample float chunk of the same shape.
 #[test]
 fn a_window_over_histograms_reserves_what_it_retains() {
     let out = grid(0, 10_000, 2);
@@ -2195,383 +2231,120 @@ fn a_window_over_histograms_reserves_what_it_retains() {
     ))
     .unwrap();
     let schema = raw_schema();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
 
     for (timestamp, is_last) in [(0, false), (10_000, true)] {
         execution
             .push_raw(raw_histogram_chunk(&schema, &[timestamp], 2, is_last))
             .unwrap();
         while execution.next_chunk().unwrap().is_some() {}
-        let (retained, emitted) = execution.state().window_charge(&NodePath::root());
-        assert!(
-            emitted > 0,
-            "the window handed nothing out, so the ledger below charges for nothing"
-        );
         assert_eq!(
             execution.state().reserved_bytes(),
-            retained.saturating_add(emitted),
-            "the reservation is not what the window retains ({retained} bytes) plus what it handed \
-             out ({emitted} bytes)",
+            pool.reserved(),
+            "the state and the pool disagree on what the window holds"
         );
-        let (folded, walked) = execution.state().emitted_charge_pair(&NodePath::root());
-        assert_eq!(
-            folded, walked,
-            "the folded charge of {folded} bytes is not the {walked} bytes the table holds",
+        assert!(
+            pool.reserved() > 0,
+            "a window over a histogram series reserves for nothing"
         );
     }
-}
 
-/// One histogram table is charged once, however many chunks of the series reference it.
-///
-/// The chunks of one series can share the immutable table their histogram indices point into, and a
-/// node holding both of them holds one table: the source charges its queue as one accounting pass,
-/// which counts the table the first time it meets it and the address the `Arc` holds is what makes
-/// two clones one table.
-#[test]
-fn a_histogram_table_is_charged_once_per_pass() {
-    let schema = raw_schema();
-    let mut builder = HistogramBatchBuilder::new();
-    let index = push_histogram(&mut builder, 2);
-    let table = builder.finish().unwrap();
-    let chunk = |timestamp: i64, is_last: bool| {
-        let samples =
-            Samples::try_from_histogram(UInt32Array::from(vec![Some(index)]), Arc::clone(&table))
-                .unwrap();
-        RawSeriesChunk::try_new(
-            &schema,
-            Buffer::from_slice_ref(b"series-a"),
-            Some(metric()),
-            RawTimestamps::try_new(ScalarBuffer::from(vec![timestamp])).unwrap(),
-            SeriesFields::one(samples),
-            is_last,
-        )
-        .unwrap()
-    };
-    let (first, second) = (chunk(0, false), chunk(10_000, true));
-
-    let mut charged = ChargedAllocations::default();
-    let queue = raw_bytes(&first, &mut charged).saturating_add(raw_bytes(&second, &mut charged));
-    let alone = raw_bytes(&first, &mut ChargedAllocations::default())
-        .saturating_add(raw_bytes(&second, &mut ChargedAllocations::default()));
+    // The table the indices point into is what the field costs, so the same one-sample chunk is
+    // worth more as a histogram than as a float.
+    let histogram = raw_histogram_chunk(&schema, &[0], 2, true);
+    let float = raw_chunk(&schema, &[0], &[1.0], true);
     assert!(
-        queue < alone,
-        "a queue of two chunks sharing one table is charged {queue} bytes, no less than the \
-         {alone} bytes they are charged apart: the table was counted twice",
-    );
-
-    // What the source reserves is exactly that one pass: it holds its queue and nothing else, and
-    // nothing has been pulled yet.
-    let tree = NativeTree::try_new(window(input(), grid(0, 10_000, 1))).unwrap();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
-    execution.push_raw(first).unwrap();
-    execution.push_raw(second).unwrap();
-    assert_eq!(
-        execution.state().reserved_bytes(),
-        queue,
-        "the queue of two chunks sharing one table was not charged as one pass",
+        raw_bytes(&histogram) > raw_bytes(&float),
+        "a histogram chunk is estimated at {} bytes, no more than the {} bytes of a float chunk of \
+         the same shape",
+        raw_bytes(&histogram),
+        raw_bytes(&float),
     );
 }
 
-/// A queue of two chunks that share one table charges it once, and the running total is what one
-/// pass over the queue counts.
+/// A source reserves the estimate of every queued chunk, and gives each one back as it leaves.
 ///
-/// The figure the node reserves while both chunks are queued is the incremental one: the table is
-/// met by the first chunk that references it and is not charged again by the second. Charging it
-/// per chunk fails the record check, and recounting the queue per enqueue fails the count of
-/// chunks walked in the test below.
+/// The figure is symmetric: what a chunk added when it entered is what comes out when it leaves, so a
+/// queue that empties returns its reservation to the pool exactly. Two chunks of one series may share
+/// one immutable histogram table, and each of them is charged for it: the estimate is per chunk, which
+/// costs a bounded over-count of a shared table rather than a pass over the queue per operation.
 #[test]
-fn a_queued_allocation_is_charged_once() {
+fn a_source_charges_its_queue_and_gives_it_back() {
     let pool = pool();
     let mut source = source_runtime(&pool);
     let schema = raw_schema();
     let mut builder = HistogramBatchBuilder::new();
     let index = push_histogram(&mut builder, 2);
     let table = builder.finish().unwrap();
-    let chunk = |timestamp: i64, is_last: bool| {
-        raw_shared_histogram_chunk(&schema, &table, index, timestamp, is_last)
-    };
-    let (first, second) = (chunk(0, false), chunk(10_000, true));
-
-    // What the two chunks cost charged apart, and what the second one costs on its own: the
-    // difference between the two is what the shared table is worth.
-    let apart = raw_bytes(&first, &mut ChargedAllocations::default())
-        .saturating_add(raw_bytes(&second, &mut ChargedAllocations::default()));
-    let second_alone = raw_bytes(&second, &mut ChargedAllocations::default());
+    let first = raw_shared_histogram_chunk(&schema, &table, index, 0, false);
+    let second = raw_shared_histogram_chunk(&schema, &table, index, 10_000, true);
+    let (first_bytes, second_bytes) = (raw_bytes(&first), raw_bytes(&second));
 
     source.enqueue(NativeChunk::Raw(first)).unwrap();
-    let one = source.queued_charge.bytes;
-    assert_eq!(
-        one,
-        source.queued_bytes_recomputed(),
-        "one queued chunk is not charged what one pass over it counts"
-    );
-    assert_eq!(
-        source.buffer.held, one,
-        "the reservation is not the queue's figure"
-    );
-    assert_eq!(pool.reserved(), one);
+    assert_eq!(source.buffer.reservation.size(), first_bytes);
+    assert_eq!(pool.reserved(), first_bytes);
 
     source.enqueue(NativeChunk::Raw(second)).unwrap();
-    let two = source.queued_charge.bytes;
-    let counted = *source
-        .queued_charge
-        .tables
-        .get(&(Arc::as_ptr(&table) as usize))
-        .expect("the queue did not count the table both chunks index into");
     assert_eq!(
-        counted.chunks, 2,
-        "two queued chunks reference the table, but the queue counts {}",
-        counted.chunks
+        source.buffer.reservation.size(),
+        first_bytes + second_bytes,
+        "the queue is not the sum of the estimates it holds"
     );
-    assert_eq!(
-        two,
-        source.queued_bytes_recomputed(),
-        "the running total is not what one pass over the queue counts"
-    );
-    assert_eq!(
-        two - one,
-        second_alone - counted.bytes,
-        "the chunk that entered charged the shared table a second time"
-    );
-    assert!(
-        two < apart,
-        "a queue of two chunks sharing one table is charged {two} bytes, no less than the {apart} \
-         bytes they are charged apart: the table was counted twice",
-    );
-    assert_eq!(source.buffer.held, two);
-    assert_eq!(pool.reserved(), two);
-}
+    assert_eq!(pool.reserved(), first_bytes + second_bytes);
 
-/// A shared table is given back with the last queued chunk that references it, not the first.
-///
-/// A leak here shows as a reservation that never returns: the first pop takes one reference away
-/// and the table stays charged, the second takes the last one and the table goes with it.
-#[test]
-fn a_queued_allocation_is_given_back_with_its_last_chunk() {
-    let pool = pool();
-    let mut source = source_runtime(&pool);
-    let schema = raw_schema();
-    let mut builder = HistogramBatchBuilder::new();
-    let index = push_histogram(&mut builder, 2);
-    let table = builder.finish().unwrap();
-    let address = Arc::as_ptr(&table) as usize;
-    let chunk = |timestamp: i64, is_last: bool| {
-        raw_shared_histogram_chunk(&schema, &table, index, timestamp, is_last)
-    };
-
-    source.enqueue(NativeChunk::Raw(chunk(0, false))).unwrap();
-    source
-        .enqueue(NativeChunk::Raw(chunk(10_000, true)))
-        .unwrap();
-    assert_eq!(source.queued_charge.tables[&address].chunks, 2);
-
-    let first = source
+    let popped = source
         .pop_source()
         .unwrap()
         .expect("the queue held two chunks");
-    assert!(!first.is_last());
+    assert!(!popped.is_last());
+    // One table, two queued chunks, two shares of its estimate: what leaves is what the chunk that
+    // left was charged, and the other chunk's share stays.
     assert_eq!(
-        source.queued_charge.tables[&address].chunks, 1,
-        "the chunk left in the queue still references the table, so it is still charged"
+        source.buffer.reservation.size(),
+        second_bytes,
+        "the chunk that left did not give its estimate back"
     );
-    assert!(
-        source.queued_charge.bytes > 0,
-        "the queue still holds a chunk, but charges for nothing"
-    );
-    assert_eq!(
-        source.queued_charge.bytes,
-        source.queued_bytes_recomputed(),
-        "the pop did not leave the running total at one pass over the queue"
-    );
-    assert_eq!(source.buffer.held, source.queued_charge.bytes);
+    assert_eq!(pool.reserved(), second_bytes);
 
     source
         .pop_source()
         .unwrap()
         .expect("the queue held two chunks");
-    assert!(
-        !source.queued_charge.tables.contains_key(&address),
-        "the last chunk referencing the table left, but the queue still counts it"
-    );
-    assert!(
-        source.queued_charge.buffers.is_empty(),
-        "a buffer outlived the chunks that referenced it"
-    );
+    assert_eq!(source.buffer.reservation.size(), 0);
     assert_eq!(
-        source.queued_charge.bytes, 0,
-        "the queue is empty, but it is still charged for"
+        pool.reserved(),
+        0,
+        "the queue emptied, but the pool holds its bytes"
     );
-    assert_eq!(
-        source.buffer.held, 0,
-        "the reservation did not come back with the queue"
-    );
-    assert_eq!(pool.reserved(), 0);
     assert!(source.pop_source().unwrap().is_none());
 }
 
-/// Queueing a chunk accounts for that chunk alone, however deep the queue is.
+/// Releasing a node drops its queue and returns the reservation once.
 ///
-/// The figure is the number of chunks the accounting walked, not wall time: `N` enqueues have to
-/// walk `N` chunks and `N` pops another `N`, whatever the queue held. Recounting the queue per
-/// operation -- the defect this refuses -- walks `N * (N + 1) / 2` chunks for the enqueues alone.
+/// A node stopped with chunks still queued holds nothing afterwards: the queue goes, and the bytes it
+/// was reserved for go back to the pool rather than staying held for as long as the caller keeps the
+/// stopped executor alive.
 #[test]
-fn queueing_a_chunk_walks_one_chunk() {
-    let pool = pool();
-    let mut source = source_runtime(&pool);
-    let schema = raw_schema();
-    let chunks = 64;
-    for index in 0..chunks {
-        let timestamp = i64::try_from(index).unwrap() * 10_000;
-        let chunk = raw_chunk(&schema, &[timestamp], &[1.0], index + 1 == chunks);
-        source.enqueue(NativeChunk::Raw(chunk)).unwrap();
-    }
-    assert_eq!(
-        source.queued_charge.walked, chunks,
-        "queueing {chunks} chunks walked {} chunk(s): the figure is recounted from the queue",
-        source.queued_charge.walked,
-    );
-    assert_eq!(
-        source.queued_charge.bytes,
-        source.queued_bytes_recomputed(),
-        "the running total is not what one pass over the queue counts"
-    );
-
-    let mut popped = 0;
-    while source.pop_source().unwrap().is_some() {
-        popped += 1;
-    }
-    assert_eq!(popped, chunks, "the queue did not hand back every chunk");
-    assert_eq!(
-        source.queued_charge.walked,
-        2 * chunks,
-        "popping {chunks} chunks walked {} chunk(s): the figure is recounted from the queue",
-        source.queued_charge.walked,
-    );
-    assert_eq!(source.queued_charge.bytes, 0);
-}
-
-/// A mixed sequence of pushes and pulls leaves the queue's figure equal to one pass over what is
-/// left in it, and the reservation equal to that figure.
-///
-/// The chunks mix ones that share a table with ones that share nothing, so an allocation is
-/// referenced by one, two or no queued chunk as the sequence runs. Both the node's own reservation
-/// and the pool's are checked, so a total that drifts from the queue is caught by the figure the
-/// memory pool actually holds.
-#[test]
-fn a_queue_figure_survives_a_mixed_push_and_pull_sequence() {
+fn releasing_a_node_drops_its_queue() {
     let pool = pool();
     let mut source = source_runtime(&pool);
     let schema = raw_schema();
     let mut builder = HistogramBatchBuilder::new();
     let index = push_histogram(&mut builder, 2);
     let table = builder.finish().unwrap();
-
-    for round in 0..6i64 {
-        for step in 0..2 {
-            let chunk =
-                raw_shared_histogram_chunk(&schema, &table, index, round * 10_000 + step, false);
-            source.enqueue(NativeChunk::Raw(chunk)).unwrap();
-        }
-        let chunk = raw_chunk(&schema, &[round * 10_000 + 2], &[1.0], false);
-        source.enqueue(NativeChunk::Raw(chunk)).unwrap();
-        let folded = source.queued_charge.bytes;
-        assert_eq!(
-            folded,
-            source.queued_bytes_recomputed(),
-            "round {round}: the running total is not one pass over the queue"
-        );
-        assert_eq!(source.buffer.held, folded);
-        assert_eq!(pool.reserved(), folded);
-
-        for _ in 0..2 {
-            if source.pop_source().unwrap().is_none() {
-                break;
-            }
-        }
-        let folded = source.queued_charge.bytes;
-        assert_eq!(
-            folded,
-            source.queued_bytes_recomputed(),
-            "round {round}: the running total is not one pass over what is left"
-        );
-        assert_eq!(source.buffer.held, folded);
-        assert_eq!(pool.reserved(), folded);
+    for timestamp in [0, 10_000] {
+        source
+            .enqueue(NativeChunk::Raw(raw_shared_histogram_chunk(
+                &schema, &table, index, timestamp, false,
+            )))
+            .unwrap();
     }
-
-    while source.pop_source().unwrap().is_some() {}
-    assert_eq!(source.queued_charge.bytes, 0);
-    assert!(
-        source.queued_charge.tables.is_empty(),
-        "a table outlived the chunks that referenced it"
-    );
-    assert!(
-        source.queued_charge.buffers.is_empty(),
-        "a buffer outlived the chunks that referenced it"
-    );
-    assert_eq!(source.buffer.held, 0);
-    assert_eq!(pool.reserved(), 0);
-}
-
-/// What a source reserves through the executor is the figure one pass over its queue counts.
-#[test]
-fn the_executor_reserves_what_one_pass_over_the_queue_counts() {
-    let tree = NativeTree::try_new(window(input(), grid(0, 10_000, 4))).unwrap();
-    let schema = raw_schema();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
-    for step in 0..3 {
-        let chunk = raw_chunk(&schema, &[step * 10_000], &[1.0], false);
-        execution.push_raw(chunk).unwrap();
-    }
-    let (folded, walked) = execution
-        .state()
-        .queued_charge_pair(&NodePath::root().input());
-    assert_eq!(
-        folded, walked,
-        "the executor's queue is not charged what one pass over it counts"
-    );
-    assert_eq!(
-        execution.state().reserved_bytes(),
-        folded,
-        "the source's reservation is not its queue's figure"
-    );
-}
-
-/// Releasing a node drops the queue's counts with the queue and returns the reservation once.
-///
-/// A count left behind would be folded onto by the next chunk the node queues, and the reservation
-/// shown as returned while the counts still hold the bytes is the leak this refuses.
-#[test]
-fn releasing_a_node_drops_the_queue_and_its_counts() {
-    let pool = pool();
-    let mut source = source_runtime(&pool);
-    let schema = raw_schema();
-    let mut builder = HistogramBatchBuilder::new();
-    let index = push_histogram(&mut builder, 2);
-    let table = builder.finish().unwrap();
-    source
-        .enqueue(NativeChunk::Raw(raw_shared_histogram_chunk(
-            &schema, &table, index, 0, false,
-        )))
-        .unwrap();
-    source
-        .enqueue(NativeChunk::Raw(raw_shared_histogram_chunk(
-            &schema, &table, index, 10_000, true,
-        )))
-        .unwrap();
-    assert_eq!(pool.reserved(), source.queued_charge.bytes);
+    assert!(pool.reserved() > 0);
 
     source.release();
     assert!(source.queued.is_empty(), "the queue outlived its release");
-    assert!(
-        source.queued_charge.tables.is_empty(),
-        "the queue's table counts outlived the queue"
-    );
-    assert!(
-        source.queued_charge.buffers.is_empty(),
-        "the queue's buffer counts outlived the queue"
-    );
-    assert_eq!(source.queued_charge.bytes, 0);
-    assert_eq!(source.buffer.held, 0);
+    assert_eq!(source.buffer.reservation.size(), 0);
     assert_eq!(pool.reserved(), 0, "the reservation was not returned");
     assert!(source.pop_source().unwrap().is_none());
 }
@@ -2605,83 +2378,6 @@ fn a_series_whose_axis_and_fields_disagree_is_rejected() {
             && message.contains("4 rows")
             && message.contains("2 samples"),
         "the rejection does not name what the axis places against what the field holds: {message}"
-    );
-}
-
-/// One entry's figure is the heap it owns, and its `History` header is charged once, by its slot.
-///
-/// The `History` of a label set lives in the map's slot, so a `size_of::<History>()` term in the
-/// entry's own figure billed one header twice: once here and once in the capacity term beside it.
-/// The two assertions below are the definition of the whole figure -- the labels, the vectors and
-/// their runs, the owner's name and tags, and one label-set slot plus one history slot per entry --
-/// so either header counted in the wrong place fails them.
-#[test]
-fn a_history_entry_is_charged_once_for_its_header() {
-    let grid = grid(0, 10_000, 2);
-    let schema = evaluated_schema(Arc::clone(&grid));
-    let metric = named_metric("requests", "job");
-    let labels = label_set(&metric);
-    // Not the closing chunk: a closed label set drops its runs, and the runs are what the entry's
-    // own figure is.
-    let chunk = evaluated_chunk_of(
-        &schema,
-        metric.clone(),
-        0,
-        vec![Some(1.0), Some(2.0)],
-        false,
-    );
-
-    let mut emitted = Emitted::default();
-    emitted
-        .occupy(&NodePath::root(), Some(&metric), &chunk)
-        .unwrap();
-
-    let history = emitted
-        .sets
-        .get(&labels)
-        .expect("the chunk recorded its label set");
-    // The owner the entry keeps is the series that filled it, so its name and each tag cost the
-    // same bytes the label set of the chunk did.
-    let owner = metric.name().map_or(0, |name| name.len())
-        + std::mem::size_of_val(metric.tags())
-        + metric
-            .tags()
-            .iter()
-            .map(|tag| tag.name.len() + tag.value.len())
-            .sum::<usize>();
-    let entry = label_bytes(&labels)
-        .saturating_add(history.fields.capacity() * std::mem::size_of::<Vec<Run>>())
-        .saturating_add(
-            history
-                .fields
-                .iter()
-                .map(|runs| runs.capacity() * std::mem::size_of::<Run>())
-                .sum::<usize>(),
-        )
-        .saturating_add(owner);
-    assert_eq!(
-        history.owner.as_ref(),
-        Some(&metric),
-        "the entry does not name the series that filled it"
-    );
-    assert!(
-        history.fields.iter().any(|runs| !runs.is_empty()),
-        "the entry kept no run, so it has no heap of its own to charge for"
-    );
-    assert_eq!(
-        emitted.entries,
-        entry,
-        "the entry's own bytes are not its labels, its runs and its owner: a `History` header in \
-         the figure would add the {} bytes its slot already charges",
-        std::mem::size_of::<History>(),
-    );
-    assert_eq!(
-        emitted.bytes(),
-        entry.saturating_add(
-            emitted.sets.capacity()
-                * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>())
-        ),
-        "the table's capacity is where a label-set slot and one `History` per entry are charged",
     );
 }
 
