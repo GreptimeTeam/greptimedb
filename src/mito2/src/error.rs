@@ -775,6 +775,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Index build did not complete for files {:?} in region {}",
+        file_ids,
+        region_id
+    ))]
+    IndexBuildIncomplete {
+        region_id: RegionId,
+        file_ids: Vec<FileId>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
         source: datatypes::error::Error,
@@ -1561,6 +1573,7 @@ impl ErrorExt for Error {
                 StatusCode::StorageUnavailable
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
+            IndexBuildIncomplete { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,

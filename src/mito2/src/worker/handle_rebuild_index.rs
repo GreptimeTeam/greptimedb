@@ -18,21 +18,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::region::build_index_request;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, warn};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc;
 
 use crate::cache::CacheStrategy;
-use crate::error::{InvalidRequestSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{
+    IndexBuildIncompleteSnafu, InvalidRequestSnafu, RegionStateSnafu, Result, WorkerStoppedSnafu,
+};
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
 use crate::region::options::IndexOptions;
-use crate::region::{IndexBuildSource, MitoRegionRef};
-use crate::request::{
-    BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
-};
+use crate::region::{IndexBuildSource, MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::request::{BuildIndexRequest, IndexBuildFinished, IndexBuildStopped, OptionOutputTx};
 use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
@@ -57,7 +57,7 @@ impl<S> RegionWorkerLoop<S> {
         file: FileHandle,
         file_meta: FileMeta,
         build_type: IndexBuildType,
-        result_sender: ResultMpscSender,
+        result_senders: Vec<ResultMpscSender>,
     ) -> IndexBuildTask {
         let access_layer = region.access_layer.clone();
 
@@ -90,6 +90,7 @@ impl<S> RegionWorkerLoop<S> {
             file: file.clone(),
             target_region_metadata: snapshot.metadata.clone(),
             source: IndexBuildSource::new(file_meta, snapshot.metadata.schema_version),
+            index_options: snapshot.index_options.clone(),
             reason: build_type,
             access_layer: access_layer.clone(),
             listener: self.listener.clone(),
@@ -99,7 +100,7 @@ impl<S> RegionWorkerLoop<S> {
             file_purger: file.file_purger(),
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),
-            result_sender,
+            result_senders,
         }
     }
 
@@ -120,6 +121,7 @@ impl<S> RegionWorkerLoop<S> {
                         region_id,
                         build_type: IndexBuildType::Manual,
                         file_metas: Vec::new(),
+                        result_senders: Vec::new(),
                     },
                     sender,
                 )
@@ -168,6 +170,18 @@ impl<S> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
+        // Staging regions are writable but must not publish indexes.
+        if region.should_abort_index() {
+            sender.send(
+                RegionStateSnafu {
+                    region_id,
+                    state: region.state(),
+                    expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+                }
+                .fail(),
+            );
+            return;
+        }
 
         // Only keep the parts of the version that index builds need, so the
         // memtables and SST version are not pinned across the awaits below.
@@ -204,13 +218,20 @@ impl<S> RegionWorkerLoop<S> {
 
         let build_tasks = if request.file_metas.is_empty() {
             // If no specific files are provided, find files whose index is inconsistent with the region metadata.
+            // Check the version rather than the manifest: a publication committed
+            // to the manifest but not yet applied is still invisible to queries.
+            // Its build still holds the file, so the manual task waits for it.
             all_files
                 .values()
+                .filter(|file| {
+                    !file.meta_ref().is_index_consistent_with_region(
+                        &snapshot.metadata.column_metadatas,
+                        &snapshot.index_options,
+                    )
+                })
                 .filter_map(|file| {
                     let file_meta = current_file_meta(file.meta_ref().file_id)?;
-                    (!file_meta
-                        .is_index_consistent_with_region(&snapshot.metadata.column_metadatas))
-                    .then(|| (file.clone(), file_meta))
+                    Some((file.clone(), file_meta))
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -234,9 +255,13 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        let num_tasks = build_tasks.len();
-        let (tx, mut rx) = mpsc::channel::<Result<IndexBuildOutcome>>(num_tasks);
-
+        let file_ids = build_tasks
+            .iter()
+            .map(|(file, _)| file.meta_ref().file_id)
+            .collect::<Vec<_>>();
+        let build_type = request.build_type.clone();
+        // Each task holds a sender and reports at most once, so sends never block.
+        let (tx, mut rx) = mpsc::channel::<Result<IndexBuildOutcome>>(build_tasks.len());
         for (file_handle, file_meta) in build_tasks {
             debug!(
                 "Scheduling index build for region {}, file_id {}",
@@ -244,6 +269,7 @@ impl<S> RegionWorkerLoop<S> {
                 file_handle.meta_ref().file_id
             );
 
+            // `set_region_role` can change the state while tasks are scheduled.
             if region.should_abort_index() {
                 warn!(
                     "Region {} is in state {:?}, abort index rebuild process for file_id {}",
@@ -254,29 +280,79 @@ impl<S> RegionWorkerLoop<S> {
                 break;
             }
 
+            let mut result_senders = request.result_senders.clone();
+            result_senders.push(tx.clone());
             let task = self.new_index_build_task(
                 &region,
                 &snapshot,
-                file_handle.clone(),
+                file_handle,
                 file_meta,
                 request.build_type.clone(),
-                tx.clone(),
+                result_senders,
             );
-            let _ = self
-                .index_build_scheduler
+            self.index_build_scheduler
                 .schedule_build(&region.version_control, task)
                 .await;
         }
+        drop(tx);
+
         // Wait for all index build tasks to finish and notify the caller.
         common_runtime::spawn_global(async move {
-            for _ in 0..num_tasks {
-                if let Some(Err(e)) = rx.recv().await {
-                    warn!(e; "Index build task failed for region: {}", region_id);
-                    sender.send(Err(e));
-                    return;
+            let mut abort_reasons = Vec::new();
+            // The channel closes once every task has reported or been dropped.
+            while let Some(result) = rx.recv().await {
+                match result {
+                    Ok(IndexBuildOutcome::Finished) => {}
+                    Ok(IndexBuildOutcome::Aborted(reason)) => abort_reasons.push(reason),
+                    Err(e) => {
+                        warn!(e; "Index build task failed for region: {}", region_id);
+                        sender.send(Err(e));
+                        return;
+                    }
                 }
             }
-            sender.send(Ok(0));
+
+            // The build covers the SSTs that existed when it was requested. A file
+            // removed meanwhile, e.g. replaced by compaction, counts as done: its
+            // replacement is indexed according to the compaction index options,
+            // as any later compaction would be.
+            let manifest = region.manifest_ctx.manifest().await;
+            let (present, removed): (Vec<_>, Vec<_>) = file_ids
+                .into_iter()
+                .partition(|file_id| manifest.files.contains_key(file_id));
+            if !removed.is_empty() && build_type == IndexBuildType::Manual {
+                warn!(
+                    "Files were removed during the manual index build, their replacements follow the compaction index options, region: {}, files: {:?}",
+                    region_id, removed
+                );
+            }
+            let incomplete = present
+                .into_iter()
+                .filter(|file_id| {
+                    !manifest.files[file_id].is_index_consistent_with_region(
+                        &snapshot.metadata.column_metadatas,
+                        &snapshot.index_options,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let result = if incomplete.is_empty() {
+                Ok(0)
+            } else {
+                // Background builds have no caller, and files they leave
+                // unindexed by configuration are expected.
+                if build_type == IndexBuildType::Manual {
+                    warn!(
+                        "Manual index build did not complete, region: {}, files: {:?}, aborted: {:?}",
+                        region_id, incomplete, abort_reasons
+                    );
+                }
+                IndexBuildIncompleteSnafu {
+                    region_id,
+                    file_ids: incomplete,
+                }
+                .fail()
+            };
+            sender.send(result);
         });
     }
 
@@ -324,7 +400,10 @@ impl<S> RegionWorkerLoop<S> {
         }
         drop(manager);
 
-        if !is_current {
+        let outcome = if is_current {
+            self.listener.on_index_build_finish(region_file_id).await;
+            IndexBuildOutcome::Finished
+        } else {
             INDEX_PUBLICATION_STALE_TOTAL
                 .with_label_values(&["worker_apply"])
                 .inc();
@@ -340,21 +419,18 @@ impl<S> RegionWorkerLoop<S> {
             )
             .await;
             self.listener.on_index_build_abort(region_file_id).await;
-            return;
+            IndexBuildOutcome::Aborted(format!(
+                "Index publication was superseded before worker apply, region: {}, file_id: {}",
+                region_id, file_meta.file_id
+            ))
+        };
+        // Notify waiters after the version is updated, so queries issued after a
+        // manual build returns can use the new index. `try_send` keeps the worker
+        // loop from waiting on a caller; a missing result is caught by the
+        // waiter's manifest check.
+        for sender in &request.result_senders {
+            let _ = sender.try_send(Ok(outcome.clone()));
         }
-
-        self.listener.on_index_build_finish(region_file_id).await;
-    }
-
-    pub(crate) async fn handle_index_build_failed(
-        &mut self,
-        region_id: RegionId,
-        request: IndexBuildFailed,
-    ) {
-        error!(request.err; "Index build failed for region: {}", region_id);
-        self.index_build_scheduler
-            .on_failure(region_id, request.err.clone())
-            .await;
     }
 
     pub(crate) async fn handle_index_build_stopped(
