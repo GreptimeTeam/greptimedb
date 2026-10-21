@@ -39,7 +39,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Extension, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
-use promql::extension_plan::HistogramFold;
+use promql::extension_plan::{FusedSeries, HistogramFold};
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
@@ -474,6 +474,7 @@ async fn plan_direct_or(
         table_provider,
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
+        native_fused: false,
     };
     planner
         .or_operator(
@@ -563,6 +564,7 @@ async fn mixed_direct_or(histogram_on_left: bool) -> (PromPlanner, LogicalPlan) 
         table_provider,
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
+        native_fused: false,
     };
     let left_context = direct_or_context("lhs", &["job", "k"], "v");
     let right_context = direct_or_context("rhs", &["job", "k"], "v");
@@ -635,6 +637,7 @@ async fn mixed_aggregate_input(histograms: Vec<NativeHistogram>) -> (PromPlanner
             ..Default::default()
         },
         promql_annotations: None,
+        native_fused: false,
     };
     (planner, plan)
 }
@@ -1615,6 +1618,79 @@ async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str)
     ).replace("TEMPLATE", plan_name);
 
     assert_eq!(plan.display_indent_schema().to_string(), expected);
+}
+
+/// Plans `query` with the native fused-series route on or off.
+///
+/// The table is the one [`build_test_table_provider`] builds — one tag `tag_0`, the millisecond
+/// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
+/// to a raw series schema of one field.
+async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
+    let eval_stmt = build_eval_stmt(query);
+    let table_provider = build_test_table_provider(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+    )
+    .await;
+    PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &eval_stmt,
+        &build_query_engine_state(),
+        None,
+        native_fused,
+    )
+    .await
+    .unwrap()
+}
+
+fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
+    if let LogicalPlan::Extension(Extension { node }) = plan
+        && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+    {
+        return Some(fused);
+    }
+
+    plan.inputs().into_iter().find_map(find_fused_series)
+}
+
+/// The flag on and a shape the compiler accepts: the statement plans to one native node.
+#[tokio::test]
+async fn native_fused_rate_plans_to_a_fused_series_node() {
+    let plan = build_native_fused_plan("rate(some_metric[5m])", true).await;
+
+    let display = plan.display_indent().to_string();
+    assert!(
+        display.contains("FusedSeries: rate(some_metric[5m])"),
+        "{display}"
+    );
+    // The node reads the selector's own scan; nothing between them packs the frame it reads.
+    assert!(display.contains("TableScan: some_metric"), "{display}");
+    // The node carries the query a reader wrote, not the shape it compiled to.
+    let fused = find_fused_series(&plan).expect("the plan holds a native node");
+    assert_eq!("rate(some_metric[5m])", fused.promql());
+}
+
+/// The flag on and a shape the compiler refuses: the existing planner plans it unchanged.
+#[tokio::test]
+async fn native_fused_unsupported_shape_falls_back() {
+    let plan = build_native_fused_plan("sum(rate(some_metric[5m]))", true).await;
+
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("FusedSeries"), "{display}");
+    // Falling back is not an approximation of the existing plan: it is the existing plan.
+    let without_flag = build_native_fused_plan("sum(rate(some_metric[5m]))", false).await;
+    assert_eq!(display, without_flag.display_indent().to_string());
+}
+
+/// The flag off: no statement is offered to the native route at all.
+#[tokio::test]
+async fn native_fused_flag_off_keeps_the_existing_plan() {
+    let plan = build_native_fused_plan("rate(some_metric[5m])", false).await;
+
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("FusedSeries"), "{display}");
+    assert!(display.contains("PromRangeManipulate"), "{display}");
 }
 
 #[tokio::test]
@@ -3328,6 +3404,7 @@ async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
         table_provider,
         ctx: PromPlannerContext::from_eval_stmt(&eval_stmt).unwrap(),
         promql_annotations: None,
+        native_fused: false,
     };
     let plan = planner
         .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
@@ -4463,6 +4540,7 @@ async fn mixed_histogram_helpers_report_annotations() {
             &operator_eval_stmt("histogram_quantile(0.5, mixed_histogram)"),
             &state,
             Some(collector.clone()),
+            false,
         )
         .await
         .unwrap();
@@ -4623,6 +4701,7 @@ async fn mixed_or_topk_bottomk_ignore_native_histograms() {
             &operator_eval_stmt(&format!("{op}(1, lf or on(tag) lh)")),
             &state,
             Some(collector.clone()),
+            false,
         )
         .await
         .unwrap();
@@ -4960,6 +5039,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
             ..Default::default()
         },
         promql_annotations: Some(collector.clone()),
+        native_fused: false,
     };
     let input = LogicalPlan::Extension(Extension {
         node: Arc::new(
@@ -6289,6 +6369,7 @@ async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
         table_provider,
         ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")).unwrap(),
         promql_annotations: None,
+        native_fused: false,
     };
     planner.ctx.time_index_column = Some("timestamp".to_string());
     planner.ctx.start = 1_000;
@@ -7129,6 +7210,7 @@ async fn test_direct_or_numeric_value_types() {
         table_provider: provider,
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
+        native_fused: false,
     };
     let left_context = direct_or_context("lhs", &["job"], "v");
     let right_context = direct_or_context("rhs", &["job"], "v");
@@ -7616,6 +7698,7 @@ async fn malformed_classic_bucket_does_not_drop_native_histogram() {
         &operator_eval_stmt("histogram_quantile(0.5, bad_classic or bad_native)"),
         &state,
         Some(collector.clone()),
+        false,
     )
     .await
     .unwrap();
@@ -7699,6 +7782,7 @@ async fn test_mixed_binary_operator_reports_only_dropped_samples() {
             &operator_eval_stmt(query),
             &state,
             Some(annotations.clone()),
+            false,
         )
         .await
         .unwrap();
@@ -8360,6 +8444,7 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
         table_provider,
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
+        native_fused: false,
     };
     let left = LogicalPlanBuilder::from(scan(&left))
         .project(vec![
