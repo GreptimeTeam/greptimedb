@@ -28,6 +28,8 @@ use crate::sst::file::RegionFileId;
 pub(crate) enum ArtifactFormat {
     #[serde(rename = "parquet")]
     Parquet,
+    #[serde(rename = "columnar-series")]
+    ColumnarSeries,
     #[cfg(test)]
     #[serde(rename = "fake-samples")]
     FakeSamples,

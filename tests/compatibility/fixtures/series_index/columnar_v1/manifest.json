@@ -1,0 +1,54 @@
+{
+  "format": "columnar-series",
+  "version": 1,
+  "region_id": 4294967297,
+  "generation": "00000000-0000-0000-0000-000000000001",
+  "tags": [
+    {
+      "column_id": 0,
+      "name": "tag_0"
+    },
+    {
+      "column_id": 1,
+      "name": "tag_1"
+    }
+  ],
+  "coverage": {
+    "file_size": 0,
+    "index_uuid": "00000000-0000-0000-0000-000000000001",
+    "bucket_start": {
+      "value": 0,
+      "unit": "Second"
+    },
+    "bucket_end": {
+      "value": 100,
+      "unit": "Second"
+    },
+    "source_file_ids": [],
+    "min_file_sequence": 1,
+    "max_file_sequence": 2,
+    "compaction_window_secs": 100,
+    "window_sequences": {
+      "0": {
+        "start": 0,
+        "end": 100,
+        "max_sequence": 2
+      }
+    }
+  },
+  "files": [
+    {
+      "part_id": 0,
+      "file_size": 747,
+      "num_series": 3,
+      "first": {
+        "table_id": 7,
+        "tsid": 10
+      },
+      "last": {
+        "table_id": 9,
+        "tsid": 5
+      }
+    }
+  ]
+}

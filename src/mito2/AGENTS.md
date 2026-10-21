@@ -66,7 +66,7 @@ filtered `RecordBatch` stream.
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may
   overshoot; closed-region files are not counted. Series handles and the SST purger own file deletion.
-- **Series format PoC**: samples are rebuildable local SST sidecars. Optional writer interfaces (`format.rs`) integrate with reconciliation, catalog publication, and deferred purge. Defaults retain the original Parquet writer and disable samples. Prepared sources, read APIs, and concrete new formats are deferred; ordinary scans only use Parquet index artifacts.
+- **Series format PoC**: samples are rebuildable local SST sidecars. Optional writer interfaces (`format.rs`) integrate with reconciliation, catalog publication, and deferred purge. Defaults retain the original Parquet writer and disable samples. The opt-in columnar backend (`series_index/columnar.rs`) implements streaming OpenDAL writes and pinned format reads; its wire contract is in `docs/formats/mito-series.md`. Prepared sources and query-consumer integration are deferred; ordinary scans only use Parquet index artifacts.
 - **Series-index coverage** (`series_index/catalog.rs`): `SeriesIndexEntry` stores
   compaction-window width and SST summaries keyed by aligned start in both catalogs and Parquet footers.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
