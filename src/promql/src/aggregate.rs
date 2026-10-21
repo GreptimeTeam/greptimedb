@@ -28,6 +28,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 
+use crate::go_format::format_float_f;
 use crate::grid_series::{GridSeriesBuilder, external};
 use crate::map::{drop_empty_labels, validate_float_series, validate_scalar};
 use crate::range_eval::quantile;
@@ -316,7 +317,7 @@ pub fn count_values(
                     Entry::Vacant(entry) => {
                         let mut metric = series.metric.clone();
                         metric
-                            .set(label, Arc::from(format_value(value)))
+                            .set(label, Arc::from(format_float_f(value)))
                             .map_err(external)?;
                         let metric = grouping.apply(&metric)?;
                         let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
@@ -346,57 +347,6 @@ pub fn count_values(
         output.extend(builder.finish(metric)?);
     }
     Ok(output)
-}
-
-/// Go's `strconv.FormatFloat(value, 'f', -1, 64)`: the fewest significant digits that round-trip,
-/// in positional notation. When two candidates of that length are equally close, Go takes the
-/// even one while Rust's shortest formatting rounds up, so the digits are recomputed with Rust's
-/// exact formatting, which rounds half to even. The recomputed digits only count when they still
-/// parse back to `value`: just above a power of two the lower neighbour is half as far away, so
-/// the even candidate can name that neighbour, and only the other one round-trips.
-fn format_value(value: f64) -> String {
-    match value {
-        f64::INFINITY => return "+Inf".to_string(),
-        f64::NEG_INFINITY => return "-Inf".to_string(),
-        _ if value.is_nan() => return "NaN".to_string(),
-        _ => {}
-    }
-    let shortest = format!("{value:e}");
-    let mantissa = shortest.split_once('e').expect("exponent format").0;
-    let significant = mantissa.chars().filter(char::is_ascii_digit).count();
-    let exact = format!("{value:.precision$e}", precision = significant - 1);
-    let digits = if exact.parse::<f64>() == Ok(value) {
-        &exact
-    } else {
-        &shortest
-    };
-    let (mantissa, exponent) = digits.split_once('e').expect("exponent format");
-    let exponent: i64 = exponent.parse().expect("integer exponent");
-    let (sign, mantissa) = match mantissa.strip_prefix('-') {
-        Some(unsigned) => ("-", unsigned),
-        None => ("", mantissa),
-    };
-    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    // The decimal point goes after `exponent + 1` digits.
-    let point = exponent + 1;
-    let mut out = String::from(sign);
-    if point <= 0 {
-        out.push_str("0.");
-        out.extend(std::iter::repeat_n('0', (-point) as usize));
-        out.push_str(digits.trim_end_matches('0'));
-    } else if point as usize >= digits.len() {
-        out.push_str(&digits);
-        out.extend(std::iter::repeat_n('0', point as usize - digits.len()));
-    } else {
-        let (whole, fraction) = digits.split_at(point as usize);
-        out.push_str(whole);
-        let fraction = fraction.trim_end_matches('0');
-        if !fraction.is_empty() {
-            out.push('.');
-            out.push_str(fraction);
-        }
-    }
-    out
 }
 
 /// Schema validation is repeated because Series exposes its fields publicly.

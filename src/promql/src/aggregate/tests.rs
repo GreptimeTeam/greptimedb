@@ -907,7 +907,7 @@ fn value_labels_format_like_go() {
     for line in include_str!("format_float_cases.txt").lines() {
         let (bits, expected) = line.split_once(' ').unwrap();
         let value = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
-        assert_eq!(format_value(value), expected, "{bits}");
+        assert_eq!(crate::go_format::format_float_f(value), expected, "{bits}");
         checked += 1;
     }
     assert!(checked > 2_400, "{checked}");
@@ -916,7 +916,7 @@ fn value_labels_format_like_go() {
         (f64::INFINITY, "+Inf"),
         (f64::NEG_INFINITY, "-Inf"),
     ] {
-        assert_eq!(format_value(value), expected);
+        assert_eq!(crate::go_format::format_float_f(value), expected);
     }
 }
 
