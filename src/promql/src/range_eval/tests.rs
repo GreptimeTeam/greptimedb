@@ -1013,8 +1013,7 @@ fn histogram_chunk(schema: &SeriesSchema, buckets: i32, ts: i64) -> RawSeriesChu
 /// The single histogram sample of [`histogram_chunk`], read with `start_timestamp`.
 ///
 /// A sample carries the start timestamp a scan read it with, and it is payload rather than a
-/// property of the value: a reader detects a counter reset from a start timestamp falling inside
-/// the range it reads, so a selected sample handed on without one hides that reset.
+/// property of the value.
 fn histogram_chunk_from(
     schema: &SeriesSchema,
     buckets: i32,
@@ -1070,9 +1069,10 @@ fn histogram_chunk_from(
 /// histogram that leaves them is the histogram that arrived, start timestamp included. The window
 /// here holds two samples that differ in bucket count and in start timestamp, so the count and the
 /// timestamp together say which one was selected rather than only that some timestamp survived:
-/// the last sample for `last_over_time`, the first one for `first_over_time`. A selected sample
-/// that lost its timestamp looks like one whose counter reset cannot be placed, which is what an
-/// extrapolated rate downstream reads it for; a histogram computed from samples carries none, as
+/// the last sample for `last_over_time`, the first one for `first_over_time`. What this pins is
+/// that the selection passes the stored payload through; it does not pin a Prometheus result, whose
+/// histogram values carry no such field, and it does not claim that a native rate reads the field
+/// afterwards. A histogram computed from samples carries none, as
 /// `histogram_eval::tests::a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one`
 /// pins for the operations that build one.
 #[test]

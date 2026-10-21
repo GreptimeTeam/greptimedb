@@ -37,16 +37,19 @@ pub(crate) struct FloatHistogram {
     pub(crate) reset_hint: CounterResetHint,
     /// The start timestamp of the sample this histogram was read from, in milliseconds.
     ///
-    /// It is payload rather than a property of a computed value: [`Self::try_from_view`] carries
-    /// it because the sample it reads has one and [`Self::push_to`] writes it back, while every
-    /// operation that derives a histogram from its input -- [`Self::add`], [`Self::kahan_add`],
-    /// [`Self::mul`], [`Self::div`], [`Self::compact`] and [`Self::copy_to_schema`], with the
-    /// constructors beside them -- leaves it `None`, as Go's `FloatHistogram`, which has no such
-    /// field, does. [`Self::equals`] does not compare it for the same reason.
+    /// It is metadata of GreptimeDB's histogram row, not part of the histogram value that
+    /// Prometheus's `FloatHistogram` models. This owned form preserves it -- [`Self::try_from_view`]
+    /// reads it off the sample and [`Self::push_to`] writes it back -- while every operation that
+    /// derives a histogram from its input ([`Self::add`], [`Self::kahan_add`], [`Self::mul`],
+    /// [`Self::div`], [`Self::compact`], [`Self::copy_to_schema`], with the constructors beside
+    /// them) clears it. [`Self::equals`] does not compare it.
     ///
-    /// It is not cosmetic: a reader detects a counter reset from a start timestamp that falls
-    /// inside the range it reads, so a sample handed on without one is a sample whose reset cannot
-    /// be told from its bucket counts alone.
+    /// Both halves are this module's own policy and say nothing about how Prometheus propagates
+    /// these timestamps: its `FloatHistogram` does not carry the field, while its rate and reset
+    /// evaluation receives start timestamps through a separate channel. This crate's native range
+    /// kernel does not read the field; the legacy extrapolation path does, to synthesize a zero
+    /// point. So a selection that keeps the field preserves what was stored, and does not by itself
+    /// make a native rate agree with the legacy one.
     pub(crate) start_timestamp: Option<i64>,
     pub(crate) schema: i32,
     pub(crate) zero_threshold: f64,
