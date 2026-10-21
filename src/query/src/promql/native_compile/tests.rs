@@ -23,7 +23,10 @@ use promql::native::plan::{
     BoundInstant, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
-use promql_parser::parser::{EvalStmt, Expr as PromExpr, NumberLiteral};
+use promql::vector_match::{BinaryMatching, BinaryOp};
+use promql_parser::parser::{
+    BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, VectorMatchFillValues,
+};
 
 use super::compile;
 
@@ -67,6 +70,19 @@ fn with_selector_range(range: Duration) -> EvalStmt {
         unreachable!("`rate(x[5m])`'s argument parses to a range selector");
     };
     selector.range = range;
+    stmt
+}
+
+/// `query`'s statement with its binary operation's modifier edited by `edit`.
+///
+/// The parser rewrites and rejects some modifiers, so a modifier the compiler has to refuse as
+/// written can only reach it on a tree the parser accepted: this is the way in.
+fn with_binary_modifier(query: &str, edit: impl FnOnce(&mut BinModifier)) -> EvalStmt {
+    let mut stmt = eval_stmt(query);
+    let PromExpr::Binary(binary) = &mut stmt.expr else {
+        unreachable!("`{query}` parses to a binary operation");
+    };
+    edit(binary.modifier.get_or_insert_with(BinModifier::default));
     stmt
 }
 
@@ -138,6 +154,42 @@ fn evaluated(node: &NativeNode) -> &Arc<SeriesSchema> {
     };
     assert!(schema.eval_grid.is_some(), "the node is not evaluated");
     schema
+}
+
+/// The two operands and the matching of a `Binary` node.
+fn binary_parts(node: &NativeNode) -> (&NativeNode, &NativeNode, &BinaryMatching) {
+    let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &node.expr
+    else {
+        panic!("the node is not a binary operation: {:?}", node.expr);
+    };
+    (left, right, matching)
+}
+
+/// The constant a `Scalar` node binds, if it is one.
+fn constant(node: &NativeNode) -> Option<f64> {
+    match &node.expr {
+        NativeExpr::Scalar(scalar) => Some(scalar.value),
+        _ => None,
+    }
+}
+
+/// The grid spec a `Scalar` node reports, as `(start_ms, step_ms, len)`.
+fn scalar_grid(node: &NativeNode) -> (i64, i64, u64) {
+    let NativeType::Scalar(grid) = &node.output else {
+        panic!("the node is not a scalar: {:?}", node.output);
+    };
+    let spec = grid.spec();
+    (spec.start_ms, spec.step_ms, spec.len)
+}
+
+/// The grid spec a node's evaluated output carries, as `(start_ms, step_ms, len)`.
+fn grid_of(node: &NativeNode) -> (i64, i64, u64) {
+    let spec = evaluated(node).eval_grid.as_ref().unwrap().spec();
+    (spec.start_ms, spec.step_ms, spec.len)
 }
 
 /// `rate(x[5m])` becomes a window over the raw input, on the statement's grid.
@@ -706,13 +758,14 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
             Expected::Ordering(SeriesOrdering::Contiguous),
         ),
         // A shape outside the subset is refused for its shape, whatever its timing: the statement
-        // range of an unsupported query is not read, so it cannot turn a refusal into a plan error.
+        // range of an unsupported shape is not read, so it cannot turn a refusal into a plan
+        // error. A subquery is the reachable case of a shape with no node at all.
         (
             "an unsupported shape with an inverted range",
             EvalStmt {
                 end: UNIX_EPOCH,
                 start: UNIX_EPOCH + Duration::from_secs(100),
-                ..eval_stmt("x + 1")
+                ..eval_stmt("x[5m:]")
             },
             SeriesOrdering::KeyThenTime,
             Expected::Rejected(Rejection::NotImplemented),
@@ -770,8 +823,6 @@ fn the_numeric_edges_of_a_statement_are_bound_as_given() {
 #[test]
 fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
     let cases = [
-        ("x + 1", "the expression `x + 1`"),
-        ("sum(x)", "the expression `sum(x)`"),
         ("x[5m:]", "the expression `x[5m:]`"),
         // Nested shapes are refused by the argument check, not skipped over. A subquery is the
         // reachable case of an argument that is not a range selector: the parser type-checks
@@ -789,10 +840,6 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
             "absent(x)",
             "a call to `absent`, which has no native kernel",
         ),
-        // The two functions PromQL calls with no arguments at all: neither has a kernel, and the
-        // rejection names the name rather than describing a vector they were never given.
-        ("pi()", "a call to `pi`, which has no native kernel"),
-        ("time()", "a call to `time`, which has no native kernel"),
     ];
 
     for (query, named) in cases {
@@ -834,6 +881,45 @@ fn the_display_of_a_compiled_tree_is_the_tree() {
         ]
         .join("\n")
     );
+}
+
+/// The display of a tree the batch added nodes to, checked as a whole: the shapes are read by
+/// someone reading an `EXPLAIN`, so a wrong nesting, operator, constant or grouping has to show up on
+/// a line rather than only in an assertion over the tree.
+#[test]
+fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
+    let cases: [(&str, &[&str]); 2] = [
+        (
+            "-x",
+            &[
+                "NativeTree",
+                "  root Binary * ignoring [] one-to-one",
+                "    left Scalar -1",
+                "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
+                "      input Input raw samples",
+            ],
+        ),
+        (
+            "0 < x",
+            &[
+                "NativeTree",
+                "  root Binary < ignoring [] one-to-one",
+                "    left Scalar 0",
+                "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
+                "      input Input raw samples",
+            ],
+        ),
+    ];
+
+    for (query, expected) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(
+            tree.to_string(),
+            expected.join("\n"),
+            "`{query}` is displayed as a different query"
+        );
+    }
 }
 
 /// Parentheses group; they do not change what a statement asks for. A compiler that refused them
@@ -1143,4 +1229,406 @@ fn an_interleaved_scan_is_refused_whatever_the_shape() {
 
     compile(&eval_stmt("x"), raw_schema(), SeriesOrdering::Contiguous)
         .expect("`x` did not compile over a contiguous scan");
+}
+
+/// A constant on the right of a vector binds as the number it is, next to the vector the rest of the
+/// query compiles to: `x * 100` is `x`'s instant selection multiplied by `100`.
+#[test]
+fn a_constant_binds_as_a_scalar_next_to_the_vector() {
+    let input = raw_schema();
+    let tree = compile(
+        &eval_stmt("x * 100"),
+        Arc::clone(&input),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+
+    let (left, right, matching) = binary_parts(tree.root());
+    assert_eq!(matching.op, BinaryOp::Mul);
+    assert!(
+        !matching.return_bool,
+        "`x * 100` is not a comparison and has no bool"
+    );
+
+    let NativeExpr::Instant { .. } = &left.expr else {
+        panic!(
+            "the left operand is not the selector's instant: {:?}",
+            left.expr
+        );
+    };
+    assert_eq!(
+        constant(right),
+        Some(100.0),
+        "the right operand is not the constant the query wrote"
+    );
+    assert_eq!(
+        scalar_grid(right),
+        (0, 5_000, 21),
+        "the constant is not on the statement's grid"
+    );
+
+    // A scalar carries no fields, so the operation reports the vector side's layout and grid.
+    let output = evaluated(tree.root());
+    assert!(
+        Arc::ptr_eq(&output.fields, &input.fields),
+        "the broadcast did not keep the vector's fields"
+    );
+    assert_eq!(
+        grid_of(tree.root()),
+        (0, 5_000, 21),
+        "the operation does not land on the statement's grid"
+    );
+}
+
+/// The operands keep the order they were written in, because most operators are not commutative:
+/// `1 / x` is not `x / 1`. The constant side is what tells them apart, so a compiler that sorted the
+/// operands would compile both queries to the same, wrong tree.
+#[test]
+fn a_non_commutative_operation_keeps_the_operands_where_they_were_written() {
+    let cases = [
+        // (query, operator, the constant, whether the constant is on the left)
+        ("1 / x", BinaryOp::Div, 1.0, true),
+        ("x / 1", BinaryOp::Div, 1.0, false),
+        ("2 - x", BinaryOp::Sub, 2.0, true),
+        ("x - 2", BinaryOp::Sub, 2.0, false),
+        ("x % 2", BinaryOp::Mod, 2.0, false),
+        ("2 ^ x", BinaryOp::Pow, 2.0, true),
+    ];
+
+    for (query, op, value, constant_on_the_left) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (left, right, matching) = binary_parts(tree.root());
+        assert_eq!(matching.op, op, "`{query}` bound the wrong operator");
+        let (scalar_side, vector_side) = if constant_on_the_left {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        assert_eq!(
+            constant(scalar_side),
+            Some(value),
+            "`{query}` put the constant on the wrong side"
+        );
+        assert!(
+            !matches!(vector_side.expr, NativeExpr::Scalar(_)),
+            "`{query}` compiled the vector operand to a constant: {:?}",
+            vector_side.expr
+        );
+    }
+}
+
+/// A binary operation compiles by compiling both operands, so it nests as deeply as the query was
+/// written: `2 / (x + 1)` is a division whose right operand is the addition, not a shape the
+/// compiler knows by name.
+#[test]
+fn a_binary_operation_nests_over_the_operands_it_was_written_with() {
+    let tree = compile(
+        &eval_stmt("2 / (x + 1)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`2 / (x + 1)` was refused: {error}"));
+
+    let (left, right, matching) = binary_parts(tree.root());
+    assert_eq!(matching.op, BinaryOp::Div);
+    assert_eq!(constant(left), Some(2.0), "the divisor was not bound");
+
+    let (inner_left, inner_right, inner_matching) = binary_parts(right);
+    assert_eq!(inner_matching.op, BinaryOp::Add);
+    let NativeExpr::Instant { .. } = &inner_left.expr else {
+        panic!(
+            "the sum's left operand is not the selector: {:?}",
+            inner_left.expr
+        );
+    };
+    assert_eq!(
+        constant(inner_right),
+        Some(1.0),
+        "the summand was not bound as a constant"
+    );
+
+    // Every node is on the statement's grid, which is what lets the operation align them.
+    assert_eq!(grid_of(tree.root()), (0, 5_000, 21));
+    assert_eq!(grid_of(right), (0, 5_000, 21));
+}
+
+/// `return_bool` is a field of the operation rather than a different tree: `x > 0` filters and
+/// `x > bool 0` reports zero or one, and the two differ in nothing else. Both directions of a
+/// comparison are asserted, because which side the constant is on decides what the filter keeps and
+/// a compiler that always put the constant on one side would compile `0 < x` as `x > 0`.
+#[test]
+fn a_comparison_carries_whether_it_filters_or_reports_bool() {
+    let cases = [
+        ("x > 0", BinaryOp::Gt, false),
+        ("x > bool 0", BinaryOp::Gt, true),
+        ("0 < x", BinaryOp::Lt, false),
+        ("0 < bool x", BinaryOp::Lt, true),
+        ("x == 0", BinaryOp::Eq, false),
+        ("x != 0", BinaryOp::Ne, false),
+        ("x >= 0", BinaryOp::Ge, false),
+        ("x <= 0", BinaryOp::Le, false),
+    ];
+
+    for (query, op, return_bool) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, _, matching) = binary_parts(tree.root());
+        assert_eq!(matching.op, op, "`{query}` bound the wrong operator");
+        assert_eq!(
+            matching.return_bool, return_bool,
+            "`{query}` bound the wrong comparison mode"
+        );
+    }
+
+    // The two modes are one tree otherwise: the query text is what differs, and a tree that recorded
+    // the mode somewhere else would fail the assertions above rather than this one.
+    let filters = compile(
+        &eval_stmt("x > 0"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let reports = compile(
+        &eval_stmt("x > bool 0"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert_eq!(grid_of(filters.root()), grid_of(reports.root()));
+}
+
+/// A negation binds as the multiplication it is: `-x` is `-1 * x`. The tree has no negate node, and
+/// the multiplication kernel computes exactly the value the query asks for.
+#[test]
+fn a_negation_binds_as_a_multiplication_by_minus_one() {
+    for query in ["-x", "-(x)"] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (left, right, matching) = binary_parts(tree.root());
+        assert_eq!(
+            matching.op,
+            BinaryOp::Mul,
+            "`{query}` is not bound as a multiplication"
+        );
+        assert_eq!(
+            constant(left),
+            Some(-1.0),
+            "`{query}` did not bind `-1` on the left"
+        );
+        let NativeExpr::Instant { .. } = &right.expr else {
+            panic!("`{query}`'s operand is not the selector: {:?}", right.expr);
+        };
+    }
+}
+
+/// The negation applies to whatever its operand compiles to, so a window can be negated: `-rate(x[5m])`
+/// is a multiplication over the window rather than a new shape.
+#[test]
+fn a_negation_applies_to_the_node_its_operand_compiles_to() {
+    let tree = compile(
+        &eval_stmt("-rate(x[5m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`-rate(x[5m])` was refused: {error}"));
+
+    let (left, right, matching) = binary_parts(tree.root());
+    assert_eq!(matching.op, BinaryOp::Mul);
+    assert_eq!(constant(left), Some(-1.0));
+    let NativeExpr::Window { op, .. } = &right.expr else {
+        panic!("the negation's operand is not a window: {:?}", right.expr);
+    };
+    assert_eq!(op.function, RangeFunction::Rate);
+    assert_eq!(op.window.range_ms, 300_000);
+}
+
+/// A constant written as an expression binds the number it folds to, by the fold a call's parameter
+/// already uses. The value is asserted exactly, so a fold that produced a neighbouring number would
+/// fail here.
+#[test]
+fn a_constant_operand_binds_the_value_it_folds_to() {
+    let cases = [
+        ("x * (1 + 2)", 3.0),
+        ("x + 2 ^ 10", 1024.0),
+        // `^` binds tighter than `*`, so this is `x * 8` rather than `(x * 2) ^ 3`.
+        ("x * 2 ^ 3", 8.0),
+        ("x * -0.5", -0.5),
+        ("x * (1 - 0.1)", 0.9),
+    ];
+
+    for (query, value) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (left, right, _) = binary_parts(tree.root());
+        let scalar_side = if constant(left).is_some() {
+            left
+        } else {
+            right
+        };
+        assert_eq!(
+            constant(scalar_side),
+            Some(value),
+            "`{query}` did not bind the number it folds to"
+        );
+    }
+}
+
+/// An operation between two vectors is refused because the tree cannot say which selector each
+/// `Input` reads: `a + b` and `a + a` would compile to the same tree. The refusal names the missing
+/// identity rather than the query it found, so whoever adds it knows what to add.
+#[test]
+fn an_operation_between_two_vectors_is_refused_for_the_missing_selector_identity() {
+    for query in [
+        "a + b",
+        "a > b",
+        "rate(a[5m]) * rate(b[5m])",
+        "abs(a) + abs(b)",
+    ] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("between two vectors"),
+            "`{query}` did not say what it found: {message}"
+        );
+        assert!(
+            message.contains("selector"),
+            "`{query}` did not name what an input is missing: {message}"
+        );
+    }
+}
+
+/// A set operator has no node at all, so it is refused as the set operator it is rather than as an
+/// arithmetic operation the compiler could not bind: `and`, `or` and `unless` combine two vectors'
+/// series, which is not what a binary value node does.
+#[test]
+fn a_set_operator_is_refused_as_a_set_operator() {
+    for (query, name) in [
+        ("a and b", "and"),
+        ("a or b", "or"),
+        ("a unless b", "unless"),
+    ] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("set operator `{name}`")),
+            "`{query}` did not name the operator it found: {message}"
+        );
+    }
+}
+
+/// A statement with no vector has nothing to read, so it is refused: a tree reads a scan and reports
+/// evaluated samples, and a constant is bound next to a vector rather than on its own. The refusal
+/// names the expression and its type, because the type is why it cannot be bound.
+#[test]
+fn a_statement_with_no_vector_is_refused() {
+    // `pi()` and `time()` are the two functions PromQL calls with no arguments. Both are scalars, so
+    // they reach this refusal before any function-name lookup: what a tree cannot do with them is
+    // report them, not fold them. The rejection still names the expression it found, so a reader
+    // learns which function it was.
+    for (query, found) in [
+        ("1 + 2", "which is a scalar"),
+        ("1", "which is a scalar"),
+        ("-3", "which is a scalar"),
+        ("pi()", "which is a scalar"),
+        ("time()", "which is a scalar"),
+    ] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("`{query}`")),
+            "`{query}` did not name the expression it found: {message}"
+        );
+        assert!(
+            message.contains(found),
+            "`{query}` did not name the type it found: {message}"
+        );
+    }
+}
+
+/// A vector-matching modifier has nothing to match when one operand is a constant, and the tree's
+/// matching has no field for a fill value. Both are refused rather than dropped: dropping one would
+/// compile a query into an operation other than the one it wrote. `bool` is not a matching modifier
+/// and is bound, which is why it is not in this list.
+#[test]
+fn a_vector_matching_modifier_over_a_constant_is_refused() {
+    let cases = [
+        (eval_stmt("x + ignoring() 1"), "x + ignoring() 1"),
+        (eval_stmt("x + on() group_left 1"), "x + on() group_left 1"),
+        (
+            eval_stmt("x + on() group_right 1"),
+            "x + on() group_right 1",
+        ),
+        // A fill value is a matching extension the tree has no field for, so a fill is refused
+        // rather than bound without it. The parser accepts a fill only between two vectors, so the
+        // value is set on a tree the parser accepted.
+        (
+            with_binary_modifier("x + 1", |modifier| {
+                modifier.fill_values = VectorMatchFillValues::new(0.0, 0.0);
+            }),
+            "x + 1 with a fill of 0 on both sides",
+        ),
+    ];
+
+    for (stmt, query) in cases {
+        let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("vector matching"),
+            "`{query}` did not say what it found: {message}"
+        );
+        assert!(
+            message.contains("constant operand"),
+            "`{query}` blamed the wrong operand: {message}"
+        );
+    }
+}
+
+/// The shared acceptance queries of this batch, compiled whole: each one combines the shapes the
+/// batch added, so a compiler that bound any of them wrongly would fail here rather than in a
+/// narrower test.
+#[test]
+fn the_batch_acceptance_queries_compile() {
+    let cases = [
+        // Recursion plus a constant on the left.
+        "2 / (x + 1)",
+        // Filter against bool comparison, in both directions.
+        "x > 0",
+        "0 < x",
+        "x > bool 0",
+        // A negation.
+        "-x",
+    ];
+
+    for query in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        // Every tree the compiler accepts reports a grid, whether it ends in a comparison or a
+        // scalar broadcast.
+        assert_eq!(
+            grid_of(tree.root()),
+            (0, 5_000, 21),
+            "`{query}` does not land on the statement's grid"
+        );
+    }
 }
