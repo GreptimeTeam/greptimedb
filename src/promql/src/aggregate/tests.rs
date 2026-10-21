@@ -1307,6 +1307,22 @@ fn merges_of_large_finite_partials_stay_finite() {
     assert!(crate::grid_series::reference::close(stdvar, serial, 1e-10));
 }
 
+/// Samples that differ by about the rounding of their mean are outside the merge's agreement with
+/// Prometheus: its serial Welford update rounds the mean back and doubles the variance, while the
+/// pairwise merge keeps the exact one.
+#[test]
+fn ill_conditioned_variance_merges_to_the_exact_value() {
+    let partitions: &[&[f64]] = &[&[1e16], &[1e16 + 2.0]];
+    assert_eq!(
+        merged_and_serial(AggregateOp::Stdvar, partitions),
+        (1.0, 2.0)
+    );
+    assert_eq!(
+        merged_and_serial(AggregateOp::Stddev, partitions),
+        (1.0, std::f64::consts::SQRT_2)
+    );
+}
+
 /// `min` and `max` keep the first of two equal values, so with `0` and `-0` the sign is that of
 /// the partial merged first.
 #[test]

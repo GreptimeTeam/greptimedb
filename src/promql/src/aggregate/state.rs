@@ -18,8 +18,11 @@
 //! A merge regroups the operations of a serial fold, so floating-point results differ from
 //! [`aggregate_float`](crate::aggregate::aggregate_float) by rounding. The same reassociation can
 //! also move an overflow of finite values: a serial `sum` of `[1e308, 1e308, -1e308]` is `+Inf`,
-//! while the merge of `[1e308]` and `[1e308, -1e308]` is finite. Explicit NaN and infinite inputs
-//! follow the same rules as the serial fold. Where the serial fold keeps the first of two equal
+//! while the merge of `[1e308]` and `[1e308, -1e308]` is finite. `stddev` and `stdvar` differ
+//! more where the samples differ by little more than the rounding of their mean: Prometheus'
+//! uncompensated Welford update rounds the mean on every sample, and no pairwise merge reproduces
+//! those roundings. For `[1e16]` and `[1e16 + 2]` Prometheus gives a variance of 2 and the merge
+//! gives the exact 1. Explicit NaN and infinite inputs follow the same rules as the serial fold. Where the serial fold keeps the first of two equal
 //! values, as `min` and `max` do for `0` and `-0`, a merge keeps the one merged first.
 
 use std::collections::hash_map::Entry;
