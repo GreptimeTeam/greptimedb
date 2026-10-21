@@ -395,6 +395,37 @@ fn test_histogram_semantics_follow_only_emitted_rows() {
 }
 
 #[test]
+fn test_shared_metric_metadata_follows_surviving_outputs() {
+    let mut metric = histogram_metric("latency");
+    let Some(metric::Data::Histogram(histogram)) = metric.data.as_mut() else {
+        unreachable!()
+    };
+    let with_sum = histogram.data_points[0].clone();
+    histogram.data_points[0].sum = None;
+    histogram.data_points.push(with_sum);
+    for (rejections, has_sum) in [
+        (vec![None, Some("rejected sum".into())], false),
+        (vec![Some("rejected first point".into()), None], true),
+        (vec![None, None], true),
+    ] {
+        let prepared = prepare_metrics(
+            metrics_request(vec![metric.clone()]),
+            &mut OtlpMetricCtx::default(),
+        )
+        .unwrap();
+        let conversion = prepared.finish(rejections, &Default::default()).unwrap();
+        let semantics = decode(&conversion.semantic_index);
+        assert_eq!(semantics.contains_key("latency_sum"), has_sum);
+        for table in ["latency_count", "latency_bucket"] {
+            assert_eq!(
+                semantics[table][SEMANTIC_METRIC_TEMPORALITY],
+                METRIC_TEMPORALITY_CUMULATIVE
+            );
+        }
+    }
+}
+
+#[test]
 fn test_delta_exponential_interval_encoding() {
     use common_query::native_histogram::{COUNT_I64_FIELD, RESET_HINT_FIELD, SUM_FIELD};
     use common_query::prelude::greptime_native_histogram;
@@ -478,6 +509,208 @@ fn gauge(name: &str) -> Metric {
             }],
         })),
         ..Default::default()
+    }
+}
+
+#[test]
+fn test_shared_schemas_preserve_source_order_and_omissions() {
+    let mut metric = gauge("ordered");
+    let Some(metric::Data::Gauge(data)) = &mut metric.data else {
+        unreachable!()
+    };
+    data.data_points = [
+        keyvalue("a", "first"),
+        keyvalue("b", "second"),
+        keyvalue("a", "third"),
+        KeyValue {
+            key: "a".into(),
+            value: None,
+        },
+        keyvalue("a", "fifth"),
+        keyvalue("a", "sixth"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, attribute)| NumberDataPoint {
+        attributes: vec![attribute],
+        time_unix_nano: (index as u64 + 1) * 1_000_000,
+        value: (index != 5).then_some(Value::AsDouble(index as f64)),
+        ..Default::default()
+    })
+    .collect();
+    for reject_first in [false, true] {
+        let prepared = prepare_metrics(
+            metrics_request(vec![metric.clone()]),
+            &mut OtlpMetricCtx::default(),
+        )
+        .unwrap();
+        assert_eq!(prepared.num_points(), 6);
+        // The fourth point omits a, even though its raw attribute key is unchanged.
+        assert_eq!(prepared.requests.len(), 4);
+        assert!(
+            prepared
+                .requests
+                .last()
+                .unwrap()
+                .rows
+                .as_ref()
+                .unwrap()
+                .schema
+                .iter()
+                .all(|column| column.column_name != greptime_value())
+        );
+        let mut rejections = vec![None; 6];
+        if reject_first {
+            rejections[0] = Some("rejected first point".into());
+        }
+        let conversion = prepared.finish(rejections, &Default::default()).unwrap();
+        let rows = table_rows(&conversion.requests, "ordered");
+        let a = column_index(rows, "a");
+        let b = column_index(rows, "b");
+        assert_eq!(b < a, reject_first);
+        let value = column_index(rows, greptime_value());
+        let timestamp = column_index(rows, greptime_timestamp());
+        for (index, row) in (usize::from(reject_first)..6).zip(&rows.rows) {
+            assert_eq!(
+                row.values[value].value_data,
+                (index != 5).then_some(ValueData::F64Value(index as f64))
+            );
+            assert_eq!(
+                row.values[timestamp].value_data,
+                Some(ValueData::TimestampMillisecondValue(index as i64 + 1))
+            );
+            assert_eq!(
+                row.values[a].value_data.is_some(),
+                matches!(index, 0 | 2 | 4 | 5)
+            );
+            assert_eq!(row.values[b].value_data.is_some(), index == 1);
+        }
+        assert_eq!(rows.rows.len(), 6 - usize::from(reject_first));
+    }
+}
+
+#[test]
+fn test_reused_sum_layouts_preserve_omitted_and_stale_values() {
+    let points = [false, true, false, true, false]
+        .into_iter()
+        .enumerate()
+        .map(|(index, stale)| NumberDataPoint {
+            attributes: vec![keyvalue("host", "a")],
+            time_unix_nano: (index as u64 + 1) * 1_000_000,
+            flags: if stale {
+                DataPointFlags::NoRecordedValueMask as u32
+            } else {
+                0
+            },
+            ..Default::default()
+        })
+        .collect();
+    let metric = Metric {
+        name: "requests".into(),
+        data: Some(metric::Data::Sum(Sum {
+            data_points: points,
+            aggregation_temporality: AggregationTemporality::Delta as i32,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let prepared =
+        prepare_metrics(metrics_request(vec![metric]), &mut OtlpMetricCtx::default()).unwrap();
+    assert_eq!(prepared.requests.len(), 2);
+    for request in &prepared.requests {
+        let rows = request.rows.as_ref().unwrap();
+        let has_value = rows
+            .schema
+            .iter()
+            .any(|c| c.column_name == greptime_value());
+        assert_eq!(rows.rows.len(), if has_value { 2 } else { 3 });
+        assert!(
+            rows.rows
+                .iter()
+                .all(|row| row.values.len() == rows.schema.len())
+        );
+    }
+    let conversion = prepared.finish(vec![None; 5], &Default::default()).unwrap();
+    assert_eq!(conversion.outcome.accepted_data_points, 5);
+    let rows = table_rows(&conversion.requests, "requests");
+    let value = column_index(rows, greptime_value());
+    for (index, row) in rows.rows.iter().enumerate() {
+        if index % 2 == 0 {
+            assert!(row.values[value].value_data.is_none());
+        } else {
+            let Some(ValueData::F64Value(value)) = row.values[value].value_data else {
+                panic!("missing stale value")
+            };
+            assert_eq!(value.to_bits(), PROMETHEUS_STALE_NAN_BITS);
+        }
+    }
+}
+
+#[test]
+fn test_unmerged_batches_preserve_normalized_rows_and_metadata() {
+    let mut first = gauge("same");
+    first.unit = "seconds".into();
+    let mut second = first.clone();
+    if let Some(metric::Data::Gauge(data)) = second.data.as_mut() {
+        data.data_points[0].value = Some(Value::AsDouble(8.0));
+    }
+    let mut prepared = prepare_metrics(
+        metrics_request(vec![first, gauge("other"), second]),
+        &mut OtlpMetricCtx::default(),
+    )
+    .unwrap();
+    assert_eq!(prepared.requests.len(), 2);
+    for request in &mut prepared.requests {
+        let rows = request.rows.as_mut().unwrap();
+        let timestamp = column_index(rows, greptime_timestamp());
+        rows.schema[timestamp].datatype = ColumnDataType::TimestampMicrosecond as i32;
+        for row in &mut rows.rows {
+            row.values[timestamp].value_data = Some(ValueData::TimestampMicrosecondValue(123));
+        }
+    }
+    let expected = prepared.requests.clone();
+    let conversion = prepared.finish(vec![None; 3], &Default::default()).unwrap();
+    assert_eq!(conversion.requests.inserts, expected);
+    assert_eq!(conversion.rows, 3);
+    assert_eq!(conversion.outcome.accepted_data_points, 3);
+    let semantics = decode(&conversion.semantic_index);
+    for request in &conversion.requests.inserts {
+        assert_eq!(
+            semantics[&request.table_name][SEMANTIC_METRIC_TYPE],
+            METRIC_TYPE_GAUGE
+        );
+    }
+}
+
+#[test]
+fn test_shared_batch_row_error_rejects_complete_histogram_point() {
+    let mut metric = histogram_metric("latency");
+    let Some(metric::Data::Histogram(data)) = &mut metric.data else {
+        unreachable!()
+    };
+    data.data_points.push(data.data_points[0].clone());
+    let prepared =
+        prepare_metrics(metrics_request(vec![metric]), &mut OtlpMetricCtx::default()).unwrap();
+    let mut errors: Vec<_> = prepared
+        .requests
+        .iter()
+        .map(|request| vec![None; request.rows.as_ref().unwrap().rows.len()])
+        .collect();
+    let bucket = prepared
+        .requests
+        .iter()
+        .position(|r| r.table_name == "latency_bucket")
+        .unwrap();
+    let second_point = errors[bucket].len() / 2;
+    errors[bucket][second_point] = Some("invalid bucket".into());
+    assert!(prepared.point_rejections(Vec::new()).is_err());
+    let rejections = prepared.point_rejections(errors).unwrap();
+    assert_eq!(rejections, vec![None, Some("invalid bucket".into())]);
+    let conversion = prepared.finish(rejections, &Default::default()).unwrap();
+    assert_eq!(conversion.outcome.accepted_data_points, 1);
+    assert_eq!(conversion.outcome.rejected_data_points, 1);
+    for table in ["latency_count", "latency_sum", "latency_bucket"] {
+        assert_eq!(table_rows(&conversion.requests, table).rows.len(), 1);
     }
 }
 

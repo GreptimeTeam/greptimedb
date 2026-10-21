@@ -125,7 +125,6 @@ impl OpenTelemetryProtocolHandler for Instance {
             prepared
                 .requests
                 .iter()
-                .flat_map(|requests| &requests.inserts)
                 .filter(|request| table_names.insert(request.table_name.as_str()))
                 .map(|request| PermissionTableTarget::new(catalog, &schema, &request.table_name))
                 .collect()
@@ -149,13 +148,14 @@ impl OpenTelemetryProtocolHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
+        let rejections = prepared.point_rejections(preflight.rejections)?;
         let otlp::metrics::MetricsConversion {
             requests,
             rows,
             semantic_index,
             resource_info,
             mut outcome,
-        } = prepared.finish(preflight.rejections, &preflight.physical_tables)?;
+        } = prepared.finish(rejections, &preflight.physical_tables)?;
         if outcome.rejected_data_points > 0 {
             warn!(
                 "Rejected {} OTLP metrics data points: {}",

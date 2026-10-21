@@ -116,6 +116,15 @@ impl SemanticIndex {
         }
     }
 
+    /// Moves a metric's metadata on its first accepted output for this table.
+    pub(crate) fn merge_table_from(&mut self, other: &mut SemanticIndex, table: &str) {
+        if let Some(scalars) = other.tables.remove(table) {
+            for (key, value) in scalars {
+                self.record_scalar(table, key, &value);
+            }
+        }
+    }
+
     #[cfg(test)]
     fn options_of(&self, table: &str) -> Option<&BTreeMap<&'static str, String>> {
         self.tables.get(table)

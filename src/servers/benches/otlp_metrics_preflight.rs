@@ -161,7 +161,7 @@ fn bench_preflight(c: &mut Criterion) {
         );
         let inserter = runtime.block_on(inserter(&converted.requests));
         let prepared = prepare_metrics(fixture.request, &mut metric_ctx).unwrap();
-        group.throughput(Throughput::Elements(prepared.requests.len() as u64));
+        group.throughput(Throughput::Elements(prepared.num_points() as u64));
         group.bench_function(fixture.name, |b| {
             let mut requests = prepared.requests.clone();
             let result = runtime
@@ -172,9 +172,10 @@ fn bench_preflight(c: &mut Criterion) {
                     "physical",
                 ))
                 .unwrap();
-            assert_eq!(result.rejections.len(), requests.len());
+            let rejections = prepared.point_rejections(result.rejections).unwrap();
+            assert_eq!(rejections.len(), prepared.num_points());
             assert_eq!(
-                result.rejections.iter().filter(|r| r.is_some()).count(),
+                rejections.iter().filter(|r| r.is_some()).count(),
                 if fixture.name == "required_tag_1024" {
                     fixture.points.div_ceil(10) as usize
                 } else {
@@ -199,9 +200,61 @@ fn bench_preflight(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_ingestion(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let ctx = QueryContext::arc();
+    let mut group = c.benchmark_group("otlp_ingestion");
+    for fixture in fixtures::fixtures() {
+        let metric_ctx = OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        };
+        let converted =
+            to_grpc_insert_requests(fixture.request.clone(), &mut metric_ctx.clone()).unwrap();
+        let inserter = runtime.block_on(inserter(&converted.requests));
+        let convert = |request| {
+            let mut prepared = prepare_metrics(request, &mut metric_ctx.clone()).unwrap();
+            let validated = runtime
+                .block_on(inserter.validate_and_normalize_otlp_metrics(
+                    &mut prepared.requests,
+                    &ctx,
+                    true,
+                    "physical",
+                ))
+                .unwrap();
+            let rejections = prepared.point_rejections(validated.rejections).unwrap();
+            prepared
+                .finish(rejections, &validated.physical_tables)
+                .unwrap()
+        };
+        let output = convert(fixture.request.clone());
+        let rejected = if fixture.name == "required_tag_1024" {
+            fixture.points.div_ceil(10) as i64
+        } else {
+            fixture.rejected
+        };
+        assert_eq!(output.outcome.rejected_data_points, rejected);
+        assert_eq!(
+            output.outcome.accepted_data_points,
+            fixture.points as i64 - rejected
+        );
+        group.throughput(Throughput::Elements(fixture.points));
+        group.bench_function(fixture.name, |b| {
+            b.iter_batched(
+                || fixture.request.clone(),
+                |request| {
+                    black_box(convert(request));
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(20).warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(3));
-    targets = bench_preflight
+    targets = bench_preflight, bench_ingestion
 }
 criterion_main!(benches);

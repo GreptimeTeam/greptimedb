@@ -18,7 +18,7 @@ use api::greptime_proto::io::prometheus::write::v2::histogram::{
 };
 use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram as PromHistogram};
 use api::v1::value::ValueData;
-use api::v1::{RowInsertRequests, SemanticType, Value};
+use api::v1::{ColumnSchema, RowInsertRequests, SemanticType, Value};
 use common_grpc::precision::Precision;
 use common_query::native_histogram::{
     encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
@@ -33,6 +33,7 @@ use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetrics
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{metric, number_data_point, *};
 use session::protocol_ctx::{MetricType, OtlpMetricCtx};
+use snafu::OptionExt;
 use table::requests::{
     METADATA_QUALITY_DECLARED, METRIC_TEMPORALITY_CUMULATIVE, METRIC_TEMPORALITY_DELTA,
     SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_ORIGINAL_NAME, SEMANTIC_METRIC_TEMPORALITY,
@@ -121,6 +122,37 @@ pub struct MetricsConversion {
     pub outcome: MetricsIngestOutcome,
 }
 
+struct MetricMetadata {
+    name: String,
+    original_name: String,
+    native_schema: Option<ColumnSchema>,
+    semantics: SemanticIndex,
+}
+
+impl MetricMetadata {
+    fn new(metric: &Metric, ctx: &OtlpMetricCtx) -> Result<Self> {
+        let name = translate_metric_name(metric, &ctx.metric_type, ctx.metric_translation_strategy);
+        let emitted = emitted_semantic_tables(&ctx.metric_type, &name);
+        let mut semantics = SemanticIndex::default();
+        record_metric_semantics(&mut semantics, metric, &name, &emitted);
+        let native_schema = matches!(metric.data, Some(metric::Data::ExponentialHistogram(_)))
+            .then(native_histogram_column_schema)
+            .transpose()
+            .map_err(|error| {
+                error::InternalSnafu {
+                    err_msg: error.to_string(),
+                }
+                .build()
+            })?;
+        Ok(Self {
+            name,
+            original_name: metric.name.clone(),
+            native_schema,
+            semantics,
+        })
+    }
+}
+
 /// Converts OpenTelemetry metrics without validating destination table schemas.
 /// Ingestion callers use [`prepare_metrics`], run destination preflight, then call
 /// [`PreparedMetrics::finish`] to apply rejections and merge surviving points.
@@ -133,37 +165,31 @@ pub fn to_grpc_insert_requests(
     metric_ctx: &mut OtlpMetricCtx,
 ) -> Result<MetricsConversion> {
     let prepared = prepare_metrics(request, metric_ctx)?;
-    let rejections = vec![None; prepared.requests.len()];
+    let rejections = vec![None; prepared.num_points()];
     prepared.finish(rejections, &std::collections::HashMap::new())
 }
 
-fn validate_sample_kinds(requests: &RowInsertRequests) -> Result<()> {
-    for request in &requests.inserts {
-        let Some(rows) = &request.rows else {
-            continue;
-        };
-        let field_count = rows
-            .schema
-            .iter()
-            .filter(|column| column.semantic_type == SemanticType::Field as i32)
-            .count();
-        let has_native_histogram = rows.schema.iter().any(|column| {
-            column.semantic_type == SemanticType::Field as i32
-                && api::helper::is_column_type_value_eq(
-                    column.datatype,
-                    column.datatype_extension.clone(),
-                    native_histogram_value_type(),
-                )
-        });
-        if has_native_histogram && field_count != 1 {
-            return Err(error::InvalidParameterSnafu {
-                reason: format!(
-                    "OTLP metric `{}` cannot mix native histogram and float sample fields",
-                    request.table_name
-                ),
-            }
-            .build());
+fn validate_sample_kind(table_name: &str, schema: &[ColumnSchema]) -> Result<()> {
+    let field_count = schema
+        .iter()
+        .filter(|column| column.semantic_type == SemanticType::Field as i32)
+        .count();
+    let has_native_histogram = schema.iter().any(|column| {
+        column.semantic_type == SemanticType::Field as i32
+            && api::helper::is_column_type_value_eq(
+                column.datatype,
+                column.datatype_extension.clone(),
+                native_histogram_value_type(),
+            )
+    });
+    if has_native_histogram && field_count != 1 {
+        return Err(error::InvalidParameterSnafu {
+            reason: format!(
+                "OTLP metric `{}` cannot mix native histogram and float sample fields",
+                table_name
+            ),
         }
+        .build());
     }
     Ok(())
 }
@@ -368,23 +394,20 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
 fn encode_metrics(
     table_writer: &mut MultiTableData,
     metric: &Metric,
+    metadata: &MetricMetadata,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<()> {
-    let name = translate_metric_name(
-        metric,
-        &metric_ctx.metric_type,
-        metric_ctx.metric_translation_strategy,
-    );
+    let name = &metadata.name;
 
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
                 encode_gauge(
                     table_writer,
-                    &name,
+                    name,
                     gauge,
                     resource_attrs,
                     scope_attrs,
@@ -395,7 +418,7 @@ fn encode_metrics(
             metric::Data::Sum(sum) => {
                 encode_sum(
                     table_writer,
-                    &name,
+                    name,
                     sum,
                     resource_attrs,
                     scope_attrs,
@@ -406,7 +429,7 @@ fn encode_metrics(
             metric::Data::Summary(summary) => {
                 encode_summary(
                     table_writer,
-                    &name,
+                    name,
                     summary,
                     resource_attrs,
                     scope_attrs,
@@ -416,7 +439,7 @@ fn encode_metrics(
             }
             metric::Data::Histogram(hist) => encode_histogram(
                 table_writer,
-                &name,
+                name,
                 hist,
                 resource_attrs,
                 scope_attrs,
@@ -425,7 +448,7 @@ fn encode_metrics(
             )?,
             metric::Data::ExponentialHistogram(hist) => encode_exponential_histogram(
                 table_writer,
-                &name,
+                metadata,
                 hist,
                 resource_attrs,
                 scope_attrs,
@@ -517,13 +540,14 @@ fn append_rejection_message(message: &mut Option<String>, reason: impl FnOnce() 
 
 fn encode_exponential_histogram(
     table_writer: &mut MultiTableData,
-    name: &str,
+    metadata: &MetricMetadata,
     histogram: &ExponentialHistogram,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<()> {
+    let name = &metadata.name;
     let temporality = match exponential_histogram_gate(histogram) {
         Ok(temporality) => temporality,
         Err(rejection) => {
@@ -537,12 +561,12 @@ fn encode_exponential_histogram(
         }
     };
 
-    let column_schema = native_histogram_column_schema().map_err(|error| {
-        error::InternalSnafu {
-            err_msg: error.to_string(),
-        }
-        .build()
-    })?;
+    let column_schema = metadata
+        .native_schema
+        .as_ref()
+        .context(error::InternalSnafu {
+            err_msg: "missing native histogram schema",
+        })?;
     for (index, data_point) in histogram.data_points.iter().enumerate() {
         let (value, timestamp_nanos) = match exponential_histogram_value(data_point, temporality) {
             Ok(value) => value,
