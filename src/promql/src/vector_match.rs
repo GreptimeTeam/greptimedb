@@ -25,12 +25,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
 use datatypes::series::histogram::{CounterResetHint, HistogramView};
 use datatypes::series::samples::{RowCursor, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridRunPair, TimeAxis};
+use datatypes::series::{Label, MetricName};
 
-use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS};
+use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS, external, owned};
 use crate::histogram_eval::float_histogram::FloatHistogram;
 
 #[cfg(test)]
@@ -110,7 +110,29 @@ pub struct BinaryMatching {
     pub return_bool: bool,
     pub labels: MatchingLabels,
     pub cardinality: Cardinality,
+    pub fill: FillValues,
 }
+
+/// The values of `fill`, `fill_left` and `fill_right`, which stand in for a sample that has no
+/// match on the other side.
+///
+/// Prometheus applies them after it swaps the operands of `group_right`, so there `fill_left`
+/// stands in for a missing right-hand sample and `fill_right` for a missing left-hand one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FillValues {
+    pub lhs: Option<f64>,
+    pub rhs: Option<f64>,
+}
+
+// Compared by bits: a NaN fill equals itself, and `fill(-0)` differs from `fill(0)` (`1 / fill`).
+impl PartialEq for FillValues {
+    fn eq(&self, other: &Self) -> bool {
+        let bits = |value: Option<f64>| value.map(f64::to_bits);
+        bits(self.lhs) == bits(other.lhs) && bits(self.rhs) == bits(other.rhs)
+    }
+}
+
+impl Eq for FillValues {}
 
 /// A PromQL set operator between two instant vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,7 +157,8 @@ pub fn binary_output_schema(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Ar
 /// Fields are paired by position. Arithmetic and `bool` comparisons drop `__name__`, `__type__`
 /// and `__unit__`; comparisons without `bool` keep the left value where they hold. Native
 /// histograms support `+`, `-`, `==` and `!=` with each other, `*` with a float on either side
-/// and `/` by a float; Prometheus skips any other pairing of a histogram.
+/// and `/` by a float; Prometheus skips any other pairing of a histogram. A fill value pairs a
+/// sample that has no match with a float sample labelled with its match group.
 pub fn binary_vectors(
     matching: &BinaryMatching,
     lhs_schema: &SeriesSchema,
@@ -174,18 +197,21 @@ fn binary_field(
         Cardinality::OneToMany(include) => (rhs, lhs, &include[..], true),
     };
     let points = grid.timestamps().len();
-    // Prometheus short-circuits a point where either side is empty, before any check.
-    let both_present: Vec<bool> = lhs
+    let fill = matching.fill;
+    // Prometheus short-circuits a point where either side is empty, before any check; with a fill
+    // value only a point where both are empty.
+    let filling = fill.lhs.is_some() || fill.rhs.is_some();
+    let evaluated: Vec<bool> = lhs
         .presence(points)
         .into_iter()
         .zip(rhs.presence(points))
-        .map(|(lhs, rhs)| lhs && rhs)
+        .map(|(lhs, rhs)| if filling { lhs || rhs } else { lhs && rhs })
         .collect();
 
     let one_groups = group(one, &matching.labels);
     let mut one_duplicate: Option<(usize, &GroupKey)> = None;
     for (key, members) in &one_groups {
-        if let Some(point) = overlap(one, members, |point| both_present[point])
+        if let Some(point) = overlap(one, members, |point| evaluated[point])
             && one_duplicate.is_none_or(|(first, _)| point < first)
         {
             one_duplicate = Some((point, key));
@@ -193,23 +219,23 @@ fn binary_field(
     }
 
     let drop_name = !matching.op.is_comparison() || matching.return_bool;
-    let mut results = Results::default();
-    let group_keys: Vec<&GroupKey> = one_groups.keys().collect();
-    let group_ids: HashMap<&GroupKey, usize> = group_keys
-        .iter()
-        .enumerate()
-        .map(|(id, key)| (*key, id))
-        .collect();
-    // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
-    // comparison as a match too, but not an operation that failed.
-    let mut matched: HashSet<(usize, usize)> = HashSet::new();
-    let mut implicit_many_to_one: Option<(usize, &GroupKey)> = None;
+    let mut pairs = Pairs {
+        matching,
+        one_is_left,
+        results: Results::default(),
+        group_keys: Vec::new(),
+        group_ids: HashMap::new(),
+        matched: (matching.cardinality == Cardinality::OneToOne || fill.lhs.is_some())
+            .then(HashSet::new),
+        implicit_many_to_one: None,
+    };
     for (many_index, many_series) in many.series.iter().enumerate() {
         let key = group_key(&many_series.metric, &matching.labels);
-        let Some(candidates) = one_groups.get(&key) else {
+        let candidates = one_groups.get(&key).map_or(&[][..], Vec::as_slice);
+        if candidates.is_empty() && fill.rhs.is_none() {
             continue;
-        };
-        let group_id = group_ids[&key];
+        }
+        let group = pairs.group_id(&key);
         for &one_index in candidates {
             let metric = result_metric(
                 &many_series.metric,
@@ -237,36 +263,65 @@ fn binary_field(
                             .at(pair.other_row + offset)
                             .expect("a row never goes back"),
                     );
-                    if matches!(many_value, SampleRef::Missing)
-                        || matches!(one_value, SampleRef::Missing)
-                    {
-                        continue;
-                    }
-                    let (lhs_value, rhs_value) = if one_is_left {
-                        (one_value, many_value)
-                    } else {
-                        (many_value, one_value)
-                    };
-                    let Some((result, keep)) = elem_binop(matching.op, lhs_value, rhs_value)?
-                    else {
-                        continue;
-                    };
-                    if matching.cardinality == Cardinality::OneToOne
-                        && !matched.insert((group_id, point))
-                        && implicit_many_to_one.is_none_or(|(first, _)| point < first)
-                    {
-                        implicit_many_to_one = Some((point, group_keys[group_id]));
-                    }
-                    let value = if matching.return_bool {
-                        Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
-                    } else {
-                        keep.then_some(result)
-                    };
-                    results.insert(&metric, group_id, point, value);
+                    pairs.apply(group, &metric, point, many_value, one_value)?;
+                }
+            }
+        }
+        if let Some(value) = fill.rhs {
+            let metric = result_metric(
+                &many_series.metric,
+                &metric_of(&key)?,
+                matching,
+                include,
+                drop_name,
+            )?;
+            let mut cursor = many.cursor(many_index);
+            let mut candidate_cursors: Vec<RowCursor<'_>> =
+                candidates.iter().map(|&index| one.cursor(index)).collect();
+            for (point, row) in many.positions(many_index) {
+                let sample = cursor.at(row).expect("a row never goes back");
+                let matched = candidates
+                    .iter()
+                    .zip(&mut candidate_cursors)
+                    .any(|(&index, cursor)| one.present(index, point, cursor));
+                if !matched {
+                    pairs.apply(group, &metric, point, sample, SampleRef::Float(value))?;
                 }
             }
         }
     }
+    // Prometheus fills the many side after every match of the step, for the samples of the one
+    // side that no operation matched.
+    if let Some(value) = fill.lhs {
+        for (one_index, one_series) in one.series.iter().enumerate() {
+            let key = group_key(&one_series.metric, &matching.labels);
+            let group = pairs.group_id(&key);
+            let metric = result_metric(
+                &metric_of(&key)?,
+                &one_series.metric,
+                matching,
+                include,
+                drop_name,
+            )?;
+            let mut cursor = one.cursor(one_index);
+            for (point, row) in one.positions(one_index) {
+                if !pairs
+                    .matched
+                    .as_ref()
+                    .is_some_and(|matched| matched.contains(&(group, point)))
+                {
+                    let sample = cursor.at(row).expect("a row never goes back");
+                    pairs.apply(group, &metric, point, SampleRef::Float(value), sample)?;
+                }
+            }
+        }
+    }
+    let Pairs {
+        mut results,
+        group_keys,
+        implicit_many_to_one,
+        ..
+    } = pairs;
     // Prometheus fails at the first failing step. Within a step it checks the one side, then
     // matches, and only after the operator checks that result label sets are unique.
     if let Some((point, key)) = one_duplicate {
@@ -283,7 +338,8 @@ fn binary_field(
             ),
         ));
     }
-    if let Some((point, key)) = implicit_many_to_one {
+    if let Some((point, group)) = implicit_many_to_one {
+        let key = &group_keys[group];
         errors.push((
             point,
             1,
@@ -317,6 +373,89 @@ fn binary_field(
         });
     }
     Ok(results)
+}
+
+/// The matched pairs of one field and the state Prometheus checks them against.
+struct Pairs<'a> {
+    matching: &'a BinaryMatching,
+    one_is_left: bool,
+    results: Results,
+    group_keys: Vec<GroupKey>,
+    group_ids: HashMap<GroupKey, usize>,
+    /// The match groups an operation matched at a point, kept where Prometheus consults them:
+    /// one-to-one matching, and filling the many side. A filtered comparison counts as a match,
+    /// an operation that failed does not.
+    matched: Option<HashSet<(usize, usize)>>,
+    implicit_many_to_one: Option<(usize, usize)>,
+}
+
+impl Pairs<'_> {
+    /// The id of the match group `key`, which stands for it in `matched` and in the results.
+    fn group_id(&mut self, key: &GroupKey) -> usize {
+        if let Some(&id) = self.group_ids.get(key) {
+            return id;
+        }
+        let id = self.group_keys.len();
+        self.group_keys.push(key.clone());
+        self.group_ids.insert(key.clone(), id);
+        id
+    }
+
+    /// Applies the operator to a sample of each side at `point`; a missing sample is no pair.
+    fn apply(
+        &mut self,
+        group: usize,
+        metric: &MetricName,
+        point: usize,
+        many_value: SampleRef<'_>,
+        one_value: SampleRef<'_>,
+    ) -> Result<()> {
+        if matches!(many_value, SampleRef::Missing) || matches!(one_value, SampleRef::Missing) {
+            return Ok(());
+        }
+        let (lhs_value, rhs_value) = if self.one_is_left {
+            (one_value, many_value)
+        } else {
+            (many_value, one_value)
+        };
+        let Some((result, keep)) = elem_binop(self.matching.op, lhs_value, rhs_value)? else {
+            return Ok(());
+        };
+        // One-to-one: a match group may be matched once per point.
+        if let Some(matched) = &mut self.matched
+            && !matched.insert((group, point))
+            && self.matching.cardinality == Cardinality::OneToOne
+            && self
+                .implicit_many_to_one
+                .is_none_or(|(first, _)| point < first)
+        {
+            self.implicit_many_to_one = Some((point, group));
+        }
+        let value = if self.matching.return_bool {
+            Some(GridSample::Float(if keep { 1.0 } else { 0.0 }))
+        } else {
+            keep.then_some(result)
+        };
+        self.results.insert(metric, group, point, value);
+        Ok(())
+    }
+}
+
+/// The labels Prometheus gives a fill sample: the match group of the sample it pairs with.
+fn metric_of(key: &GroupKey) -> Result<MetricName> {
+    let mut name = None;
+    let mut labels = Vec::with_capacity(key.len());
+    for (label, value) in key {
+        if &**label == "__name__" {
+            name = Some(value.clone());
+        } else {
+            labels.push(Label {
+                name: label.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    MetricName::try_new(name, labels).map_err(external)
 }
 
 fn earliest_error(errors: Vec<(usize, u8, String)>) -> Result<()> {
@@ -685,17 +824,6 @@ impl<'a> Operand<'a> {
         }
         presence
     }
-}
-
-/// `sample` as an owned value; `None` when missing.
-fn owned(sample: SampleRef<'_>) -> Result<Option<GridSample>> {
-    Ok(match sample {
-        SampleRef::Missing => None,
-        SampleRef::Float(value) => Some(GridSample::Float(value)),
-        SampleRef::Histogram(view) => Some(GridSample::Histogram(Box::new(
-            FloatHistogram::try_from_view(&view)?,
-        ))),
-    })
 }
 
 /// Prometheus `vectorElemBinop` over present samples: the value and whether to keep it, or
