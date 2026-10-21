@@ -910,7 +910,7 @@ fn value_labels_format_like_go() {
         assert_eq!(format_value(value), expected, "{bits}");
         checked += 1;
     }
-    assert!(checked > 1_800, "{checked}");
+    assert!(checked > 2_400, "{checked}");
     for (value, expected) in [
         (f64::NAN, "NaN"),
         (f64::INFINITY, "+Inf"),
@@ -1020,4 +1020,48 @@ fn quantile_over_one_point_members_reads_each_member_at_its_point() {
     let output = aggregate_quantile(&schema, &series, &q, Grouping::By(&[])).unwrap();
     let expected: Vec<Option<f64>> = (0..128).map(|point| Some(point as f64)).collect();
     assert_eq!(values_of(&output, 0, 128), (0, expected));
+}
+
+/// `2^-24` and the float below it format to different labels, so they count as two values: the
+/// even 16-digit candidate for `2^-24` names the lower neighbour.
+#[test]
+fn count_values_keeps_neighbours_of_a_power_of_two_apart() {
+    let schema = schema(&["value"]);
+    let series = [0x3e70_0000_0000_0000, 0x3e6f_ffff_ffff_ffff]
+        .into_iter()
+        .enumerate()
+        .map(|(index, bits)| {
+            input(
+                &schema,
+                metric("m", &[("i", &index.to_string())]),
+                0,
+                &[vec![Some(f64::from_bits(bits))]],
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut groups: Vec<(String, (usize, Vec<Option<f64>>))> =
+        count_values(&schema, &series, "v", Grouping::By(&[]))
+            .unwrap()
+            .iter()
+            .map(|series| {
+                (
+                    series.metric.get("v").unwrap().to_string(),
+                    values(series, 0),
+                )
+            })
+            .collect();
+    groups.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        groups,
+        [
+            (
+                "0.00000005960464477539062".to_string(),
+                (0, vec![Some(1.0)])
+            ),
+            (
+                "0.00000005960464477539063".to_string(),
+                (0, vec![Some(1.0)])
+            ),
+        ]
+    );
 }
