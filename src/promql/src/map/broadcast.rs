@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::samples::{FieldSpec, Series, SeriesSchema};
+use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
 use crate::grid_series::GridSeriesBuilder;
 use crate::map::{
     ArithmeticOp, Comparison, MathOp, drop_metric_name, float_sample, validate_float_series,
+    validate_grid_series,
 };
 
 /// A time-varying, unlabelled single-field scalar, with explicit operand direction.
@@ -129,62 +130,60 @@ pub fn map_scalar_function(
 }
 
 /// A math function whose parameters are scalar expressions, which Prometheus evaluates at every
-/// step: `round(v, to_nearest)`, `clamp(v, min, max)`, `clamp_min(v, min)` and `clamp_max(v, max)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ParameterizedMath {
-    Round,
-    Clamp,
-    ClampMin,
-    ClampMax,
+/// step, with those parameters as time-varying scalars.
+#[derive(Clone, Copy, Debug)]
+pub enum ParameterizedMath<'a> {
+    /// `round(v, to_nearest)`.
+    Round { to_nearest: &'a Series },
+    /// `clamp(v, min, max)`.
+    Clamp { min: &'a Series, max: &'a Series },
+    /// `clamp_min(v, min)`.
+    ClampMin { min: &'a Series },
+    /// `clamp_max(v, max)`.
+    ClampMax { max: &'a Series },
 }
 
-impl ParameterizedMath {
-    /// The function with the parameters of one point, in argument order.
-    fn at(self, parameters: &[f64]) -> MathOp {
+impl<'a> ParameterizedMath<'a> {
+    /// The parameters in argument order.
+    fn parameters(self) -> Vec<&'a Series> {
         match self {
-            Self::Round => MathOp::Round {
-                nearest: parameters[0],
-            },
-            Self::Clamp => MathOp::Clamp {
-                min: parameters[0],
-                max: parameters[1],
-            },
-            Self::ClampMin => MathOp::ClampMin { min: parameters[0] },
-            Self::ClampMax => MathOp::ClampMax { max: parameters[0] },
+            Self::Round { to_nearest } => vec![to_nearest],
+            Self::Clamp { min, max } => vec![min, max],
+            Self::ClampMin { min } => vec![min],
+            Self::ClampMax { max } => vec![max],
         }
     }
 
-    fn arity(self) -> usize {
+    /// The function with the parameter values of one point, in argument order.
+    fn at(self, values: &[f64]) -> MathOp {
         match self {
-            Self::Clamp => 2,
-            Self::Round | Self::ClampMin | Self::ClampMax => 1,
+            Self::Round { .. } => MathOp::Round { nearest: values[0] },
+            Self::Clamp { .. } => MathOp::Clamp {
+                min: values[0],
+                max: values[1],
+            },
+            Self::ClampMin { .. } => MathOp::ClampMin { min: values[0] },
+            Self::ClampMax { .. } => MathOp::ClampMax { max: values[0] },
         }
     }
 }
 
-/// Applies `function` to every float field with its parameters read at each point from
-/// time-varying scalars, and drops the metric name, as [`crate::map::map_math`] does with
-/// constant parameters.
+/// Applies `function` to every field with its parameters read at each point from time-varying
+/// scalars, and drops the metric name, as [`crate::map::map_math`] does with constant parameters;
+/// native histogram samples are skipped the same way.
 ///
 /// A point where a parameter has no value has no result. `clamp` with `max < min` at a point has
 /// no result there, as Prometheus returns an empty vector for that step. `None` means no point
-/// holds a result.
+/// holds a result. Same-labelset merging is left to the caller.
 pub fn map_math_with_parameters(
     schema: &Arc<SeriesSchema>,
     series: &Series,
-    function: ParameterizedMath,
-    parameters: &[&Series],
+    function: ParameterizedMath<'_>,
 ) -> Result<Option<Series>> {
-    if parameters.len() != function.arity() {
-        return Err(DataFusionError::Execution(format!(
-            "{function:?} takes {} scalar parameters, got {}",
-            function.arity(),
-            parameters.len()
-        )));
-    }
-    let time = validate_float_series(schema, series)?;
+    let time = validate_grid_series(schema, series)?;
+    let parameters = function.parameters();
     let mut parameter_axes = Vec::with_capacity(parameters.len());
-    for parameter in parameters {
+    for parameter in &parameters {
         parameter_axes.push(validate_scalar(schema, parameter)?);
     }
     // Points only increase, so each parameter's row does too and one cursor reads it.
@@ -204,16 +203,16 @@ pub fn map_math_with_parameters(
             });
             values.extend(value);
         }
+        let op = (values.len() == parameters.len())
+            .then(|| function.at(&values))
+            .filter(|op| !op.is_empty_clamp());
         row.clear();
-        let op = (values.len() == parameters.len()).then(|| function.at(&values));
         for cursor in &mut field_cursors {
-            let sample = float_sample(
-                cursor
-                    .at(index)
-                    .expect("the axis and the fields are aligned"),
-            );
-            row.push(match op {
-                Some(op) if !op.is_empty_clamp() => sample.map(|value| op.calculate(value)),
+            let sample = cursor
+                .at(index)
+                .expect("the axis and the fields are aligned");
+            row.push(match (op, sample) {
+                (Some(op), SampleRef::Float(value)) => Some(op.calculate(value)),
                 _ => None,
             });
         }

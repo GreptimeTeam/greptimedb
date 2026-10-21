@@ -468,13 +468,7 @@ fn parameterized_math_matches_prometheus() {
         .filter(|case| case.contains("case "))
     {
         let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
-        let function = match lines[0].strip_prefix("case ").unwrap() {
-            "round" => ParameterizedMath::Round,
-            "clamp" => ParameterizedMath::Clamp,
-            "clamp_min" => ParameterizedMath::ClampMin,
-            "clamp_max" => ParameterizedMath::ClampMax,
-            other => panic!("unknown function {other}"),
-        };
+        let name = lines[0].strip_prefix("case ").unwrap();
         let points: u64 = lines[2].split_whitespace().nth(3).unwrap().parse().unwrap();
         let grid = Arc::new(
             EvalGrid::try_new(GridSpec::try_new(100_000, 10_000, points).unwrap()).unwrap(),
@@ -486,18 +480,17 @@ fn parameterized_math_matches_prometheus() {
             .into(),
             eval_grid: Some(grid.clone()),
         });
-        let dense = |schema: &Arc<SeriesSchema>, labels: &Labels, values: &Points| {
-            crate::grid_series::reference::sparse_series(schema, labels, values)
-        };
+        let sparse_series = crate::grid_series::reference::sparse_series;
         let (mut inputs, mut parameters, mut expected) = (Vec::new(), Vec::new(), BTreeMap::new());
         for line in &lines[3..] {
             let (kind, rest) = line.split_once(' ').unwrap();
             let (labels, values) = parse(rest);
             match kind {
-                "series" => inputs.extend(dense(&input_schema, &labels, &values)),
+                "series" => inputs.extend(sparse_series(&input_schema, &labels, &values)),
                 // A parameter is `scalar(p)`: unlabelled, with a value at every point.
                 "param" => parameters.push(
-                    dense(&input_schema, &Labels::new(), &values).expect("a value at every point"),
+                    sparse_series(&input_schema, &Labels::new(), &values)
+                        .expect("a value at every point"),
                 ),
                 "result" => {
                     expected.insert(labels, values);
@@ -505,11 +498,16 @@ fn parameterized_math_matches_prometheus() {
                 other => panic!("unexpected line {other}"),
             }
         }
-        let parameters: Vec<&Series> = parameters.iter().collect();
+        let function = match (name, parameters.as_slice()) {
+            ("round", [to_nearest]) => ParameterizedMath::Round { to_nearest },
+            ("clamp", [min, max]) => ParameterizedMath::Clamp { min, max },
+            ("clamp_min", [min]) => ParameterizedMath::ClampMin { min },
+            ("clamp_max", [max]) => ParameterizedMath::ClampMax { max },
+            other => panic!("unknown case {other:?}"),
+        };
         let mut actual = BTreeMap::new();
         for input in &inputs {
-            if let Some(output) =
-                map_math_with_parameters(&input_schema, input, function, &parameters).unwrap()
+            if let Some(output) = map_math_with_parameters(&input_schema, input, function).unwrap()
             {
                 actual.insert(labels_of(&output.metric), points_of(&output));
             }
@@ -538,14 +536,79 @@ fn parameterized_math_matches_prometheus() {
     assert!(checked >= 40, "{checked}");
 }
 
-/// The parameter count must match the function.
+/// Parameters are read at each point of the input, whether they cover the grid or not: a point
+/// where a parameter has no value, absent from its axis or null, has no result, and every field
+/// takes the parameters of its point.
 #[test]
-fn parameterized_math_checks_its_parameter_count() {
-    let schema = Arc::new(schema(&["value"]));
-    let series = series(&schema, 0, vec![floats(&[Some(1.0)])]);
-    let parameter = scalar(&schema, 0, floats(&[Some(1.0)]));
-    assert!(
-        map_math_with_parameters(&schema, &series, ParameterizedMath::Clamp, &[&parameter])
-            .is_err()
+fn parameters_are_read_per_point_and_missing_ones_drop_the_point() {
+    let schema = Arc::new(schema(&["a", "b"]));
+    let input = series(
+        &schema,
+        2,
+        vec![
+            floats(&[Some(1.4), Some(2.6), Some(3.5), Some(4.4)]),
+            floats(&[Some(-1.4), None, Some(-3.5), Some(9.0)]),
+        ],
     );
+    // `min` covers 2..=3 and 5 with a null at 3; `max` covers 2..=5.
+    let min = Series::try_new(
+        &SeriesSchema {
+            fields: vec![FieldSpec {
+                name: "scalar".into(),
+            }]
+            .into(),
+            eval_grid: schema.eval_grid.clone(),
+        },
+        MetricName::try_new(None, vec![]).unwrap(),
+        TimeAxis::from_grid_spans(
+            schema.eval_grid.clone().unwrap(),
+            vec![GridSpan::new(2, 2), GridSpan::new(5, 1)],
+        )
+        .unwrap(),
+        SeriesFields::one(floats(&[Some(0.0), None, Some(5.0)])),
+    )
+    .unwrap();
+    let max = scalar(
+        &schema,
+        2,
+        floats(&[Some(2.0), Some(2.0), Some(2.0), Some(4.0)]),
+    );
+    let output = map_math_with_parameters(
+        &schema,
+        &input,
+        ParameterizedMath::Clamp {
+            min: &min,
+            max: &max,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    // Point 2 clamps both fields to [0, 2]; point 3 has a null `min`; point 4 has no `min`; point 5
+    // has `max < min`, so no result.
+    assert_eq!(run_floats(&output, 0), vec![((2, 1), vec![Some(1.4)])]);
+    assert_eq!(run_floats(&output, 1), vec![((2, 1), vec![Some(0.0)])]);
+}
+
+/// Like `map_math`, the parameterized functions skip native histogram samples.
+#[test]
+fn parameterized_math_skips_histogram_samples() {
+    let schema = Arc::new(schema(&["mixed"]));
+    let mixed = Samples::try_from_mixed(
+        Float64Array::from(vec![Some(1.26), None]),
+        HistogramSamples::try_new(UInt32Array::from(vec![None, Some(0)]), histogram_batch())
+            .unwrap(),
+    )
+    .unwrap();
+    let input = series(&schema, 2, vec![mixed]);
+    let to_nearest = scalar(&schema, 2, floats(&[Some(0.5), Some(0.5)]));
+    let output = map_math_with_parameters(
+        &schema,
+        &input,
+        ParameterizedMath::Round {
+            to_nearest: &to_nearest,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(run_floats(&output, 0), vec![((2, 1), vec![Some(1.5)])]);
 }

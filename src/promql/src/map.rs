@@ -42,6 +42,7 @@ use datatypes::series::samples::{
 use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::functions::Round;
+use crate::grid_series::GridSeriesBuilder;
 
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug)]
@@ -117,9 +118,12 @@ pub enum ScalarOperand {
 ///
 /// Eval must resolve raw staleness before calling this kernel. Evaluated samples use validity,
 /// not NaN payloads, for missingness: arithmetic can produce the reserved stale bit pattern too.
-/// Raw time axes and histogram/mixed segments are rejected. Unsupported query types must be
-/// admitted to the ordinary path before execution; this function neither falls back nor returns
-/// partial results.
+/// Raw time axes are rejected.
+///
+/// Native histogram samples are skipped, as Prometheus' math functions process only float
+/// samples: a point holding a histogram has no result in that field, and a series with no float
+/// sample left has none at all. Float-only fields keep their chunks; a field with histograms is
+/// rebuilt point by point.
 ///
 /// Returns `None` for `clamp` with `max < min`, which yields no series in Prometheus.
 ///
@@ -128,8 +132,30 @@ pub enum ScalarOperand {
 /// `mergeSeriesWithSameLabelset`).
 pub fn map_math(schema: &SeriesSchema, series: &Series, op: MathOp) -> Result<Option<Series>> {
     if op.is_empty_clamp() {
-        validate_float_series(schema, series)?;
+        validate_grid_series(schema, series)?;
         return Ok(None);
+    }
+    if !is_float_series(series) {
+        let time = validate_grid_series(schema, series)?;
+        let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
+        let mut cursors: Vec<_> = series.fields.iter().map(|field| field.cursor()).collect();
+        let mut row = Vec::with_capacity(cursors.len());
+        for (point, index) in time.positions() {
+            row.clear();
+            for cursor in &mut cursors {
+                row.push(
+                    match cursor
+                        .at(index)
+                        .expect("the axis and the fields are aligned")
+                    {
+                        SampleRef::Float(value) => Some(op.calculate(value)),
+                        SampleRef::Missing | SampleRef::Histogram(_) => None,
+                    },
+                );
+            }
+            builder.push(point, &row)?;
+        }
+        return builder.finish(drop_metric_name(&series.metric)?);
     }
     let mut output = map_float_fields(schema, series, |floats| op.apply(floats))?;
     output.metric = drop_metric_name(&output.metric)?;
@@ -373,6 +399,31 @@ pub(crate) fn validate_float_series<'a>(
     schema: &SeriesSchema,
     series: &'a Series,
 ) -> Result<&'a TimeAxis> {
+    let time = validate_grid_series(schema, series)?;
+    if !is_float_series(series) {
+        return Err(DataFusionError::NotImplemented(
+            "Series operators support only float samples; histogram/mixed samples are not supported"
+                .into(),
+        ));
+    }
+    Ok(time)
+}
+
+/// Whether every field of `series` holds float samples only.
+fn is_float_series(series: &Series) -> bool {
+    series.fields.iter().all(|field| {
+        field
+            .segments()
+            .iter()
+            .all(|segment| matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
+    })
+}
+
+/// Checks `series` against `schema` and its evaluation grid, whatever its sample types.
+pub(crate) fn validate_grid_series<'a>(
+    schema: &SeriesSchema,
+    series: &'a Series,
+) -> Result<&'a TimeAxis> {
     let time = &series.time;
     if time.grid().is_none() {
         return Err(DataFusionError::Execution(
@@ -386,18 +437,6 @@ pub(crate) fn validate_float_series<'a>(
         series.fields.clone(),
     )
     .map_err(series_error)?;
-    for field in series.fields.iter() {
-        if field
-            .segments()
-            .iter()
-            .any(|segment| !matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
-        {
-            return Err(DataFusionError::NotImplemented(
-                "Series operators support only float samples; histogram/mixed samples are not supported"
-                    .into(),
-            ));
-        }
-    }
     Ok(time)
 }
 
