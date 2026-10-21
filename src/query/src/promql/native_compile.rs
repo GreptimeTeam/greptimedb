@@ -600,9 +600,11 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
 /// Binds a range function over the matrix it is given, and the window that matrix opens.
 ///
 /// Where the matrix sits is the signature's, not a convention: `quantile_over_time(0.9, x[5m])` writes
-/// its constant before the matrix, while `predict_linear(x[5m], 300)` writes it after, and every other
-/// function reads the matrix first because it has no constants at all. [`RangeSignature::selector_index`]
-/// is that position, and everything else the call wrote is a constant.
+/// its constant before the matrix, while `predict_linear(x[5m], 300)` and
+/// `double_exponential_smoothing(x[5m], 0.5, 0.1)` write theirs after it, and a function with no
+/// constants at all reads the matrix first. [`RangeSignature::selector_index`] is that position, and
+/// everything else the call wrote is a constant — which keeps the position it was written at, so a
+/// rejection names the argument the query wrote rather than the constant's offset among the constants.
 ///
 /// The matrix is either shape: a range selector, which reads raw samples, or a subquery, which
 /// evaluates its own expression on a grid of its own.
