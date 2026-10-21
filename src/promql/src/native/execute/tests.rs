@@ -4839,6 +4839,117 @@ fn a_binary_beneath_the_executor_reserves_what_it_retains() {
     );
 }
 
+/// A query rooted at a binary node streams its answer after the input ends, one chunk per pull.
+///
+/// The kernel needs both whole vectors before it answers anything, so nothing is settled until the
+/// caller ends the input. From there the answer is not handed over as one collected value: each pull
+/// takes the next chunk out of the node that holds it and gives back what that chunk was charged,
+/// and the pull that finds nothing left is where the execution closes. A caller that stops pulling
+/// early therefore still holds nothing it did not ask for, and the pool is empty when the last
+/// `None` arrives.
+#[test]
+fn an_ended_input_streams_the_binary_answer_one_chunk_at_a_time() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let pool = bounded_pool(1 << 22);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0; 4], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![2.0; 4], true))
+        .unwrap();
+    // The operands are whole now, but the kernel has not run: the caller has not ended the input.
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    execution
+        .end_of_input()
+        .expect("a closed input with two whole operands ends cleanly");
+    // Ending the input runs the kernel and leaves its answer in the node that computed it, charged
+    // there until it is pulled; it does not collect the answer into a value of its own.
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        chunks.push(chunk);
+    }
+    assert_eq!(addressed(&chunks), vec![(0, vec![Some(3.0); 4])]);
+    // The last pull closed the execution and returned everything it reserved.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    // A finished execution is not pulled again.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(again.to_string().contains("already finished"), "{again}");
+}
+
+/// `finish` still answers the whole result in one value for a caller that wants it that way.
+#[test]
+fn finish_collects_what_the_streaming_contract_would_have_pulled() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let pool = bounded_pool(1 << 22);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(&left, evaluated_chunk(&schema, 0, vec![1.0; 4], true))
+        .unwrap();
+    execution
+        .push_evaluated_at(&right, evaluated_chunk(&schema, 0, vec![2.0; 4], true))
+        .unwrap();
+    let chunks = execution.finish().expect("the whole answer is collected");
+    assert_eq!(addressed(&chunks), vec![(0, vec![Some(3.0); 4])]);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A binary node reads an operand a collecting window below it produces only after that window
+/// flushes.
+///
+/// `Add(LastOverTime(Abs(a)), b)` puts a collecting window under a binary node: the window is above
+/// a map, so it collects its whole input and answers at the end of it, while the binary node needs
+/// both operands whole before it decides a point. Ending the input therefore has to finish the
+/// subtree below each operand before the binary node computes -- flushing the window first and
+/// letting the pull that follows carry its answer up. A binary node that computed on the empty
+/// left operand would mark itself computed and answer nothing, and the value the window produced
+/// afterwards would never be read.
+#[test]
+fn a_binary_reads_an_operand_a_collecting_window_flushes() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // The left operand is a window over a map: the map rewrites the label set, so the window
+    // collects its input and answers at the end of it. The right operand is a plain source.
+    let root = binary_of(
+        window_with(
+            map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+            RangeFunction::LastOverTime,
+            60_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        ),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    );
+    let tree = NativeTree::try_new(root).expect("the shape is legal");
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    // One point on each side, in one window: the left is -1, which `abs` makes 1, and the right is
+    // 10, so the sum is 11.
+    execution
+        .push_evaluated_at(
+            &NodePath::root().left().input().input(),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(-1.0)], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated_at(
+            &NodePath::root().right(),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(10.0)], true),
+        )
+        .unwrap();
+
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0))],
+        "the binary node computed before the window below it answered"
+    );
+}
+
 /// A series that arrives in ten thousand one-point chunks is one candidate for the kernel, not ten
 /// thousand.
 ///

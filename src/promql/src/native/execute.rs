@@ -2746,6 +2746,13 @@ pub struct NativeExecutor {
     /// stream closed, and only then sets this flag and drains again, which is what lets a binary
     /// node answer its result -- and a binary node beneath another one do the same in turn.
     inputs_finished: bool,
+    /// Whether the caller ended the input.
+    ///
+    /// Until then a pull that finds nothing means nothing has settled yet. After it, the same pull
+    /// runs the next stage of the ending -- the truncation check, a binary node's computation, the
+    /// merge a collecting window owes -- and only a pull that finds every stage done closes the
+    /// nodes and returns their reservations.
+    ended: bool,
 }
 
 /// Whether the execution can still produce chunks.
@@ -2766,6 +2773,7 @@ impl NativeExecutor {
             state,
             phase: Phase::Running,
             inputs_finished: false,
+            ended: false,
         }
     }
 
@@ -2817,66 +2825,110 @@ impl NativeExecutor {
     /// at the root hands over pieces, and a caller that needs one series per label set merges them.
     pub fn next_chunk(&mut self) -> Result<Option<EvaluatedChunk>> {
         self.check_running()?;
-        // The root is the node the state was built from, which the pass puts first.
-        let result = self.pull(0).and_then(|chunk| match chunk {
-            Some(NativeChunk::Evaluated(chunk)) => Ok(Some(chunk)),
-            // Rejected when the state was built; kept as an error rather than a panic so an
-            // impossible tree cannot take the process down.
-            Some(NativeChunk::Raw(_)) => Err(DataFusionError::Execution(
-                "the native runtime produces evaluated chunks, but its root produced raw samples"
-                    .to_string(),
-            )),
-            None => Ok(None),
-        });
-        if let Err(error) = &result {
-            self.stop(error);
+        // The end of the input is walked here rather than in one call, so a chunk is handed over as
+        // soon as the tree settles it: the caller pulls the answer instead of receiving it as one
+        // collected value, and what it has not pulled yet stays charged to the node holding it.
+        loop {
+            // The root is the node the state was built from, which the pass puts first.
+            let pulled: Option<NativeChunk> = match self.pull(0) {
+                Ok(Some(NativeChunk::Evaluated(chunk))) => return Ok(Some(chunk)),
+                // Rejected when the state was built; kept as an error rather than a panic so an
+                // impossible tree cannot take the process down.
+                Ok(Some(NativeChunk::Raw(_))) => {
+                    let error = DataFusionError::Execution(
+                        "the native runtime produces evaluated chunks, but its root produced raw \
+                         samples"
+                            .to_string(),
+                    );
+                    self.stop(&error);
+                    return Err(error);
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    self.stop(&error);
+                    return Err(error);
+                }
+            };
+            let _ = pulled;
+            // Nothing has settled. While the caller is still pushing, that is a stall and the
+            // answer is simply not ready; once it has ended the input, each stage below runs on the
+            // first pull that finds the tree quiet, and the loop looks for what it produced.
+            if !self.ended {
+                return Ok(None);
+            }
+            if !self.inputs_finished {
+                // The source queues are empty and every node has consumed what it was given, so a
+                // series the caller never closed is still open here and nowhere else. It is
+                // refused before a binary node computes: half a vector is not a vector, so the
+                // kernel must not allocate a workspace to match one.
+                if let Err(error) = self.state.unclosed() {
+                    self.stop(&error);
+                    return Err(error);
+                }
+                self.inputs_finished = true;
+                continue;
+            }
+            // A window that collects its input answers only once its own input is finished, and
+            // what a binary node above it reads is that answer. Flushing the deepest ready window
+            // first is what keeps the two in order: the window produces, the pull that follows
+            // carries its output to whoever reads it, and only then can a binary node decide
+            // whether both of its operands are complete.
+            match self.flush_ready_merges() {
+                // A window answered: what it queued is pulled on the next turn, and that pull is
+                // also what carries its answer to a node above it.
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    self.stop(&error);
+                    return Err(error);
+                }
+            }
+            if self.any_merge_pending() {
+                // A window still holds collected input, so something below it has not finished:
+                // pulling again is what gives that node its turn.
+                continue;
+            }
+            // Every node has answered everything it can. Closing them is what hands back the
+            // reservations they were charged, so pulling to exhaustion leaves the pool as it found
+            // it.
+            return match self.state.close() {
+                Ok(()) => {
+                    self.phase = Phase::Finished;
+                    Ok(None)
+                }
+                Err(error) => {
+                    self.stop(&error);
+                    Err(error)
+                }
+            };
         }
-        result
     }
 
-    /// Ends the input: drains what has settled, merges what the windows that collect their input
-    /// hold, closes every node and releases every reservation.
+    /// Ends the input, which is what tells the tree that nothing more will be pushed.
     ///
-    /// Every series must have closed by now, in every tree: a window's evaluator reports the series
-    /// it is still holding, and a tree with no window has its input node report one it handed over
-    /// without the chunk that ends it. An input that ends mid-series is an error here rather than a
-    /// series the caller never sees close, and it is refused before any collected input is merged:
-    /// merging closes what it merges.
+    /// It hands nothing over: [`Self::next_chunk`] runs the ending stage by stage as the caller
+    /// pulls, so a chunk reaches the caller as soon as it settles and the chunks not pulled yet
+    /// stay charged to the node holding them. A caller that wants the whole answer at once calls
+    /// [`Self::finish`] instead.
+    pub fn end_of_input(&mut self) -> Result<()> {
+        if self.ended {
+            return Err(DataFusionError::Execution(
+                "the native execution already ended its input".to_string(),
+            ));
+        }
+        self.ended = true;
+        Ok(())
+    }
+
+    /// Ends the input and collects everything the tree answers.
     ///
-    /// The merge comes next, deepest window first, and what it hands up is drained as it is
-    /// produced. What the root hands over is therefore a piece stream: a chunk's `is_last` says the
-    /// source series it carries ended, and two of them can share one label set. A caller that needs
-    /// one series per label set from the root merges them with
-    /// [`crate::grid_series::merge_same_labelset`] as well, exactly as this runtime merges the input
-    /// of the windows it collects for.
+    /// It is [`Self::end_of_input`] followed by a drain, kept for callers that want the whole
+    /// answer in one value. A caller that would rather stream it calls `end_of_input` and then
+    /// pulls with [`Self::next_chunk`] until it returns `None`, which is also when the execution
+    /// closes and returns its reservations.
     pub fn finish(&mut self) -> Result<Vec<EvaluatedChunk>> {
-        let mut drained = self.drain()?;
-        // A stream that ended mid-series is refused before a binary node computes: half a vector is
-        // not a vector, so the kernel must not allocate a workspace to match one.
-        if let Err(error) = self.state.unclosed() {
-            self.stop(&error);
-            return Err(error);
-        }
-        // Every source has ended. A binary node can answer its result now, and a binary node
-        // beneath another one answers in turn, so the drain runs to quiescence again.
-        self.inputs_finished = true;
-        drained.extend(self.drain()?);
-        // The merge comes next, deepest window first, and what it hands up is drained as it is
-        // produced.
-        if let Err(error) = self.flush_merges(&mut drained) {
-            self.stop(&error);
-            return Err(error);
-        }
-        match self.state.close() {
-            Ok(()) => {
-                self.phase = Phase::Finished;
-                Ok(drained)
-            }
-            Err(error) => {
-                self.stop(&error);
-                Err(error)
-            }
-        }
+        self.end_of_input()?;
+        self.drain()
     }
 
     /// Pulls what has settled until nothing is left.
@@ -2895,30 +2947,80 @@ impl NativeExecutor {
     /// merged series.
     ///
     /// Deeper windows go first: a window above one of them collects the chunks the one below hands
-    /// up, so flushing the shallow one first would merge an input it has not received yet. The
-    /// queue of a flushed node is emptied by the root drain that follows each of its merged series,
-    /// so a chunk it produced never stands beside the fragments it was computed from.
-    fn flush_merges(&mut self, drained: &mut Vec<EvaluatedChunk>) -> Result<()> {
+    /// up, so flushing the shallow one first would merge an input it has not received yet. What a
+    /// flush queues is handed up by the caller's own pulls, which is why nothing here collects the
+    /// answer into a value of its own.
+    fn flush_ready_merges(&mut self) -> Result<bool> {
+        let mut flushed = false;
         for index in (0..self.state.runtimes.len()).rev() {
             // A window that collects its input is the one node holding a [`MergeInput`], and the
             // flush takes it: the same node is not visited twice.
             if self.state.runtimes[index].merge.is_none() {
                 continue;
             }
-            self.flush_merge(index, drained)?;
+            // Its input has to be finished before it is merged: a node below still holding collected
+            // input has not answered yet, and merging what it has not sent would answer a series
+            // from half of its contributions.
+            let Some(child) = self.state.nodes[index].input else {
+                continue;
+            };
+            if !self.settled(child) {
+                continue;
+            }
+            self.flush_merge(index)?;
+            flushed = true;
         }
-        Ok(())
+        Ok(flushed)
+    }
+
+    /// Whether any window still holds collected input that has not been merged.
+    fn any_merge_pending(&self) -> bool {
+        self.state
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.merge.is_some())
+    }
+
+    /// Whether the node at `index` has produced everything it ever will.
+    ///
+    /// A pull that finds nothing does not answer it: a collecting window reports nothing until it
+    /// is flushed, and a binary node reports nothing until both nodes it reads from are finished.
+    /// Each node therefore answers from its own state and from its children's, which is what keeps
+    /// a binary node from computing on an operand a window below it has not handed over yet.
+    fn settled(&self, index: usize) -> bool {
+        let runtime = &self.state.runtimes[index];
+        if !runtime.queued.is_empty() || runtime.merge.is_some() {
+            return false;
+        }
+        match self.state.nodes[index].tag {
+            NodeTag::Input => true,
+            NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
+                .input
+                .is_none_or(|child| self.settled(child)),
+            NodeTag::Binary => {
+                runtime
+                    .binary
+                    .as_ref()
+                    .is_some_and(|binary| binary.computed)
+                    && self.state.nodes[index]
+                        .input
+                        .is_none_or(|child| self.settled(child))
+                    && self
+                        .state
+                        .right_input(index)
+                        .is_ok_and(|right| self.settled(right))
+            }
+        }
     }
 
     /// Merges the collected input of the node at `index` and evaluates it, one merged series at a
     /// time.
     ///
     /// Each merged series is a whole series: it is handed to the evaluator as one closing series, so
-    /// the window reports on it once, and its chunk is queued and drained up the tree before the
-    /// next one is evaluated. That is what keeps the reservation honest: the fragments and the
-    /// merge's workspace stay charged while the flush runs, and the queue of a node never holds an
-    /// earlier series beside the fragments of a later one.
-    fn flush_merge(&mut self, index: usize, drained: &mut Vec<EvaluatedChunk>) -> Result<()> {
+    /// the window reports on it once, and its chunk waits in the node's queue at its own estimate.
+    /// The fragments and the merge's workspace stay charged for the whole flush and go back when it
+    /// ends; the queued answers stay charged until the caller pulls them.
+    fn flush_merge(&mut self, index: usize) -> Result<()> {
         let path = self.state.paths[index].clone();
         let Some(merge) = self.state.runtimes[index].merge.take() else {
             return Ok(());
@@ -2926,7 +3028,7 @@ impl NativeExecutor {
         if merge.fragments.is_empty() {
             // Nothing arrived, so there is nothing to merge and nothing to answer: the window's
             // evaluator never read a series and the charge goes back.
-            return self.settle_merge(index);
+            return self.settle_merge(index, merge.bytes);
         }
         // The workspace the merge allocates is charged before it runs, from the rows, segments and
         // fields of the fragments as they were collected.
@@ -2969,20 +3071,20 @@ impl NativeExecutor {
                     .resize(retained.saturating_add(emitted).saturating_add(held))?;
                 runtime.enqueue_output(output)?;
             }
-            drained.extend(self.drain()?);
         }
-        self.settle_merge(index)
+        // The fragments and the merge's workspace go back, and whatever the flush produced stays
+        // charged in the node's queue until the caller pulls it.
+        self.settle_merge(index, held)
     }
 
-    /// Sets the reservation of the node at `index` to what it holds once its flush is over.
-    fn settle_merge(&mut self, index: usize) -> Result<()> {
-        let runtime = &mut self.state.runtimes[index];
-        let retained = runtime
-            .window
-            .as_ref()
-            .map_or(0, RangeEvaluator::retained_bytes);
-        let emitted = runtime.emitted_bytes();
-        runtime.buffer.resize(retained.saturating_add(emitted))
+    /// Gives back the `give_back` bytes the flush took, leaving the rest of the node's
+    /// reservation alone.
+    ///
+    /// It must not resize to a figure computed here: the chunks the flush queued are still charged
+    /// to this node, and they stay charged until the pull that hands each of them up returns its
+    /// estimate.
+    fn settle_merge(&mut self, index: usize, give_back: usize) -> Result<()> {
+        self.state.runtimes[index].buffer.shrink(give_back)
     }
 
     /// The next chunk of the node at `index`.
@@ -3050,8 +3152,9 @@ impl NativeExecutor {
                         self.state.runtimes[index].retain_binary(path, side, chunk)?;
                     }
                 }
-                if !self.inputs_finished {
-                    // Nothing has settled for a point that has an operand still arriving.
+                // Nothing has settled for a point that has an operand still arriving, and an
+                // operand below a collecting window has not arrived until that window is flushed.
+                if !self.inputs_finished || !self.settled(left) || !self.settled(right) {
                     return Ok(None);
                 }
                 let path = &self.state.paths[index];
