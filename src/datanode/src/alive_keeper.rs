@@ -921,6 +921,36 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn created_region_lease_is_capped_after_creation() {
+        common_telemetry::init_default_ut_logging();
+        let mut env = TestEnv::with_prefix("region-alive-keeper-created-lease-cap").await;
+        let (region_server, _engine) = lease_region_server(&mut env, None).await;
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        let lease = Duration::from_secs(2);
+        handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
+        let region_id = RegionId::new(1024, 1);
+        let schema = create_region(&region_server, region_id).await;
+        let created = Instant::now();
+        put_row(&region_server, region_id, &schema).await.unwrap();
+
+        // Responses keep renewing the node lease without granting the region anything. The
+        // region uses the node lease only within one lease of its creation.
+        while created.elapsed() < lease + Duration::from_millis(200) {
+            handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
+        let err = put_row(&region_server, region_id, &schema)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("does not hold a valid leader lease"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn catchup_reopen_keeps_region_lease() {
         common_telemetry::init_default_ut_logging();
         let mut env = TestEnv::with_prefix("region-alive-keeper-reopen-lease").await;

@@ -119,8 +119,8 @@ impl RegionLeaseRecord {
         self.state.lock().unwrap().demoted_at = Some(now);
     }
 
-    /// Returns whether the region may take a write at `now`: its latest grant is Leader or
-    /// StagingLeader, and the Leader deadline has not passed.
+    /// Returns whether the region may take a write at `now`: its latest grant, if any, is Leader
+    /// or StagingLeader, and the Leader deadline has not passed.
     pub(crate) fn allows_write(&self, node: &NodeLease, now: Instant) -> bool {
         self.is_valid(node, now, true)
     }
@@ -136,13 +136,88 @@ impl RegionLeaseRecord {
             return true;
         }
         let state = self.state.lock().unwrap();
-        let deadline = match state.role {
-            Some(role) if check_role && !role.writable() => return false,
-            Some(_) => state.leader_deadline,
-            None => state
+        if check_role && state.role.is_some_and(|role| !role.writable()) {
+            return false;
+        }
+        // A region created on this node has the node lease as its Leader deadline until its
+        // first Leader grant.
+        let deadline = state.leader_deadline.or_else(|| {
+            state
                 .created_at
-                .and_then(|created_at| node.created_region_deadline(created_at)),
-        };
+                .and_then(|created_at| node.created_region_deadline(created_at))
+        });
         deadline.is_some_and(|deadline| now < deadline)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LEASE: Duration = Duration::from_secs(10);
+
+    fn enabled_node_lease() -> NodeLease {
+        let node = NodeLease::default();
+        node.enable();
+        node
+    }
+
+    fn grant(record: &RegionLeaseRecord, role: RegionRole, heartbeat_sent_at: Instant) -> bool {
+        let grant = RegionLeaseGrant {
+            role,
+            heartbeat_sent_at,
+            deadline: heartbeat_sent_at + LEASE,
+        };
+        record.grant(grant, |_| {})
+    }
+
+    #[test]
+    fn test_downgrading_grant_keeps_leader_deadline() {
+        let node = enabled_node_lease();
+        let record = RegionLeaseRecord::default();
+        let sent_at = Instant::now();
+        assert!(grant(&record, RegionRole::Leader, sent_at));
+        // The metasrv keeps renewing the lease as DowngradingLeader after a route is marked as
+        // downgrading.
+        assert!(grant(
+            &record,
+            RegionRole::DowngradingLeader,
+            sent_at + LEASE / 2
+        ));
+
+        let now = sent_at + Duration::from_secs(1);
+        assert!(!record.allows_write(&node, now));
+        assert!(record.allows_ack(&node, now));
+        assert!(record.allows_ack(&node, sent_at + LEASE - Duration::from_millis(1)));
+        assert!(!record.allows_ack(&node, sent_at + LEASE));
+    }
+
+    #[test]
+    fn test_created_region_writes_within_one_lease() {
+        let node = enabled_node_lease();
+        let created_at = Instant::now();
+        let record = RegionLeaseRecord::created(created_at);
+        // No heartbeat response has carried region leases yet.
+        assert!(!record.allows_write(&node, created_at));
+
+        // The node lease keeps being renewed, but the region uses it only within one lease of
+        // its creation.
+        node.renew(created_at + LEASE, LEASE);
+        assert!(record.allows_write(&node, created_at + LEASE - Duration::from_millis(1)));
+        assert!(!record.allows_write(&node, created_at + LEASE));
+    }
+
+    #[test]
+    fn test_created_region_acknowledges_after_first_downgrading_grant() {
+        let node = enabled_node_lease();
+        let created_at = Instant::now();
+        let record = RegionLeaseRecord::created(created_at);
+        node.renew(created_at, LEASE);
+        let sent_at = created_at + Duration::from_secs(1);
+        assert!(grant(&record, RegionRole::DowngradingLeader, sent_at));
+
+        assert!(!record.allows_write(&node, sent_at));
+        assert!(record.allows_ack(&node, sent_at));
+        assert!(!record.allows_ack(&node, created_at + LEASE));
     }
 }

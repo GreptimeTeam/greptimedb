@@ -1317,7 +1317,7 @@ async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
 /// Creates a region with rows `[0, 3)` in an SST and starts an ALTER whose
 /// result the worker does not handle until `listener` is woken, so the region
 /// stays in Altering. Returns the ALTER task.
-async fn create_region_and_start_alter(
+pub(crate) async fn create_region_and_start_alter(
     env: &TestEnv,
     engine: &MitoEngine,
     region_id: RegionId,

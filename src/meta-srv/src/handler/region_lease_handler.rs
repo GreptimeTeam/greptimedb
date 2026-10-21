@@ -87,6 +87,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
         let regions = stat.regions();
         let datanode_id = stat.id;
+        // Recorded before the routes are read: a migration that reads the tracker after marking a
+        // route as downgrading then sees every Leader grant computed from the earlier route.
+        self.lease_grant_tracker.record_grant(datanode_id);
 
         match self
             .region_lease_keeper
@@ -112,8 +115,6 @@ impl HeartbeatHandler for RegionLeaseHandler {
                         .collect::<Vec<_>>()
                 };
 
-                // Recorded before the response leaves, so a migration waits for this grant.
-                self.lease_grant_tracker.record_grant(datanode_id);
                 acc.region_lease = Some(RegionLease {
                     regions: renewed,
                     duration_since_epoch: req.duration_since_epoch,
@@ -154,6 +155,7 @@ mod test {
 
     use super::*;
     use crate::metasrv::builder::MetasrvBuilder;
+    use crate::region::lease_grant_tracker::LeaseGrantTracker;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
         let store = Arc::new(MemoryKvBackend::new());
@@ -544,5 +546,39 @@ mod test {
 
         assert!(acc.region_lease.is_none());
         assert!(acc.inactive_region_ids.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_handle_records_lease_grant() {
+        let keeper = new_test_keeper();
+        let metasrv = MetasrvBuilder::new().build().await.unwrap();
+        let ctx = &mut metasrv.new_ctx();
+        let acc = &mut HeartbeatAccumulator::default();
+        let datanode_id = 1;
+        acc.stat = Some(Stat {
+            id: datanode_id,
+            ..Default::default()
+        });
+        let region_lease = default_distributed_time_constants().region_lease;
+        let lease_grant_tracker = Arc::new(LeaseGrantTracker::default());
+        let handler = RegionLeaseHandler::new(
+            region_lease.as_secs(),
+            keeper.table_metadata_manager().clone(),
+            Default::default(),
+            None,
+            lease_grant_tracker.clone(),
+        );
+
+        // Long after the tracker starts, the recorded grant alone bounds the lease expiry.
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        handler
+            .handle(&HeartbeatRequest::default(), ctx, acc)
+            .await
+            .unwrap();
+        assert!(acc.region_lease.is_some());
+        assert_eq!(
+            tokio::time::Instant::now() + region_lease,
+            lease_grant_tracker.lease_expiry(datanode_id, region_lease)
+        );
     }
 }
