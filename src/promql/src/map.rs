@@ -24,7 +24,10 @@ mod go_math;
 mod tests;
 
 pub(crate) use broadcast::validate_scalar;
-pub use broadcast::{ScalarSeriesOperand, map_arithmetic_series, map_compare_series};
+pub use broadcast::{
+    ScalarFunction, ScalarSeriesOperand, map_arithmetic_series, map_compare_series,
+    map_scalar_function,
+};
 pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
 
 use std::f64::consts::PI;
@@ -316,7 +319,7 @@ fn go_min(x: f64, y: f64) -> f64 {
 
 impl ArithmeticOp {
     /// Prometheus `vectorElemBinop` for two floats.
-    pub(crate) fn calculate(self, left: f64, right: f64) -> f64 {
+    pub fn calculate(self, left: f64, right: f64) -> f64 {
         match self {
             Self::Add => left + right,
             Self::Subtract => left - right,

@@ -193,13 +193,7 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
         chunk: Some(chunk),
     });
     let frames = pack_raw_series(input).unwrap();
-    let mut decoded = unpack_raw_series(
-        frames,
-        schema,
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut decoded = unpack_raw_series(frames, Some(schema)).unwrap();
     let mut output = Vec::new();
     while let Some(item) = decoded.next().await {
         output.push(item.unwrap());
@@ -425,13 +419,7 @@ async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners()
         chunk: Some(chunk),
     });
     let frames = pack_raw_series(input).unwrap();
-    let mut decoded = unpack_raw_series(
-        frames,
-        schema,
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut decoded = unpack_raw_series(frames, Some(schema)).unwrap();
     let mut output = Vec::new();
     while let Some(item) = decoded.next().await {
         output.push(item.unwrap());

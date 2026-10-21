@@ -28,13 +28,13 @@ use datafusion::physical_plan::RecordBatchStream;
 use datatypes::arrow::array::{Array, Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::arrow::compute::concat_batches;
-use datatypes::arrow::datatypes::{DataType, SchemaRef};
+use datatypes::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datatypes::arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::Label;
 use datatypes::series::MetricName;
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::{RawLabelMode, raw_series_frame_schema};
+use datatypes::series::frame::{LabelDecodeSpec, RawLabelMode, raw_series_frame_schema};
 use datatypes::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
@@ -45,7 +45,10 @@ use store_api::region_engine::{
     BoundTag, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
 
-use super::{pack_raw_series, raw_series_frame_ordering, unpack_raw_series};
+use super::{
+    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series,
+    raw_series_frame_ordering, unpack_raw_series,
+};
 
 fn schema() -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
@@ -101,6 +104,8 @@ struct RawMock {
     schema: Arc<SeriesSchema>,
     items: VecDeque<Result<RawSeriesChunk, BoxedError>>,
     binding: RawLabelSource,
+    /// The description this fixture declares, derived once from `binding`.
+    label_decode_spec: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     polls: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
@@ -143,6 +148,9 @@ impl RawSeriesStream for RawMock {
     }
     fn label_source(&self) -> &RawLabelSource {
         &self.binding
+    }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.label_decode_spec.as_ref()
     }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
@@ -239,6 +247,7 @@ fn raw_never_polled(
             schema: schema(),
             items: VecDeque::new(),
             binding: RawLabelSource::Explicit,
+            label_decode_spec: None,
             ordering,
             polls: polls.clone(),
             drops: drops.clone(),
@@ -260,11 +269,15 @@ fn raw_items(
 ) -> (SendableRawSeriesStream, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let polls = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
+    // A fixture holding a key binding declares the layout it encodes, like a real producer; a
+    // fixture with explicit labels already carries complete ones and declares none.
+    let label_decode_spec = label_decode_spec(&binding);
     (
         Box::pin(RawMock {
             schema,
             items: items.into(),
             binding,
+            label_decode_spec,
             ordering,
             polls: polls.clone(),
             drops: drops.clone(),
@@ -382,13 +395,7 @@ async fn contiguous_adapter_does_not_certify_nonadjacent_recurrence() {
     assert_eq!(batches[0].num_rows(), 3);
     let frame_schema = batches[0].schema();
     let (source, _, _) = df_source(batches, frame_schema);
-    let mut decoded = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
 
     for (key, time, value) in expected {
         let actual = decoded.next().await.unwrap().unwrap();
@@ -484,13 +491,7 @@ async fn roundtrip_explicit_unordered_contiguous_preserves_complete_chunk_conten
         panic_on_poll: false,
         emitted: 0,
     });
-    let mut output = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut output = unpack_raw_series(source, Some(schema())).unwrap();
     assert_chunk(
         &output.next().await.unwrap().unwrap(),
         b"complete-b",
@@ -535,13 +536,7 @@ async fn key_then_time_valid_roundtrip() {
         panic_on_poll: false,
         emitted: 0,
     });
-    let mut out = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
+    let mut out = unpack_raw_series(source, Some(schema())).unwrap();
     assert_chunk(
         &out.next().await.unwrap().unwrap(),
         b"a",
@@ -667,10 +662,20 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
                 .unwrap(),
             );
         }
-        let frame_schema = frames[0].schema();
+        // The ordering is a property of the frame, so the frames must declare the case's one for
+        // unpack to validate the same sequence the producer rejected.
+        let frame_schema = super::raw_series_frame_schema_with_ordering(
+            &schema(),
+            &RawLabelSource::Explicit,
+            case.order,
+        )
+        .unwrap();
+        let frames = frames
+            .into_iter()
+            .map(|frame| frame.with_schema(frame_schema.clone()).unwrap())
+            .collect();
         let (source, _, _) = df_source(frames, frame_schema);
-        let mut decoded =
-            unpack_raw_series(source, schema(), RawLabelSource::Explicit, case.order).unwrap();
+        let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
         for (key, time, last, host) in &case.prefix {
             let chunk = decoded.next().await.unwrap().unwrap();
             assert_chunk(&chunk, key, &[*time], &[Some(*time as f64)], *last);
@@ -693,13 +698,7 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
     .unwrap();
     let frame_schema = frame[0].schema();
     let (source, _, _) = df_source(frame, frame_schema);
-    let mut decoded = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
     let first = decoded.next().await.unwrap().unwrap();
     assert_chunk(&first, b"unfinished", &[7], &[Some(7.0)], false);
     assert_eq!(
@@ -750,8 +749,11 @@ fn primary_binding(metadata: store_api::metadata::RegionMetadataRef) -> RawLabel
     }
 }
 
+/// A key frame states its whole label layout, so unpacking keeps exactly that description and no
+/// binding: the description is what a consumer decodes from, and the physical region metadata the
+/// producer read under never reaches the receiver.
 #[tokio::test]
-async fn primary_key_binding_is_retained_exactly() {
+async fn the_declared_description_is_retained_and_no_binding_is_invented() {
     use api::v1::SemanticType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -779,6 +781,7 @@ async fn primary_key_binding_is_retained_exactly() {
         .primary_key(vec![0]);
     let metadata = Arc::new(builder.build().unwrap());
     let binding = primary_binding(metadata.clone());
+    let description = label_decode_spec(&binding).expect("a primary-key binding describes its key");
     let (input, _, _) = raw_custom(
         vec![
             RawSeriesChunk::try_new(
@@ -806,25 +809,25 @@ async fn primary_key_binding_is_retained_exactly() {
         panic_on_poll: false,
         emitted: 0,
     });
-    let mut out = unpack_raw_series(source, schema(), binding, SeriesOrdering::Contiguous).unwrap();
+    let mut out = unpack_raw_series(source, None).unwrap();
     let decoded = out.next().await.unwrap().unwrap();
     assert_eq!(decoded.primary_key.as_slice(), b"encoded-complete-key");
     assert!(decoded.metric.is_none());
-    let retained = out.label_source();
-    match retained {
-        RawLabelSource::PrimaryKey {
-            metric_name,
-            physical_metadata,
-            logical_tags,
-        } => {
-            assert!(Arc::ptr_eq(physical_metadata, &metadata));
-            assert_eq!(metric_name.as_ref(), "cpu");
-            assert_eq!(logical_tags.as_ref().len(), 1);
-            assert_eq!(logical_tags[0].column_id, 0);
-            assert_eq!(logical_tags[0].name.as_ref(), "host");
-        }
-        _ => panic!("binding changed"),
-    }
+    assert_eq!(
+        out.label_decode_spec(),
+        Some(&description),
+        "the declaration is retained exactly as the frame states it"
+    );
+    assert_eq!(description.metric_name, "cpu");
+    assert_eq!(description.primary_key.len(), 1);
+    assert_eq!(description.primary_key[0].column_id, 0);
+    assert_eq!(description.primary_key[0].name, "host");
+    assert_eq!(description.logical_tags.len(), 1);
+    assert_eq!(description.logical_tags[0].name, "host");
+    assert!(
+        matches!(out.label_source(), RawLabelSource::Explicit),
+        "the physical region metadata the producer read under is not carried across the frame"
+    );
 }
 
 #[tokio::test]
@@ -946,6 +949,7 @@ async fn locally_invalid_public_raw_chunk_is_rejected() {
         schema: schema(),
         items: VecDeque::from([Ok(bad)]),
         binding: RawLabelSource::Explicit,
+        label_decode_spec: None,
         ordering: SeriesOrdering::Contiguous,
         polls,
         drops: Arc::new(AtomicUsize::new(0)),
@@ -977,13 +981,7 @@ async fn empty_streams_keep_self_describing_schema() {
     // A declared-but-empty stream is still validated against the expected schema before any
     // poll, and then ends without producing rows.
     let (source, polls, _) = df_source(vec![], frame_schema.clone());
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     assert_eq!(unpacked.schema().fields.len(), 1);
     assert_eq!(unpacked.schema().fields[0].name.as_ref(), "value");
@@ -1000,6 +998,7 @@ async fn upstream_error_status_is_preserved_once_and_releases_source() {
             schema: schema(),
             items: VecDeque::from([Err(e)]),
             binding: RawLabelSource::Explicit,
+            label_decode_spec: None,
             ordering: SeriesOrdering::Contiguous,
             polls: polls.clone(),
             drops: drops.clone(),
@@ -1037,13 +1036,7 @@ async fn upstream_error_status_is_preserved_once_and_releases_source() {
             panic_on_poll: false,
             emitted: 0,
         });
-        let mut unpacked = unpack_raw_series(
-            source,
-            schema(),
-            RawLabelSource::Explicit,
-            SeriesOrdering::Contiguous,
-        )
-        .unwrap();
+        let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
         let error = unpacked.next().await.unwrap().unwrap_err();
         assert_eq!(common_error::ext::ErrorExt::status_code(&error), status);
         assert!(unpacked.next().await.is_none());
@@ -1096,15 +1089,7 @@ async fn dropping_adapter_releases_upstream_and_pending_item_is_resumed() {
 async fn unpack_rejects_mismatched_batch_schema_before_polling() {
     let wrong = datatypes::arrow::datatypes::Schema::empty().into();
     let (source, polls, drops) = df_source(vec![], wrong);
-    assert!(
-        unpack_raw_series(
-            source,
-            schema(),
-            RawLabelSource::Explicit,
-            SeriesOrdering::Contiguous
-        )
-        .is_err()
-    );
+    assert!(unpack_raw_series(source, Some(schema())).is_err());
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
@@ -1123,6 +1108,7 @@ async fn invalid_grid_schema_rejected_for_empty_raw_stream() {
         schema: Arc::new(invalid),
         items: VecDeque::new(),
         binding: RawLabelSource::Explicit,
+        label_decode_spec: None,
         ordering: SeriesOrdering::Contiguous,
         polls: polls.clone(),
         drops: Arc::new(AtomicUsize::new(0)),
@@ -1138,9 +1124,11 @@ async fn invalid_grid_schema_rejected_for_empty_raw_stream() {
 #[tokio::test]
 async fn unpack_batch_sequence_error_is_atomic_for_all_rows() {
     let mut batches = Vec::new();
-    let frame_schema = datatypes::series::frame::raw_series_frame_schema(
+    // `KeyThenTime` is what makes a recurring key an error, so the frame has to declare it.
+    let frame_schema = super::raw_series_frame_schema_with_ordering(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        &RawLabelSource::Explicit,
+        SeriesOrdering::KeyThenTime,
     )
     .unwrap();
     for (key, time) in [
@@ -1153,13 +1141,7 @@ async fn unpack_batch_sequence_error_is_atomic_for_all_rows() {
     }
     let multi = concat_batches(&frame_schema, &batches).unwrap();
     let (source, _, _) = df_source(vec![multi], frame_schema);
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     assert!(unpacked.next().await.unwrap().is_err());
     assert!(unpacked.next().await.is_none());
 }
@@ -1216,13 +1198,7 @@ async fn unpack_rejects_late_invalid_frame_row_before_prefix() {
     second = RecordBatch::try_new(frame_schema.clone(), columns).unwrap();
     let multi = concat_batches(&frame_schema, &[first, second]).unwrap();
     let (source, _, _) = df_source(vec![multi], frame_schema);
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     let error = unpacked.next().await.unwrap().unwrap_err();
     assert_eq!(
         common_error::ext::ErrorExt::status_code(&error),
@@ -1264,13 +1240,7 @@ async fn frame_application_metadata_is_stable_and_schema_change_rejected() {
     .with_schema(declared.clone())
     .unwrap();
     let (source, _, _) = df_source(vec![first.clone(), stable_second], declared.clone());
-    let mut stable = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut stable = unpack_raw_series(source, Some(schema())).unwrap();
     assert_chunk(
         &stable.next().await.unwrap().unwrap(),
         b"a",
@@ -1305,13 +1275,7 @@ async fn frame_application_metadata_is_stable_and_schema_change_rejected() {
         .with_schema(changed_schema)
         .unwrap();
         let (source, _, _) = df_source(vec![first.clone(), bad_batch], declared.clone());
-        let mut unpacked = unpack_raw_series(
-            source,
-            schema(),
-            RawLabelSource::Explicit,
-            SeriesOrdering::Contiguous,
-        )
-        .unwrap();
+        let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
         assert_chunk(
             &unpacked.next().await.unwrap().unwrap(),
             b"a",
@@ -1367,13 +1331,7 @@ async fn unpack_bounds_empty_batches_per_poll_and_eventually_yields_row() {
     let mut batches = vec![RecordBatch::new_empty(frame_schema.clone()); 10_000];
     batches.push(row);
     let (source, polls, _) = df_source(batches, frame_schema);
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
 
@@ -1427,13 +1385,7 @@ fn unpack_yields_at_empty_batch_budget_before_observing_eof() {
     .unwrap();
     let batches = vec![RecordBatch::new_empty(frame_schema.clone()); BUDGET];
     let (source, polls, _) = df_source(batches, frame_schema);
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
 
@@ -1462,13 +1414,7 @@ fn unpack_propagates_upstream_pending_without_extra_wake() {
         frame_schema,
         1,
     );
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
 
@@ -1493,13 +1439,7 @@ fn unpack_reports_bad_batch_at_budget_boundary_before_yielding() {
         datatypes::arrow::datatypes::Schema::empty().into(),
     ));
     let (source, polls, _) = df_source(batches, frame_schema);
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
 
@@ -1541,13 +1481,7 @@ fn unpack_surfaces_upstream_error_after_budget_yield_once() {
         panic_on_poll: false,
         emitted: 0,
     });
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
     let waker = Waker::from(wake.clone());
 
@@ -1579,13 +1513,7 @@ async fn unpack_drains_decoded_rows_before_polling_another_batch() {
     let frame_schema = batches[0].schema();
     let multi = concat_batches(&frame_schema, &batches).unwrap();
     let (source, polls, _) = df_source(vec![multi], frame_schema);
-    let mut unpacked = unpack_raw_series(
-        source,
-        schema(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
+    let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
     assert_chunk(
         &unpacked.next().await.unwrap().unwrap(),
         b"a",
@@ -1633,15 +1561,7 @@ async fn unpack_preflights_empty_and_grid_schemas_without_polling() {
         )
         .unwrap();
         let (source, polls, drops) = df_source(vec![], frame_schema);
-        assert!(
-            unpack_raw_series(
-                source,
-                Arc::new(expected),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-            )
-            .is_err()
-        );
+        assert!(unpack_raw_series(source, Some(Arc::new(expected))).is_err());
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
@@ -1683,6 +1603,7 @@ async fn named_frame_fields_roundtrip_and_reject_wrong_bindings_before_polling()
         schema: expected.clone(),
         items: VecDeque::from([Ok(input_chunk)]),
         binding: RawLabelSource::Explicit,
+        label_decode_spec: None,
         ordering: SeriesOrdering::KeyThenTime,
         polls: Arc::new(AtomicUsize::new(0)),
         drops: Arc::new(AtomicUsize::new(0)),
@@ -1716,13 +1637,7 @@ async fn named_frame_fields_roundtrip_and_reject_wrong_bindings_before_polling()
     );
 
     let (source, _, _) = df_source(ipc_batches.clone(), frame_schema.clone());
-    let mut decoded = unpack_raw_series(
-        source,
-        expected.clone(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
+    let mut decoded = unpack_raw_series(source, Some(expected.clone())).unwrap();
     let actual = decoded.next().await.unwrap().unwrap();
     assert_chunk(
         &actual,
@@ -1750,15 +1665,7 @@ async fn named_frame_fields_roundtrip_and_reject_wrong_bindings_before_polling()
         let wrong_schema = named_fields_schema(wrong_names);
         let batches = if empty { vec![] } else { ipc_batches.clone() };
         let (source, polls, drops) = df_source(batches, frame_schema.clone());
-        assert!(
-            unpack_raw_series(
-                source,
-                wrong_schema,
-                RawLabelSource::Explicit,
-                SeriesOrdering::KeyThenTime,
-            )
-            .is_err()
-        );
+        assert!(unpack_raw_series(source, Some(wrong_schema)).is_err());
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
@@ -2193,13 +2100,7 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
     let frame_schema = reader.schema();
     let ipc_batches = reader.map(Result::unwrap).collect::<Vec<_>>();
     let (source, _, _) = df_source(ipc_batches, frame_schema);
-    let mut decoded = unpack_raw_series(
-        source,
-        schema.clone(),
-        RawLabelSource::Explicit,
-        SeriesOrdering::KeyThenTime,
-    )
-    .unwrap();
+    let mut decoded = unpack_raw_series(source, Some(schema.clone())).unwrap();
 
     struct Expected {
         time: i64,
@@ -2391,7 +2292,7 @@ async fn interleaved_ordering_is_rejected_before_any_poll() {
     assert!(
         super::raw_series_frame_schema_with_ordering(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            &RawLabelSource::Explicit,
             SeriesOrdering::Interleaved,
         )
         .is_err(),
@@ -2414,20 +2315,27 @@ async fn interleaved_ordering_is_rejected_before_any_poll() {
     );
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 
-    let frame_schema = datatypes::series::frame::raw_series_frame_schema(
+    // An unpack has no ordering argument, so the only way an `Interleaved` stream could reach it is
+    // a frame that declares one; that spelling has no wire representation and is rejected.
+    let frame = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
         datatypes::series::frame::RawLabelMode::Explicit,
     )
     .unwrap();
-    let (source, polls, drops) = df_never_polled(frame_schema);
-    assert!(
-        unpack_raw_series(
-            source,
-            schema(),
-            RawLabelSource::Explicit,
-            SeriesOrdering::Interleaved,
-        )
-        .is_err()
+    let mut metadata = frame.metadata().clone();
+    metadata.insert(
+        "greptime.series.ordering".to_string(),
+        "interleaved".to_string(),
+    );
+    let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
+    let (source, polls, drops) = df_never_polled(frame);
+    let error = match unpack_raw_series(source, Some(schema())) {
+        Ok(_) => panic!("an interleaved declaration must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        StatusCode::InvalidArguments
     );
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -2482,13 +2390,7 @@ async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
             RecordBatch::try_new(changed, first.columns().to_vec()).unwrap()
         };
         let (source, _, _) = df_source(vec![first.clone(), bad], base.clone());
-        let mut unpacked = unpack_raw_series(
-            source,
-            schema(),
-            RawLabelSource::Explicit,
-            SeriesOrdering::Contiguous,
-        )
-        .unwrap();
+        let mut unpacked = unpack_raw_series(source, Some(schema())).unwrap();
         assert_chunk(
             &unpacked.next().await.unwrap().unwrap(),
             b"a",
@@ -2609,8 +2511,7 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
             assert_eq!(ipc_batches.len(), expected_batch_count);
             assert!(ipc_batches.iter().all(|batch| batch.schema() == declared));
             let (source, _, _) = df_source(ipc_batches, declared);
-            let mut decoded =
-                unpack_raw_series(source, schema(), RawLabelSource::Explicit, ordering).unwrap();
+            let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
             if is_empty {
                 assert!(decoded.next().await.is_none());
             } else {
@@ -2627,4 +2528,553 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
             }
         }
     }
+}
+
+/// A primary-key binding over a region whose only tag is `host`.
+fn key_binding(metric: &str) -> RawLabelSource {
+    use api::v1::SemanticType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "host",
+                datatypes::data_type::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 0,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        })
+        .primary_key(vec![0]);
+    let metadata = Arc::new(builder.build().unwrap());
+    RawLabelSource::PrimaryKey {
+        metric_name: Arc::from(metric),
+        physical_metadata: metadata,
+        logical_tags: Arc::from([BoundTag {
+            column_id: 0,
+            name: Arc::from("host"),
+        }]),
+    }
+}
+
+/// A primary-key binding over a region whose two tags are `host` then `zone`.
+fn two_tag_binding(metric: &str) -> RawLabelSource {
+    use api::v1::SemanticType;
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::RegionId;
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "host",
+                datatypes::data_type::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 0,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "zone",
+                datatypes::data_type::ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 2,
+        })
+        .primary_key(vec![0, 1]);
+    let metadata = Arc::new(builder.build().unwrap());
+    RawLabelSource::PrimaryKey {
+        metric_name: Arc::from(metric),
+        physical_metadata: metadata,
+        logical_tags: Arc::from([
+            BoundTag {
+                column_id: 0,
+                name: Arc::from("host"),
+            },
+            BoundTag {
+                column_id: 1,
+                name: Arc::from("zone"),
+            },
+        ]),
+    }
+}
+
+/// A key frame whose metadata carries exactly the supplied description and nothing else.
+fn key_frame_with(description: &datatypes::series::frame::LabelDecodeSpec) -> SchemaRef {
+    let layout = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    let mut metadata = layout.metadata().clone();
+    metadata.insert(
+        "greptime.series.label_decode".to_string(),
+        serde_json::to_string(description).unwrap(),
+    );
+    Arc::new(Schema::new_with_metadata(layout.fields().clone(), metadata))
+}
+
+/// Logical tag order is fixed by the writer, so the wire form has one spelling and the comparison
+/// is plain equality. The ordered key columns are the encoding, so the same columns in another
+/// order are a different layout and are rejected.
+///
+/// The tag order is canonical rather than meaningful: the decoder sorts tags by name when it binds
+/// them (`src/mito-codec/src/labels.rs:235`), so sorting in the writer cannot change a decoded label
+/// set. What it does change is that the written text no longer depends on the caller's order, which
+/// is what makes one comparison rule enough for both a local check and the byte-exact remote one.
+#[tokio::test]
+async fn frame_check_compares_the_canonical_description_and_key_order_exactly() {
+    let binding = two_tag_binding("cpu");
+    let description = label_decode_spec(&binding).expect("a primary-key binding describes its key");
+    assert_eq!(
+        description.logical_tags.len(),
+        2,
+        "two tags to canonicalize"
+    );
+
+    // A description derived from the binding is already canonical, whichever order the binding
+    // lists its tags in.
+    let RawLabelSource::PrimaryKey {
+        metric_name,
+        physical_metadata,
+        logical_tags,
+    } = &binding
+    else {
+        unreachable!("the fixture is a primary-key binding")
+    };
+    let mut reversed_tags = logical_tags.to_vec();
+    reversed_tags.reverse();
+    let reordered_binding = RawLabelSource::PrimaryKey {
+        metric_name: metric_name.clone(),
+        physical_metadata: physical_metadata.clone(),
+        logical_tags: reversed_tags.into(),
+    };
+    assert_eq!(
+        label_decode_spec(&reordered_binding).expect("a primary-key binding describes its key"),
+        description,
+        "a binding's tag order does not reach the description"
+    );
+    let reordered =
+        label_decode_spec(&reordered_binding).expect("a primary-key binding describes its key");
+    assert_eq!(
+        key_frame_with(&reordered).metadata(),
+        key_frame_with(&description).metadata(),
+        "and so two producers with the same tags write the same bytes"
+    );
+
+    // A frame that is not canonical is compared as written instead of being guessed equal.
+    let mut non_canonical = description.clone();
+    non_canonical.logical_tags.reverse();
+    let frame = key_frame_with(&non_canonical);
+    assert!(
+        ensure_frame_matches_label_source(frame.as_ref(), &binding).is_err(),
+        "the reader does not reorder what a writer should have ordered"
+    );
+
+    // The ordered key columns are the encoding and are never reordered.
+    let mut reordered_key = description;
+    reordered_key.primary_key.reverse();
+    let frame = key_frame_with(&reordered_key);
+    assert!(
+        ensure_frame_matches_label_source(frame.as_ref(), &binding).is_err(),
+        "primary-key column order is the encoding and is compared as written"
+    );
+}
+
+/// The identity check a caller performs on its own compares the frame's declaration with the
+/// binding it holds: a different metric, another key layout, or an explicit frame with no
+/// declaration at all is a disagreement, and the frame alone still decides what is decoded.
+#[tokio::test]
+async fn frame_check_rejects_a_binding_the_frame_does_not_describe() {
+    let description =
+        label_decode_spec(&key_binding("cpu")).expect("a primary-key binding describes its key");
+    let frame = key_frame_with(&description);
+    assert!(
+        ensure_frame_matches_label_source(frame.as_ref(), &key_binding("cpu")).is_ok(),
+        "the same binding is the same layout"
+    );
+    assert!(
+        ensure_frame_matches_label_source(frame.as_ref(), &key_binding("other_metric")).is_err(),
+        "another metric is another label layout"
+    );
+    assert!(
+        ensure_frame_matches_label_source(frame.as_ref(), &RawLabelSource::Explicit).is_err(),
+        "an explicit identity expects a frame that carries complete labels"
+    );
+
+    let explicit = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    assert!(
+        ensure_frame_matches_label_source(explicit.as_ref(), &key_binding("cpu")).is_err(),
+        "a frame declaring no layout cannot satisfy a primary-key identity"
+    );
+    assert!(
+        ensure_frame_matches_label_source(explicit.as_ref(), &RawLabelSource::Explicit).is_ok(),
+        "an explicit frame is what an explicit identity expects"
+    );
+}
+
+/// The description parsed at unpack time is retained on the returned stream, so a consumer that
+/// holds only the frame can decode; an explicit frame retains none.
+#[tokio::test]
+async fn unpack_retains_the_declared_description_without_a_binding() {
+    let binding = key_binding("cpu");
+    let description = label_decode_spec(&binding).expect("a primary-key binding describes its key");
+
+    let (source, _, _) = df_source(vec![], key_frame_with(&description));
+    let unpacked = unpack_raw_series(source, None).unwrap();
+    assert_eq!(unpacked.label_decode_spec(), Some(&description));
+    assert!(
+        matches!(unpacked.label_source(), RawLabelSource::Explicit),
+        "no physical region key layout is invented for a frame that carries none"
+    );
+
+    let explicit = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let (source, _, _) = df_source(vec![], explicit);
+    let unpacked = unpack_raw_series(source, None).unwrap();
+    assert_eq!(
+        unpacked.label_decode_spec(),
+        None,
+        "explicit labels are already complete and need no decoder"
+    );
+}
+
+/// A key frame whose `greptime.series.label_decode` entry is exactly the supplied text.
+fn key_frame_with_encoded(encoded: &str) -> SchemaRef {
+    let layout = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    let mut metadata = layout.metadata().clone();
+    metadata.insert(
+        "greptime.series.label_decode".to_string(),
+        encoded.to_string(),
+    );
+    Arc::new(Schema::new_with_metadata(layout.fields().clone(), metadata))
+}
+
+/// The description is validated whether or not a binding is supplied, so trusting the frame never
+/// means skipping validation: an unknown version, an unknown field, a malformed entry, a logical
+/// tag outside the key, a key frame without a description, and an explicit frame carrying one are
+/// all rejected before the stream is returned.
+#[tokio::test]
+async fn unpack_rejects_invalid_descriptions_without_a_binding() {
+    let description =
+        label_decode_spec(&key_binding("cpu")).expect("a primary-key binding describes its key");
+    let encoded = |value: &serde_json::Value| serde_json::to_string(value).unwrap();
+    let mut unknown_version = serde_json::to_value(&description).unwrap();
+    unknown_version["version"] =
+        serde_json::json!(datatypes::series::frame::LABEL_DECODE_VERSION + 1);
+    let mut unknown_field = serde_json::to_value(&description).unwrap();
+    unknown_field["future_field"] = serde_json::json!(1);
+    let mut unlisted_tag = serde_json::to_value(&description).unwrap();
+    unlisted_tag["logical_tags"] = serde_json::json!([{ "column_id": 7, "name": "absent" }]);
+    let cases = [
+        ("unknown version", encoded(&unknown_version)),
+        ("unknown field", encoded(&unknown_field)),
+        (
+            "logical tag outside the primary key",
+            encoded(&unlisted_tag),
+        ),
+        ("malformed entry", "{".to_string()),
+    ];
+    for (label, text) in cases {
+        let (source, polls, _) = df_source(vec![], key_frame_with_encoded(&text));
+        let error = match unpack_raw_series(source, None) {
+            Ok(_) => panic!("{label}: an invalid description must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+            StatusCode::InvalidArguments,
+            "{label}"
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            0,
+            "{label}: a rejected frame is never polled"
+        );
+    }
+
+    let key_without_description = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    let (source, _, _) = df_source(vec![], key_without_description);
+    assert!(
+        unpack_raw_series(source, None).is_err(),
+        "a key frame nobody can decode is rejected instead of being trusted"
+    );
+
+    let explicit = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let mut metadata = explicit.metadata().clone();
+    metadata.insert(
+        "greptime.series.label_decode".to_string(),
+        encoded(&serde_json::to_value(&description).unwrap()),
+    );
+    let explicit_with_description = Arc::new(Schema::new_with_metadata(
+        explicit.fields().clone(),
+        metadata,
+    ));
+    let (source, _, _) = df_source(vec![], explicit_with_description);
+    assert!(
+        unpack_raw_series(source, None).is_err(),
+        "an explicit frame declares no description, so one is a contradiction"
+    );
+}
+
+fn key_chunk() -> RawSeriesChunk {
+    chunk_with(b"encoded-complete-key", &[1], vec![Some(3.0)], None, true)
+}
+
+/// Every packed key frame declares the label decode description derived from its binding, so a
+/// consumer needs no scan-side label source. Explicit frames declare none.
+#[tokio::test]
+async fn pack_declares_the_label_decode_description_of_its_binding() {
+    let binding = key_binding("cpu");
+    let (input, _, _) = raw_custom(
+        vec![key_chunk()],
+        SeriesOrdering::Contiguous,
+        binding.clone(),
+    );
+    let mut packed = pack_raw_series(input).unwrap();
+    let declared = packed.schema();
+    let canonical = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    assert_eq!(
+        declared.metadata().len(),
+        canonical.metadata().len() + 2,
+        "a key frame adds the producer ordering and the label decode description"
+    );
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(&declared).unwrap(),
+        label_decode_spec(&binding),
+        "the declared description is derived from the binding, not from the first row"
+    );
+    let batch = packed.next().await.unwrap().unwrap();
+    assert_eq!(batch.schema(), declared);
+
+    let (input, _, _) = raw_custom(
+        vec![key_chunk()],
+        SeriesOrdering::Contiguous,
+        RawLabelSource::Explicit,
+    );
+    let packed = pack_raw_series(input).unwrap();
+    let declared = packed.schema();
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(&declared).unwrap(),
+        None,
+        "explicit labels are already complete"
+    );
+    assert_eq!(declared.metadata().len(), canonical.metadata().len() + 1);
+}
+
+/// A key frame that omits its description is not decodable, and unpacking says so instead of falling
+/// back to a caller-side layout; the description that is present survives the round trip.
+#[tokio::test]
+async fn unpack_round_trips_a_key_frame_and_rejects_one_without_a_description() {
+    let binding = key_binding("cpu");
+    let (input, _, _) = raw_custom(
+        vec![key_chunk()],
+        SeriesOrdering::Contiguous,
+        binding.clone(),
+    );
+    let mut packed = pack_raw_series(input).unwrap();
+    let declared = packed.schema();
+    let batch = packed.next().await.unwrap().unwrap();
+
+    // The frame and the binding agree, so the round trip decodes.
+    let (source, _, _) = df_source(vec![batch.clone()], declared.clone());
+    let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
+    let chunk = decoded.next().await.unwrap().unwrap();
+    assert_eq!(chunk.primary_key.as_slice(), b"encoded-complete-key");
+
+    // A frame that omits the description is not decodable from the schema alone.
+    let canonical = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    let mut metadata = canonical.metadata().clone();
+    metadata.insert(
+        "greptime.series.ordering".to_string(),
+        "contiguous".to_string(),
+    );
+    let stripped = Arc::new(datatypes::arrow::datatypes::Schema::new_with_metadata(
+        declared.fields().clone(),
+        metadata,
+    ));
+    let stripped_batch = RecordBatch::try_new(stripped.clone(), batch.columns().to_vec()).unwrap();
+    let (source, _, _) = df_source(vec![stripped_batch], stripped);
+    let error = match unpack_raw_series(source, Some(schema())) {
+        Ok(_) => panic!("a key frame without a description must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        StatusCode::InvalidArguments
+    );
+}
+
+/// The ordering a frame declares is the only ordering a consumer has: unpacking a `KeyThenTime`
+/// frame reports `KeyThenTime` although nobody passed it in.
+#[tokio::test]
+async fn unpack_reports_the_ordering_the_frame_declares() {
+    let (input, _, _) = raw_custom(
+        vec![key_chunk()],
+        SeriesOrdering::KeyThenTime,
+        key_binding("cpu"),
+    );
+    let packed = pack_raw_series(input).unwrap();
+    assert_eq!(
+        raw_series_frame_ordering(packed.schema().as_ref()).unwrap(),
+        SeriesOrdering::KeyThenTime,
+        "the producer declaration reaches the wire"
+    );
+
+    let unpacked = unpack_raw_series(packed, None).unwrap();
+    assert_eq!(
+        unpacked.ordering(),
+        SeriesOrdering::KeyThenTime,
+        "unpacking derives the ordering from the frame, not from a caller"
+    );
+
+    // A frame that declares no ordering is a legacy contiguous frame.
+    let frame = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let (source, _, _) = df_source(vec![], frame);
+    assert_eq!(
+        unpack_raw_series(source, None).unwrap().ordering(),
+        SeriesOrdering::Contiguous
+    );
+}
+
+/// Reserved layout metadata this revision does not write is rejected instead of being read as the
+/// current layout, so a frame cannot be decoded under a contract it did not declare.
+#[tokio::test]
+async fn unpack_rejects_unknown_layout_metadata() {
+    let cases = [
+        ("greptime.series.layout", "v2"),
+        ("greptime.series.content", "series"),
+        ("greptime.series.time", "timestamps_v2"),
+        ("greptime.series.ordering", "hash_then_time"),
+    ];
+    for (key, value) in cases {
+        let frame = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+        let mut metadata = frame.metadata().clone();
+        metadata.insert(key.to_string(), value.to_string());
+        let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
+        let (source, polls, _) = df_source(vec![], frame);
+        assert!(
+            unpack_raw_series(source, None).is_err(),
+            "{key} = {value} is not a declaration this revision reads"
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 0, "{key}");
+    }
+}
+
+/// `expected` is a check, not an input: a schema the frame does not declare is rejected, and the
+/// same frame unpacks without it because the frame is the only source of decode information.
+#[tokio::test]
+async fn unpack_rejects_an_expected_schema_the_frame_does_not_declare() {
+    let frame = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+
+    let other_field = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("other_value"),
+        }]
+        .into(),
+        eval_grid: None,
+    });
+    let (source, polls, _) = df_source(vec![], frame.clone());
+    let error = match unpack_raw_series(source, Some(other_field)) {
+        Ok(_) => panic!("a field layout the frame does not declare must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        StatusCode::InvalidArguments
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 0, "nothing is polled");
+
+    let two_fields = Arc::new(SeriesSchema {
+        fields: vec![
+            FieldSpec {
+                name: Arc::from("value"),
+            },
+            FieldSpec {
+                name: Arc::from("second"),
+            },
+        ]
+        .into(),
+        eval_grid: None,
+    });
+    let (source, _, _) = df_source(vec![], frame.clone());
+    assert!(
+        unpack_raw_series(source, Some(two_fields)).is_err(),
+        "the same names in a longer list are another layout"
+    );
+
+    let (source, _, _) = df_source(vec![], frame.clone());
+    assert!(
+        unpack_raw_series(source, Some(schema())).is_ok(),
+        "the schema the frame declares is accepted"
+    );
+
+    let (source, _, _) = df_source(vec![], frame);
+    let unpacked = unpack_raw_series(source, None).unwrap();
+    assert_eq!(
+        unpacked
+            .schema()
+            .fields
+            .iter()
+            .map(|field| field.name.as_ref())
+            .collect::<Vec<_>>(),
+        vec!["value"],
+        "the returned schema is the frame's, whether or not an expectation was given"
+    );
+}
+
+/// Unpacking a frame and packing it again keeps both declarations, so a relayed stream is the same
+/// stream: the description still decodes the same labels and the ordering still holds.
+#[tokio::test]
+async fn unpack_pack_unpack_preserves_the_description_and_the_ordering() {
+    let binding = key_binding("cpu");
+    let description = label_decode_spec(&binding).expect("a primary-key binding describes its key");
+    let (input, _, _) = raw_custom(vec![key_chunk()], SeriesOrdering::KeyThenTime, binding);
+    let packed = pack_raw_series(input).unwrap();
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(packed.schema().as_ref()).unwrap(),
+        Some(description.clone())
+    );
+
+    let unpacked = unpack_raw_series(packed, None).unwrap();
+    assert_eq!(unpacked.label_decode_spec(), Some(&description));
+    assert_eq!(unpacked.ordering(), SeriesOrdering::KeyThenTime);
+
+    let repacked = pack_raw_series(unpacked).unwrap();
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(repacked.schema().as_ref())
+            .unwrap(),
+        Some(description.clone()),
+        "the repacked frame declares what the unpacked stream declared"
+    );
+    assert_eq!(
+        raw_series_frame_ordering(repacked.schema().as_ref()).unwrap(),
+        SeriesOrdering::KeyThenTime,
+        "the repacked frame keeps the ordering it was unpacked under"
+    );
+
+    let mut again = unpack_raw_series(repacked, None).unwrap();
+    assert_eq!(again.label_decode_spec(), Some(&description));
+    assert_eq!(again.ordering(), SeriesOrdering::KeyThenTime);
+    let chunk = again.next().await.unwrap().unwrap();
+    assert_eq!(chunk.primary_key.as_slice(), b"encoded-complete-key");
+    assert!(chunk.metric.is_none(), "key chunks stay undecoded");
+    assert!(again.next().await.is_none());
 }

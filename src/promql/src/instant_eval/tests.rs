@@ -190,7 +190,7 @@ fn stale_sample_in_any_field_suppresses_without_falling_back() {
 }
 
 #[test]
-fn offset_extreme_timestamps_and_point_limit_are_checked_without_large_fixture() {
+fn offset_extreme_timestamps_are_checked_without_large_fixture() {
     let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(7.0)])));
     assert_eq!(
         select(&[i64::MAX], &fields, i64::MAX..=i64::MAX, 1, 0, 0).unwrap(),
@@ -209,18 +209,19 @@ fn offset_extreme_timestamps_and_point_limit_are_checked_without_large_fixture()
         (vec![0], vec![110])
     );
 
+    // A grid of a million and one points used to be refused by a point limit of the kernel's own.
+    // The kernel decides it now, and the reservation its caller grows before the call is what
+    // stands in for that limit; the stale marker still suppresses the points row zero would answer,
+    // so only the one sample after it is selected.
     let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
         Some(f64::from_bits(
             common_query::prometheus::PROMETHEUS_STALE_NAN_BITS,
         )),
         Some(1.0),
     ])));
-    let result = select(&[0, 1_000_000], &fields, 0..=1_000_000, 1, 0, 0);
-    let error = result.unwrap_err().to_string();
-    assert!(
-        error.contains("output points exceed limit: 1000001 > 1000000"),
-        "{error}"
-    );
+    let (rows, times) = select(&[0, 1_000_000], &fields, 0..=1_000_000, 1, 0, 0).unwrap();
+    assert_eq!(rows, [1]);
+    assert_eq!(times, [1_000_000]);
 }
 
 #[test]

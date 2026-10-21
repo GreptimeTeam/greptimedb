@@ -16,16 +16,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use api::v1::region::RegionRequestHeader;
 use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{BoundTag, RawLabelSource};
 use store_api::storage::ColumnId;
-
-/// Reserved query-context extension containing an explicit internal raw-series request.
-pub const RAW_SERIES_REQUEST_EXTENSION_KEY: &str = "greptime.raw_series_request";
 
 /// A logical label mapped to its physical region column.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,21 +50,6 @@ pub struct RawSeriesRequest {
 }
 
 impl RawSeriesRequest {
-    /// Serializes the control after validating its version and field binding.
-    pub fn to_extension_value(&self) -> DataFusionResult<String> {
-        self.validate()?;
-        serde_json::to_string(self)
-            .map_err(|_| DataFusionError::Plan("Invalid raw-series request".into()))
-    }
-
-    /// Parses and validates a strict versioned control value.
-    pub fn from_extension_value(value: &str) -> DataFusionResult<Self> {
-        let request: Self = serde_json::from_str(value)
-            .map_err(|_| DataFusionError::Plan("Invalid raw-series request".into()))?;
-        request.validate()?;
-        Ok(request)
-    }
-
     /// Binds expected output fields and labels to the actual opened scanner metadata.
     pub fn bind(
         &self,
@@ -138,83 +119,87 @@ fn same_encoding_identity(left: &RegionMetadata, right: &RegionMetadata) -> bool
         && left.time_index_type() == right.time_index_type()
 }
 
-/// Removes and parses the optional raw control from a mutable request header.
-pub fn take_raw_series_request(
-    header: &mut Option<RegionRequestHeader>,
-) -> DataFusionResult<Option<RawSeriesRequest>> {
-    let Some(value) = header
-        .as_mut()
-        .and_then(|header| header.query_context.as_mut())
-        .and_then(|context| context.extensions.remove(RAW_SERIES_REQUEST_EXTENSION_KEY))
-    else {
-        return Ok(None);
-    };
-    RawSeriesRequest::from_extension_value(&value).map(Some)
-}
-
 #[cfg(test)]
 mod tests {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
 
-    #[test]
-    fn strict_versioned_extension_fixture_is_parseable() {
-        let fixture = include_str!(
-            "../../../../../tests/compatibility/wire/raw_series_request/v1_request.json"
-        );
-        let request = RawSeriesRequest::from_extension_value(fixture).unwrap();
-        assert_eq!(request.version, 1);
-        assert_eq!(request.metric_name, "cpu");
-        assert_eq!(request.logical_tags[0].name, "host");
-        assert_eq!(request.logical_tags[0].column_id, 1);
-        assert_eq!(request.field_ids, [3, 2]);
-        assert_eq!(request.physical_metadata.region_id, RegionId::new(1, 1));
+    /// Builds the physical metadata of a one-tag, two-field region.
+    fn fixture_metadata() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "value",
+                    ConcreteDataType::int32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("aux", ConcreteDataType::int64_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 4,
+            })
+            .primary_key(vec![1]);
+        builder.build().unwrap()
     }
 
-    #[test]
-    fn absent_marker_remains_an_ordinary_request() {
-        let mut header = None;
-        assert!(take_raw_series_request(&mut header).unwrap().is_none());
-    }
-
+    /// Builds a request asking for fields in descending column order.
     fn fixture_request() -> RawSeriesRequest {
-        let fixture = include_str!(
-            "../../../../../tests/compatibility/wire/raw_series_request/v1_request.json"
-        );
-        RawSeriesRequest::from_extension_value(fixture).unwrap()
+        RawSeriesRequest {
+            version: 1,
+            physical_metadata: fixture_metadata(),
+            metric_name: "cpu".to_string(),
+            logical_tags: vec![RawSeriesTag {
+                column_id: 1,
+                name: "host".to_string(),
+            }],
+            field_ids: vec![3, 2],
+        }
     }
 
     #[test]
-    fn rejects_unknown_fields_and_versions() {
-        let mut version: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../../tests/compatibility/wire/raw_series_request/v1_request.json"
-        ))
-        .unwrap();
-        version["version"] = serde_json::json!(2);
-        assert!(RawSeriesRequest::from_extension_value(&version.to_string()).is_err());
-
-        let mut unknown: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../../tests/compatibility/wire/raw_series_request/v1_request.json"
-        ))
-        .unwrap();
-        unknown["logical_tags"][0]["extra"] = serde_json::json!(true);
-        assert!(RawSeriesRequest::from_extension_value(&unknown.to_string()).is_err());
+    fn rejects_unsupported_version() {
+        let mut request = fixture_request();
+        request.version = 2;
+        assert!(request.validate().is_err());
     }
 
     #[test]
     fn rejects_empty_duplicate_and_non_field_ids() {
         let mut request = fixture_request();
         request.field_ids.clear();
-        assert!(request.to_extension_value().is_err());
+        assert!(request.validate().is_err());
         let mut request = fixture_request();
         request.field_ids.push(3);
-        assert!(request.to_extension_value().is_err());
+        assert!(request.validate().is_err());
         let mut request = fixture_request();
         request.field_ids = vec![1];
-        assert!(request.to_extension_value().is_err());
+        assert!(request.validate().is_err());
     }
 
     #[test]

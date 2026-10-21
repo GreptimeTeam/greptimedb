@@ -81,6 +81,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid label decode description"))]
+    InvalidLabelDecodeDescription {
+        // Box the source to reduce the size of the error.
+        #[snafu(source(from(datatypes::error::Error, Box::new)))]
+        source: Box<datatypes::error::Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Encode null value"))]
     IndexEncodeNull {
         #[snafu(implicit)]
@@ -108,6 +117,7 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             NotSupportedField { .. } | UnsupportedOperation { .. } => StatusCode::Unsupported,
+            InvalidLabelDecodeDescription { source, .. } => source.status_code(),
             InvalidSparsePrimaryKey { .. } | InvalidDensePrimaryKey { .. } => {
                 StatusCode::InvalidArguments
             }

@@ -73,6 +73,11 @@ impl RangeFunction {
     /// the same as saying `IS_COUNTER` in `extrapolated_rate`: `rate` and `increase`. A kernel
     /// that corrects counters without the index being maintained would silently drop every
     /// correction, so a new counter function has to be added here as well.
+    ///
+    /// It governs both readers of the index: the per-window kernel above, and the batch kernel,
+    /// which reads [`FloatWindows::resets_of`]. When it returns `false`, `resets` stays empty and
+    /// `resets_of` yields nothing, so a batch kernel for a counter function would skip every
+    /// correction and report `delta`-like values.
     pub(crate) fn indexes_counter_resets(self) -> bool {
         matches!(self, Self::Rate | Self::Increase)
     }
