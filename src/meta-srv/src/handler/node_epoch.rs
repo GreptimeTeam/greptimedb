@@ -233,14 +233,16 @@ pub(crate) mod tests {
 
     pub(crate) const NODE_ID: u64 = 1;
 
-    /// A memory kv backend whose reads can be slowed down or failed, and whose
-    /// compare-and-put can be held.
+    /// A memory kv backend whose reads can be slowed down, failed or held after they read,
+    /// and whose compare-and-put can be held.
     #[derive(Default)]
-    struct HookedKvBackend {
+    pub(crate) struct HookedKvBackend {
         inner: MemoryKvBackend<common_meta::error::Error>,
         reads: AtomicUsize,
         read_delay: std::sync::Mutex<Option<Duration>>,
         fail_reads: AtomicBool,
+        /// Holds the next read after it has read: notifies the first, waits for the second.
+        pub(crate) hold_next_read: std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
         cas_entered: Notify,
         cas_gate: std::sync::Mutex<Option<Arc<Notify>>>,
     }
@@ -316,7 +318,13 @@ pub(crate) mod tests {
                 }
                 .fail();
             }
-            self.inner.get(key).await
+            let value = self.inner.get(key).await;
+            let hold = self.hold_next_read.lock().unwrap().take();
+            if let Some((entered, release)) = hold {
+                entered.notify_one();
+                release.notified().await;
+            }
+            value
         }
 
         async fn compare_and_put(
@@ -386,7 +394,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn new_group_builder() -> HeartbeatHandlerGroupBuilder {
+    fn new_group_builder() -> HeartbeatHandlerGroupBuilder {
         let lease_handler = RegionLeaseHandler::new(
             10,
             Arc::new(TableMetadataManager::new(Arc::new(MemoryKvBackend::new()))),

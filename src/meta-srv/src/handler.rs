@@ -537,20 +537,19 @@ impl HeartbeatHandlerGroup {
 
     /// Handles the heartbeat request.
     pub async fn handle(&self, req: HeartbeatRequest, ctx: Context) -> Result<HeartbeatResponse> {
-        self.handle_checked(req, ctx).await.map(|(res, _)| res)
+        let (role, epoch_check) = self.check_request(&req, &ctx).await?;
+        self.handle_checked(req, ctx, role, epoch_check).await
     }
 
-    /// Handles the heartbeat request, and returns the result of its node epoch check.
+    /// Returns the role of the request and the result of its node epoch check.
     ///
     /// The check runs here rather than as a handler, so replacing the handlers cannot bypass
-    /// it. A stale or clock-ahead datanode request skips the handlers. A datanode request that
-    /// does not pass the check gets no region lease, and its mailbox reply is not delivered.
-    pub(crate) async fn handle_checked(
+    /// it.
+    pub(crate) async fn check_request(
         &self,
-        req: HeartbeatRequest,
-        mut ctx: Context,
-    ) -> Result<(HeartbeatResponse, NodeEpochCheck)> {
-        let mut acc = HeartbeatAccumulator::default();
+        req: &HeartbeatRequest,
+        ctx: &Context,
+    ) -> Result<(Role, NodeEpochCheck)> {
         let (role, member_id) = req
             .header
             .as_ref()
@@ -558,10 +557,23 @@ impl HeartbeatHandlerGroup {
             .context(error::InvalidArgumentsSnafu {
                 err_msg: format!("invalid role: {:?}", req.header),
             })?;
+        Ok((role, check_node_epoch(req, role, member_id, ctx).await))
+    }
 
+    /// Handles the heartbeat request after [Self::check_request].
+    ///
+    /// A stale or clock-ahead datanode request skips the handlers. A datanode request that
+    /// does not pass the check gets no region lease, and its mailbox reply is not delivered.
+    pub(crate) async fn handle_checked(
+        &self,
+        req: HeartbeatRequest,
+        mut ctx: Context,
+        role: Role,
+        epoch_check: NodeEpochCheck,
+    ) -> Result<HeartbeatResponse> {
+        let mut acc = HeartbeatAccumulator::default();
         let is_handshake = ctx.is_handshake;
 
-        let epoch_check = check_node_epoch(&req, role, member_id, &ctx).await;
         match epoch_check {
             NodeEpochCheck::NotLeader => {
                 acc.header = Some(ResponseHeader {
@@ -628,7 +640,7 @@ impl HeartbeatHandlerGroup {
             heartbeat_config,
             extensions,
         };
-        Ok((res, epoch_check))
+        Ok(res)
     }
 }
 

@@ -232,23 +232,25 @@ where
             .with_label_values(&[sender_id.as_str()])
             .inc();
 
-        let node_epoch = req.node_epoch;
-        let is_startup = is_startup_handshake(&req, is_handshake);
-        let res = match self
-            .handler_group
-            .handle_checked(req, self.ctx.clone().with_handshake(is_handshake))
-            .await
-        {
-            Ok((res, epoch_check)) => {
-                self.on_node_epoch_check(epoch_check, node_epoch, is_startup)
+        let ctx = self.ctx.clone().with_handshake(is_handshake);
+        let res = match self.handler_group.check_request(&req, &ctx).await {
+            Ok((role, epoch_check)) => {
+                // Updates the pushers before the handlers run, so the stream receives the
+                // messages they broadcast.
+                let is_startup = is_startup_handshake(&req, is_handshake);
+                self.on_node_epoch_check(epoch_check, req.node_epoch, is_startup)
                     .await;
-                Ok(res)
+                self.handler_group
+                    .handle_checked(req, ctx, role, epoch_check)
+                    .await
             }
-            Err(e) => {
-                warn!(e; "Failed to handle heartbeat request, sender: {}", self.sender_id);
-                Err(e.into())
-            }
+            Err(e) => Err(e),
         };
+        let res = res
+            .inspect_err(
+                |e| warn!(e; "Failed to handle heartbeat request, sender: {}", self.sender_id),
+            )
+            .map_err(|e| e.into());
 
         let is_not_leader = res.as_ref().is_ok_and(|r| r.is_not_leader());
 
@@ -834,13 +836,10 @@ mod tests {
 
         use super::{MockHeartbeatRequestStream, MockLeaderStepDown};
         use crate::handler::node_epoch::tests::{
-            NODE_ID, fence, handshake, heartbeat, new_group, new_group_builder, startup_handshake,
+            HookedKvBackend, NODE_ID, fence, handshake, heartbeat, new_group, startup_handshake,
         };
         use crate::handler::test_utils::TestEnv;
-        use crate::handler::{
-            HandleControl, HeartbeatAccumulator, HeartbeatHandler, HeartbeatHandlerGroup,
-            HeartbeatMailbox, Pusher, PusherId,
-        };
+        use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher, PusherId};
         use crate::metasrv::Context;
         use crate::service::heartbeat::{HeartbeatResponseResult, HeartbeatSession};
         use crate::service::mailbox::Channel;
@@ -998,59 +997,35 @@ mod tests {
             ));
         }
 
-        /// Holds the requests of one node epoch in the handler chain until released.
-        struct HoldEpoch {
-            node_epoch: u64,
-            entered: Arc<Notify>,
-            release: Arc<Notify>,
-        }
-
-        #[async_trait::async_trait]
-        impl HeartbeatHandler for HoldEpoch {
-            fn is_acceptable(&self, role: Role) -> bool {
-                role == Role::Datanode
-            }
-
-            async fn handle(
-                &self,
-                req: &HeartbeatRequest,
-                _: &mut Context,
-                _: &mut HeartbeatAccumulator,
-            ) -> crate::error::Result<HandleControl> {
-                if req.node_epoch == self.node_epoch {
-                    self.entered.notify_one();
-                    self.release.notified().await;
-                }
-                Ok(HandleControl::Continue)
-            }
-        }
-
         #[tokio::test]
         async fn test_request_accepted_before_startup_fence_cannot_register_pusher() {
             let (e1, e2) = epochs();
-            let entered = Arc::new(Notify::new());
-            let release = Arc::new(Notify::new());
-            let mut builder = new_group_builder().add_default_handlers();
-            builder
-                .add_handler_after(
-                    "ResponseHeaderHandler",
-                    HoldEpoch {
-                        node_epoch: e1,
-                        entered: entered.clone(),
-                        release: release.clone(),
-                    },
-                )
+            let group = Arc::new(new_group());
+            let kv_backend = Arc::new(HookedKvBackend::default());
+            let mut ctx = TestEnv::new().ctx();
+            ctx.kv_backend = kv_backend.clone() as _;
+            // A1 has been accepted before.
+            ctx.kv_backend
+                .put(PutRequest {
+                    key: DatanodeEpochKey::new(NODE_ID).to_bytes(),
+                    value: DatanodeEpochValue { node_epoch: e1 }
+                        .try_as_raw_value()
+                        .unwrap(),
+                    ..Default::default()
+                })
+                .await
                 .unwrap();
-            let group = Arc::new(builder.build().unwrap());
-            let ctx = TestEnv::new().ctx();
             let Stream {
                 mut session,
                 tx: a1_tx,
                 rx: mut a1_rx,
             } = Stream::open(&group, &ctx, handshake(0)).await;
 
-            // A1's first heartbeat passes the check, then waits in the handler chain while
-            // A2's startup handshake fences A1 off.
+            // A1's heartbeat on a new stream reads the epoch, then waits before it registers
+            // its pusher while A2's startup handshake fences A1 off.
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            *kv_backend.hold_next_read.lock().unwrap() = Some((entered.clone(), release.clone()));
             let a1 = tokio::spawn(async move {
                 session.handle_request(heartbeat(e1, "a1"), false).await;
                 session

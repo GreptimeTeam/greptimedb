@@ -1125,6 +1125,8 @@ mod tests {
                         id: 1,
                         addr: "meta_client_peer".to_string(),
                     }),
+                    // Datanodes report their start time on every heartbeat.
+                    node_epoch: 1,
                     ..Default::default()
                 };
                 sender.send(req).await.unwrap();
