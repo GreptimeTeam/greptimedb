@@ -21,6 +21,7 @@ use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
+use futures::FutureExt;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
@@ -67,8 +68,10 @@ impl CompactionSstReaderBuilder<'_> {
         let schema = scan_input.mapper.output_schema();
         let schema = rewrite_json2_schema(schema.arrow_schema(), &plans);
 
+        // Erase the nested scan future before embedding it in the compaction task.
         let stream = SeqScan::new(scan_input)
             .build_flat_reader_for_compaction()
+            .boxed()
             .await?;
         Ok(FlatSource::new_stream(schema, stream))
     }
