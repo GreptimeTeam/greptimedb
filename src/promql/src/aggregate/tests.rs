@@ -42,6 +42,10 @@ const OPS: [AggregateOp; 6] = [
 ];
 
 fn schema(fields: &[&str]) -> Arc<SeriesSchema> {
+    schema_with_grid_len(fields, 128)
+}
+
+fn schema_with_grid_len(fields: &[&str], len: u64) -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
         fields: fields
             .iter()
@@ -50,7 +54,7 @@ fn schema(fields: &[&str]) -> Arc<SeriesSchema> {
             })
             .collect(),
         eval_grid: Some(Arc::new(
-            EvalGrid::try_new(GridSpec::try_new(-1000, 250, 128).unwrap()).unwrap(),
+            EvalGrid::try_new(GridSpec::try_new(-1000, 250, len).unwrap()).unwrap(),
         )),
     })
 }
@@ -195,6 +199,42 @@ fn aggregates_match_prometheus() {
                 .copied()
                 .unwrap_or_default();
             assert!(count >= 8, "{op} {grouping}: {count}");
+        }
+    }
+}
+
+/// `stddev`, `stdvar`, `quantile` and `count_values` evaluated by the Prometheus v3.15.0 engine;
+/// see the header of `stat_cases.txt`.
+#[test]
+fn stat_aggregates_match_prometheus() {
+    let mut matched = BTreeMap::<String, usize>::new();
+    for case in cases(include_str!("stat_cases.txt")) {
+        let h = &case.header;
+        let labels = h[3]
+            .split(',')
+            .filter(|label| *label != "-")
+            .collect::<Vec<_>>();
+        let grouping = grouping(h, &labels);
+        let output = match h[1].as_str() {
+            "stddev" => aggregate_float(&case.schema, &case.series, AggregateOp::Stddev, grouping),
+            "stdvar" => aggregate_float(&case.schema, &case.series, AggregateOp::Stdvar, grouping),
+            "quantile" => {
+                let q = case.scalar.as_ref().expect("quantile cases carry q");
+                aggregate_quantile(&case.schema, &case.series, q, grouping)
+            }
+            "count_values" => count_values(&case.schema, &case.series, &h[4], grouping),
+            other => panic!("unmapped aggregate {other}"),
+        };
+        assert_result(&case, output.unwrap());
+        *matched.entry(format!("{} {}", h[1], h[2])).or_default() += 1;
+    }
+    for op in ["stddev", "stdvar", "quantile", "count_values"] {
+        for grouping in ["none", "by", "without"] {
+            let count = matched
+                .get(&format!("{op} {grouping}"))
+                .copied()
+                .unwrap_or_default();
+            assert!(count >= 12, "{op} {grouping}: {count}");
         }
     }
 }
@@ -351,18 +391,50 @@ fn fields_are_aggregated_independently() {
             })
             .collect()
     };
+    let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
+    let q_values: Vec<Option<f64>> = (0..grid_len)
+        .map(|i| Some([0.0, 0.25, 0.5, 0.9, 1.0][i % 5]))
+        .collect();
+    let q = input(
+        &schema(&["scalar"]),
+        MetricName::try_new(None, Vec::new()).unwrap(),
+        0,
+        &[q_values],
+    );
+    type Kernel<'a> = Box<dyn Fn(&Arc<SeriesSchema>, &[Series], Grouping<'_>) -> Vec<Series> + 'a>;
+    let mut kernels: Vec<(String, Kernel<'_>)> = OPS
+        .iter()
+        .chain(&[AggregateOp::Stddev, AggregateOp::Stdvar])
+        .map(|&op| -> (String, Kernel<'_>) {
+            (
+                format!("{op:?}"),
+                Box::new(move |schema, input, grouping| {
+                    aggregate_float(schema, input, op, grouping).unwrap()
+                }),
+            )
+        })
+        .collect();
+    kernels.push((
+        "quantile".into(),
+        Box::new(|schema, input, grouping| {
+            aggregate_quantile(schema, input, &q, grouping).unwrap()
+        }),
+    ));
+    kernels.push((
+        "count_values".into(),
+        Box::new(|schema, input, grouping| count_values(schema, input, "value", grouping).unwrap()),
+    ));
     for grouping in [
         Grouping::By(&[]),
         Grouping::By(&["host"]),
         Grouping::Without(&["i"]),
     ] {
-        for op in OPS {
-            let output = aggregate_float(&multi, &series, op, grouping).unwrap();
+        for (op, kernel) in &kernels {
+            let output = kernel(&multi, &series, grouping);
             for field in [0, 1] {
-                let expected = aggregate_float(&single, &project(field), op, grouping).unwrap();
+                let expected = kernel(&single, &project(field), grouping);
                 // The multi-field result is cut into pieces where its values are interrupted, so
                 // the comparison is over the dense values of each label set, not over pieces.
-                let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
                 let grouped = |pieces: &[Series], field: usize| {
                     let mut by_metric: BTreeMap<LabelKey, Positions> = BTreeMap::new();
                     for piece in pieces {
@@ -394,7 +466,7 @@ fn fields_are_aggregated_independently() {
                 };
                 let actual = grouped(&output, field);
                 let expected = grouped(&expected, 0);
-                assert_eq!(actual, expected, "{op:?} {grouping:?} field {field}");
+                assert_eq!(actual, expected, "{op} {grouping:?} field {field}");
             }
         }
     }
@@ -632,6 +704,16 @@ fn unsupported_shapes_and_mutated_schema_fail_without_partial_output() {
         11,
         &[vec![Some(1.0)], vec![Some(2.0)]],
     );
+    // Prometheus rejects an empty `count_values` label name at evaluation.
+    assert!(matches!(
+        count_values(
+            &schema,
+            std::slice::from_ref(&source),
+            "",
+            Grouping::By(&[])
+        ),
+        Err(DataFusionError::Execution(_))
+    ));
     assert!(matches!(
         aggregate_float(
             &schema,
@@ -814,4 +896,171 @@ fn an_aggregation_of_sparse_inputs_is_compared_in_full_against_the_reference() {
     counted[6] = vec![Some(1.0)];
     assert_pieces_eq(&counts, &counted, &metric_of(&Labels::new()));
     assert_eq!(piece_ranges(&counts), vec![(2, 1), (6, 1)]);
+}
+
+/// `count_values` writes value labels the way Go's `strconv.FormatFloat(v, 'f', -1, 64)` does,
+/// including the round-half-even choice of the last shortest digit; see the header of
+/// `format_float_cases.txt` (promql-compat `cmd/narthex-golden-formatfloat`).
+#[test]
+fn value_labels_format_like_go() {
+    let mut checked = 0;
+    for line in include_str!("format_float_cases.txt").lines() {
+        let (bits, expected) = line.split_once(' ').unwrap();
+        let value = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
+        assert_eq!(format_value(value), expected, "{bits}");
+        checked += 1;
+    }
+    assert!(checked > 2_400, "{checked}");
+    for (value, expected) in [
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "+Inf"),
+        (f64::NEG_INFINITY, "-Inf"),
+    ] {
+        assert_eq!(format_value(value), expected);
+    }
+}
+
+/// A point where the `q` scalar has no value has no `quantile` result, as a missing scalar point
+/// yields no output in the other scalar operators.
+#[test]
+fn quantile_without_q_at_a_point_has_no_result() {
+    let schema = schema(&["value"]);
+    let series = [
+        input(
+            &schema,
+            metric("a", &[("i", "0")]),
+            10,
+            &[vec![Some(1.0); 3]],
+        ),
+        input(
+            &schema,
+            metric("a", &[("i", "1")]),
+            10,
+            &[vec![Some(3.0); 3]],
+        ),
+    ];
+    let q = input(
+        &schema,
+        MetricName::try_new(None, Vec::new()).unwrap(),
+        10,
+        &[vec![Some(0.5), None, Some(0.5)]],
+    );
+    let output = aggregate_quantile(&schema, &series, &q, Grouping::By(&[])).unwrap();
+    let (start, values) = values_of(&output, 0, 128);
+    assert_eq!((start, values), (10, vec![Some(2.0), None, Some(2.0)]));
+}
+
+/// Listing the value label in `by` repeats what `count_values` adds to the grouping, also when an
+/// input field has that name; listing another field name is still unsupported.
+#[test]
+fn count_values_accepts_its_own_label_in_by() {
+    let schema = schema(&["value"]);
+    let series = [
+        input(&schema, metric("m", &[("i", "0")]), 10, &[vec![Some(1.0)]]),
+        input(&schema, metric("m", &[("i", "1")]), 10, &[vec![Some(2.0)]]),
+    ];
+    let rendered = |grouping| {
+        let mut output: Vec<_> = count_values(&schema, &series, "value", grouping)
+            .unwrap()
+            .iter()
+            .map(|series| (format!("{:?}", series.metric), values(series, 0)))
+            .collect();
+        output.sort_by(|a, b| a.0.cmp(&b.0));
+        output
+    };
+    let implicit = rendered(Grouping::By(&[]));
+    assert_eq!(implicit.len(), 2);
+    assert_eq!(implicit, rendered(Grouping::By(&["value"])));
+    assert!(matches!(
+        count_values(&schema, &series, "c", Grouping::By(&["value"])),
+        Err(DataFusionError::NotImplemented(_))
+    ));
+}
+
+/// A series the aggregator rejects is not folded in part: the series after it aggregate as if it
+/// had never been offered.
+#[test]
+fn a_rejected_series_leaves_the_aggregator_unchanged() {
+    let schema = schema(&["value"]);
+    let other = schema_with_grid_len(&["value"], 64);
+    let first = input(&schema, metric("m", &[("i", "0")]), 10, &[vec![Some(1.0)]]);
+    let second = input(&schema, metric("m", &[("i", "1")]), 10, &[vec![Some(2.0)]]);
+    let foreign = input(&other, metric("m", &[("i", "2")]), 10, &[vec![Some(4.0)]]);
+
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&first).unwrap();
+    assert!(aggregator.update(&foreign).is_err());
+    aggregator.update(&second).unwrap();
+    let output = aggregator.finish().unwrap();
+    assert_eq!(values_of(&output, 0, 128), (10, vec![Some(3.0)]));
+}
+
+/// A group of short-lived series, one sample each at its own point: every point aggregates the one
+/// member present there, the shape whose cost must follow the samples and not members × points.
+#[test]
+fn quantile_over_one_point_members_reads_each_member_at_its_point() {
+    let schema = schema(&["value"]);
+    let series: Vec<Series> = (0..128)
+        .map(|point| {
+            input(
+                &schema,
+                metric("m", &[("i", &point.to_string())]),
+                point,
+                &[vec![Some(point as f64)]],
+            )
+        })
+        .collect();
+    let q = input(
+        &schema,
+        MetricName::try_new(None, Vec::new()).unwrap(),
+        0,
+        &[vec![Some(0.5); 128]],
+    );
+    let output = aggregate_quantile(&schema, &series, &q, Grouping::By(&[])).unwrap();
+    let expected: Vec<Option<f64>> = (0..128).map(|point| Some(point as f64)).collect();
+    assert_eq!(values_of(&output, 0, 128), (0, expected));
+}
+
+/// `2^-24` and the float below it format to different labels, so they count as two values: the
+/// even 16-digit candidate for `2^-24` names the lower neighbour.
+#[test]
+fn count_values_keeps_neighbours_of_a_power_of_two_apart() {
+    let schema = schema(&["value"]);
+    let series = [0x3e70_0000_0000_0000, 0x3e6f_ffff_ffff_ffff]
+        .into_iter()
+        .enumerate()
+        .map(|(index, bits)| {
+            input(
+                &schema,
+                metric("m", &[("i", &index.to_string())]),
+                0,
+                &[vec![Some(f64::from_bits(bits))]],
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut groups: Vec<_> = count_values(&schema, &series, "v", Grouping::By(&[]))
+        .unwrap()
+        .iter()
+        .map(|series| {
+            (
+                series.metric.get("v").unwrap().to_string(),
+                values(series, 0),
+            )
+        })
+        .collect();
+    groups.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        groups,
+        [
+            (
+                "0.00000005960464477539062".to_string(),
+                (0, vec![Some(1.0)])
+            ),
+            (
+                "0.00000005960464477539063".to_string(),
+                (0, vec![Some(1.0)])
+            ),
+        ]
+    );
 }
