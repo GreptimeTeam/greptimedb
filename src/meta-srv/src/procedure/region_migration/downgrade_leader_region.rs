@@ -289,6 +289,24 @@ impl DowngradeLeaderRegion {
         );
     }
 
+    /// Extends the deadline to wait for, after the downgrade failed, to when the region leases
+    /// granted to the leader expire, as in [`Self::update_leader_region_lease_deadline`].
+    ///
+    /// The leader may not have applied the downgrade, and a former metasrv leader may have
+    /// granted it leases after this step started.
+    fn extend_leader_region_lease_deadline(&self, ctx: &mut Context) {
+        let leader = &ctx.persistent_ctx.from_peer;
+        let region_lease = default_distributed_time_constants().region_lease;
+        let lease_expiry = ctx
+            .lease_grant_tracker
+            .lease_expiry(leader.id, region_lease);
+        let deadline = ctx
+            .volatile_ctx
+            .leader_region_lease_deadline
+            .get_or_insert(lease_expiry);
+        *deadline = (*deadline).max(lease_expiry);
+    }
+
     /// Downgrades a leader region.
     ///
     /// Fast path:
@@ -320,6 +338,7 @@ impl DowngradeLeaderRegion {
                     error!(err; "Failed to downgrade region leader, regions: {:?}, retry later", ctx.persistent_ctx.region_ids);
                     sleep(self.retry_initial_interval).await;
                 } else {
+                    self.extend_leader_region_lease_deadline(ctx);
                     return Err(BoxedError::new(err)).context(error::DowngradeLeaderSnafu {
                         // TODO(weny): handle multiple regions.
                         region_id: ctx.persistent_ctx.region_ids[0],
@@ -628,8 +647,9 @@ mod tests {
             }
         });
 
+        // Later than the expiry of the leases granted to the leader.
         ctx.volatile_ctx
-            .set_leader_region_lease_deadline(Duration::from_secs(5));
+            .set_leader_region_lease_deadline(Duration::from_secs(60));
         let expected_deadline = ctx.volatile_ctx.leader_region_lease_deadline.unwrap();
         let err = state
             .downgrade_region_with_retry(&mut ctx)
@@ -760,5 +780,41 @@ mod tests {
             leader_since + Duration::from_secs(META_LEASE_SECS) + region_lease,
             unreachable_leader_lease_deadline(&mut ctx).await
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_failed_downgrade_waits_after_leader_change() {
+        let mut state = Box::<DowngradeLeaderRegion>::default();
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
+        let region_lease = default_distributed_time_constants().region_lease;
+
+        // The leader has a heartbeat stream to this metasrv, but the downgrade instruction does
+        // not reach it.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        env.mailbox_context()
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+            .await;
+        drop(rx);
+
+        // This metasrv has just become the leader. The former leader may still grant leases to
+        // the leader for `META_LEASE_SECS`.
+        ctx.lease_grant_tracker.reset();
+        let leader_since = Instant::now();
+        let (next, _) = state
+            .next(&mut ctx, &new_procedure_context())
+            .await
+            .unwrap();
+        assert_eq!(
+            leader_since + Duration::from_secs(META_LEASE_SECS) + region_lease,
+            Instant::now()
+        );
+        let _ = next
+            .as_any()
+            .downcast_ref::<UpgradeCandidateRegion>()
+            .unwrap();
     }
 }

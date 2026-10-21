@@ -77,7 +77,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .series_index_store(self.series_index_store.clone())
         .series_index_purger(self.series_index_purger.clone())
         .hook(self.plugins.get())
-        // The region is writable once created, before the metasrv grants it a lease.
+        // Until the metasrv grants the region a lease, it takes writes within the node lease
+        // at its creation, if the node has one.
         .lease(Arc::new(RegionLeaseRecord::created(
             self.node_lease.deadline(),
         )));
