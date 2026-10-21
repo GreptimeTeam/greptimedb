@@ -1781,12 +1781,14 @@ pub(crate) mod tests {
             // A 5 s heartbeat interval gives a 16 s region lease.
             let (supervisor, restart_grace) = supervisor_with(Duration::from_secs(16), options);
             let now = current_time_millis();
-            sample(&supervisor, region(1), 5000, now - 15_000);
+            // 40 s is past the default bound of 30 s but within 3 x 16 s.
+            sample(&supervisor, region(1), 5000, now - 40_000);
             sample(&supervisor, region(2), 5000, now - 49_000);
+            sample(&supervisor, region(3), 5000, now - 40_000);
             restart_grace.record_startup(1, now - 10_000);
             restart_grace.record_startup(2, now - 10_000);
 
-            assert_eq!(detected(&supervisor), HashSet::from([region(2)]));
+            assert_eq!(detected(&supervisor), HashSet::from([region(2), region(3)]));
         }
     }
 }

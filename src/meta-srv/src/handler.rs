@@ -543,8 +543,8 @@ impl HeartbeatHandlerGroup {
     /// Handles the heartbeat request, and returns the result of its node epoch check.
     ///
     /// The check runs here rather than as a handler, so replacing the handlers cannot bypass
-    /// it. A stale datanode request skips the handlers. A datanode request that does not pass
-    /// the check gets no region lease, and its mailbox reply is not delivered.
+    /// it. A stale or clock-ahead datanode request skips the handlers. A datanode request that
+    /// does not pass the check gets no region lease, and its mailbox reply is not delivered.
     pub(crate) async fn handle_checked(
         &self,
         req: HeartbeatRequest,
@@ -569,7 +569,9 @@ impl HeartbeatHandlerGroup {
                     error: Some(api::v1::meta::Error::is_not_leader()),
                 });
             }
-            NodeEpochCheck::Checked(NodeEpochFence::Stale) => {
+            // A process fenced off, or with an epoch too far ahead to record, neither keeps
+            // the node alive nor reports its stats, so failure detection can act on the node.
+            NodeEpochCheck::Checked(NodeEpochFence::Stale | NodeEpochFence::ClockAhead) => {
                 acc.header = Some(ResponseHeader {
                     protocol_version: PROTOCOL_VERSION,
                     ..Default::default()

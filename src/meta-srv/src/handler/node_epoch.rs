@@ -567,6 +567,8 @@ pub(crate) mod tests {
         assert_eq!(fence(&res), Some("clock_ahead"));
         assert!(res.region_lease.is_none());
         assert_eq!(recorded_epoch(&kv_backend).await, None);
+        // It does not keep the node alive either, so failure detection can act on the node.
+        assert_eq!(lease_addr(&ctx).await, None);
 
         let slightly_ahead = now + Duration::from_secs(60).as_millis() as u64;
         let res = group
@@ -597,32 +599,48 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_epoch_is_read_from_kv_on_every_leader() {
+        let now = current_time_millis() as u64;
+        let (e1, e2) = (now - 1000, now);
+        let (m1_group, m2_group) = (new_group(), new_group());
+
+        // M2 accepts A1, then A2 is accepted on M1. When A1 returns to M2, M2 sees A2's epoch.
+        let kv_backend = Arc::new(HookedKvBackend::default());
+        let m1 = new_ctx(kv_backend.clone(), None);
+        let m2 = new_ctx(kv_backend.clone(), None);
+        let res = m2_group
+            .handle(heartbeat(e1, "a1"), m2.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        let res = m1_group.handle(heartbeat(e2, "a2"), m1).await.unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        let res = m2_group.handle(heartbeat(e1, "a1"), m2).await.unwrap();
+        assert_eq!(fence(&res), Some("stale"));
+        assert!(res.region_lease.is_none());
+        // One read per check.
+        assert_eq!(kv_backend.reads.load(Ordering::Relaxed), 3);
+
+        // M1 accepts A1, steps down while M2 accepts A2, and is elected again.
         let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
-        let group = new_group();
         let election = Arc::new(TestElection::default());
         election.leader.store(true, Ordering::Relaxed);
         let m1 = new_ctx(kv_backend.clone(), Some(election.clone()));
-        let m2 = new_ctx(kv_backend.clone(), None);
-        let now = current_time_millis() as u64;
-        let (e1, e2) = (now - 1000, now);
-
-        // A1 is accepted on M1, then A2 replaces it there.
-        let res = group.handle(heartbeat(e1, "a1"), m1.clone()).await.unwrap();
+        let m2 = new_ctx(kv_backend, None);
+        let res = m1_group
+            .handle(heartbeat(e1, "a1"), m1.clone())
+            .await
+            .unwrap();
         assert_eq!(fence(&res), Some("accepted"));
-        let res = group.handle(heartbeat(e2, "a2"), m1.clone()).await.unwrap();
-        assert_eq!(fence(&res), Some("accepted"));
-
-        // The leadership moves to M2, which never saw A2.
-        let res = group.handle(heartbeat(e1, "a1"), m2).await.unwrap();
-        assert_eq!(fence(&res), Some("stale"));
-        assert!(res.region_lease.is_none());
-
-        // M1 steps down and is elected again.
         election.leader.store(false, Ordering::Relaxed);
-        let res = group.handle(heartbeat(e1, "a1"), m1.clone()).await.unwrap();
+        let res = m1_group
+            .handle(heartbeat(e1, "a1"), m1.clone())
+            .await
+            .unwrap();
         assert!(res.is_not_leader());
+        let res = m2_group.handle(heartbeat(e2, "a2"), m2).await.unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
         election.leader.store(true, Ordering::Relaxed);
-        let res = group.handle(heartbeat(e1, "a1"), m1).await.unwrap();
+        let res = m1_group.handle(heartbeat(e1, "a1"), m1).await.unwrap();
         assert_eq!(fence(&res), Some("stale"));
         assert!(res.region_lease.is_none());
     }
@@ -818,28 +836,34 @@ pub(crate) mod tests {
 
     /// Runs the fence across two metasrvs, each with its own client of `kv_backend`.
     async fn fence_across_metasrvs(m1_kv: KvBackendRef, m2_kv: KvBackendRef) {
-        let node_id = NODE_ID;
-        let key = DatanodeEpochKey::new(node_id).to_bytes();
+        let key = DatanodeEpochKey::new(NODE_ID).to_bytes();
         m1_kv.delete(&key, false).await.unwrap();
-        let group = new_group();
+        let (m1_group, m2_group) = (new_group(), new_group());
         let m1 = new_ctx(m1_kv.clone(), None);
         let m2 = new_ctx(m2_kv, None);
         let now = current_time_millis() as u64;
         let (e1, e2) = (now - 1000, now);
 
-        let res = group.handle(heartbeat(e1, "a1"), m1.clone()).await.unwrap();
+        // M2 accepts A1 before A2's startup handshake is accepted on M1.
+        let res = m2_group
+            .handle(heartbeat(e1, "a1"), m2.clone())
+            .await
+            .unwrap();
         assert_eq!(fence(&res), Some("accepted"));
-        let res = group
-            .handle(startup_handshake(e2), m1.clone().with_handshake(true))
+        let res = m1_group
+            .handle(startup_handshake(e2), m1.with_handshake(true))
             .await
             .unwrap();
         assert_eq!(fence(&res), Some("accepted"));
         assert_eq!(recorded_epoch(&m1_kv).await, Some(e2));
 
-        let res = group.handle(heartbeat(e1, "a1"), m2.clone()).await.unwrap();
+        let res = m2_group
+            .handle(heartbeat(e1, "a1"), m2.clone())
+            .await
+            .unwrap();
         assert_eq!(fence(&res), Some("stale"));
         assert!(res.region_lease.is_none());
-        let res = group.handle(heartbeat(e2, "a2"), m2).await.unwrap();
+        let res = m2_group.handle(heartbeat(e2, "a2"), m2).await.unwrap();
         assert_eq!(fence(&res), Some("accepted"));
         assert!(res.region_lease.is_some());
 

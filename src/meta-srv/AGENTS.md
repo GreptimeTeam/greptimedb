@@ -46,8 +46,8 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
 - **Datanode process fence**: `HeartbeatHandlerGroup::handle_checked` checks
   every datanode request carrying a `node_epoch` against the highest epoch in
   the KV backend (`handler/node_epoch.rs`, read uncached, outside the handler
-  chain) before running the chain. Stale requests skip the chain; unverified
-  ones get no region lease and no mailbox delivery. A datanode stream
+  chain) before running the chain. Stale and clock-ahead requests skip the
+  chain; unverified ones get no region lease and no mailbox delivery. A datanode stream
   registers its pusher on its first request that passes the check; startup
   handshakes register none and feed the restart grace in
   `region/restart_grace.rs`.
