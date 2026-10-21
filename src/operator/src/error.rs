@@ -120,6 +120,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Write rejected: {reason}"))]
+    WriteRejected {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported region request"))]
     UnsupportedRegionRequest {
         #[snafu(implicit)]
@@ -946,6 +953,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::Cast { source, .. } => source.status_code(),
+            Error::WriteRejected { .. } => StatusCode::RateLimited,
             Error::InvalidSql { .. }
             | Error::InvalidConfigValue { .. }
             | Error::InvalidInsertRequest { .. }
@@ -1093,7 +1101,7 @@ impl ErrorExt for Error {
     fn retry_hint(&self) -> RetryHint {
         match self {
             Error::ReadObject { error, .. } => retry_hint_from_opendal_error(error),
-            Error::ReadParquetMetadata { .. } => RetryHint::Retryable,
+            Error::ReadParquetMetadata { .. } | Error::WriteRejected { .. } => RetryHint::Retryable,
             Error::InvalidateTableCache { source, .. }
             | Error::ExecuteDdl { source, .. }
             | Error::RequestInserts { source, .. }
