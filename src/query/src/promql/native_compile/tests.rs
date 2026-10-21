@@ -826,8 +826,8 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
             "a call to `predict_linear`, which has no native kernel",
         ),
         (
-            "absent(x)",
-            "a call to `absent`, which has no native kernel",
+            "scalar(x)",
+            "a call to `scalar`, which has no native kernel",
         ),
         // The two functions PromQL calls with no arguments at all: neither has a kernel, and the
         // rejection names the name rather than describing a vector they were never given.
@@ -1157,5 +1157,41 @@ fn a_math_function_over_a_non_vector_argument_is_refused_and_names_it() {
             message.contains("where the function takes a vector"),
             "the refusal did not say what the argument has to be: {message}"
         );
+    }
+}
+
+/// The sorts and `absent` bind a selection over the vector they are given. `absent` derives its
+/// labels from the selector's matchers as Prometheus does: the first equality of a name sets the
+/// label and any other matcher of it removes it, the matchers that accept a missing label read
+/// last; `__name__` and the table-choosing matchers are not labels, and any expression other than
+/// a selector answers without labels.
+#[test]
+fn sorts_and_absent_bind_a_selection() {
+    let cases = [
+        ("sort(x)", "sort"),
+        ("sort_desc(rate(x[5m]))", "sort_desc"),
+        (
+            r#"sort_by_label(x, "job", "le")"#,
+            "sort_by_label [job, le]",
+        ),
+        (
+            r#"sort_by_label_desc(x, "job")"#,
+            "sort_by_label_desc [job]",
+        ),
+        (
+            r#"absent(x{job="a", env=~"p.*", instance!="", __field__="v"})"#,
+            r#"absent {job="a"}"#,
+        ),
+        // `job!="b"` accepts a missing `job`, so it reads after `job="a"` and removes it.
+        (r#"absent(x{job!="b", job="a"})"#, "absent {}"),
+        (r#"absent({__name__="x", job="a"})"#, r#"absent {job="a"}"#),
+        ("absent(rate(x[5m]))", "absent {}"),
+    ];
+    for (query, op) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let display = tree.to_string();
+        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        assert_eq!(root, format!("  root Select {op}"), "`{query}`");
     }
 }

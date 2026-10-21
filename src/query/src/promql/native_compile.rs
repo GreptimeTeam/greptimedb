@@ -23,11 +23,14 @@
 //! <range function>(<selector>[<range>])             e.g. rate(x[5m])
 //! <range function>(<constant>, <selector>[<range>]) e.g. quantile_over_time(0.9, x[5m])
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//! <sort>(<expression>[, <string>]*)                 e.g. sort_desc(x), sort_by_label(x, "job")
+//! absent(<expression>)                              e.g. absent(x{job="a"})
 //! ```
 //!
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
 //! `Input` (raw samples) → `Window` (the range function over the statement's grid) and
-//! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to). A
+//! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to), and
+//! `<expression>` → `Select` (a sort or `absent`, which read the whole vector). A
 //! selector may carry `offset` in either selection shape and, in the window shape, an `@` anchor.
 //! Everything else is a [`DataFusionError::NotImplemented`] that names what was found and quotes the
 //! shapes above, because rejecting a query the compiler does not understand is the only honest
@@ -53,19 +56,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::{MetricName, SeriesOrdering};
 use promql::map::{ArithmeticOp, MathOp};
 use promql::native::plan::{
-    BoundInput, BoundInstant, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundInput, BoundInstant, BoundMap, BoundSelect, BoundWindow, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
+use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
+use promql_parser::label::MatchOp as ParserMatchOp;
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AtModifier, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral, Offset,
-    VectorSelector, token,
+    StringLiteral, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -73,9 +79,10 @@ use crate::promql::label_values::signed_millis_since_epoch;
 /// The shapes this compiler accepts, quoted in every rejection.
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
-                         the selector as in `quantile_over_time(0.9, x[5m])` — or a math function \
-                         over any of them, as in `abs(rate(x[5m]))`: for example `x`, \
-                         `rate(x[5m])`, `quantile_over_time(0.9, x[5m])` or `abs(rate(x[5m]))`";
+                         the selector as in `quantile_over_time(0.9, x[5m])` — or a math function, \
+                         a sort or `absent` over any of them, as in `abs(rate(x[5m]))`: for \
+                         example `x`, `rate(x[5m])`, `quantile_over_time(0.9, x[5m])` or \
+                         `abs(rate(x[5m]))`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -167,6 +174,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
     }
+    if let Some((op, vector)) = select_op(func.name, &args.args)? {
+        return select_call(context, func.name, op, vector);
+    }
     // The name is looked up before the call's arguments are read, so a name this compiler has no
     // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
     // vector to map, and the rejection names the name rather than describing a vector they never
@@ -245,6 +255,125 @@ fn map_call(context: &Context, name: &str, op: MathOp, vector: &PromExpr) -> Res
         },
         output,
     })
+}
+
+/// Wraps the selection `op` over the value of `vector`, which keeps its type as a map does.
+fn select_call(
+    context: &Context,
+    name: &str,
+    op: BoundSelect,
+    vector: &PromExpr,
+) -> Result<NativeNode> {
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose first argument is `{vector}`, which is a {}, where the \
+             function takes a vector",
+            vector.value_type()
+        )));
+    }
+    let input = compile_expr(context, vector)?;
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Select {
+            input: Box::new(input),
+            op,
+        },
+        output,
+    })
+}
+
+/// The selection a sort or `absent` binds, and the vector it reads, or `None` when `name` is
+/// neither.
+fn select_op<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(BoundSelect, &'a PromExpr)>> {
+    let order = match name {
+        "sort" => Some(SortOrder::Asc),
+        "sort_desc" => Some(SortOrder::Desc),
+        "sort_by_label" | "sort_by_label_desc" => None,
+        "absent" => {
+            let [vector] = arguments else {
+                return Err(not_implemented(&format!(
+                    "a call to `absent` with {} argument(s)",
+                    arguments.len()
+                )));
+            };
+            let labels = absent_labels_of(vector)?;
+            return Ok(Some((BoundSelect::Absent { labels }, vector)));
+        }
+        _ => return Ok(None),
+    };
+    let Some((vector, strings)) = arguments.split_first() else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with no argument"
+        )));
+    };
+    let order = match order {
+        Some(order) if strings.is_empty() => order,
+        Some(_) => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` with {} argument(s)",
+                arguments.len()
+            )));
+        }
+        None => {
+            let labels = strings
+                .iter()
+                .map(|argument| match unparen(argument) {
+                    PromExpr::StringLiteral(StringLiteral { val }) => Ok(Arc::from(val.as_str())),
+                    other => Err(not_implemented(&format!(
+                        "a call to `{name}` whose argument `{other}` is not a string literal"
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if name == "sort_by_label" {
+                SortOrder::ByLabel(labels)
+            } else {
+                SortOrder::ByLabelDesc(labels)
+            }
+        }
+    };
+    Ok(Some((BoundSelect::Sort(order), vector)))
+}
+
+/// The labels `absent(expr)` answers with, as Prometheus `createLabelsForAbsentFunction` derives
+/// them: from the matchers of a vector selector, and none for any other expression.
+///
+/// `__field__`, `__schema__` and `__database__` choose what is read rather than match a label, so
+/// they are not labels of the answer, as in the existing planner.
+fn absent_labels_of(expr: &PromExpr) -> Result<MetricName> {
+    let PromExpr::VectorSelector(selector) = unparen(expr) else {
+        return absent_labels(&[]);
+    };
+    if !selector.matchers.or_matchers.is_empty() {
+        return Err(not_implemented(&format!(
+            "`absent` over `{selector}`, whose matchers are alternatives"
+        )));
+    }
+    let matchers = selector
+        .matchers
+        .matchers
+        .iter()
+        .filter(|matcher| {
+            !matches!(
+                matcher.name.as_str(),
+                "__field__" | "__schema__" | "__database__"
+            )
+        })
+        .map(|matcher| LabelMatcher {
+            name: Arc::from(matcher.name.as_str()),
+            op: match matcher.op {
+                ParserMatchOp::Equal => MatchOp::Equal,
+                ParserMatchOp::NotEqual => MatchOp::NotEqual,
+                ParserMatchOp::Re(_) => MatchOp::Regex,
+                ParserMatchOp::NotRe(_) => MatchOp::NotRegex,
+            },
+            value: Arc::from(matcher.value.as_str()),
+            matches_empty: matcher.is_match(""),
+        })
+        .collect::<Vec<_>>();
+    absent_labels(&matchers)
 }
 
 /// Binds `function` over the range selector `vs[range]` into a window over the raw input.
