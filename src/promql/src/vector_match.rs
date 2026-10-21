@@ -36,6 +36,34 @@ use crate::histogram_eval::float_histogram::FloatHistogram;
 #[cfg(test)]
 mod tests;
 
+// How many candidate pairs the binary kernel visited on this thread.
+//
+// Test-only, and per thread: the pairs a query considers are what says whether a series delivered in
+// many chunks is still one candidate, and that is not visible in the result. A thread of its own
+// keeps one test's chunks out of another test's figure, and the counter is compiled out of the
+// kernel otherwise.
+#[cfg(test)]
+thread_local! {
+    static VISITED_PAIRS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resets the candidate-pair counter of this thread to zero.
+#[cfg(test)]
+pub(crate) fn reset_visited_pairs() {
+    VISITED_PAIRS.with(|visited| visited.set(0));
+}
+
+/// The candidate pairs the binary kernel has visited on this thread since the last
+/// [`reset_visited_pairs`].
+///
+/// A pair is visited once per one-side candidate the kernel looks up for a many-side series, before
+/// the pairing's label set and axis intersection are built, so the count is what the kernel actually
+/// does rather than what its operands' sizes imply it would.
+#[cfg(test)]
+pub(crate) fn visited_pairs() -> usize {
+    VISITED_PAIRS.with(std::cell::Cell::get)
+}
+
 /// A PromQL binary operator between two instant vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinaryOp {
@@ -785,6 +813,11 @@ fn binary_field(
         };
         let group_id = group_ids[&key];
         for &one_index in candidates {
+            // One candidate of the one side is paired with this series, whether or not the pairing
+            // turns out to hold a row: the visit is what the test-only counter reports, before the
+            // pairing's label set and axis intersection are built.
+            #[cfg(test)]
+            VISITED_PAIRS.with(|visited| visited.set(visited.get() + 1));
             // One pairing's label set is built before the axes are intersected, so it is reserved
             // first and the next pairing replaces it.
             let mut pairing = 0usize;

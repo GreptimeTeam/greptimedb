@@ -39,6 +39,8 @@
 //! A vector–vector binary node is the one kind that reads two inputs: it retains the chunks of both
 //! operands and runs the matching kernel once the input has ended, because the operation pairs two
 //! whole vectors point by point and nothing is decided for a point until both sides are complete.
+//! The chunks of one logical series are assembled into the single series the kernel matches before it
+//! runs, so a series that arrived in many chunks is one candidate, not one per chunk.
 //!
 //! A node kind this runtime does not execute yet is rejected when the execution is built, naming
 //! the kind and its position. An unsupported tree therefore never starts, rather than answering
@@ -66,7 +68,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
-use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::grid_series::{GridSample, GridSeriesBuilder, LabelSet, label_set};
@@ -1326,9 +1328,15 @@ impl InstantRuntime {
 
 /// One operand of a binary node, chunk by chunk, until it ends.
 ///
-/// What is kept is the series each chunk carries, not a concatenation of them: the kernel groups
-/// and matches whole series by label set and reads each one where its own axis places it, so the
-/// chunks of a series are handed over as separate series entries and no row is copied to join them.
+/// What is kept is the series each chunk carries, not a concatenation of them: a chunk is retained
+/// as it arrives and nothing is copied on the way in, because the chunks of a series can share an
+/// allocation and the figure the operand charges for is the data it holds rather than a running copy
+/// of it.
+///
+/// The kernel matches whole series by label set, so the chunks are assembled into one series per
+/// logical series once the input has ended: a series that arrived in a thousand chunks is otherwise
+/// a thousand candidates on this side for every candidate of the other, and its own rows would be
+/// paired a chunk at a time.
 #[derive(Default)]
 struct BinaryOperand {
     /// The series whose last chunk did not close it, with the position after its last row.
@@ -1338,11 +1346,18 @@ struct BinaryOperand {
     /// so a chunk that starts a series again is not an error, only one that starts it before the
     /// series already open ended, or names another series while it is open.
     open: Option<(MetricName, usize)>,
-    /// The series this operand handed over, in arrival order.
+    /// The chunks this operand handed over, in arrival order.
     series: Vec<Series>,
-    /// The bytes `series` hold, folded in as chunks arrive: two chunks of one series can share an
-    /// Arrow buffer or a histogram table, and the dedupe of [`QueuedCharge`] is what keeps one
-    /// allocation counted once for the whole operand.
+    /// The chunk count at which each logical series closed, exclusive, in arrival order.
+    ///
+    /// The chunks `start..end` of one entry are one logical series: a label set that closes and
+    /// starts again is two of them, so a list of ends is what keeps the two apart where a label set
+    /// alone would read them as one. Only a chunk carrying `is_last` records an end, and it does so
+    /// whether or not it carries a row.
+    ends: Vec<usize>,
+    /// The bytes `series` and `ends` hold, folded in as chunks arrive: two chunks of one series can
+    /// share an Arrow buffer or a histogram table, and the dedupe of [`QueuedCharge`] is what keeps
+    /// one allocation counted once for the whole operand.
     held: QueuedCharge,
 }
 
@@ -1350,28 +1365,175 @@ impl BinaryOperand {
     /// The bytes `chunk` would add to what this operand holds, read without retaining it.
     ///
     /// It is what [`Self::enqueue`] adds for the same chunk: the descriptor the operand takes for
-    /// it, and only those allocations the chunks it already holds do not reference. The figure is
-    /// what a caller reserves before it retains the chunk, so an allocation two chunks of one
-    /// series share is paid for once rather than once per chunk.
+    /// it, the room a chunk that closes its series needs in the boundary list, and only those
+    /// allocations the chunks it already holds do not reference. The figure is what a caller
+    /// reserves before it retains the chunk, so an allocation two chunks of one series share is paid
+    /// for once rather than once per chunk.
     fn pending(&self, chunk: &EvaluatedChunk) -> usize {
         let mut charged = ChargedAllocations::default();
         let _ = fields_bytes(&chunk.series.fields, &mut charged);
-        self.held.increment(std::mem::size_of::<Series>(), &charged)
+        self.held
+            .increment(std::mem::size_of::<Series>(), &charged)
+            .saturating_add(self.ends_growth(chunk.is_last))
     }
 
     /// Retains one chunk, folding the allocations it references into what the operand holds.
     fn enqueue(&mut self, chunk: EvaluatedChunk) {
+        let closing = chunk.is_last;
+        // The boundary list is storage the operand keeps, and it grows before the chunk is recorded
+        // in it: an end is charged for before it exists, the same figure `pending` reported.
+        self.held.bytes = self.held.bytes.saturating_add(self.ends_growth(closing));
         let mut charged = ChargedAllocations::default();
         let _ = fields_bytes(&chunk.series.fields, &mut charged);
         self.series.push(chunk.series);
         self.held.add(std::mem::size_of::<Series>(), &charged);
+        if closing {
+            self.ends.push(self.series.len());
+        }
     }
 
-    /// Drops the retained series, giving back what they hold.
+    /// The bytes the boundary list grows by when a chunk that ends its series `closing` is recorded
+    /// in it.
+    ///
+    /// The list holds one `usize` per closed logical series and grows by doubling from a first
+    /// allocation of four entries, so a record costs nothing while the capacity it has holds it and
+    /// otherwise costs the new capacity.
+    fn ends_growth(&self, closing: bool) -> usize {
+        let needed = self.ends.len() + 1;
+        if !closing || needed <= self.ends.capacity() {
+            return 0;
+        }
+        let capacity = (2 * self.ends.capacity()).max(4).max(needed);
+        (capacity - self.ends.capacity()) * std::mem::size_of::<usize>()
+    }
+
+    /// The chunk ranges of the logical series this operand closed, in arrival order.
+    ///
+    /// Read after the input ended: a series that is still open has no end, and
+    /// [`BinaryRuntime::closed`] refuses such an input before anything is assembled.
+    fn boundaries(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        self.ends.iter().scan(0, |start, &end| {
+            let range = *start..end;
+            *start = end;
+            Some(range)
+        })
+    }
+
+    /// The bytes assembling this operand's chunks into logical series allocates, before it does.
+    ///
+    /// One series per closed logical series, on `schema`'s grid, and nothing that copies a sample:
+    /// the descriptors the chunks' fields are made of are collected and shared. What is counted is
+    /// therefore metadata only -- the entry in the assembled vector, the field list of the series,
+    /// and for each field the chunk descriptors it is collected into, the list
+    /// [`Samples::try_from_chunks`] flattens them into and the `Arc` it hands them over in, which is
+    /// one list of each per field per boundary. The axis adds the runs the boundary covers in the
+    /// vector they are collected in, and, from two runs on, the span and row-offset arrays
+    /// [`TimeAxis::from_grid_spans`] copies them into; a single run becomes a [`GridRange`] and
+    /// allocates neither.
+    fn assembly_bytes(&self, schema: &SeriesSchema) -> Option<usize> {
+        let samples = std::mem::size_of::<Samples>();
+        let grids = std::mem::size_of::<GridSpan>();
+        let width = schema.fields.len();
+        let mut bytes = 0usize;
+        for boundary in self.boundaries() {
+            let chunks = &self.series[boundary];
+            // The runs the boundary covers, and the dense segments its fields hold: a chunk's field
+            // can itself be chunked, and flattening it copies one descriptor per segment.
+            let mut runs = 0usize;
+            let mut segments = 0usize;
+            for chunk in chunks {
+                runs = runs.checked_add(chunk.time.runs().count())?;
+                for field in chunk.fields.iter() {
+                    segments = segments.checked_add(field.segments().len())?;
+                }
+            }
+            let descriptors = chunks
+                .len()
+                .checked_mul(width)?
+                .checked_add(segments.checked_mul(2)?)?;
+            let collected = runs.checked_mul(grids)?;
+            let ranges = if runs > 1 {
+                runs.checked_mul(grids.checked_add(std::mem::size_of::<usize>())?)?
+            } else {
+                0
+            };
+            bytes = bytes
+                .checked_add(std::mem::size_of::<Series>())?
+                .checked_add(width.checked_mul(samples)?)?
+                .checked_add(descriptors.checked_mul(samples)?)?
+                .checked_add(collected)?
+                .checked_add(ranges)?;
+        }
+        Some(bytes)
+    }
+
+    /// The logical series this operand closed, each as one series on `schema`'s grid.
+    ///
+    /// The chunks of a logical series are collected, not concatenated: the fields keep one
+    /// descriptor per segment of every chunk, the axis keeps the runs the chunks cover, and the
+    /// buffers behind both are shared with the chunks this operand still holds. The series is what
+    /// the kernel matches and reads, so it must be on the schema's grid and hold as many rows as its
+    /// axis places, which is what [`Series::try_new`] checks. What it allocates is
+    /// [`Self::assembly_bytes`], which a caller reserves before this runs.
+    fn assemble(&self, schema: &SeriesSchema, path: &NodePath, side: usize) -> Result<Vec<Series>> {
+        let grid = schema.eval_grid.clone().ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "the binary node at {path} assembles its {} operand on an evaluation grid, and the \
+                 operand's schema names none",
+                side_name(side)
+            ))
+        })?;
+        let mut assembled = Vec::with_capacity(self.ends.len());
+        for boundary in self.boundaries() {
+            let chunks = &self.series[boundary];
+            let metric = chunks.first().map(|chunk| chunk.metric.clone()).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "the binary node at {path} closed a logical series of its {} operand without a \
+                     chunk to assemble",
+                    side_name(side)
+                ))
+            })?;
+            let runs = chunks
+                .iter()
+                .map(|chunk| chunk.time.runs().count())
+                .fold(0usize, usize::saturating_add);
+            let mut spans = Vec::with_capacity(runs);
+            for chunk in chunks {
+                for run in chunk.time.runs() {
+                    spans.push(GridSpan::new(run.position, run.len));
+                }
+            }
+            let mut fields = Vec::with_capacity(schema.fields.len());
+            for index in 0..schema.fields.len() {
+                let mut segments = Vec::with_capacity(chunks.len());
+                for chunk in chunks {
+                    let field = chunk.fields.get(index).ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "the binary node at {path} cannot assemble its {} operand: a chunk of \
+                             it carries {} fields, not {}",
+                            side_name(side),
+                            chunk.fields.len(),
+                            schema.fields.len()
+                        ))
+                    })?;
+                    segments.push(field.clone());
+                }
+                fields.push(Samples::try_from_chunks(segments).map_err(series_error)?);
+            }
+            let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
+            let time = TimeAxis::from_grid_spans(grid.clone(), spans).map_err(series_error)?;
+            assembled.push(Series::try_new(schema, metric, time, fields).map_err(series_error)?);
+        }
+        Ok(assembled)
+    }
+
+    /// Drops the retained chunks, giving back what they hold.
     fn release(&mut self) {
         self.open = None;
         self.series.clear();
         self.series.shrink_to_fit();
+        self.ends.clear();
+        self.ends.shrink_to_fit();
         self.held = QueuedCharge::default();
     }
 }
@@ -1379,9 +1541,10 @@ impl BinaryOperand {
 /// What a binary node holds: both operands until they end.
 ///
 /// The operation pairs two whole vectors point by point, so this node cannot answer from the chunks
-/// in hand the way a map does: it retains every chunk each operand hands over and runs the kernel
-/// once, after the input has ended and both operands closed. The chunks it produces are queued in
-/// the node's own output queue and handed over from there.
+/// in hand the way a map does: it retains every chunk each operand hands over, assembles the chunks
+/// of each logical series into the one series the kernel matches, and runs the kernel once, after the
+/// input has ended and both operands closed. The chunks it produces are queued in the node's own
+/// output queue and handed over from there.
 struct BinaryRuntime {
     /// The operation and its modifiers, bound by the compiler.
     matching: Arc<BinaryMatching>,
@@ -1419,6 +1582,24 @@ impl BinaryRuntime {
             .iter()
             .map(|operand| operand.held.bytes)
             .fold(0usize, usize::saturating_add)
+    }
+
+    /// The bytes assembling both operands into logical series allocates, before it does.
+    fn assembly_bytes(&self) -> Option<usize> {
+        let [left, right] = &self.operands;
+        let [left_schema, right_schema] = &self.schemas;
+        left.assembly_bytes(left_schema)?
+            .checked_add(right.assembly_bytes(right_schema)?)
+    }
+
+    /// The logical series both operands closed, ready for the kernel to match.
+    fn assemble(&self, path: &NodePath) -> Result<[Vec<Series>; 2]> {
+        let [left, right] = &self.operands;
+        let [left_schema, right_schema] = &self.schemas;
+        Ok([
+            left.assemble(left_schema, path, 0)?,
+            right.assemble(right_schema, path, 1)?,
+        ])
     }
 
     /// The bytes the chunk of `side` would add to that operand's retention.
@@ -1510,10 +1691,15 @@ impl BinaryRuntime {
 
     /// Runs the kernel over both operands and returns the series it produced.
     ///
+    /// The chunks of each operand are assembled into the logical series they make up first, because
+    /// the kernel matches whole series by label set: a series that arrived in many chunks would
+    /// otherwise be a candidate per chunk on its own side and be paired with every candidate of the
+    /// other, which is quadratic in the chunk count of one series rather than in the series count.
+    ///
     /// The kernel requests a conservative live-workspace budget before allocating its matching
-    /// tables, per-point presence arrays and results. The reservation covers the retained operands
-    /// plus that workspace, and resizes as temporary storage is released. It keeps covering the
-    /// returned results until the caller queues them.
+    /// tables, per-point presence arrays and results. The reservation covers the retained chunks,
+    /// the assembled series the kernel reads and that workspace, and resizes as temporary storage is
+    /// released. It keeps covering the returned results until the caller queues them.
     fn compute(&mut self, path: &NodePath, buffer: &mut NodeBuffer) -> Result<Option<Vec<Series>>> {
         // The kernel reads the operands once and drops them, so a second call has nothing to read
         // and nothing left to produce: what it produced the first time is in the node's queue, and
@@ -1522,13 +1708,30 @@ impl BinaryRuntime {
             return Ok(None);
         }
         self.closed(path)?;
-        let [left_operand, right_operand] = &self.operands;
         let [left_schema, right_schema] = &self.schemas;
-        let (left, right) = (&left_operand.series, &right_operand.series);
         let retained = self.retained_bytes();
-        // The operands are still held while the kernel runs, so what this node holds is both the
-        // operands and the workspace the kernel reports; the callback resizes the reservation to
-        // that sum as the live workspace changes.
+        // The assembled series are live while the kernel reads them and share the buffers the
+        // retained chunks hold, so what they add is metadata, and it is reserved before it exists:
+        // the assembly allocates as it goes, and a figure read from it afterwards would be a figure
+        // the pool never admitted.
+        let assembly = self
+            .assembly_bytes()
+            .ok_or_else(|| reservation_overflow(path))?;
+        buffer.hold(assembly)?;
+        let assembled = match self.assemble(path) {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                // Nothing the assembly allocated outlives this call, so the node falls back to what
+                // it still holds. A failure of that resize is the pool's to report; the driver stops
+                // the execution either way and releases every node.
+                buffer.hold_exactly(retained)?;
+                return Err(error);
+            }
+        };
+        let [left, right] = &assembled;
+        // The operands are still held while the kernel runs, so what this node holds is the operands,
+        // the assembled series and the workspace the kernel reports; the callback resizes the
+        // reservation to that sum as the live workspace changes.
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -1542,18 +1745,21 @@ impl BinaryRuntime {
                 right,
                 &mut |workspace| {
                     let bytes = retained
-                        .checked_add(workspace)
+                        .checked_add(assembly)
+                        .and_then(|held| held.checked_add(workspace))
                         .ok_or_else(|| reservation_overflow(path))?;
                     buffer.hold_exactly(bytes)
                 },
             )
         };
-        // The operands have been handed to the kernel and the reservation covers the workspace it
-        // allocated past them, so a failure is the driver's to release: it stops the execution and
-        // every node with it.
+        // The operands and the assembled series have been handed to the kernel and the reservation
+        // covers the workspace it allocated past them, so a failure is the driver's to release: it
+        // stops the execution and every node with it.
         let output = output?;
-        // Both operands have been read: what this node holds from here on is what the kernel
-        // returned, so the pool is not charged for a vector nothing reads again.
+        // The assembled series were the kernel's input and are read by nothing after it, so they go
+        // before the chunks they share their buffers with: what this node holds from here on is what
+        // the kernel returned, and the pool is not charged for a vector nothing reads again.
+        drop(assembled);
         for operand in &mut self.operands {
             operand.release();
         }

@@ -28,7 +28,7 @@ use datatypes::series::histogram::{
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName, SeriesOrdering};
@@ -47,7 +47,9 @@ use crate::native::plan::{
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, MatchingLabels, reset_visited_pairs, visited_pairs,
+};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
@@ -4339,14 +4341,18 @@ fn a_binary_operand_is_charged_the_increment_of_a_shared_allocation() {
         std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
     };
     let (first_alone, second_alone) = (alone(&first), alone(&second));
-    // What both cost together: the one allocation they are slices of, and a descriptor each.
+    // What both cost together: the one allocation they are slices of, a descriptor each, and the
+    // room the closing chunk's end takes in the operand's boundary list -- the list is storage the
+    // operand keeps, and its first end allocates room for four.
+    let boundaries = 4 * std::mem::size_of::<usize>();
     let mut charged = ChargedAllocations::default();
-    let held = [&first, &second]
-        .iter()
-        .map(|chunk| {
-            std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
-        })
-        .fold(0usize, usize::saturating_add);
+    let held = boundaries
+        + [&first, &second]
+            .iter()
+            .map(|chunk| {
+                std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
+            })
+            .fold(0usize, usize::saturating_add);
     assert!(
         first_alone + second_alone > held,
         "the two chunks are not slices of one allocation: {first_alone} and {second_alone} bytes \
@@ -4373,8 +4379,9 @@ fn a_binary_operand_is_charged_the_increment_of_a_shared_allocation() {
         .unwrap();
     assert_eq!(
         runtime.buffer.held - before,
-        std::mem::size_of::<Series>(),
-        "a chunk of the allocation the operand already retains cost more than its descriptor"
+        std::mem::size_of::<Series>() + boundaries,
+        "a chunk of the allocation the operand already retains cost more than its descriptor and \
+         the end it records"
     );
     assert_eq!(
         runtime.buffer.held, held,
@@ -4395,6 +4402,36 @@ fn a_binary_operand_is_charged_the_increment_of_a_shared_allocation() {
         alone(&own),
         "a chunk of an allocation the operand does not hold is not charged for it"
     );
+
+    // Assembling the two chunks keeps the allocation they are slices of: the series the kernel reads
+    // is made of their descriptors, and no sample is copied into it.
+    let assembled = runtime
+        .binary
+        .as_ref()
+        .unwrap()
+        .assemble(&NodePath::root())
+        .unwrap();
+    assert_eq!(
+        assembled[0].len(),
+        1,
+        "two chunks of one series are one series"
+    );
+    let field = &assembled[0][0].fields.as_slice()[0];
+    assert_eq!(
+        field.segments().len(),
+        2,
+        "the assembled field is not the chunks it is built from"
+    );
+    for segment in field.segments() {
+        let Some(DenseSamplesRef::Float(values)) = segment.dense() else {
+            panic!("a float chunk assembles into float segments");
+        };
+        assert_eq!(
+            values.values().inner().data_ptr(),
+            batch.values().inner().data_ptr(),
+            "the assembly copied samples instead of sharing the allocation they are slices of"
+        );
+    }
 }
 
 /// The executor's binary node never reserves a chunk on top of the allocation it shares: the peak
@@ -4412,14 +4449,16 @@ fn a_binary_beneath_the_executor_does_not_reserve_a_shared_chunk_on_top() {
     let second =
         evaluated_array_chunk_of(&schema, metric(), 2_000, batch.slice(2_000, 2_000), true);
     // What the left operand holds once both chunks are retained, counted the way its ledger counts:
-    // the one allocation the chunks are slices of, and one descriptor per chunk.
+    // the one allocation the chunks are slices of, one descriptor per chunk, and the boundary list
+    // the closing chunk adds its end to.
     let mut charged = ChargedAllocations::default();
-    let retained = [&first, &second]
-        .iter()
-        .map(|chunk| {
-            std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
-        })
-        .fold(0usize, usize::saturating_add);
+    let retained = 4 * std::mem::size_of::<usize>()
+        + [&first, &second]
+            .iter()
+            .map(|chunk| {
+                std::mem::size_of::<Series>() + fields_bytes(&chunk.series.fields, &mut charged)
+            })
+            .fold(0usize, usize::saturating_add);
 
     let set = ExecutionPlanMetricsSet::new();
     let mut execution = executor(&tree, bounded_pool(1 << 22), &set);
@@ -4443,6 +4482,170 @@ fn a_binary_beneath_the_executor_does_not_reserve_a_shared_chunk_on_top() {
         addressed(&run(&mut execution)),
         vec![(0, vec![Some(3.0); 4_000])]
     );
+}
+
+/// A series that arrives in ten thousand one-point chunks is one candidate for the kernel, not ten
+/// thousand.
+///
+/// The kernel matches whole series, so the chunks of a logical series are assembled into the series
+/// it reads before it runs: the pairing is over candidates, and a chunk that was a candidate of its
+/// own would pair every chunk of one side with every chunk of the other. The same series delivered
+/// whole must answer the same result, so the count of pairs the kernel actually visited is what
+/// separates the two deliveries rather than their outcome.
+#[test]
+fn a_series_of_many_chunks_is_one_candidate_for_the_kernel() {
+    let points = 10_000usize;
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, points as u64);
+    let schema = evaluated_schema(grid);
+    let batch = Float64Array::from((0..points).map(|point| point as f64).collect::<Vec<_>>());
+    // One point per chunk, and only the last of them closes the series: the boundaries of the
+    // delivery say nothing about the series it carries.
+    let per_point: Vec<EvaluatedChunk> = (0..points)
+        .map(|position| {
+            evaluated_array_chunk_of(
+                &schema,
+                metric(),
+                position,
+                batch.slice(position, 1),
+                position + 1 == points,
+            )
+        })
+        .collect();
+
+    reset_visited_pairs();
+    let mut split = executor(
+        &tree,
+        bounded_pool(1 << 26),
+        &ExecutionPlanMetricsSet::new(),
+    );
+    for (position, chunk) in per_point.iter().enumerate() {
+        split.push_evaluated_at(&left, chunk.clone()).unwrap();
+        split.push_evaluated_at(&right, chunk.clone()).unwrap();
+        assert!(
+            split.next_chunk().unwrap().is_none(),
+            "the binary node answered at position {position} before its input ended"
+        );
+    }
+    let split = split.finish().unwrap();
+    assert_eq!(
+        visited_pairs(),
+        1,
+        "the chunks of one series were paired instead of the one series they make up"
+    );
+    assert_eq!(split.len(), 1, "one matched label set answers one chunk");
+
+    reset_visited_pairs();
+    let mut whole = executor(
+        &tree,
+        bounded_pool(1 << 26),
+        &ExecutionPlanMetricsSet::new(),
+    );
+    let chunk = evaluated_array_chunk_of(&schema, metric(), 0, batch.clone(), true);
+    whole.push_evaluated_at(&left, chunk.clone()).unwrap();
+    whole.push_evaluated_at(&right, chunk).unwrap();
+    assert!(whole.next_chunk().unwrap().is_none());
+    let whole = whole.finish().unwrap();
+    assert_eq!(
+        visited_pairs(),
+        1,
+        "a series delivered whole is one candidate as well"
+    );
+    assert_eq!(whole.len(), 1, "one matched label set answers one chunk");
+
+    assert_eq!(
+        decided(&split),
+        decided(&whole),
+        "the delivery of a series changed the result"
+    );
+    let expected: Vec<(usize, Option<f64>)> = (0..points)
+        .map(|position| (position, Some(2.0 * position as f64)))
+        .collect();
+    assert_eq!(decided(&split), expected);
+}
+
+/// The assembly of the operands into the series the kernel matches is reserved before it allocates.
+///
+/// Assembling one series per closed series is metadata on top of the chunks the node retains -- the
+/// descriptors the chunks' fields are collected into and the runs the axis is built from -- and the
+/// pool is asked for that figure before it exists. A pool a byte short of it refuses the assembly,
+/// and nothing of it is left charged: the node holds what it retained while the runtime is still
+/// alive.
+#[test]
+fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let left = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
+    let right = evaluated_chunk(&schema, 0, vec![10.0, 20.0], true);
+
+    // What the node holds once both operands are retained, and what assembling them into the one
+    // series each of them is adds.
+    let (retained, assembly) = {
+        let pool = pool();
+        let mut runtime = binary_runtime(&pool, &schema);
+        runtime
+            .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left.clone()))
+            .unwrap();
+        runtime
+            .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right.clone()))
+            .unwrap();
+        let retained = runtime.buffer.held;
+        let assembly = runtime.binary.as_ref().unwrap().assembly_bytes().unwrap();
+        (retained, assembly)
+    };
+    assert!(
+        assembly > 0,
+        "assembling the operands into series is not charged for"
+    );
+
+    // One byte short of the assembly: the assembly is refused rather than run over the budget.
+    let pool = bounded_pool(retained + assembly - 1);
+    let mut runtime = binary_runtime(&pool, &schema);
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left.clone()))
+        .unwrap();
+    runtime
+        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right))
+        .unwrap();
+    assert_eq!(runtime.buffer.held, retained);
+    let error = runtime.compute_binary(&NodePath::root()).unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "the assembly was not reserved before it allocated: {error}"
+    );
+    // The assembly never ran, so its charge is gone: what the node holds is what it retained, and
+    // the pool holds no more than that while the runtime is still alive.
+    assert_eq!(runtime.buffer.held, retained);
+    assert_eq!(pool.reserved(), retained);
+    assert_eq!(
+        runtime.binary.as_ref().unwrap().retained_bytes(),
+        retained,
+        "the refused assembly changed what the operand retains"
+    );
+
+    // The figure covers the assembly itself: with exactly that much more, the series are built and
+    // hold the rows the chunks carried.
+    let pool = bounded_pool(retained + assembly);
+    let mut runtime = binary_runtime(&pool, &schema);
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left))
+        .unwrap();
+    runtime
+        .retain_binary(
+            &NodePath::root(),
+            1,
+            NativeChunk::Evaluated(evaluated_chunk(&schema, 0, vec![10.0, 20.0], true)),
+        )
+        .unwrap();
+    let assembled = runtime
+        .binary
+        .as_ref()
+        .unwrap()
+        .assemble(&NodePath::root())
+        .unwrap();
+    assert_eq!(assembled[0].len(), 1, "one closed series is one series");
+    assert_eq!(assembled[1].len(), 1, "one closed series is one series");
+    let built = EvaluatedChunk::try_new(assembled[0][0].clone(), true).unwrap();
+    assert_eq!(sample_values(&built), vec![Some(1.0), Some(2.0)]);
 }
 
 /// A kernel error and dropping the execution both give back everything the node reserved.
