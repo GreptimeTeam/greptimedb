@@ -458,7 +458,14 @@ impl RegionServer {
         region_id: RegionId,
         state: SettableRegionRoleState,
     ) -> Result<SetRegionRoleStateResponse> {
-        match self.inner.region_map.get(&region_id) {
+        // Cloning releases the DashMap guard before awaiting the engine operation.
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .map(|entry| entry.value().clone());
+
+        match engine {
             Some(engine) => Ok(engine
                 .set_region_role_state_gracefully(region_id, state)
                 .await
