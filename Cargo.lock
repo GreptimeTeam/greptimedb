@@ -11797,6 +11797,7 @@ dependencies = [
  "bitflags 2.12.1",
  "bytes",
  "common-base",
+ "common-cache",
  "common-error",
  "common-macro",
  "common-runtime",
@@ -11814,6 +11815,7 @@ dependencies = [
  "snafu 0.8.6",
  "tokio",
  "tokio-util",
+ "tracing",
  "uuid",
 ]
 

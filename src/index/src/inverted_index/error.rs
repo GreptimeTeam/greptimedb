@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::io::Error as IoError;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -221,6 +222,13 @@ pub enum Error {
         expected_row_count: usize,
     },
 
+    #[snafu(display("Shared index metadata read failed"))]
+    SharedRead {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error"))]
     External {
         source: BoxedError,
@@ -269,6 +277,7 @@ impl ErrorExt for Error {
 
             Intermediate { source, .. } => source.status_code(),
             External { source, .. } => source.status_code(),
+            SharedRead { source, .. } => source.status_code(),
         }
     }
 
@@ -278,3 +287,20 @@ impl ErrorExt for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use snafu::IntoError;
+
+    use super::*;
+
+    #[test]
+    fn shared_metadata_error_preserves_status() {
+        let source = CommonIoSnafu.into_error(std::io::Error::other("read failed"));
+        let status = source.status_code();
+        let retry = source.retry_hint();
+        let error = SharedReadSnafu.into_error(Arc::new(source));
+        assert_eq!(error.status_code(), status);
+        assert_eq!(error.retry_hint(), retry);
+    }
+}
