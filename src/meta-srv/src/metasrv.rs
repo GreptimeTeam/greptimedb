@@ -80,6 +80,7 @@ use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManag
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::flush_trigger::RegionFlushTickerRef;
+use crate::region::lease_grant_tracker::LeaseGrantTrackerRef;
 use crate::region::supervisor::RegionSupervisorTickerRef;
 use crate::selector::{RegionStatAwareSelector, Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
@@ -533,10 +534,14 @@ pub struct MetaStateHandler {
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     leadership_change_notifier: LeadershipChangeNotifier,
     state: StateRef,
+    lease_grant_tracker: LeaseGrantTrackerRef,
 }
 
 impl MetaStateHandler {
     pub async fn on_leader_start(&self) {
+        // Before any migration starts: grants of the previous terms are forgotten, and this
+        // instant bounds the grants of former leaders.
+        self.lease_grant_tracker.reset();
         self.state.write().unwrap().next_state(become_leader(false));
 
         if let Err(e) = self.leader_cached_kv_backend.load().await {
@@ -611,6 +616,7 @@ pub struct Metasrv {
     resource_stat: ResourceStatRef,
     gc_ticker: Option<GcTickerRef>,
     database_operator: DatabaseOperatorRef,
+    lease_grant_tracker: LeaseGrantTrackerRef,
 
     plugins: Plugins,
 }
@@ -695,6 +701,7 @@ impl Metasrv {
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
                 leadership_change_notifier,
+                lease_grant_tracker: self.lease_grant_tracker.clone(),
             };
             let _handle = common_runtime::spawn_global(async move {
                 loop {
@@ -972,10 +979,19 @@ impl Metasrv {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use common_event_recorder::EventTypeFilter;
+    use common_meta::distributed_time_constants::{
+        META_LEASE_SECS, default_distributed_time_constants,
+    };
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use tokio::time::Instant;
 
     use super::*;
     use crate::metasrv::MetasrvNodeInfo;
+    use crate::region::lease_grant_tracker::LeaseGrantTracker;
+    use crate::state::State;
 
     #[test]
     fn test_deserialize_metasrv_node_info() {
@@ -1001,5 +1017,40 @@ mod tests {
         );
         assert!(selected.event_types.allows("create_database"));
         assert!(!selected.event_types.allows("drop_database"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_on_leader_start_resets_lease_grants() {
+        let lease_grant_tracker = Arc::new(LeaseGrantTracker::default());
+        let state_handler = MetaStateHandler {
+            subscribe_manager: None,
+            greptimedb_telemetry_task: Arc::new(GreptimeDBTelemetryTask::disable()),
+            leader_cached_kv_backend: Arc::new(LeaderCachedKvBackend::with_always_leader(
+                Arc::new(MemoryKvBackend::new()),
+            )),
+            leadership_change_notifier: LeadershipChangeNotifier::default(),
+            state: Arc::new(RwLock::new(State::follower("127.0.0.1:3002".to_string()))),
+            lease_grant_tracker: lease_grant_tracker.clone(),
+        };
+        let region_lease = default_distributed_time_constants().region_lease;
+        let former_leader_lease_expiry =
+            || Instant::now() + Duration::from_secs(META_LEASE_SECS) + region_lease;
+
+        state_handler.on_leader_start().await;
+        assert_eq!(
+            former_leader_lease_expiry(),
+            lease_grant_tracker.lease_expiry(1, region_lease)
+        );
+        tokio::time::advance(Duration::from_secs(30)).await;
+        lease_grant_tracker.record_grant(1);
+        state_handler.on_leader_stop().await;
+
+        // Elected again, the metasrv counts from the new election, not its former grants.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        state_handler.on_leader_start().await;
+        assert_eq!(
+            former_leader_lease_expiry(),
+            lease_grant_tracker.lease_expiry(1, region_lease)
+        );
     }
 }

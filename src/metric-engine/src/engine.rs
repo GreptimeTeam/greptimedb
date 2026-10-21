@@ -44,7 +44,7 @@ pub(crate) use state::MetricEngineState;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{
-    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
+    BatchResponses, RegionEngine, RegionLeaseGrant, RegionRole, RegionScannerRef, RegionStatistic,
     RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
     SetRegionRoleStateSuccess, SettableRegionRoleState, SyncRegionFromRequest,
     SyncRegionFromResponse,
@@ -381,6 +381,26 @@ impl RegionEngine for MetricEngine {
             }
         }
         Ok(())
+    }
+
+    fn set_region_role_by_lease(
+        &self,
+        region_id: RegionId,
+        grant: RegionLeaseGrant,
+    ) -> Result<bool, BoxedError> {
+        // ignore the region not found error
+        let mut applied = true;
+        for x in [
+            utils::to_metadata_region_id(region_id),
+            utils::to_data_region_id(region_id),
+        ] {
+            match self.inner.mito.set_region_role_by_lease(x, grant) {
+                Ok(region_applied) => applied &= region_applied,
+                Err(e) if e.status_code() == StatusCode::RegionNotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(applied)
     }
 
     async fn sync_region(

@@ -15,6 +15,7 @@
 //! Mito region.
 
 pub mod catchup;
+pub(crate) mod lease;
 pub mod opener;
 pub mod options;
 pub mod utils;
@@ -38,7 +39,7 @@ use store_api::logstore::provider::Provider;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::region_engine::{
-    RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
+    RegionLeaseGrant, RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{PathType, StagingPartitionDirective};
@@ -57,6 +58,7 @@ use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
+use crate::region::lease::RegionLeaseRecordRef;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
 use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
@@ -184,6 +186,8 @@ pub struct MitoRegion {
     pub(crate) region_stats: RegionStats,
     /// manifest stats
     stats: ManifestStats,
+    /// Leases the metasrv grants to the region.
+    pub(crate) lease: RegionLeaseRecordRef,
 }
 
 /// Runtime statistics of a region.
@@ -412,6 +416,13 @@ impl MitoRegion {
     /// Sets the region role state.
     pub(crate) fn set_role(&self, next_role: RegionRole) {
         self.manifest_ctx.set_role(next_role, self.region_id);
+    }
+
+    /// Sets the region role from a lease the metasrv grants and records the lease.
+    ///
+    /// Returns false if the grant is stale and ignored.
+    pub(crate) fn set_role_by_lease(&self, grant: RegionLeaseGrant) -> bool {
+        self.lease.grant(grant, |role| self.set_role(role))
     }
 
     pub(crate) fn region_role(&self) -> RegionRole {
@@ -2089,6 +2100,7 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
+            lease: Default::default(),
         }
     }
 
@@ -2594,6 +2606,7 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
+            lease: Default::default(),
         };
 
         // Test initial state

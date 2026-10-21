@@ -26,7 +26,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
-use store_api::region_engine::{RegionRole, SettableRegionRoleState};
+use store_api::region_engine::{RegionLeaseGrant, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 #[cfg(test)]
@@ -134,13 +134,18 @@ impl RegionAliveKeeper {
         }
     }
 
-    /// Renews the lease of regions to `deadline`.
-    async fn renew_region_leases(&self, regions: &[GrantedRegion], deadline: Instant) {
+    /// Renews the lease of regions to `deadline`, granted for the heartbeat sent at `heartbeat_sent_at`.
+    async fn renew_region_leases(
+        &self,
+        regions: &[GrantedRegion],
+        heartbeat_sent_at: Instant,
+        deadline: Instant,
+    ) {
         for region in regions {
             let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
                 handle
-                    .reset_deadline(role, deadline, region.extensions.clone())
+                    .reset_deadline(role, heartbeat_sent_at, deadline, region.extensions.clone())
                     .await;
             } else {
                 warn!(
@@ -276,9 +281,14 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
                 err_msg: "'region_lease' is missing in heartbeat response",
             })?;
         let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
-        let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
+        let lease = Duration::from_secs(region_lease.lease_seconds);
+        let deadline = start_instant + lease;
 
-        self.renew_region_leases(&region_lease.regions, deadline)
+        // Regions created on this node write under the node lease until their first grant.
+        if let Some(mito) = self.region_server.mito_engine() {
+            mito.renew_node_lease(start_instant.into_std(), lease);
+        }
+        self.renew_region_leases(&region_lease.regions, start_instant, deadline)
             .await;
         self.close_staled_regions(&region_lease.closeable_region_ids)
             .await;
@@ -293,8 +303,8 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    /// (NextRole, Deadline, ExtensionInfo)
-    Reset((RegionRole, Instant, HashMap<String, Vec<u8>>)),
+    /// (NextRole, HeartbeatSentAt, Deadline, ExtensionInfo)
+    Reset((RegionRole, Instant, Instant, HashMap<String, Vec<u8>>)),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -374,12 +384,18 @@ impl CountdownTaskHandle {
     async fn reset_deadline(
         &self,
         role: RegionRole,
+        heartbeat_sent_at: Instant,
         deadline: Instant,
         extension_info: HashMap<String, Vec<u8>>,
     ) {
         if let Err(e) = self
             .tx
-            .send(CountdownCommand::Reset((role, deadline, extension_info)))
+            .send(CountdownCommand::Reset((
+                role,
+                heartbeat_sent_at,
+                deadline,
+                extension_info,
+            )))
             .await
         {
             warn!(
@@ -433,26 +449,40 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset((role, deadline, extension_info))) => {
+                        Some(CountdownCommand::Reset((role, heartbeat_sent_at, deadline, extension_info))) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
-                            if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
-                                if err.status_code() == StatusCode::RegionNotFound {
-                                    // Table metadata in metasrv is deleted after its regions are dropped.
-                                    // The datanode may still receive lease renewal responses that depend on the metadata
-                                    // during the short period before it is removed.
-                                    warn!(err; "Failed to set region role to {role} for region {region_id}");
-                                } else {
-                                    error!(err; "Failed to set region role to {role} for region {region_id}");
+                            let grant = RegionLeaseGrant {
+                                role,
+                                heartbeat_sent_at: heartbeat_sent_at.into_std(),
+                                deadline: deadline.into_std(),
+                            };
+                            match self.region_server.set_region_role_by_lease(self.region_id, grant) {
+                                Err(err) => {
+                                    if err.status_code() == StatusCode::RegionNotFound {
+                                        // Table metadata in metasrv is deleted after its regions are dropped.
+                                        // The datanode may still receive lease renewal responses that depend on the metadata
+                                        // during the short period before it is removed.
+                                        warn!(err; "Failed to set region role to {role} for region {region_id}");
+                                    } else {
+                                        error!(err; "Failed to set region role to {role} for region {region_id}");
+                                    }
                                 }
-
-                            // Finalize leadership: persist backfilled metadata.
-                            } else if !prev_role_leader && role == RegionRole::Leader
-                                && let Err(err) = self
-                                    .region_server
-                                    .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
-                                    .await
-                            {
-                                error!(err; "Failed to set region role state gracefully to {role} for region {region_id}");
+                                // A leader grant for a heartbeat sent before a downgrade must not make the region writable again.
+                                Ok(false) => {
+                                    info!("Ignore the stale {role} lease of region {region_id}");
+                                    continue;
+                                }
+                                // Finalize leadership: persist backfilled metadata.
+                                Ok(true) => {
+                                    if !prev_role_leader && role == RegionRole::Leader
+                                        && let Err(err) = self
+                                            .region_server
+                                            .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
+                                            .await
+                                    {
+                                        error!(err; "Failed to set region role state gracefully to {role} for region {region_id}");
+                                    }
+                                }
                             }
 
                             if let Some(ext_handler) = self.handler_ext.as_ref() {
@@ -500,13 +530,102 @@ impl CountdownTask {
 #[cfg(test)]
 mod test {
 
+    use api::region::RegionResponse;
+    use api::v1::meta::{HeartbeatResponse, RegionLease};
+    use api::v1::{ColumnSchema, Rows};
+    use common_meta::heartbeat::mailbox::HeartbeatMailbox;
     use mito2::config::MitoConfig;
-    use mito2::test_util::{CreateRequestBuilder, TestEnv};
+    use mito2::engine::MitoEngine;
+    use mito2::engine::listener::WriteWalListener;
+    use mito2::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
+    use store_api::region_request::{
+        EnterStagingRequest, RegionCatchupRequest, RegionPutRequest, StagingPartitionDirective,
+    };
 
     use super::*;
     use crate::tests::mock_region_server;
+
+    /// Returns a region server whose Mito engine needs a lease to acknowledge writes, as on a
+    /// datanode the metasrv controls.
+    async fn lease_region_server(
+        env: &mut TestEnv,
+        listener: Option<Arc<WriteWalListener>>,
+    ) -> (RegionServer, MitoEngine) {
+        let mut region_server = mock_region_server();
+        let engine = env
+            .create_engine_with(
+                MitoConfig::default(),
+                None,
+                listener.map(|listener| listener as _),
+                None,
+            )
+            .await;
+        engine.require_write_lease();
+        region_server.register_engine(Arc::new(engine.clone()));
+        (region_server, engine)
+    }
+
+    async fn create_region(region_server: &RegionServer, region_id: RegionId) -> Vec<ColumnSchema> {
+        let request = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&request);
+        region_server
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        schema
+    }
+
+    async fn put_row(
+        region_server: &RegionServer,
+        region_id: RegionId,
+        schema: &[ColumnSchema],
+    ) -> Result<RegionResponse> {
+        region_server
+            .handle_request(
+                region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: schema.to_vec(),
+                        rows: build_rows(0, 1),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                    skip_wal: false,
+                }),
+            )
+            .await
+    }
+
+    fn leader_grant(region_id: RegionId) -> GrantedRegion {
+        GrantedRegion {
+            region_id: region_id.as_u64(),
+            role: api::v1::meta::RegionRole::Leader.into(),
+            extensions: HashMap::new(),
+        }
+    }
+
+    /// Handles a heartbeat response with region leases for a heartbeat sent now.
+    async fn handle_lease_response(
+        alive_keeper: &RegionAliveKeeper,
+        regions: Vec<GrantedRegion>,
+        lease_seconds: u64,
+    ) {
+        let (tx, _rx) = mpsc::channel(1);
+        let response = HeartbeatResponse {
+            region_lease: Some(RegionLease {
+                regions,
+                duration_since_epoch: alive_keeper.epoch().elapsed().as_millis() as u64,
+                lease_seconds,
+                closeable_region_ids: vec![],
+            }),
+            ..Default::default()
+        };
+        let mut ctx =
+            HeartbeatResponseHandlerContext::new(Arc::new(HeartbeatMailbox::new(tx)), response);
+        assert!(alive_keeper.is_acceptable(&ctx));
+        alive_keeper.handle(&mut ctx).await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn region_alive_keeper() {
@@ -560,6 +679,7 @@ mod test {
                     role: api::v1::meta::RegionRole::Leader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(200),
             )
             .await;
@@ -613,6 +733,7 @@ mod test {
         countdown_handle
             .reset_deadline(
                 RegionRole::Leader,
+                Instant::now(),
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
                 HashMap::new(),
             )
@@ -663,6 +784,7 @@ mod test {
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;
@@ -711,6 +833,7 @@ mod test {
                     role: api::v1::meta::RegionRole::Leader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;
@@ -753,10 +876,181 @@ mod test {
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(engine.role(region_id).unwrap(), RegionRole::Leader);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn created_region_writes_under_node_lease() {
+        common_telemetry::init_default_ut_logging();
+        let mut env = TestEnv::with_prefix("region-alive-keeper-node-lease").await;
+        let (region_server, _engine) = lease_region_server(&mut env, None).await;
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        let region_id = RegionId::new(1024, 1);
+        let schema = create_region(&region_server, region_id).await;
+
+        // No heartbeat response has carried region leases yet.
+        let err = put_row(&region_server, region_id, &schema)
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+
+        // A response without region leases does not renew the node lease.
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = HeartbeatResponseHandlerContext::new(
+            Arc::new(HeartbeatMailbox::new(tx)),
+            HeartbeatResponse::default(),
+        );
+        assert!(!alive_keeper.is_acceptable(&ctx));
+
+        // A response with region leases renews it, though it grants nothing to the region.
+        handle_lease_response(&alive_keeper, vec![], 1).await;
+        put_row(&region_server, region_id, &schema).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let err = put_row(&region_server, region_id, &schema)
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn catchup_reopen_keeps_region_lease() {
+        common_telemetry::init_default_ut_logging();
+        let mut env = TestEnv::with_prefix("region-alive-keeper-reopen-lease").await;
+        let (region_server, engine) = lease_region_server(&mut env, None).await;
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(
+            region_server.clone(),
+            None,
+            Duration::from_millis(100),
+        ));
+        let region_id = RegionId::new(1024, 1);
+        let schema = create_region(&region_server, region_id).await;
+        alive_keeper.register_region(region_id).await;
+        handle_lease_response(&alive_keeper, vec![leader_grant(region_id)], 10).await;
+        // Waits until the countdown task applies the grant.
+        alive_keeper.deadline(region_id).await.unwrap();
+        put_row(&region_server, region_id, &schema).await.unwrap();
+
+        // The catchup reopens the region, as its memtable is not empty.
+        region_server
+            .set_region_role(region_id, RegionRole::Follower)
+            .unwrap();
+        let region = engine.find_region(region_id).unwrap();
+        region_server
+            .handle_request(
+                region_id,
+                RegionRequest::Catchup(RegionCatchupRequest {
+                    set_writable: true,
+                    entry_id: None,
+                    metadata_entry_id: None,
+                    checkpoint: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &region,
+            &engine.find_region(region_id).unwrap()
+        ));
+        // The reopened region still holds the Leader grant.
+        put_row(&region_server, region_id, &schema).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn writes_fail_after_lease_expiry_without_countdown() {
+        common_telemetry::init_default_ut_logging();
+        let mut env = TestEnv::with_prefix("region-alive-keeper-no-countdown").await;
+        let listener = Arc::new(WriteWalListener::default());
+        let (region_server, engine) = lease_region_server(&mut env, Some(listener.clone())).await;
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        let region_id = RegionId::new(1024, 1);
+        let schema = create_region(&region_server, region_id).await;
+        alive_keeper.register_region(region_id).await;
+        let deadline = Instant::now() + Duration::from_millis(500);
+        alive_keeper
+            .renew_region_leases(&[leader_grant(region_id)], Instant::now(), deadline)
+            .await;
+        alive_keeper.deadline(region_id).await.unwrap();
+        // No lease comes anymore, and the countdown task stops.
+        alive_keeper.deregister_region(region_id).await;
+
+        // The lease expires while a write is in the WAL.
+        listener.pause_next();
+        let write = {
+            let region_server = region_server.clone();
+            let schema = schema.clone();
+            tokio::spawn(async move { put_row(&region_server, region_id, &schema).await })
+        };
+        listener.wait_appended().await;
+        tokio::time::sleep_until(deadline).await;
+        listener.resume();
+        let err = write.await.unwrap().unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+
+        // Without the countdown task, the region is still a leader but rejects writes.
+        assert_eq!(engine.role(region_id), Some(RegionRole::Leader));
+        let err = put_row(&region_server, region_id, &schema)
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_leader_lease_after_downgrade_is_ignored() {
+        common_telemetry::init_default_ut_logging();
+        let mut env = TestEnv::with_prefix("region-alive-keeper-stale-lease").await;
+        let (region_server, engine) = lease_region_server(&mut env, None).await;
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        let region_id = RegionId::new(1024, 1);
+        let schema = create_region(&region_server, region_id).await;
+        alive_keeper.register_region(region_id).await;
+        let sent_before_downgrade = Instant::now();
+        alive_keeper
+            .renew_region_leases(
+                &[leader_grant(region_id)],
+                sent_before_downgrade,
+                sent_before_downgrade + Duration::from_secs(10),
+            )
+            .await;
+        alive_keeper.deadline(region_id).await.unwrap();
+
+        region_server
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+            .await
+            .unwrap();
+
+        // A Leader grant for a heartbeat sent before the downgrade arrives late.
+        alive_keeper
+            .renew_region_leases(
+                &[leader_grant(region_id)],
+                sent_before_downgrade,
+                sent_before_downgrade + Duration::from_secs(10),
+            )
+            .await;
+        alive_keeper.deadline(region_id).await.unwrap();
+        assert_eq!(engine.role(region_id), Some(RegionRole::DowngradingLeader));
+        let err = put_row(&region_server, region_id, &schema)
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+
+        // After a rollback, the Leader grant for a later heartbeat applies.
+        alive_keeper
+            .renew_region_leases(
+                &[leader_grant(region_id)],
+                Instant::now(),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .await;
+        alive_keeper.deadline(region_id).await.unwrap();
+        assert_eq!(engine.role(region_id), Some(RegionRole::Leader));
+        put_row(&region_server, region_id, &schema).await.unwrap();
     }
 }

@@ -24,12 +24,10 @@ use common_meta::instruction::{
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, info, warn};
-use common_time::util::current_time_millis;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio::time::{Instant, sleep};
 
-use crate::discovery::utils::find_datanode_lease_value;
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
@@ -270,60 +268,25 @@ impl DowngradeLeaderRegion {
         }
     }
 
-    async fn update_leader_region_lease_deadline(&self, ctx: &mut Context) {
+    /// Sets the deadline to wait for the region leases of the unreachable leader to expire.
+    ///
+    /// They expire one lease after this metasrv last granted them. A former metasrv leader
+    /// grants no lease later than [`META_LEASE_SECS`](common_meta::distributed_time_constants::META_LEASE_SECS)
+    /// after this metasrv became the leader.
+    fn update_leader_region_lease_deadline(&self, ctx: &mut Context) {
         let leader = &ctx.persistent_ctx.from_peer;
-
-        let last_connection_at = match find_datanode_lease_value(&ctx.in_memory, leader.id).await {
-            Ok(lease_value) => lease_value.map(|lease_value| lease_value.timestamp_millis),
-            Err(err) => {
-                error!(err; "Failed to find datanode lease value for datanode: {}, during region migration, region: {:?}", leader, ctx.persistent_ctx.region_ids);
-                return;
-            }
-        };
-
-        if let Some(last_connection_at) = last_connection_at {
-            let now = current_time_millis();
-            let elapsed = now - last_connection_at;
-            let region_lease = default_distributed_time_constants().region_lease;
-
-            // It's safe to update the region leader lease deadline here because:
-            // 1. The old region leader has already been marked as downgraded in metadata,
-            //    which means any attempts to renew its lease will be rejected.
-            // 2. The pusher disconnect time record only gets removed when the datanode (from_peer)
-            //    establishes a new heartbeat connection stream.
-            if elapsed >= (region_lease.as_secs() * 1000) as i64 {
-                ctx.volatile_ctx.reset_leader_region_lease_deadline();
-                info!(
-                    "Datanode {}({}) has been disconnected for longer than the region lease period ({:?}), reset leader region lease deadline to None, region: {:?}",
-                    leader, last_connection_at, region_lease, ctx.persistent_ctx.region_ids
-                );
-            } else if elapsed > 0 {
-                // `now - last_connection_at` < REGION_LEASE_SECS * 1000
-                let lease_timeout =
-                    region_lease - Duration::from_millis((now - last_connection_at) as u64);
-                ctx.volatile_ctx.reset_leader_region_lease_deadline();
-                ctx.volatile_ctx
-                    .set_leader_region_lease_deadline(lease_timeout);
-                info!(
-                    "Datanode {}({}) last connected {:?} ago, updated leader region lease deadline to {:?}, region: {:?}",
-                    leader,
-                    last_connection_at,
-                    elapsed,
-                    ctx.volatile_ctx.leader_region_lease_deadline,
-                    ctx.persistent_ctx.region_ids
-                );
-            } else {
-                warn!(
-                    "Datanode {} has invalid last connection timestamp: {} (which is after current time: {}), region: {:?}",
-                    leader, last_connection_at, now, ctx.persistent_ctx.region_ids
-                )
-            }
-        } else {
-            warn!(
-                "Failed to find last connection time for datanode {}, unable to update region lease deadline, region: {:?}",
-                leader, ctx.persistent_ctx.region_ids
-            )
-        }
+        let region_lease = default_distributed_time_constants().region_lease;
+        let lease_expiry = ctx
+            .lease_grant_tracker
+            .lease_expiry(leader.id, region_lease);
+        let lease_timeout = lease_expiry.saturating_duration_since(Instant::now());
+        ctx.volatile_ctx.reset_leader_region_lease_deadline();
+        ctx.volatile_ctx
+            .set_leader_region_lease_deadline(lease_timeout);
+        info!(
+            "Datanode {} is unreachable, waits {:?} for its region leases to expire, region: {:?}",
+            leader, lease_timeout, ctx.persistent_ctx.region_ids
+        );
     }
 
     /// Downgrades a leader region.
@@ -351,7 +314,7 @@ impl DowngradeLeaderRegion {
                 } else if matches!(err, error::Error::PusherNotFound { .. }) {
                     // Throws the error immediately if the datanode is unreachable.
                     error!(err; "Failed to downgrade region leader, regions: {:?}, datanode({}) is unreachable(PusherNotFound)", ctx.persistent_ctx.region_ids, ctx.persistent_ctx.from_peer.id);
-                    self.update_leader_region_lease_deadline(ctx).await;
+                    self.update_leader_region_lease_deadline(ctx);
                     return Err(err);
                 } else if err.is_retryable() && retry < self.optimistic_retry {
                     error!(err; "Failed to downgrade region leader, regions: {:?}, retry later", ctx.persistent_ctx.region_ids);
@@ -379,6 +342,7 @@ mod tests {
     use std::assert_matches;
     use std::collections::HashMap;
 
+    use common_meta::distributed_time_constants::META_LEASE_SECS;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -749,5 +713,52 @@ mod tests {
         let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
         assert_matches!(update_metadata, UpdateMetadata::Rollback);
+    }
+
+    /// Downgrades the leader, which is unreachable, and returns the deadline to wait until.
+    async fn unreachable_leader_lease_deadline(ctx: &mut Context) -> Instant {
+        let state = DowngradeLeaderRegion::default();
+        let err = state.downgrade_region_with_retry(ctx).await.unwrap_err();
+        assert_matches!(err, Error::PusherNotFound { .. });
+        ctx.volatile_ctx.leader_region_lease_deadline.unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_unreachable_leader_waits_for_last_grant() {
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let region_lease = default_distributed_time_constants().region_lease;
+
+        // The wait counts from the monotonic instant of the last grant.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        ctx.lease_grant_tracker.record_grant(from_peer_id);
+        let granted_at = Instant::now();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            granted_at + region_lease,
+            unreachable_leader_lease_deadline(&mut ctx).await
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_unreachable_leader_waits_after_leader_change() {
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let region_lease = default_distributed_time_constants().region_lease;
+
+        ctx.lease_grant_tracker.record_grant(from_peer_id);
+        // Another metasrv leads for a while, then this one is elected again. The other leader
+        // may still grant leases for `META_LEASE_SECS` after the election.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        ctx.lease_grant_tracker.reset();
+        let leader_since = Instant::now();
+        assert_eq!(
+            leader_since + Duration::from_secs(META_LEASE_SECS) + region_lease,
+            unreachable_leader_lease_deadline(&mut ctx).await
+        );
     }
 }

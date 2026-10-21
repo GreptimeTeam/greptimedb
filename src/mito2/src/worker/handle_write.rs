@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet, hash_map};
 use std::sync::Arc;
+use std::time::Instant;
 
 use api::v1::OpType;
 use common_telemetry::{debug, error};
@@ -25,12 +26,14 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
+    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionLeaseExpiredSnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
+    UnacknowledgedWriteSnafu,
 };
 use crate::metrics;
 use crate::metrics::{
-    WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
+    WRITE_LEASE_REJECT_TOTAL, WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED,
+    WRITE_STALL_TOTAL,
 };
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
@@ -118,6 +121,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         }
+        self.listener.on_write_wal_end().await;
+        self.fail_writes_after_lease_expiry(&mut region_ctxs);
 
         let (mut put_rows, mut delete_rows) = (0, 0);
         // Write to memtables.
@@ -304,6 +309,7 @@ impl<S> RegionWorkerLoop<S> {
         region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
         write_requests: &mut Vec<SenderWriteRequest>,
     ) {
+        let now = Instant::now();
         for mut sender_req in write_requests.drain(..) {
             let region_id = sender_req.request.region_id;
 
@@ -334,6 +340,15 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        if !region.lease.allows_write(&self.node_lease, now) {
+                            WRITE_LEASE_REJECT_TOTAL
+                                .with_label_values(&["prepare"])
+                                .inc();
+                            sender_req
+                                .sender
+                                .send(RegionLeaseExpiredSnafu { region_id }.fail());
+                            continue;
+                        }
                         if region.reject_all_writes_in_staging() {
                             sender_req
                                 .sender
@@ -464,6 +479,7 @@ impl<S> RegionWorkerLoop<S> {
         let _timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
             .with_label_values(&["prepare_bulk_request"])
             .start_timer();
+        let now = Instant::now();
         for mut bulk_req in requests.drain(..) {
             let region_id = bulk_req.region_id;
             // If region is waiting for alteration, add requests to pending writes.
@@ -482,6 +498,15 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        if !region.lease.allows_write(&self.node_lease, now) {
+                            WRITE_LEASE_REJECT_TOTAL
+                                .with_label_values(&["prepare"])
+                                .inc();
+                            bulk_req
+                                .sender
+                                .send(RegionLeaseExpiredSnafu { region_id }.fail());
+                            continue;
+                        }
                         if region.reject_all_writes_in_staging() {
                             bulk_req
                                 .sender
@@ -569,6 +594,36 @@ impl<S> RegionWorkerLoop<S> {
             // Collect requests by region.
             if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
                 continue;
+            }
+        }
+    }
+
+    /// Fails the writes of regions whose leader lease expired while writing to the WAL.
+    ///
+    /// The entries are already in the WAL, so the writes still go to the memtables and publish
+    /// their sequences; only their waiters get an error, whose outcome is unknown to them.
+    fn fail_writes_after_lease_expiry(&self, region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>) {
+        if !self.node_lease.is_enabled() {
+            return;
+        }
+        let now = Instant::now();
+        for (region_id, region_ctx) in region_ctxs.iter_mut() {
+            if region_ctx.is_failed() {
+                continue;
+            }
+            let Some(region) = self.regions.get_region(*region_id) else {
+                continue;
+            };
+            if !region.lease.allows_ack(&self.node_lease, now) {
+                let num_waiters = region_ctx.fail_waiters(Arc::new(
+                    UnacknowledgedWriteSnafu {
+                        region_id: *region_id,
+                    }
+                    .build(),
+                ));
+                WRITE_LEASE_REJECT_TOTAL
+                    .with_label_values(&["ack"])
+                    .inc_by(num_waiters as u64);
             }
         }
     }

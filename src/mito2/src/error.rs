@@ -656,6 +656,23 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
+    RegionLeaseExpired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} lost its leader lease while writing to the WAL, the write may have been applied",
+        region_id
+    ))]
+    UnacknowledgedWrite {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to compact region {}", region_id))]
     CompactRegion {
         region_id: RegionId,
@@ -1571,6 +1588,7 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1667,6 +1685,8 @@ impl ErrorExt for Error {
             PartitionExprVersionMismatch { .. }
             | RegionNotFound { .. }
             | RejectWriteInStaging { .. }
+            | RegionLeaseExpired { .. }
+            | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
                 ..

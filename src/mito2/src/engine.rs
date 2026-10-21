@@ -48,6 +48,8 @@ mod filter_deleted_test;
 mod flush_test;
 #[cfg(test)]
 mod index_build_test;
+#[cfg(test)]
+mod lease_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -96,7 +98,7 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -124,8 +126,8 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::{
     BatchPutResponse, BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse,
-    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
-    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    RegionEngine, RegionLeaseGrant, RegionManifestInfo, RegionRole, RegionScannerRef,
+    RegionStatistic, RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
     SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_info::RegionInfoEntry;
@@ -322,6 +324,23 @@ impl MitoEngine {
 
     pub fn gc_limiter(&self) -> GcLimiterRef {
         self.inner.workers.gc_limiter()
+    }
+
+    /// Requires regions to hold a valid lease from the metasrv to take and acknowledge writes.
+    ///
+    /// A datanode the metasrv controls calls it before it serves requests.
+    pub fn require_write_lease(&self) {
+        self.inner.workers.node_lease().enable();
+    }
+
+    /// Renews the lease of this node from a heartbeat response that carries region leases.
+    ///
+    /// A region created on this node writes under it until the region gets its first grant.
+    pub fn renew_node_lease(&self, heartbeat_sent_at: Instant, lease: Duration) {
+        self.inner
+            .workers
+            .node_lease()
+            .renew(heartbeat_sent_at, lease);
     }
 
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
@@ -1200,6 +1219,16 @@ impl EngineInner {
         Ok(())
     }
 
+    /// Converts the [`RegionRole`] from a lease grant.
+    fn set_region_role_by_lease(
+        &self,
+        region_id: RegionId,
+        grant: RegionLeaseGrant,
+    ) -> Result<bool> {
+        let region = self.find_region(region_id)?;
+        Ok(region.set_role_by_lease(grant))
+    }
+
     /// Sets read-only for a region and ensures no more writes in the region after it returns.
     async fn set_region_role_state_gracefully(
         &self,
@@ -1529,6 +1558,16 @@ impl RegionEngine for MitoEngine {
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
         self.inner
             .set_region_role(region_id, role)
+            .map_err(BoxedError::new)
+    }
+
+    fn set_region_role_by_lease(
+        &self,
+        region_id: RegionId,
+        grant: RegionLeaseGrant,
+    ) -> Result<bool, BoxedError> {
+        self.inner
+            .set_region_role_by_lease(region_id, grant)
             .map_err(BoxedError::new)
     }
 

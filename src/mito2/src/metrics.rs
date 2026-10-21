@@ -99,6 +99,13 @@ lazy_static! {
     /// Counter of rejected write requests.
     pub static ref WRITE_REJECT_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_write_reject_total", "mito write reject total").unwrap();
+    /// Counter of write requests failed because the region holds no valid leader lease.
+    pub static ref WRITE_LEASE_REJECT_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_write_lease_reject_total",
+        "mito write requests failed without a valid leader lease",
+        &[STAGE_LABEL]
+    )
+    .unwrap();
     /// Elapsed time of each write stage.
     pub static ref WRITE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_write_stage_elapsed",

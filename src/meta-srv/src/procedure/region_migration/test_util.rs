@@ -124,7 +124,6 @@ impl TestingEnv {
             table_metadata_manager: self.table_metadata_manager.clone(),
             opening_region_keeper: self.opening_region_keeper.clone(),
             volatile_ctx: Default::default(),
-            in_memory_key: Arc::new(MemoryKvBackend::default()),
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.clone(),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
@@ -134,6 +133,7 @@ impl TestingEnv {
                     server_addr: self.server_addr.clone(),
                 },
             )),
+            lease_grant_tracker: Default::default(),
         }
     }
 

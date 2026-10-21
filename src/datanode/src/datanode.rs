@@ -370,6 +370,10 @@ impl DatanodeBuilder {
                 cache_registry.clone(),
             )
             .await?;
+        // A region acknowledges writes only while it holds a lease from the metasrv.
+        if controlled_by_metasrv && let Some(mito) = region_server.mito_engine() {
+            mito.require_write_lease();
+        }
 
         // TODO(weny): Considering introducing a readonly kv_backend trait.
         let runtime_switch_manager = RuntimeSwitchManager::new(self.kv_backend.clone());

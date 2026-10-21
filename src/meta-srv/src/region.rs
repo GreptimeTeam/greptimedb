@@ -14,6 +14,7 @@
 
 pub mod failure_detector;
 pub mod flush_trigger;
+pub mod lease_grant_tracker;
 pub mod lease_keeper;
 pub mod supervisor;
 

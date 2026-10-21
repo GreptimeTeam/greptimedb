@@ -785,6 +785,8 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema};
@@ -799,6 +801,9 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
+    use mito2::config::MitoConfig;
+    use mito2::engine::listener::WriteWalListener;
+    use mito2::test_util::TestEnv as MitoTestEnv;
     use partition::expr::col;
     use store_api::metadata::ColumnMetadata;
     use store_api::metric_engine_consts::{
@@ -806,7 +811,7 @@ mod tests {
         PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING,
     };
     use store_api::path_utils::table_dir;
-    use store_api::region_engine::RegionEngine;
+    use store_api::region_engine::{RegionEngine, RegionLeaseGrant, RegionRole};
     use store_api::region_request::{
         EnterStagingRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
         StagingPartitionDirective,
@@ -2349,5 +2354,70 @@ mod tests {
             err.to_string().contains("impure default value"),
             "expected impure-default rejection, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_logical_region_writes_need_leader_lease() {
+        common_telemetry::init_default_ut_logging();
+        let mut mito_env = MitoTestEnv::with_prefix("logical-region-lease").await;
+        let listener = Arc::new(WriteWalListener::default());
+        let mito = mito_env
+            .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+            .await;
+        mito.require_write_lease();
+        // Created regions write under the node lease until their first grant.
+        mito.renew_node_lease(Instant::now(), Duration::from_secs(10));
+        let env = TestEnv::with_mito_engine(mito_env, mito);
+        env.init_metric_region().await;
+        let engine = env.metric();
+        let physical_region_id = env.default_physical_region_id();
+        let grant = |deadline| RegionLeaseGrant {
+            role: RegionRole::Leader,
+            heartbeat_sent_at: Instant::now(),
+            deadline,
+        };
+        engine
+            .set_region_role_by_lease(
+                physical_region_id,
+                grant(Instant::now() + Duration::from_secs(10)),
+            )
+            .unwrap();
+
+        // The lease expires while a logical region write is in the WAL.
+        listener.pause_next();
+        let logical_region_id = env.default_logical_region_id();
+        let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
+            rows: Rows {
+                schema: test_util::row_schema_with_tags(&["job"]),
+                rows: test_util::build_rows(1, 5),
+            },
+            hint: None,
+            partition_expr_version: None,
+        });
+        let write = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
+        };
+        listener.wait_appended().await;
+        engine
+            .set_region_role_by_lease(physical_region_id, grant(Instant::now()))
+            .unwrap();
+        listener.resume();
+        let err = write.await.unwrap().unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+
+        // A logical table DDL writes to the metadata region, which holds no lease either.
+        let logical_region_id = RegionId::new(4, 2);
+        let request = test_util::create_logical_region_request(
+            &["job"],
+            physical_region_id,
+            &table_dir("test", logical_region_id.table_id()),
+        );
+        let err = engine
+            .handle_request(logical_region_id, RegionRequest::Create(request))
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
     }
 }

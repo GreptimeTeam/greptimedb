@@ -41,7 +41,6 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::topic_name::TopicNameKey;
 use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey};
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
@@ -70,6 +69,7 @@ use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
 };
+use crate::region::lease_grant_tracker::LeaseGrantTrackerRef;
 use crate::service::mailbox::MailboxRef;
 
 /// The default timeout for region migration.
@@ -381,35 +381,35 @@ pub trait ContextFactory {
 #[derive(Clone)]
 pub struct DefaultContextFactory {
     volatile_ctx: VolatileContext,
-    in_memory_key: ResettableKvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
     region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
     cache_invalidator: CacheInvalidatorRef,
+    lease_grant_tracker: LeaseGrantTrackerRef,
 }
 
 impl DefaultContextFactory {
     /// Returns an [`DefaultContextFactory`].
     pub fn new(
-        in_memory_key: ResettableKvBackendRef,
         table_metadata_manager: TableMetadataManagerRef,
         opening_region_keeper: MemoryRegionKeeperRef,
         region_failure_detector_controller: RegionFailureDetectorControllerRef,
         mailbox: MailboxRef,
         server_addr: String,
         cache_invalidator: CacheInvalidatorRef,
+        lease_grant_tracker: LeaseGrantTrackerRef,
     ) -> Self {
         Self {
             volatile_ctx: VolatileContext::default(),
-            in_memory_key,
             table_metadata_manager,
             opening_region_keeper,
             region_failure_detector_controller,
             mailbox,
             server_addr,
             cache_invalidator,
+            lease_grant_tracker,
         }
     }
 }
@@ -419,13 +419,13 @@ impl ContextFactory for DefaultContextFactory {
         Context {
             persistent_ctx,
             volatile_ctx: self.volatile_ctx,
-            in_memory: self.in_memory_key,
             table_metadata_manager: self.table_metadata_manager,
             opening_region_keeper: self.opening_region_keeper,
             region_failure_detector_controller: self.region_failure_detector_controller,
             mailbox: self.mailbox,
             server_addr: self.server_addr,
             cache_invalidator: self.cache_invalidator,
+            lease_grant_tracker: self.lease_grant_tracker,
         }
     }
 }
@@ -434,13 +434,13 @@ impl ContextFactory for DefaultContextFactory {
 pub struct Context {
     persistent_ctx: PersistentContext,
     volatile_ctx: VolatileContext,
-    in_memory: KvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
     region_failure_detector_controller: RegionFailureDetectorControllerRef,
     mailbox: MailboxRef,
     server_addr: String,
     cache_invalidator: CacheInvalidatorRef,
+    lease_grant_tracker: LeaseGrantTrackerRef,
 }
 
 impl Context {

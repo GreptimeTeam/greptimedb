@@ -247,20 +247,27 @@ impl RegionWriteCtx {
 
     /// Sets error and marks all write operations are failed.
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
-        // Set error for all notifiers.
-        for notify in self
-            .wal_notifiers
-            .iter_mut()
-            .chain(self.memtable_mutations.iter_mut().map(|(_, notify)| notify))
-        {
-            notify.err = Some(err.clone());
-        }
-        for notify in &mut self.bulk_notifiers {
-            notify.err = Some(err.clone());
-        }
+        self.fail_waiters(err);
 
         // Fail the whole write operation.
         self.failed = true;
+    }
+
+    /// Sets error for all notifiers without failing the write operation.
+    ///
+    /// Returns the number of notifiers.
+    pub(crate) fn fail_waiters(&mut self, err: Arc<Error>) -> usize {
+        let notifiers = self
+            .wal_notifiers
+            .iter_mut()
+            .chain(self.memtable_mutations.iter_mut().map(|(_, notify)| notify))
+            .chain(self.bulk_notifiers.iter_mut());
+        let mut num_notifiers = 0;
+        for notify in notifiers {
+            notify.err = Some(err.clone());
+            num_notifiers += 1;
+        }
+        num_notifiers
     }
 
     /// Returns whether the write operation is already marked as failed.

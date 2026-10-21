@@ -62,6 +62,7 @@ use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::read::series_candidate::is_sparse_metric_metadata;
+use crate::region::lease::{RegionLeaseRecord, RegionLeaseRecordRef};
 use crate::region::options::RegionOptions;
 use crate::region::version::{Version, VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -168,6 +169,7 @@ pub(crate) struct RegionOpener {
     hook: Option<RegionHookRef>,
     series_index_store: Option<ObjectStore>,
     series_index_purger: Option<IndexFilePurger>,
+    lease: Option<RegionLeaseRecordRef>,
 }
 
 impl RegionOpener {
@@ -209,7 +211,14 @@ impl RegionOpener {
             hook: None,
             series_index_store: None,
             series_index_purger: None,
+            lease: None,
         }
+    }
+
+    /// Keeps the lease record of the region being reopened.
+    pub(crate) fn lease(mut self, lease: RegionLeaseRecordRef) -> Self {
+        self.lease = Some(lease);
+        self
     }
 
     /// Sets the store for companion range indexes.
@@ -337,6 +346,8 @@ impl RegionOpener {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
+        // The region is writable once created, before the metasrv grants it a lease.
+        self.lease = Some(Arc::new(RegionLeaseRecord::created(Instant::now())));
         // Tries to open the region.
         match self.maybe_open(config, wal).await {
             Ok(Some(region)) => {
@@ -470,6 +481,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
             region_stats: RegionStats::new(),
             stats: self.stats,
+            lease: self.lease.unwrap_or_default(),
         }))
     }
 
@@ -708,6 +720,7 @@ impl RegionOpener {
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             region_stats: RegionStats::new(),
             stats: self.stats.clone(),
+            lease: self.lease.clone().unwrap_or_default(),
         };
 
         let region = Arc::new(region);

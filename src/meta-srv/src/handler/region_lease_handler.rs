@@ -27,6 +27,7 @@ use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 use crate::region::RegionLeaseKeeper;
+use crate::region::lease_grant_tracker::LeaseGrantTrackerRef;
 use crate::region::lease_keeper::{
     RegionLeaseInfo, RegionLeaseKeeperRef, RenewRegionLeasesResponse,
 };
@@ -35,6 +36,7 @@ pub struct RegionLeaseHandler {
     region_lease_seconds: u64,
     region_lease_keeper: RegionLeaseKeeperRef,
     customized_region_lease_renewer: Option<CustomizedRegionLeaseRenewerRef>,
+    lease_grant_tracker: LeaseGrantTrackerRef,
 }
 
 pub type CustomizedRegionLeaseRenewerRef = Arc<dyn CustomizedRegionLeaseRenewer>;
@@ -53,6 +55,7 @@ impl RegionLeaseHandler {
         table_metadata_manager: TableMetadataManagerRef,
         memory_region_keeper: MemoryRegionKeeperRef,
         customized_region_lease_renewer: Option<CustomizedRegionLeaseRenewerRef>,
+        lease_grant_tracker: LeaseGrantTrackerRef,
     ) -> Self {
         let region_lease_keeper =
             RegionLeaseKeeper::new(table_metadata_manager, memory_region_keeper.clone());
@@ -61,6 +64,7 @@ impl RegionLeaseHandler {
             region_lease_seconds,
             region_lease_keeper: Arc::new(region_lease_keeper),
             customized_region_lease_renewer,
+            lease_grant_tracker,
         }
     }
 }
@@ -108,6 +112,8 @@ impl HeartbeatHandler for RegionLeaseHandler {
                         .collect::<Vec<_>>()
                 };
 
+                // Recorded before the response leaves, so a migration waits for this grant.
+                self.lease_grant_tracker.record_grant(datanode_id);
                 acc.region_lease = Some(RegionLease {
                     regions: renewed,
                     duration_since_epoch: req.duration_since_epoch,
@@ -244,6 +250,7 @@ mod test {
             table_metadata_manager.clone(),
             opening_region_keeper.clone(),
             None,
+            Default::default(),
         );
 
         handler.handle(&req, ctx, acc).await.unwrap();
@@ -388,6 +395,7 @@ mod test {
             table_metadata_manager.clone(),
             Default::default(),
             None,
+            Default::default(),
         );
 
         handler.handle(&req, ctx, acc).await.unwrap();
@@ -451,6 +459,7 @@ mod test {
             table_metadata_manager.clone(),
             Default::default(),
             None,
+            Default::default(),
         );
 
         handler.handle(&req, ctx, acc).await.unwrap();
@@ -529,6 +538,7 @@ mod test {
             table_metadata_manager.clone(),
             Default::default(),
             None,
+            Default::default(),
         );
         handler.handle(&req, ctx, acc).await.unwrap();
 

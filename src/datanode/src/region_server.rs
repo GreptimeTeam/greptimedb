@@ -86,9 +86,9 @@ use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
 use store_api::region_engine::{
-    RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
-    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
-    SyncRegionFromRequest,
+    RegionEngineRef, RegionLeaseGrant, RegionManifestInfo, RegionRole, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncRegionFromRequest,
 };
 use store_api::region_request::{
     self as store_region_request, AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest,
@@ -469,6 +469,24 @@ impl RegionServer {
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
             .set_region_role(region_id, role)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
+    /// Sets the role of a region from a lease the metasrv grants.
+    ///
+    /// Returns false if the engine ignores the grant as stale.
+    pub fn set_region_role_by_lease(
+        &self,
+        region_id: RegionId,
+        grant: RegionLeaseGrant,
+    ) -> Result<bool> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .set_region_role_by_lease(region_id, grant)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 

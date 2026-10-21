@@ -80,6 +80,7 @@ use crate::procedure::repartition::{
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::region::flush_trigger::RegionFlushTrigger;
+use crate::region::lease_grant_tracker::LeaseGrantTracker;
 use crate::region::supervisor::{
     DEFAULT_INITIALIZATION_RETRY_PERIOD, DEFAULT_TICK_INTERVAL, HeartbeatAcceptor,
     RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
@@ -381,17 +382,18 @@ impl MetasrvBuilder {
             (Arc::new(NoopRegionFailureDetectorControl) as _, None as _)
         };
 
+        let lease_grant_tracker = Arc::new(LeaseGrantTracker::default());
         // region migration manager
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             procedure_manager.clone(),
             DefaultContextFactory::new(
-                in_memory.clone(),
                 table_metadata_manager.clone(),
                 memory_region_keeper.clone(),
                 region_failure_detector_controller.clone(),
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
                 cache_invalidator.clone(),
+                lease_grant_tracker.clone(),
             ),
         ));
         region_migration_manager.try_start()?;
@@ -604,6 +606,7 @@ impl MetasrvBuilder {
                     table_metadata_manager.clone(),
                     memory_region_keeper.clone(),
                     customized_region_lease_renewer,
+                    lease_grant_tracker.clone(),
                 );
 
                 HeartbeatHandlerGroupBuilder::new(pushers)
@@ -679,6 +682,7 @@ impl MetasrvBuilder {
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
             database_operator,
+            lease_grant_tracker,
         })
     }
 }
