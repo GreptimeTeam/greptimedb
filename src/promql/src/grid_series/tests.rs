@@ -15,15 +15,20 @@
 use std::mem::size_of;
 use std::sync::Arc;
 
-use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec};
+use datafusion::arrow::array::{Float64Array, UInt32Array};
+use datatypes::series::histogram::{HistogramBatch, HistogramBatchBuilder};
+use datatypes::series::samples::{
+    DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, Series, SeriesFields,
+    SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::reference::{
-    Labels, Points, assert_pieces_eq, assert_result_eq, points_of, random_dense, run_ranges,
-    series_of, stitch,
+    Labels, OwnedHistogram, Points, assert_pieces_eq, assert_result_eq, metric_of, points_of,
+    random_dense, run_ranges, series_of, stitch,
 };
 use super::{GridSeriesBuilder, merge_same_labelset};
 
@@ -477,6 +482,325 @@ fn finish_hands_out_only_the_rows_pushed_after_a_prefix_flush() {
         "the row carries another position's value"
     );
     assert!(!builder.has_pending());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Merging: one label set handed over in several fragments.
+//
+// A runtime hands one label set over as fragments, and the merge is the only place that puts them
+// back into one series. What these tests pin is that the values move without being rebuilt: the
+// merged series shares the fragments' payloads, keeps native histograms and NaNs, and still costs
+// one row per position holding a value.
+// ---------------------------------------------------------------------------------------------
+
+/// The start of the float buffer a dense float segment reads, to show a merge shared the buffer
+/// instead of copying it.
+fn float_ptr(segment: &Samples) -> *const f64 {
+    match segment.dense() {
+        Some(DenseSamplesRef::Float(values)) => values.values().as_ptr(),
+        _ => panic!("expected a dense float segment"),
+    }
+}
+
+type FragmentRow<'a> = (usize, Option<f64>, Option<&'a str>, Option<f64>);
+
+/// A two-field fragment: field 0 holds a float or a native histogram, field 1 a float.
+///
+/// `rows` holds `(position, field 0 float, field 0 histogram, field 1 float)` in ascending position
+/// order; a row holds a value when some field has one at that position.
+fn fragment_with_histograms(
+    schema: &Arc<SeriesSchema>,
+    labels: &Labels,
+    rows: &[FragmentRow<'_>],
+) -> (Series, Arc<HistogramBatch>) {
+    let mut batch = HistogramBatchBuilder::new();
+    let mut spans: Vec<GridSpan> = Vec::new();
+    let mut floats = Vec::with_capacity(rows.len());
+    let mut indices = Vec::with_capacity(rows.len());
+    let mut seconds = Vec::with_capacity(rows.len());
+    for &(position, float, histogram, second) in rows {
+        match spans.last_mut() {
+            Some(span) if span.start() + span.len() == position => {
+                *span = GridSpan::new(span.start(), span.len() + 1);
+            }
+            _ => spans.push(GridSpan::new(position, 1)),
+        }
+        floats.push(float);
+        indices.push(histogram.map(|text| {
+            batch
+                .push(OwnedHistogram::parse(text).view())
+                .expect("the fixture histogram is valid")
+        }));
+        seconds.push(second);
+    }
+    let batch = batch.finish().expect("an empty histogram table is valid");
+    let histograms = HistogramSamples::try_new(UInt32Array::from(indices), batch.clone()).unwrap();
+    let mixed = Samples::try_from_mixed(Float64Array::from(floats), histograms).unwrap();
+    let fields = SeriesFields::try_from_vec(vec![
+        mixed,
+        Samples::from_float(Float64Array::from(seconds)),
+    ])
+    .unwrap();
+    let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
+    (
+        Series::try_new(schema, metric_of(labels), time, fields).unwrap(),
+        batch,
+    )
+}
+
+/// Two fragments a boundary kept apart -- the first holding position 0, the second positions 1 and
+/// 2 -- become one series of one run, each fragment's rows at its own positions.
+#[test]
+fn merge_of_adjacent_fragments_is_one_run() {
+    let schema = grid_schema(1, 4);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let first = series_of(&schema, &labels, &Points::from([(0, 1f64.to_bits())])).unwrap();
+    let second = series_of(
+        &schema,
+        &labels,
+        &Points::from([(1, 2f64.to_bits()), (2, 3f64.to_bits())]),
+    )
+    .unwrap();
+    let first_ptr = float_ptr(&first.fields.as_slice()[0].segments()[0]);
+    let second_ptr = float_ptr(&second.fields.as_slice()[0].segments()[0]);
+
+    let merged = merge_same_labelset(&schema, vec![first, second]).unwrap();
+    assert_eq!(merged.len(), 1, "one label set, one merged series");
+    assert_eq!(merged[0].time.len(), 3, "one row per value");
+    assert_eq!(
+        run_ranges(&merged[0]),
+        vec![(0, 3)],
+        "fragments holding adjacent positions share one run"
+    );
+    assert_eq!(
+        points_of(&merged[0]),
+        Points::from([
+            (0, 1f64.to_bits()),
+            (1, 2f64.to_bits()),
+            (2, 3f64.to_bits()),
+        ])
+    );
+    // One slice per fragment: the second fragment's two rows are one slice of its own buffer, and
+    // neither slice copies a value.
+    let chunks = merged[0].fields.as_slice()[0].segments();
+    assert_eq!(chunks.len(), 2, "one slice per fragment");
+    assert_eq!(float_ptr(&chunks[0]), first_ptr);
+    assert_eq!(float_ptr(&chunks[1]), second_ptr);
+    assert_eq!(chunks[1].len(), 2, "the fragment's two rows are one slice");
+}
+
+/// Native histograms, floats, NaNs and complementary fields merge into one aligned series, and
+/// every value keeps the storage it already had: the histogram table and the float buffers are
+/// shared, not rebuilt.
+#[test]
+fn merge_keeps_native_histograms_and_complementary_fields_without_copying_them() {
+    let schema = grid_schema(2, 4);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let histogram = "0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///";
+    // The first fragment holds a native histogram in field 0 and a float in field 1 at position 0.
+    let (first, first_batch) =
+        fragment_with_histograms(&schema, &labels, &[(0, None, Some(histogram), Some(1.0))]);
+    // The second holds field 0's float at position 1 and field 1's NaN at position 2, leaving the
+    // other field missing at each.
+    let (second, _) = fragment_with_histograms(
+        &schema,
+        &labels,
+        &[(1, Some(2.0), None, None), (2, None, None, Some(f64::NAN))],
+    );
+    let second_field1 = float_ptr(&second.fields.as_slice()[1].segments()[0]);
+
+    let merged = merge_same_labelset(&schema, vec![first, second]).unwrap();
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        run_ranges(&merged[0]),
+        vec![(0, 3)],
+        "positions 0, 1 and 2 are one run"
+    );
+    assert_eq!(merged[0].time.len(), 3);
+    assert_eq!(merged[0].fields.len(), 2);
+
+    // Field 0: the histogram, the float, and a null at the position only field 1 fills.
+    let field0 = merged[0].fields.as_slice()[0].segments();
+    assert_eq!(field0.len(), 3, "a histogram, a float, and one null run");
+    let DenseSamplesRef::Mixed(mixed) = field0[0].dense().unwrap() else {
+        panic!("the histogram lost its mixed column")
+    };
+    assert!(
+        Arc::ptr_eq(mixed.histograms().batch(), &first_batch),
+        "the histogram table was rebuilt"
+    );
+    assert!(
+        matches!(field0[0].sample(0), SampleRef::Histogram(view) if view.count == 1.0),
+        "the histogram did not survive as a histogram"
+    );
+    assert!(
+        matches!(field0[1].sample(0), SampleRef::Float(value) if value.to_bits() == 2f64.to_bits()),
+        "field 0 lost the other fragment's float"
+    );
+    assert!(
+        matches!(field0[2].sample(0), SampleRef::Missing),
+        "field 0 filled a position only field 1 holds"
+    );
+
+    // Field 1: its value, the null field 0 fills, and the NaN, which is a value like any other.
+    let field1 = merged[0].fields.as_slice()[1].segments();
+    assert_eq!(field1.len(), 3, "a float, one null run, and a NaN");
+    assert!(
+        matches!(field1[0].sample(0), SampleRef::Float(value) if value.to_bits() == 1f64.to_bits())
+    );
+    assert!(matches!(field1[1].sample(0), SampleRef::Missing));
+    assert!(
+        matches!(field1[2].sample(0), SampleRef::Float(value) if value.is_nan()),
+        "the NaN was dropped"
+    );
+    // The NaN came out as a slice of the second fragment's buffer, one row in.
+    assert_eq!(
+        float_ptr(&field1[2]),
+        second_field1.wrapping_add(1),
+        "the NaN was copied instead of sliced"
+    );
+
+    // Two fragments holding one field at one position still collide, histograms included.
+    let at_zero =
+        || fragment_with_histograms(&schema, &labels, &[(0, None, Some(histogram), None)]).0;
+    assert!(
+        merge_same_labelset(&schema, vec![at_zero(), at_zero()]).is_err(),
+        "two histograms of one field at one position merged"
+    );
+}
+
+/// A merge over many fragments of many segments keeps one row per value: a million-position grid
+/// costs a span per run and a sample per value, and locating a row never rescans the segments
+/// before it.
+#[test]
+fn merge_of_many_segments_keeps_one_row_per_value() {
+    const GRID: usize = 1_000_000;
+    const SEGMENTS: usize = 1_000;
+    let schema = grid_schema(1, GRID as u64);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    // A fragment of one value per segment, one chunk per value, the segments a thousand positions
+    // apart.
+    let fragment = |offset: usize| {
+        let mut chunks = Vec::with_capacity(SEGMENTS);
+        let mut spans = Vec::with_capacity(SEGMENTS);
+        for segment in 0..SEGMENTS {
+            let position = offset + segment * (GRID / SEGMENTS);
+            chunks.push(Samples::from_float(Float64Array::from(vec![
+                position as f64,
+            ])));
+            spans.push(GridSpan::new(position, 1));
+        }
+        let time = TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap();
+        let fields = SeriesFields::one(Samples::try_from_chunks(chunks).unwrap());
+        Series::try_new(&schema, metric_of(&labels), time, fields).unwrap()
+    };
+
+    let merged = merge_same_labelset(&schema, vec![fragment(0), fragment(1)]).unwrap();
+    assert_eq!(merged.len(), 1);
+    let series = &merged[0];
+    assert_eq!(
+        series.time.grid().unwrap().timestamps().len(),
+        GRID,
+        "the grid really holds a million positions"
+    );
+    assert_eq!(series.time.len(), 2 * SEGMENTS, "one row per value");
+    assert_eq!(
+        series.time.runs().count(),
+        SEGMENTS,
+        "two adjacent values per segment are one run, and the holes between are spans"
+    );
+    assert_eq!(run_ranges(series)[0], (0, 2));
+    let field = &series.fields.as_slice()[0];
+    assert_eq!(
+        field.len(),
+        2 * SEGMENTS,
+        "the field holds one sample per merged row"
+    );
+    assert_eq!(
+        field.segments().len(),
+        2 * SEGMENTS,
+        "one chunk per value: no hole was densified into the payload"
+    );
+    assert!(field.segments().iter().all(|chunk| chunk.len() == 1));
+    assert_eq!(
+        points_of(series).len(),
+        2 * SEGMENTS,
+        "every value survived and no hole became one"
+    );
+}
+
+/// A label set whose fragments all closed without a value still yields one series: a runtime that
+/// closes a label set needs one answer per set, and an empty grid series is the legal one.
+#[test]
+fn merge_of_empty_fragments_yields_one_empty_series() {
+    let schema = grid_schema(2, 4);
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    let empty = || {
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), Vec::new()).unwrap();
+        let fields = SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::new_null(0)),
+            Samples::from_float(Float64Array::new_null(0)),
+        ])
+        .unwrap();
+        Series::try_new(&schema, metric_of(&labels), time, fields).unwrap()
+    };
+
+    let merged = merge_same_labelset(&schema, vec![empty(), empty()]).unwrap();
+    assert_eq!(merged.len(), 1, "the label set vanished");
+    assert_eq!(merged[0].metric, metric_of(&labels));
+    assert_eq!(merged[0].time.len(), 0);
+    assert!(
+        merged[0].time.grid().is_some(),
+        "an empty series keeps its grid"
+    );
+    assert!(
+        run_ranges(&merged[0]).is_empty(),
+        "an empty series has no run"
+    );
+    assert_eq!(merged[0].fields.len(), 2);
+    for field in merged[0].fields.iter() {
+        assert!(field.is_empty(), "an empty fragment contributed a row");
+    }
+}
+
+/// A `Series` built as a struct literal can carry fields that do not line up with its axis; the
+/// merge checks the alignment before it reads a row, so it reports such a fragment instead of
+/// reading past a field or dropping the values the axis never reaches.
+#[test]
+fn merge_rejects_fragments_whose_fields_do_not_fill_their_axis() {
+    let schema = grid_schema(1, 8);
+    let grid = schema.eval_grid.clone().unwrap();
+    let labels = Labels::from([("job".to_string(), "x".to_string())]);
+    // A well-formed fragment gives the malformed one a label set to merge into.
+    let partner = || series_of(&schema, &labels, &Points::from([(1, 7f64.to_bits())])).unwrap();
+    // `(axis rows, field rows)`: a field shorter than its axis, one longer than it, and a value on
+    // an axis of no rows at all. The last two leave every axis row self-consistent, so only the
+    // merge's alignment check catches them.
+    for (axis_rows, field_rows) in [(2, 1), (1, 2), (0, 1)] {
+        let spans = if axis_rows == 0 {
+            Vec::new()
+        } else {
+            vec![GridSpan::new(1, axis_rows)]
+        };
+        let time = TimeAxis::from_grid_spans(grid.clone(), spans).unwrap();
+        let values = Float64Array::from(
+            (0..field_rows)
+                .map(|row| row as f64 + 1.0)
+                .collect::<Vec<_>>(),
+        );
+        let malformed = Series {
+            metric: metric_of(&labels),
+            time,
+            fields: SeriesFields::one(Samples::from_float(values)),
+        };
+        let error = merge_same_labelset(&schema, vec![partner(), malformed])
+            .expect_err("a fragment whose fields do not fill its axis merged");
+        assert!(
+            error.to_string().contains("rows of its axis"),
+            "{axis_rows} axis rows with a {field_rows}-row field: {error}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

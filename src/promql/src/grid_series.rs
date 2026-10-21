@@ -24,7 +24,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{
-    HistogramSamples, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridSpan, TimeAxis};
 
@@ -310,6 +310,13 @@ pub(crate) fn label_set(metric: &MetricName) -> LabelSet {
 
 /// Merges series that share a label set into one, as Prometheus does after a function that
 /// rewrites labels or drops `__name__`; two of them holding one field at one point fail.
+///
+/// The merge rearranges the payloads instead of rewriting them: a merged row takes the value its
+/// member carries at that position -- a float, a NaN, or a native histogram -- and a field another
+/// field's row does not fill keeps a null there. The values keep their storage: a run of rows one
+/// member holds in one dense segment is handed out as a [`Samples::slice`] of that segment, so a
+/// histogram table is shared rather than copied. The result costs one row per position holding a
+/// value, plus the rows the other fields fill, and nothing for a position of the grid holding none.
 pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> Result<Vec<Series>> {
     let mut groups: HashMap<LabelSet, Vec<usize>> = HashMap::with_capacity(series.len());
     let mut collided = false;
@@ -328,111 +335,272 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
         return Ok(series);
     }
 
+    // The merged axis and the fields placed on it are the schema's grid: a member of another grid
+    // would land its rows at positions naming other timestamps.
+    let grid = schema.eval_grid.clone().ok_or_else(|| {
+        DataFusionError::Execution("grid series schema requires an evaluation grid".into())
+    })?;
     let mut series: Vec<Option<Series>> = series.into_iter().map(Some).collect();
     let mut output = Vec::with_capacity(groups.len());
-    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    // `(absolute position, member slot, compact row)`, sorted by position before merging. The
-    // slot indexes `members`, so the merge below picks the member's cursor directly instead of
-    // searching for the member per row.
+    // `(absolute position, member slot, compact row)`, sorted by position before merging. The slot
+    // indexes the group's fragments, so a row names its member without a search.
     let mut rows: Vec<(usize, usize, usize)> = Vec::new();
-    let mut values = vec![None; schema.fields.len()];
-    let mut merged = vec![None; schema.fields.len()];
+    // The position of each merged row, ascending, with the positions several fragments share held
+    // once.
+    let mut positions: Vec<usize> = Vec::new();
     for (labels, members) in groups {
         if let [member] = members[..] {
             output.extend(series[member].take());
             continue;
         }
-        builder.begin_series();
-        rows.clear();
-        for (member_slot, &member) in members.iter().enumerate() {
-            let member_series = series[member]
-                .as_ref()
-                .expect("each series is in one group");
-            if member_series.time.grid().is_none() {
+        // Validate every fragment before indexing it: the merge reads its fields and places its
+        // rows on the schema's grid.
+        let mut fragments: Vec<&Series> = Vec::with_capacity(members.len());
+        for &member in &members {
+            let fragment = series[member].as_ref().ok_or_else(|| {
+                DataFusionError::Execution("each series is in exactly one label set".into())
+            })?;
+            let Some(fragment_grid) = fragment.time.grid() else {
                 return Err(DataFusionError::Execution(
                     "merging requires evaluated series".into(),
                 ));
+            };
+            if fragment_grid.spec() != grid.spec() {
+                return Err(DataFusionError::Execution(
+                    "merging requires one evaluation grid".into(),
+                ));
             }
-            // The axis names the positions this member holds, and one cursor per field reads its
-            // values in the same order, so a member of several runs costs its rows.
-            let mut cursors: Vec<RowCursor<'_>> = member_series
+            if fragment.fields.len() != schema.fields.len() {
+                return Err(DataFusionError::Execution(format!(
+                    "merging requires {} fields, a fragment holds {}",
+                    schema.fields.len(),
+                    fragment.fields.len()
+                )));
+            }
+            // The alignment is checked before a row is read: a field of another length would either
+            // run off the axis or leave values the axis never reaches.
+            let time_len = fragment.time.len();
+            if let Some((field, samples)) = fragment
                 .fields
                 .iter()
-                .map(|field| field.cursor())
-                .collect();
-            for (point, row) in member_series.time.positions() {
-                if read_row(&mut cursors, row, &mut values)? {
-                    rows.push((point, member_slot, row));
+                .enumerate()
+                .find(|(_, samples)| samples.len() != time_len)
+            {
+                return Err(DataFusionError::Execution(format!(
+                    "merging requires every field to hold the {time_len} rows of its axis, field \
+                     {field} holds {}",
+                    samples.len()
+                )));
+            }
+            fragments.push(fragment);
+        }
+        rows.clear();
+        for (member_slot, fragment) in fragments.iter().enumerate() {
+            // One forward reader per field: the axis names the rows that exist, and a row holding
+            // no value in any field is not a merged row.
+            let mut readers: Vec<FieldReader<'_>> =
+                fragment.fields.iter().map(FieldReader::new).collect();
+            for (position, row) in fragment.time.positions() {
+                let mut present = false;
+                for reader in &mut readers {
+                    let (segment, offset) = reader.locate(row)?;
+                    present |= !matches!(segment.sample(offset), SampleRef::Missing);
+                }
+                if present {
+                    rows.push((position, member_slot, row));
                 }
             }
         }
-        // By position, then by member slot: the slots follow the order `members` was built in, so
-        // the merge below still walks each member's rows forward and its cursors never go back.
+        // By position, then by member slot: the slots follow the order the fragments were collected
+        // in, so a member's rows only go forward and its readers never go back.
         rows.sort_unstable();
-        // One forward cursor per member and field, so re-reading a row costs neither a chunk scan
-        // nor an allocation.
-        let mut cursors: Vec<Vec<RowCursor<'_>>> = members
-            .iter()
-            .map(|&member| {
-                let member_series = series[member]
-                    .as_ref()
-                    .expect("each series is in one group");
-                member_series
-                    .fields
-                    .iter()
-                    .map(|field| field.cursor())
-                    .collect()
-            })
-            .collect();
-        let mut start = 0;
-        while start < rows.len() {
-            let point = rows[start].0;
-            let end = start + rows[start..].partition_point(|&(p, _, _)| p == point);
-            // Rows of one point merge field by field; only a field present twice collides.
-            merged.iter_mut().for_each(|value| *value = None);
-            for &(_, member_slot, row) in &rows[start..end] {
-                read_row(&mut cursors[member_slot], row, &mut values)?;
-                for (slot, value) in merged.iter_mut().zip(&values) {
-                    if value.is_some() {
-                        if slot.is_some() {
-                            let labels: Vec<_> = labels
-                                .iter()
-                                .map(|(name, value)| format!("{name}=\"{value}\""))
-                                .collect();
-                            return Err(DataFusionError::Execution(format!(
-                                "vector cannot contain metrics with the same labelset {{{}}}",
-                                labels.join(", ")
-                            )));
-                        }
-                        *slot = *value;
-                    }
-                }
-            }
-            builder.push(point, &merged)?;
-            start = end;
+        positions.clear();
+        positions.extend(rows.iter().map(|&(position, _, _)| position));
+        positions.dedup();
+        let mut fields = Vec::with_capacity(schema.fields.len());
+        for field in 0..schema.fields.len() {
+            let mut readers: Vec<FieldReader<'_>> = fragments
+                .iter()
+                .map(|fragment| FieldReader::new(&fragment.fields.as_slice()[field]))
+                .collect();
+            fields.push(merge_field(&mut readers, &rows, &labels)?);
         }
-        let metric = series[members[0]].as_ref().unwrap().metric.clone();
-        output.extend(builder.finish(metric)?);
+        // The runs are all the axis remembers about the holes, so a sparse merge stores one span
+        // per run and no row for the positions between them.
+        let time =
+            TimeAxis::from_grid_spans(grid.clone(), spans_of(&positions)).map_err(external)?;
+        let fields = SeriesFields::try_from_vec(fields).map_err(external)?;
+        // The first fragment names the output, as it always has: a label set ignores empty values,
+        // so the metric of the first member is the one the merged series keeps.
+        let metric = fragments[0].metric.clone();
+        output.push(Series::try_new(schema, metric, time, fields).map_err(external)?);
     }
     Ok(output)
 }
 
-/// Reads the float fields of `row` through the member's cursors; returns whether any is present.
-fn read_row(cursors: &mut [RowCursor<'_>], row: usize, values: &mut [Option<f64>]) -> Result<bool> {
-    let mut present = false;
-    for (value, cursor) in values.iter_mut().zip(cursors) {
-        *value = match cursor.at(row).expect("the axis and the fields are aligned") {
-            SampleRef::Missing => None,
-            SampleRef::Float(value) => Some(value),
-            SampleRef::Histogram(_) => {
-                return Err(DataFusionError::NotImplemented(
-                    "merging histogram series with the same label set".into(),
-                ));
+/// Builds one field of the merged series, one sample per merged row.
+///
+/// The rows are walked in output order. A row holding a value of this field in one member continues
+/// the run of rows that member holds in one dense segment, and a run is handed out as one
+/// [`Samples::slice`]; the rows another field fills become one null run, so the field stays aligned
+/// with the merged axis while sharing the values it carries.
+fn merge_field(
+    readers: &mut [FieldReader<'_>],
+    rows: &[(usize, usize, usize)],
+    labels: &LabelSet,
+) -> Result<Samples> {
+    let mut chunks: Vec<Samples> = Vec::new();
+    // The run of values the last merged row continued, if any.
+    let mut run: Option<FieldRun<'_>> = None;
+    // Merged rows this field leaves empty, waiting for the null run that carries them.
+    let mut missing = 0;
+    let mut start = 0;
+    while start < rows.len() {
+        let position = rows[start].0;
+        let mut end = start;
+        // At most one member may hold this field here; the second value is the collision Prometheus
+        // rejects, since the two label sets became one.
+        let mut value: Option<(usize, &Samples, usize)> = None;
+        while end < rows.len() && rows[end].0 == position {
+            let (_, member, row) = rows[end];
+            let (segment, offset) = readers[member].locate(row)?;
+            if !matches!(segment.sample(offset), SampleRef::Missing) {
+                if value.is_some() {
+                    let labels: Vec<_> = labels
+                        .iter()
+                        .map(|(name, value)| format!("{name}=\"{value}\""))
+                        .collect();
+                    return Err(DataFusionError::Execution(format!(
+                        "vector cannot contain metrics with the same labelset {{{}}}",
+                        labels.join(", ")
+                    )));
+                }
+                value = Some((member, segment, offset));
             }
-        };
-        present |= value.is_some();
+            end += 1;
+        }
+        match value {
+            Some((member, segment, offset)) => {
+                if let Some(run) = &mut run
+                    && run.continues(member, segment, offset)
+                {
+                    run.len += 1;
+                } else {
+                    if let Some(run) = run.take() {
+                        run.push(&mut chunks)?;
+                    }
+                    push_missing(&mut chunks, &mut missing);
+                    run = Some(FieldRun {
+                        member,
+                        segment,
+                        offset,
+                        len: 1,
+                    });
+                }
+            }
+            None => {
+                if let Some(run) = run.take() {
+                    run.push(&mut chunks)?;
+                }
+                missing += 1;
+            }
+        }
+        start = end;
     }
-    Ok(present)
+    if let Some(run) = run {
+        run.push(&mut chunks)?;
+    }
+    push_missing(&mut chunks, &mut missing);
+    Samples::try_from_chunks(chunks).map_err(external)
+}
+
+/// A run of merged rows one member field fills out of one dense segment, without copying values.
+///
+/// The run grows only while the next merged row is the same member's next row in the same segment,
+/// so handing it out is one [`Samples::slice`] of that segment: the payload stays where it is, and
+/// the rows a hole skipped are not part of the run.
+struct FieldRun<'a> {
+    /// The member slot the run reads, which indexes the [`FieldReader`]s of the field.
+    member: usize,
+    /// The dense segment holding the run's values.
+    segment: &'a Samples,
+    /// Offset of the run's first row inside `segment`.
+    offset: usize,
+    /// How many rows of `segment` the run covers.
+    len: usize,
+}
+
+impl FieldRun<'_> {
+    /// Returns whether the value at `offset` of `segment` continues the run: the same member's next
+    /// row in the same dense segment.
+    fn continues(&self, member: usize, segment: &Samples, offset: usize) -> bool {
+        self.member == member
+            && std::ptr::eq(self.segment, segment)
+            && self.offset + self.len == offset
+    }
+
+    /// Pushes the run as one slice of its dense segment.
+    fn push(self, chunks: &mut Vec<Samples>) -> Result<()> {
+        chunks.push(
+            self.segment
+                .slice(self.offset, self.len)
+                .map_err(external)?,
+        );
+        Ok(())
+    }
+}
+
+/// Reads one field's rows by locating the dense segment each row sits in.
+///
+/// [`Samples::sample`] rescans a chunked field from its first segment on every row, so reading a
+/// field row by row would cost a scan over the segments before it. The rows a merge reads only go
+/// forward, so this walks the segments once and returns the segment with the offset of the row
+/// inside it, which is what a [`FieldRun`] slices.
+struct FieldReader<'a> {
+    segments: &'a [Samples],
+    /// Index of the segment `start` belongs to.
+    segment: usize,
+    /// Logical row the current segment starts at.
+    start: usize,
+}
+
+impl<'a> FieldReader<'a> {
+    /// Creates a reader at the first row of `samples`.
+    fn new(samples: &'a Samples) -> Self {
+        Self {
+            segments: samples.segments(),
+            segment: 0,
+            start: 0,
+        }
+    }
+
+    /// Returns the dense segment holding `row` and the offset of `row` inside it.
+    ///
+    /// Rows must not go backwards. A row past the field is an error rather than a panic: a member is
+    /// only read after its fields are validated to align with its axis.
+    fn locate(&mut self, row: usize) -> Result<(&'a Samples, usize)> {
+        while let Some(segment) = self.segments.get(self.segment) {
+            if let Some(offset) = row
+                .checked_sub(self.start)
+                .filter(|offset| *offset < segment.len())
+            {
+                return Ok((segment, offset));
+            }
+            self.segment += 1;
+            self.start += segment.len();
+        }
+        Err(DataFusionError::Execution(
+            "merging requires each field to be row-aligned with its time axis".into(),
+        ))
+    }
+}
+
+/// Pushes the merged rows a field leaves empty as one null run.
+fn push_missing(chunks: &mut Vec<Samples>, missing: &mut usize) {
+    if *missing != 0 {
+        chunks.push(Samples::from_float(Float64Array::new_null(*missing)));
+        *missing = 0;
+    }
 }
 
 pub(crate) fn external(error: datatypes::error::Error) -> DataFusionError {

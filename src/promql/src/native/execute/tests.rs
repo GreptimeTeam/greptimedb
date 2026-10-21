@@ -35,9 +35,10 @@ use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
     Emitted, NativeChunk, NativeExecutionState, NativeExecutor, NodeBuffer, NodeRuntime,
-    absorb_rebuilds, map_chunk, raw_bytes,
+    absorb_rebuilds, evaluated_bytes, map_chunk, raw_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
+use crate::grid_series::merge_same_labelset;
 use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
@@ -356,6 +357,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         window: None,
         map: None,
         emitted: None,
+        merge: None,
         open_source_series: false,
     }
 }
@@ -905,9 +907,10 @@ fn an_unimplemented_node_is_reported_not_panicked() {
 /// Each node reports its own chunks, grid points and closed series, at its own position.
 ///
 /// The two windows decide different traffic — the inner one four grid points of its own grid, the
-/// outer one two of its own — so a single total for the tree cannot produce both numbers. They take
-/// and hand over the same number of chunks, which is what streaming means here: a node passes on one
-/// chunk per chunk it took in, instead of holding its input until a whole series is available.
+/// outer one two of its own — so a single total for the tree cannot produce both numbers. The inner
+/// window reads the source as it arrives and hands over one chunk per chunk it took in; the outer
+/// one collects those chunks, because the inner one keeps the metric name and its output can hold
+/// two source series under one label set, and reports the one merged series its input ended with.
 #[test]
 fn each_node_records_its_own_metrics() {
     let inner_grid = grid(0, 60_000, 4);
@@ -939,26 +942,23 @@ fn each_node_records_its_own_metrics() {
         .push_raw(raw_chunk(&schema, &[180_000], &[4.0], true))
         .unwrap();
     let out = run(&mut execution);
-    // The outer window reports each point as the inner one settles it: one chunk per inner chunk,
-    // and an empty chunk that closes the series.
-    assert_eq!(
-        addressed(&out),
-        vec![(0, vec![Some(1.0)]), (1, vec![Some(3.0)]), (2, Vec::new()),]
-    );
+    // The outer window reports the two points of its grid once its input ended, in the one chunk of
+    // the series it merged from the inner window's pieces.
+    assert_eq!(addressed(&out), vec![(0, vec![Some(1.0), Some(3.0)])]);
     assert!(out.last().unwrap().is_last);
 
     let outer = NodePath::root();
     let inner = outer.input();
     let source = inner.input();
 
-    // Three source chunks reach the inner window, and the chunks it hands over reach the outer one
-    // one for one, because neither window buffers.
+    // Three source chunks reach the inner window, which hands one chunk on per chunk it took in.
+    // The outer window takes those three pieces in and reports the one series they merge into.
     assert_eq!(count(&set, &source, NodeMetric::INPUT_BATCHES), 3);
     assert_eq!(count(&set, &source, NodeMetric::OUTPUT_BATCHES), 3);
     assert_eq!(count(&set, &inner, NodeMetric::INPUT_BATCHES), 3);
     assert_eq!(count(&set, &outer, NodeMetric::INPUT_BATCHES), 3);
     assert_eq!(count(&set, &inner, NodeMetric::OUTPUT_BATCHES), 3);
-    assert_eq!(count(&set, &outer, NodeMetric::OUTPUT_BATCHES), 3);
+    assert_eq!(count(&set, &outer, NodeMetric::OUTPUT_BATCHES), 1);
     // The grid points each window decided, which is its own output range: four on the inner grid
     // and two on the outer one, which is the figure that tells the two nodes apart.
     assert_eq!(count(&set, &inner, NodeMetric::EVALUATED_GRID_POINTS), 4);
@@ -1098,13 +1098,110 @@ fn a_pool_that_cannot_admit_a_chunk_releases_what_it_held() {
     );
 }
 
-/// A map that drops the metric name cannot hand two series on under one label set.
+/// Two series that a map turns into one label set are merged before the window above reads them.
 ///
-/// `a{job="x"}` and `b{job="x"}` arrive whole, so each says it is the last chunk of its own series,
-/// and `abs` drops the name, so both become `{job="x"}`. A window above the map reads chunks as
-/// they arrive, so it would take them for two series and answer once per series; the only answer
-/// the data has is the merged series, which this layer does not hold. The map refuses the second
-/// one before the window above evaluates it.
+/// `a{job="x"}` and `b{job="x"}` arrive whole, so each says it is the last chunk of its own source
+/// series, and `abs` drops the name, so both become `{job="x"}`. The two hold their values at
+/// different positions, so they are one series with a hole each and the answer is the window over
+/// the merged series: `sum_over_time` sees 1 and 3 and answers 4, `count_over_time` answers 2. A
+/// window that read the two as two series would answer twice, once per source series, and close
+/// twice.
+///
+/// The window above the map is the node that merges: its input can hold two series under one label
+/// set, so it collects the whole input, merges each label set once with
+/// [`crate::grid_series::merge_same_labelset`], and only then evaluates. Nothing comes out of it
+/// while the pieces arrive, which is the price of merging; what comes out is one series.
+#[test]
+fn two_series_onto_one_label_set_after_a_map_are_merged_into_one_series() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // One map and two maps: the label set is rewritten at the first one either way, and the second
+    // only rewrites it again, so both shapes are one affected window over one rewritten set.
+    let shapes = |function: RangeFunction| {
+        [
+            (
+                "a map",
+                NativeTree::try_new(window_with(
+                    map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+                    function,
+                    120_000,
+                    Some(Arc::clone(&inner_grid)),
+                    Arc::clone(&outer_grid),
+                ))
+                .unwrap(),
+            ),
+            (
+                "two maps",
+                NativeTree::try_new(window_with(
+                    map(
+                        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+                        vec![MathOp::Abs],
+                    ),
+                    function,
+                    120_000,
+                    Some(Arc::clone(&inner_grid)),
+                    Arc::clone(&outer_grid),
+                ))
+                .unwrap(),
+            ),
+        ]
+    };
+
+    for (function, expected) in [
+        // The two values at inner positions 0 and 1 both fall in the one window of the outer grid.
+        (RangeFunction::SumOverTime, 4.0),
+        (RangeFunction::CountOverTime, 2.0),
+    ] {
+        for (shape, tree) in shapes(function) {
+            let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+            // Each source series is closed properly, and each holds its value where the other holds
+            // none, so the pair is one logical series and one answer.
+            execution
+                .push_evaluated(evaluated_chunk_of(
+                    &schema,
+                    named_metric("a", "x"),
+                    0,
+                    vec![Some(1.0), None],
+                    true,
+                ))
+                .unwrap();
+            execution
+                .push_evaluated(evaluated_chunk_of(
+                    &schema,
+                    named_metric("b", "x"),
+                    0,
+                    vec![None, Some(3.0)],
+                    true,
+                ))
+                .unwrap();
+            // Nothing settles while the pieces arrive: the merged series is what the window evaluates,
+            // and it does not exist before the input ends.
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "{shape} with {function:?} reported a piece it had not merged yet"
+            );
+            let out = execution.finish().expect("the merged series evaluates");
+            assert_eq!(
+                decided(&out),
+                vec![(0, Some(expected))],
+                "{shape} with {function:?} did not answer over the merged series"
+            );
+            assert_eq!(
+                out.iter().filter(|chunk| chunk.is_last).count(),
+                1,
+                "{shape} with {function:?} closed the one merged series more than once"
+            );
+        }
+    }
+}
+
+/// Two closed series that hold a value at the same position are still refused under one label set.
+///
+/// The pair below maps into one label set and both hold a value at position 0 of the field, which
+/// no merge resolves and Prometheus rejects for two series whose label sets became equal. The
+/// refusal is the map's own, before the window above evaluates anything, and it names the position
+/// rather than a closed label set: a closed source series is not a closed label set.
 #[test]
 fn two_series_onto_one_label_set_after_a_map_are_rejected() {
     let inner_grid = grid(0, 60_000, 2);
@@ -1121,7 +1218,6 @@ fn two_series_onto_one_label_set_after_a_map_are_rejected() {
     };
     let schema = evaluated_schema(Arc::clone(&inner_grid));
 
-    // The first series closes, so its window answer comes out on its own.
     let mut execution = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
     execution
         .push_evaluated(evaluated_chunk_of(
@@ -1132,28 +1228,24 @@ fn two_series_onto_one_label_set_after_a_map_are_rejected() {
             true,
         ))
         .unwrap();
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the first series settles the outer point");
-    assert_eq!(sample_values(&first), vec![Some(1.0)]);
-    assert!(first.is_last);
-
-    // The second one maps onto the label set the first one closed. Answering would produce a second
-    // chunk with the same labels at the same point.
+    // The first series closed, and the window above collects it rather than reporting it.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the window above the map reported a piece before its input ended"
+    );
     execution
         .push_evaluated(evaluated_chunk_of(
             &schema,
             named_metric("b", "x"),
             0,
-            vec![None, Some(3.0)],
+            vec![Some(3.0), Some(4.0)],
             true,
         ))
         .unwrap();
     let error = match execution.next_chunk() {
-        Ok(None) => panic!("the second series settled nothing at all"),
+        Ok(None) => panic!("the second series was accepted at a position the first one holds"),
         Ok(Some(chunk)) => panic!(
-            "the map handed a second series on at the label set the first one closed: {:?}",
+            "two values at one position were handed on: {:?}",
             decided(&[chunk])
         ),
         Err(error) => error,
@@ -1164,27 +1256,301 @@ fn two_series_onto_one_label_set_after_a_map_are_rejected() {
         "the rejection does not name the label set: {message}"
     );
     assert!(
-        message.contains("closed"),
-        "the rejection does not say the label set was already closed: {message}"
+        message.contains("position 0"),
+        "the rejection does not name the shared position: {message}"
+    );
+}
+
+/// An empty tag and an absent one are two source series and one canonical label set.
+///
+/// `requests{host="web-1", zone=""}` and `requests{host="web-1"}` are distinct series to a scan: an
+/// empty tag value is a present label, an absent one is not. `last_over_time` keeps the metric name
+/// and every tag, so the inner window hands both on as two pieces, each closing its own source
+/// series, and the two pieces carry different metrics. The outer window is the node that merges
+/// them: a consumer compares label sets without the empty value, so the two are one series there.
+/// Merging first is what makes the outer `sum_over_time` answer 4 at the second point -- the two
+/// pieces hold 1 at the first point and 3 at the second -- where evaluating each piece on its own
+/// would answer 3.
+#[test]
+fn an_empty_tag_and_an_absent_one_are_one_label_set_to_the_window_above() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(0, 60_000, 2);
+    let inner = || {
+        // A one-millisecond window on a 60 s grid, so every point reads only the sample at its own
+        // timestamp and each source series decides one point.
+        window_with(
+            input(),
+            RangeFunction::LastOverTime,
+            1,
+            None,
+            Arc::clone(&inner_grid),
+        )
+    };
+    let chain = || {
+        window_with(
+            inner(),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        )
+    };
+    let schema = raw_schema();
+    let push_both = |execution: &mut NativeExecutor| {
+        execution
+            .push_raw(raw_chunk_of(
+                &schema,
+                b"series-a",
+                host_metric(Some("")),
+                &[0],
+                &[1.0],
+                true,
+            ))
+            .unwrap();
+        execution
+            .push_raw(raw_chunk_of(
+                &schema,
+                b"series-b",
+                host_metric(None),
+                &[60_000],
+                &[3.0],
+                true,
+            ))
+            .unwrap();
+    };
+
+    // The inner window alone hands both series on, and they are two series: the empty tag survives
+    // `last_over_time`, which keeps the name and every tag.
+    let inner_tree = NativeTree::try_new(inner()).unwrap();
+    let mut inner_execution = executor(&inner_tree, pool(), &ExecutionPlanMetricsSet::new());
+    push_both(&mut inner_execution);
+    let pieces = run(&mut inner_execution);
+    assert_eq!(
+        pieces.len(),
+        2,
+        "the inner window did not hand both series on"
+    );
+    assert_ne!(
+        pieces[0].series.metric, pieces[1].series.metric,
+        "the two source series were not two series to `last_over_time`"
     );
 
-    // What the rejection protects: one series carrying both samples averages to 2 at that point,
-    // which is the answer neither of the two separate series can produce.
-    let mut merged = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
-    merged
-        .push_evaluated(evaluated_chunk_of(
-            &schema,
-            named_metric("c", "x"),
-            0,
-            vec![Some(1.0), Some(3.0)],
-            true,
-        ))
-        .unwrap();
-    let answer = merged
+    // The chain merges them before the outer window reads them.
+    let tree = NativeTree::try_new(chain()).unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    push_both(&mut execution);
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(1.0)), (1, Some(4.0))],
+        "the outer window did not answer over the merged label set"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the merged label set closed more than once"
+    );
+}
+
+/// A window that collects its whole input gives every byte back when the execution closes.
+///
+/// The fragments it holds, the workspace it merges them with and the chunks it queued while
+/// flushing are all charged while they live, so the pool never admits memory the node still owns.
+/// The close releases all of them, and the figures read zero while the executor is still alive.
+#[test]
+fn a_window_that_merges_its_input_releases_what_it_collected() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let set = ExecutionPlanMetricsSet::new();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &set);
+    for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric(name, "x"),
+                0,
+                values,
+                true,
+            ))
+            .unwrap();
+    }
+    // Pulling takes both fragments out of the queue and into the window, which charges them.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    let held = execution.state().reserved_bytes();
+    let window_held = execution.state().runtimes[0].buffer.reservation.size();
+    assert!(held > 0, "the collected input is not charged for");
+    assert_eq!(
+        held,
+        pool.reserved(),
+        "the state and the pool disagree on what the collected input holds"
+    );
+
+    let out = execution.finish().expect("the merged series evaluates");
+    assert_eq!(decided(&out), vec![(0, Some(4.0))]);
+    // The fragments, the workspace, the queue and the evaluator are all gone.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().nodes_holding_windows(), 0);
+    let current = NodePath::root().metric_name(NodeMetric::CURRENT_RESERVED_BYTES);
+    assert_eq!(gauge(&set, &current), 0);
+    let peak = NodePath::root().partitioned_metric_name(NodeMetric::PEAK_RESERVED_BYTES, 0);
+    assert!(
+        gauge(&set, &peak) >= window_held,
+        "the peak does not cover the input the window collected"
+    );
+}
+
+/// A pool that cannot admit what a collecting chain holds fails the execution and gives everything
+/// back.
+///
+/// The window collects its whole input, so the fragment it keeps costs more than the chunk it was
+/// made from: the pool below holds room for the chunk and no more, so one of the charges the chain
+/// makes fails. Whichever it is, the failure hands every reservation back while the executor is
+/// still alive, and the evaluators and the collected fragments go with it.
+#[test]
+fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::SumOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("a", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    // Room for the chunk the source queue holds, which is what the pool admits first, and nothing
+    // for the label sets the map records or the fragment the window collects.
+    let pool = bounded_pool(evaluated_bytes(&chunk) + 1);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(chunk)
+        .expect("the source queue holds the chunk");
+
+    let error = execution
         .next_chunk()
+        .expect_err("the chain was admitted by a pool that cannot hold what it makes of the chunk");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(
+        execution.state().nodes_holding_windows(),
+        0,
+        "the stopped execution still holds a window's samples"
+    );
+}
+
+/// A merge whose workspace the pool cannot admit stops the execution and gives everything back.
+///
+/// The fragments are admitted one by one as they arrive, so their charge is not what fails here:
+/// what fails is the workspace the merge needs, taken in `finish` before the helper runs. The first
+/// run measures what the collected input holds where the pool admits it; the second is given that
+/// much and a little over -- enough for every fragment, not for the workspace, which charges at
+/// least one `(position, member, row)` triple and one position per row. The failure releases the
+/// fragments, the evaluators and the queues while the executor is still alive.
+#[test]
+fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = || {
+        NativeTree::try_new(window_with(
+            map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+            RangeFunction::SumOverTime,
+            120_000,
+            Some(Arc::clone(&inner_grid)),
+            Arc::clone(&outer_grid),
+        ))
         .unwrap()
-        .expect("the merged series settles the outer point");
-    assert_eq!(sample_values(&answer), vec![Some(2.0)]);
+    };
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    // Two closed source series, each holding its value where the other holds none, so the fragments
+    // do merge and the merge is what needs the workspace.
+    let push_both = |execution: &mut NativeExecutor| {
+        for (name, values) in [("a", vec![Some(-1.0), None]), ("b", vec![None, Some(-3.0)])] {
+            execution
+                .push_evaluated(evaluated_chunk_of(
+                    &schema,
+                    named_metric(name, "x"),
+                    0,
+                    values,
+                    true,
+                ))
+                .unwrap();
+        }
+    };
+
+    // What the chain holds once its input is collected, measured where the pool admits it.
+    let mut reference = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
+    push_both(&mut reference);
+    assert!(
+        reference.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    let measured = reference.state().reserved_bytes();
+    assert!(measured > 0, "the collected input is not charged for");
+    drop(reference);
+
+    // Room for exactly what the collected input holds, and not for the merge's workspace.
+    let pool = bounded_pool(measured + 64);
+    let mut execution = executor(&tree(), Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    push_both(&mut execution);
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    let collected = execution.state().reserved_bytes();
+    assert_eq!(
+        collected, measured,
+        "the collected input was charged differently the second time, so the pool is not sized for it"
+    );
+    assert_eq!(collected, pool.reserved());
+
+    let error = execution
+        .finish()
+        .expect_err("the merge ran without its workspace admitted");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    // Everything the chain held went back while the executor is alive: the fragments, the
+    // evaluator and both queues.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(
+        execution.state().nodes_holding_windows(),
+        0,
+        "the stopped execution still holds a window's samples"
+    );
+    // A stopped execution is not resumed.
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
 }
 
 /// A window that drops empty-valued labels cannot hand two series on under one label set either.
@@ -1195,6 +1561,12 @@ fn two_series_onto_one_label_set_after_a_map_are_rejected() {
 /// grid out twice under the same labels and the same timestamps. No map is involved, so the
 /// rejection has to be the node's own — a check at the root would be too late, because the window
 /// above would already have evaluated the two as two series.
+///
+/// The two cover the same positions of the same field, which is the collision no merge resolves:
+/// the refusal names the position, not a closed label set, because closing a source series says
+/// nothing about the label set it shared with another one. `rate` needs two samples, so neither
+/// series decides position 0 -- it holds the single sample at its own timestamp -- and both decide
+/// positions 1 to 4. The first position both occupy is therefore 1.
 #[test]
 fn two_series_onto_one_label_set_after_a_window_are_rejected() {
     let out_grid = grid(0, 60_000, 5);
@@ -1224,7 +1596,17 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
         .next_chunk()
         .unwrap()
         .expect("the first series settles the grid");
-    assert!(!first.series.time.is_empty());
+    // The decided positions of the first series, which are the ones the second one has to share.
+    assert_eq!(
+        first.series.time.runs().count(),
+        1,
+        "the first series decided more than one run"
+    );
+    assert_eq!(
+        first.series.time.first_position(),
+        Some(1),
+        "`rate` decided a position the single sample at 0 cannot settle"
+    );
     assert!(first.is_last);
 
     // The second series is a different one to the scan and the same one to `rate`.
@@ -1249,7 +1631,10 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
     let message = error.to_string();
     assert!(message.contains("host"), "{message}");
     assert!(message.contains("web-1"), "{message}");
-    assert!(message.contains("closed"), "{message}");
+    assert!(
+        message.contains("position 1"),
+        "the rejection does not name the first position both series hold: {message}"
+    );
 
     // Two series carrying different hosts stay distinct, which is what a rate over a label that
     // survives the rewrite looks like.
@@ -1287,9 +1672,9 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
 
 /// A chunk that holds a value where the same field already holds one is rejected.
 ///
-/// Neither piece closes its series, so this is not a closed label set: the refusal is about the
-/// positions themselves. `v0` would carry two values at position 0 under one label set, which no
-/// merge can resolve, so the node refuses rather than picking one.
+/// Neither piece closes its series, and neither needs to: the refusal is about the positions
+/// themselves. `v0` would carry two values at position 0 under one label set, which no merge can
+/// resolve, so the node refuses rather than picking one.
 #[test]
 fn two_series_holding_a_value_at_one_position_are_rejected() {
     let map_grid = grid(0, 60_000, 2);
@@ -1336,18 +1721,16 @@ fn two_series_holding_a_value_at_one_position_are_rejected() {
     assert!(message.contains("position 0"), "{message}");
 }
 
-/// Two closed series that hold no position of the same field in common still cannot be handed on:
-/// merging across a closed series is not implemented by this streaming evaluator, so the pair is
-/// refused rather than answered wrongly.
+/// Two closed series under one label set are two pieces of one logical series.
 ///
-/// Neither piece holds a value where the other does — each has a missing value where the other holds
-/// one — so the two do merge in Prometheus, and [`crate::grid_series::merge_same_labelset`] accepts
-/// exactly this. What refuses it is the label set having closed on the piece carrying `is_last`: the
-/// evaluator above has already closed its per-series state for it, so the node cannot hold the first
-/// series back until it knows whether a second one follows. The refusal has to say so; a test that
-/// passed both pieces as open chunks would be proving a merge the runtime never performs.
+/// `a{job="x"}` and `b{job="x"}` are two series to the input and one label set to `abs`, which drops
+/// the name. Each holds a value where the other holds none, and each says it is the last chunk of
+/// its own source series — which is what `is_last` means here: the source series ended, not the
+/// label set. The map hands both pieces on, and merging the two pieces with
+/// [`crate::grid_series::merge_same_labelset`] gives the one series the data has, which is what a
+/// caller holding the root's pieces does.
 #[test]
-fn a_merge_across_a_closed_series_is_not_implemented() {
+fn a_merge_across_two_closed_series_is_the_root_piece_stream() {
     let map_grid = grid(0, 60_000, 2);
     let tree = NativeTree::try_new(map(
         evaluated_input(Arc::clone(&map_grid)),
@@ -1370,25 +1753,60 @@ fn a_merge_across_a_closed_series_is_not_implemented() {
             ))
             .unwrap();
     }
-    let first = execution
-        .next_chunk()
-        .unwrap()
-        .expect("the first closed series is handed on before the second one arrives");
-    assert_eq!(sample_values(&first), vec![Some(1.0), None]);
-    // The second one would merge with it, which this runtime does not do across a closed series.
-    let error = match execution.next_chunk() {
-        Ok(None) => panic!("the map produced no chunk for the closed label set"),
-        Ok(Some(chunk)) => panic!(
-            "a merge across a closed series was handed on instead of refused: {:?}",
-            decided(&[chunk])
-        ),
-        Err(error) => error,
-    };
-    let message = error.to_string();
-    assert!(message.contains("job"), "{message}");
+    // Both pieces come out of the root, one per source series, and neither is refused.
+    let mut pieces = Vec::new();
+    loop {
+        match execution.next_chunk() {
+            Ok(Some(chunk)) => pieces.push(chunk),
+            Ok(None) => break,
+            Err(error) => panic!("a closed source series was refused: {error}"),
+        }
+    }
+    pieces.extend(
+        execution
+            .finish()
+            .expect("the map holds no collected input"),
+    );
+    assert_eq!(pieces.len(), 2, "the root did not hand over both pieces");
     assert!(
-        message.contains("already closed the label set"),
-        "{message}"
+        pieces.iter().all(|piece| piece.is_last),
+        "a piece of a closed source series did not close it"
+    );
+
+    // The one series the two pieces are, merged the way a consumer of the root's pieces merges
+    // them: positions 0 and 1 of field 0, holding 1 and 3.
+    let merged = merge_same_labelset(
+        &evaluated_schema(Arc::clone(&map_grid)),
+        pieces.into_iter().map(|piece| piece.series).collect(),
+    )
+    .expect("the two pieces hold disjoint positions");
+    assert_eq!(
+        merged.len(),
+        1,
+        "the two pieces did not merge into one logical series"
+    );
+    assert_eq!(
+        merged[0].metric,
+        {
+            let mut mapped = named_metric("a", "x");
+            mapped.remove("__name__");
+            mapped
+        },
+        "the merged series does not carry the label set both pieces produced"
+    );
+    assert_eq!(
+        merged[0]
+            .fields
+            .get(0)
+            .expect("one field")
+            .iter()
+            .map(|sample| match sample {
+                SampleRef::Float(value) => Some(value),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![Some(1.0), Some(3.0)],
+        "the merged series does not hold both pieces' values at their positions"
     );
 }
 
@@ -1484,8 +1902,8 @@ fn a_nan_occupies_its_position_where_a_missing_sample_does_not() {
         (vec![Some(1.0)], vec![None], true),
         (vec![None], vec![Some(f64::NAN)], true),
     ];
-    // Both chunks are open, so the label set is still open when the second series arrives: a closed
-    // set refuses every second series, and this test is about what occupies a position.
+    // Both chunks are open and neither needs to close: what the check reads is which positions a
+    // chunk occupies, and that does not depend on `is_last`.
     let drain = |execution: &mut NativeExecutor| -> Result<(), DataFusionError> {
         while execution.next_chunk()?.is_some() {}
         Ok(())
@@ -1522,11 +1940,13 @@ fn a_nan_occupies_its_position_where_a_missing_sample_does_not() {
     }
 }
 
-/// One series arriving in pieces is not two series: a chunk that continues where its label set
-/// ended is handed on.
+/// One series arriving in pieces is not two series: the pieces are merged into the one series they
+/// are, and the window above reports it once.
 ///
-/// The map is passed twice for one label set, and the window above it reports the whole series once
-/// the piece carrying `is_last` arrives.
+/// The map is passed twice for one label set, so the window above collects both pieces and merges
+/// them with [`crate::grid_series::merge_same_labelset`] before it evaluates: the two pieces hold
+/// one position each, the window across them needs both, and answering per piece would close the
+/// first series in the evaluator before the second arrived.
 #[test]
 fn a_series_that_continues_where_it_ended_is_not_a_second_series() {
     let inner_grid = grid(0, 60_000, 4);
@@ -1551,6 +1971,8 @@ fn a_series_that_continues_where_it_ended_is_not_a_second_series() {
             false,
         ))
         .unwrap();
+    // Nothing comes out of the collecting window before its input ended, and the piece here does
+    // not end it.
     while let Some(chunk) = execution.next_chunk().unwrap() {
         assert!(
             !chunk.is_last,
@@ -1819,14 +2241,13 @@ fn an_interleaved_input_is_refused_without_a_window() {
 /// same label set, is not a collision: the second contributes no sample, so the answer is just the
 /// first one's values.
 ///
-/// This is the other order of [`two_series_with_no_result_do_not_collide`], and the one that used to
-/// fail: by the time the empty series arrives the label set is already closed, and refusing it
-/// failed an execution whose answer was never in doubt.
+/// This is the other order of [`two_series_with_no_result_do_not_collide`]: a series that produced
+/// values under a label set, followed by one that produced none. The empty one occupies no
+/// position, so it records nothing and changes nothing, and the answer is the first one's values.
 ///
-/// The set is closed here, which is what makes the empty series a later one that also answers
-/// empty. Its mirror image -- an empty closing chunk that arrives while the set is still open -- is
-/// [`an_empty_closing_chunk_of_another_series_does_not_close_a_label_set`], where the same series
-/// is not a harmless extra but would take the close away from the series that filled the set.
+/// The first series closed, which closes the source series and not the label set: the empty series
+/// is a later one that also answers empty, and
+/// [`an_empty_closing_chunk_of_another_series_does_not_close_a_label_set`] is its mirror image.
 #[test]
 fn a_series_with_no_result_after_a_closed_one_is_passed_over() {
     let map_grid = grid(0, 60_000, 1);
@@ -2370,7 +2791,7 @@ fn a_series_whose_axis_and_fields_disagree_is_rejected() {
 
     let mut emitted = Emitted::default();
     let error = emitted
-        .occupy(&NodePath::root(), Some(&chunk.series.metric), &chunk)
+        .occupy(&NodePath::root(), &chunk)
         .expect_err("a field with fewer samples than the axis places rows was accepted");
     let message = error.to_string();
     assert!(
@@ -2414,7 +2835,7 @@ fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
             false,
         );
         emitted
-            .occupy(&path, Some(&chunk.series.metric), &chunk)
+            .occupy(&path, &chunk)
             .unwrap_or_else(|error| panic!("position {position} was refused: {error}"));
     };
     // The runs stored under the one label set, which is what `absorb` keeps in position order.
