@@ -25,6 +25,7 @@
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
 //! <expression> <operator> <constant>                e.g. x * 100, x > bool 0
 //! <constant> <operator> <expression>                e.g. 1 / x, 0 < x
+//! <expression> <operator> <expression>              e.g. a + b, a / on(job) group_left(env) b
 //! -<expression>                                     e.g. -x
 //! ```
 //!
@@ -55,11 +56,22 @@
 //! its own: `-x` binds as the multiplication by `-1` that it is, which the multiplication kernel
 //! already computes.
 //!
-//! What a tree cannot yet express is deliberate too. The one input binding carries the ordering it
-//! guarantees and what it produces, but not the selector it reads, so a tree with two selectors
-//! cannot tell its inputs apart and an operation between two vectors is refused. A statement whose
-//! value is a scalar has nothing to read, so it is refused as well: a constant is bound next to a
-//! vector that gives it something to broadcast over.
+//! What a tree cannot yet express is deliberate too. A statement whose value is a scalar has
+//! nothing to read, so it is refused: a constant is bound next to a vector that gives it something
+//! to broadcast over. A set operator combines two vectors' series rather than their values, and the
+//! tree has no node for it, so `and`, `or` and `unless` are refused as the set operators they are.
+//!
+//! A tree with two selectors reads two inputs, and each one is bound to the selector it was
+//! compiled from: [`CompiledInput`] carries the selector's [`SelectorRequirement`] (its metric, its
+//! matchers, its offset and its anchor) beside the layout the caller said it would feed and the
+//! position the executor names it by. That is what makes `a + b` and `a + a` different trees, and
+//! it is why a vector–vector operation is an ordinary node: the two operands read different
+//! selectors, and [`BinaryMatching`] says how their series pair up.
+//!
+//! The position an input is named by is not written down here. [`promql::native::metrics::walk`]
+//! is the one traversal rule that gives every node its position, and the executor builds its state
+//! from the same walk, so [`compile_selectors`] reads each input's path from that walk rather than
+//! re-deriving it: a node kind added later cannot make the two copies disagree.
 //!
 //! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
 //! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
@@ -68,6 +80,7 @@
 //! chunks of different series that interleave, so an `Interleaved` ordering is refused once, at the
 //! entry, and [`NativeNode::validate`] refuses the same ordering for a tree built some other way.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,17 +89,21 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use promql::map::{ArithmeticOp, MathOp};
+use promql::native::metrics::{self, NodePath};
 use promql::native::plan::{
     BoundInput, BoundInstant, BoundMap, BoundScalar, BoundWindow, NativeExpr, NativeNode,
     NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
-use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use promql::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, binary_output_schema,
+};
+use promql_parser::label::Matchers;
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AtModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral,
-    Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
+    AtModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector,
+    NumberLiteral, Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -95,10 +112,40 @@ use crate::promql::label_values::signed_millis_since_epoch;
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
                          the selector as in `quantile_over_time(0.9, x[5m])` — a math function over \
-                         any of them, a binary operation between one of them and a constant, or a \
-                         negation of one of them, as in `x`, `rate(x[5m])`, \
-                         `quantile_over_time(0.9, x[5m])`, `abs(rate(x[5m]))`, `2 / (x + 1)` or \
-                         `-x`";
+                         any of them, a binary operation between two of them or between one of them \
+                         and a constant, or a negation of one of them, as in `x`, `rate(x[5m])`, \
+                         `quantile_over_time(0.9, x[5m])`, `abs(rate(x[5m]))`, `2 / (x + 1)`, \
+                         `a / on(job) b` or `-x`";
+
+/// What one selector asks a scan for, apart from the layout it is bound to.
+///
+/// The statement contributes the grid and the lookback, which every selector of one query shares;
+/// what differs per selector is which series it names and how it shifts their time axis.
+#[derive(Clone, Debug)]
+pub struct SelectorRequirement {
+    pub metric: Option<String>,
+    pub matchers: Matchers,
+    pub offset_ms: i64,
+    pub at_ms: Option<i64>,
+}
+
+/// One input a compiled tree reads, and the selector it was bound to.
+#[derive(Clone, Debug)]
+pub struct CompiledInput {
+    /// The position the executor names this input by; `push_raw_at` takes it.
+    pub path: NodePath,
+    pub requirement: SelectorRequirement,
+    /// The layout the caller said it will feed for this selector.
+    pub schema: Arc<SeriesSchema>,
+    pub ordering: SeriesOrdering,
+}
+
+/// A tree together with the inputs it reads.
+#[derive(Clone, Debug)]
+pub struct CompiledTree {
+    pub tree: NativeTree,
+    pub inputs: Arc<[CompiledInput]>,
+}
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -110,23 +157,40 @@ const SUPPORTED: &str = "a selector, a range function over a range selector — 
 /// `rate(x{__field__="a"}[5m])` over fields `[a, b]` would fold two fields where the planner folds
 /// one.
 ///
-/// `ordering` is what the caller's scan guarantees, and the tree records it rather than assuming
-/// one. Only `Contiguous` and `KeyThenTime` are accepted: every shape this compiler accepts reads
-/// one series to its last chunk before the next, so an `Interleaved` declaration is refused at the
-/// entry, before any shape is built — the bare selector included, which returns before a window
-/// exists — and a shape added later inherits the refusal instead of restating it.
-/// [`NativeNode::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
-/// backstop for a tree built some other way.
-///
-/// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
-/// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
-/// is fine while a tree has one selector; a tree with two inputs will need each `Input` to name its
-/// selector.
+/// Every selector is bound to that one layout. A query whose selectors are fed by different layouts,
+/// and a caller that has to know which input belongs to which selector, calls [`compile_selectors`]
+/// instead; this function keeps its signature for the callers that read one input, and drops the
+/// inputs it bound.
 pub fn compile(
     stmt: &EvalStmt,
     input: Arc<SeriesSchema>,
     ordering: SeriesOrdering,
 ) -> Result<NativeTree> {
+    compile_selectors(stmt, &|_selector| Ok(Arc::clone(&input)), ordering)
+        .map(|compiled| compiled.tree)
+}
+
+/// Compiles `stmt` into a tree and the inputs it reads, binding each selector through `bindings`.
+///
+/// `bindings` answers what a scan of one selector produces, so two selectors of one query may be fed
+/// differently shaped samples. It is a plain callback: the answer depends on the selector and on
+/// what the caller already holds, and there is no state of the compiler's to keep between calls.
+/// `ordering` is what the caller's scan guarantees for every one of them, and each input records it
+/// rather than assuming one. Only `Contiguous` and `KeyThenTime` are accepted: every shape this
+/// compiler accepts reads one series to its last chunk before the next, so an `Interleaved`
+/// declaration is refused at the entry, before any shape is built — the bare selector included,
+/// which returns before a window exists — and a shape added later inherits the refusal instead of
+/// restating it. [`NativeNode::validate`] refuses the same ordering in its `Instant` and `Window`
+/// branches, as a backstop for a tree built some other way.
+///
+/// The inputs come back in the order they were bound, which is the executor's visit order: left
+/// before right. Their paths are [`promql::native::metrics::walk`]'s, read from the finished tree,
+/// so the position a caller pushes a chunk at is the position the executor names that input by.
+pub fn compile_selectors(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&VectorSelector) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+) -> Result<CompiledTree> {
     // Every shape this compiler accepts reads one series to its last chunk before the next, so raw
     // samples whose chunks of different series interleave cannot be fed to any of them. The refusal
     // is here rather than in a shape's branch so that a shape added later inherits it.
@@ -151,27 +215,86 @@ pub fn compile(
     }
     let context = Context {
         stmt,
-        input,
+        bindings,
         ordering,
+        inputs: RefCell::new(Vec::new()),
     };
     // The whole tree is validated once, here: a node compiled as another node's input is checked as
     // part of the tree rather than on its own, so the same node cannot be legal in one place and
     // illegal in another.
-    NativeTree::try_new(compile_expr(&context, &stmt.expr)?)
+    let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
+    let bound = context.inputs.into_inner();
+    let inputs = name_inputs(&tree, bound)?;
+    Ok(CompiledTree {
+        tree,
+        inputs: inputs.into(),
+    })
+}
+
+/// The inputs `tree` reads, each named by the position the executor names it by.
+///
+/// Both orders are the same pre-order walk — a binary operation compiles its left operand before its
+/// right, and [`metrics::walk`] descends left before right — so the inputs a compilation bound in
+/// order name the input nodes in order. A count that disagrees is a compiler defect, which is why it
+/// is reported as one instead of zipping whatever there is.
+fn name_inputs(tree: &NativeTree, bound: Vec<PendingInput>) -> Result<Vec<CompiledInput>> {
+    let bound_count = bound.len();
+    let mut bound = bound.into_iter();
+    let mut named = 0usize;
+    let mut inputs = Vec::new();
+    metrics::walk(tree.root(), &mut |node, path| {
+        if matches!(&node.expr, NativeExpr::Input(_)) {
+            named += 1;
+            if let Some(input) = bound.next() {
+                inputs.push(CompiledInput {
+                    path: path.clone(),
+                    requirement: input.requirement,
+                    schema: input.schema,
+                    ordering: input.ordering,
+                });
+            }
+        }
+    });
+    if named != bound_count {
+        return Err(input_count_mismatch(bound_count, named));
+    }
+    Ok(inputs)
+}
+
+/// The rejection of a tree whose input nodes and bound selectors do not line up.
+fn input_count_mismatch(bound: usize, named: usize) -> DataFusionError {
+    DataFusionError::Internal(format!(
+        "the native compiler bound {bound} selector(s) but the tree has {named} input node(s): \
+         every selector compiles to an input node, so the two walks disagree"
+    ))
+}
+
+/// One input as it is bound, before the tree's walk gives it its position.
+///
+/// A selector is compiled where its subtree is built, and the position it lands at is only known
+/// once the whole tree exists, so the path is added by [`name_inputs`] rather than guessed here.
+struct PendingInput {
+    requirement: SelectorRequirement,
+    schema: Arc<SeriesSchema>,
+    ordering: SeriesOrdering,
 }
 
 /// What every node of one compilation derives from the statement rather than from the expression.
 ///
-/// The three are the same for the whole tree: one statement decides the grid, the lookback and the
-/// anchors, one caller binds the raw input, and one scan guarantees the ordering. Passing them as
-/// one value is what lets [`compile_expr`] recurse without restating what it was handed.
+/// The same for the whole tree: one statement decides the grid, the lookback and the anchors, one
+/// caller binds every selector's layout, and one scan guarantees the ordering. The inputs it bound
+/// are collected here, because a selector is compiled where its subtree is built rather than at the
+/// top. Passing these as one value is what lets [`compile_expr`] recurse without restating what it
+/// was handed.
 struct Context<'a> {
     /// The statement being compiled.
     stmt: &'a EvalStmt,
-    /// The raw series the caller bound; shared by every input node rather than copied per node.
-    input: Arc<SeriesSchema>,
+    /// The layout to feed each selector in, asked once per selector.
+    bindings: &'a dyn Fn(&VectorSelector) -> Result<Arc<SeriesSchema>>,
     /// The ordering the caller's scan guarantees.
     ordering: SeriesOrdering,
+    /// The inputs bound so far, in the order they were bound.
+    inputs: RefCell<Vec<PendingInput>>,
 }
 
 /// Compiles `expr` into the node it denotes, recursing into whatever it is made of.
@@ -229,13 +352,12 @@ fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
     ))
 }
 
-/// Compiles a binary operation whose operands are not both vectors.
+/// Compiles a binary operation over its two operands.
 ///
-/// The tree holds one input binding, and that binding carries the ordering it guarantees and what it
-/// produces but not the selector it reads, so two vectors cannot be told apart: `a + b` and `a + a`
-/// would compile to the same tree. That is why a vector–vector operation is refused until an input
-/// names its selector, and why an operation over one vector and one scalar is the shape the tree can
-/// bind: a scalar carries no labels, so broadcasting it is unambiguous.
+/// Two vectors are an ordinary node: each operand is compiled from its own selector, so the two
+/// inputs are told apart by which selector they were bound to, and [`vector_matching`] binds the
+/// modifiers the query wrote. A vector and a constant is a broadcast instead — a scalar carries no
+/// labels, so there is nothing to match and [`broadcast`] is the node.
 fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode> {
     // A set operator combines two vectors' series rather than their values, and the tree has no node
     // for it at all. Its name is reported before the operands are looked at, so a set operation
@@ -255,22 +377,40 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
             binary.op
         )));
     };
-    // Two vectors are refused before the modifier is looked at, so a vector–vector query with
-    // matching says what is actually missing. The refusal names the missing identity rather than the
-    // query, because that is what whoever adds it has to add.
+    // Two vectors are matched by their labels, so the node carries the modifiers the query wrote.
     if binary.lhs.value_type() == ValueType::Vector && binary.rhs.value_type() == ValueType::Vector
     {
-        return Err(not_implemented(&format!(
-            "the binary operation `{binary}` between two vectors, which needs each input to name \
-             the selector it reads: an input binding carries its ordering and what it produces, but \
-             not which selector it was bound to"
-        )));
+        // Both operands are compiled before the node is built, so `a + b` binds one input per
+        // selector and `(a + b) / c` nests. Left before right, because a non-commutative operator
+        // means what that order says.
+        let left = compile_expr(context, &binary.lhs)?;
+        let right = compile_expr(context, &binary.rhs)?;
+        // A vector-typed expression compiles to evaluated samples, so a side that is not one is a
+        // compiler defect rather than a query error: the type check above is what a query has to
+        // pass.
+        let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
+            return Err(DataFusionError::Internal(format!(
+                "the binary operation `{binary}` compiled a vector operand to something other than \
+                 samples: a vector-typed expression compiles to samples, so the two disagree"
+            )));
+        };
+        // The output is the kernel's own schema: the two grids have to agree, and the fields are
+        // paired by position and named after the left side. `NativeNode::validate`'s binary arm
+        // demands exactly that shape, so binding it here is what keeps the two from disagreeing.
+        let output = NativeType::Samples(binary_output_schema(lhs, rhs)?);
+        return Ok(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(left),
+                right: Box::new(right),
+                matching: vector_matching(binary, op)?,
+            },
+            output,
+        });
     }
     // What is left has a constant on at least one side, and a modifier is refused rather than
     // dropped: a scalar carries no labels, so there is nothing to match or name, and Prometheus
-    // rejects these words on a scalar operand for the same reason. A fill value is refused because
-    // the tree's matching has no field for one, so binding the operation would compute it without
-    // the fill the query asked for.
+    // rejects these words on a scalar operand for the same reason. A fill value is refused because a
+    // broadcast never misses a match, so there is nothing for one to fill.
     if let Some(modifier) = &binary.modifier
         && (modifier.matching.is_some()
             || modifier.card != VectorMatchCardinality::OneToOne
@@ -291,6 +431,70 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
         op,
         binary.return_bool(),
     ))
+}
+
+/// The matching a vector–vector operation records.
+///
+/// Each part is read from the modifier the query wrote, and a modifier it did not write is the
+/// default PromQL applies: every label but `__name__` matches (`ignoring` nothing), one series of
+/// each side may share a match group, and no fill value stands in for a missing sample.
+///
+/// `ManyToMany` is the cardinality of a set operator, which [`binary_operation`] refuses before
+/// asking for a matching, so reaching it means the two disagree; it is reported as a shape with no
+/// node rather than panicking on a path a query cannot take today.
+fn vector_matching(binary: &BinaryExpr, op: BinaryOp) -> Result<BinaryMatching> {
+    let modifier = binary.modifier.as_ref();
+    // `Include` is `on`, `Exclude` is `ignoring`: a label list is matched as the names it holds, and
+    // `__name__` is only a match label when `on` names it.
+    let labels = match modifier.and_then(|modifier| modifier.matching.as_ref()) {
+        None => MatchingLabels::Ignoring(Vec::new()),
+        Some(LabelModifier::Include(labels)) => MatchingLabels::On(label_names(&labels.labels)),
+        Some(LabelModifier::Exclude(labels)) => {
+            MatchingLabels::Ignoring(label_names(&labels.labels))
+        }
+    };
+    let cardinality = match modifier.map(|modifier| &modifier.card) {
+        None | Some(VectorMatchCardinality::OneToOne) => Cardinality::OneToOne,
+        Some(VectorMatchCardinality::ManyToOne(labels)) => {
+            Cardinality::ManyToOne(label_names(&labels.labels))
+        }
+        Some(VectorMatchCardinality::OneToMany(labels)) => {
+            Cardinality::OneToMany(label_names(&labels.labels))
+        }
+        Some(VectorMatchCardinality::ManyToMany) => {
+            return Err(not_implemented(&format!(
+                "the many-to-many matching in `{binary}`, which is the cardinality of a set \
+                 operator: it combines two vectors' series, and this node is an arithmetic or \
+                 comparison operation over values"
+            )));
+        }
+    };
+    // The two fields keep the parser's names, so `fill_values.lhs` is what `fill_left` wrote and
+    // `fill_values.rhs` is what `fill_right` wrote, field for field. That is a name-preserving copy
+    // and nothing more: it does not say that `fill_left` always stands in for the original left
+    // operand. Which sample a fill stands in for depends on the cardinality, because the kernel
+    // picks the field by which side of the *match* is missing rather than by which operand was
+    // written first: `fill.rhs` answers a many-side series that found no match, standing in for the
+    // missing one-side sample, and `fill.lhs` answers a one-side series that found no match,
+    // standing in for the missing many-side sample. The default and `group_left` make the many side
+    // the left operand; `group_right` swaps them, so there `fill_right` fills a missing left-hand
+    // sample and `fill_left` a missing right-hand one. [`FillValues`] states the same thing.
+    let fill = modifier.map_or_else(FillValues::default, |modifier| FillValues {
+        lhs: modifier.fill_values.lhs,
+        rhs: modifier.fill_values.rhs,
+    });
+    Ok(BinaryMatching {
+        op,
+        return_bool: binary.return_bool(),
+        labels,
+        cardinality,
+        fill,
+    })
+}
+
+/// The label names of a parser label list, as the matching and the copied-label lists hold them.
+fn label_names(labels: &[String]) -> Vec<Arc<str>> {
+    labels.iter().map(|name| Arc::from(name.as_str())).collect()
 }
 
 /// Wraps two compiled operands in the binary node that applies `op` to them.
@@ -476,15 +680,25 @@ fn window_selection(
     let output_grid = statement_grid(context.stmt)?;
 
     // A range function reports one value per input field, so the layout is the input's.
+    let raw_schema = bind_selector(
+        context,
+        vs,
+        SelectorRequirement {
+            metric: vs.name.clone(),
+            matchers: vs.matchers.clone(),
+            offset_ms,
+            at_ms: anchor_ms,
+        },
+    )?;
     let output = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: Arc::clone(&context.input.fields),
+        fields: Arc::clone(&raw_schema.fields),
         eval_grid: Some(Arc::clone(&output_grid)),
     }));
 
     // One allocation shared by the binding and the node's output: `NativeTree::try_new` compares
     // them by identity, because a compiler that meant one schema has no reason to allocate it
     // twice.
-    let raw = NativeType::Samples(Arc::clone(&context.input));
+    let raw = NativeType::Samples(Arc::clone(&raw_schema));
 
     Ok(NativeNode {
         expr: NativeExpr::Window {
@@ -531,13 +745,24 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
     let output_grid = statement_grid(context.stmt)?;
 
     // An instant selection reports one value per input field, so the layout is the input's.
+    let raw_schema = bind_selector(
+        context,
+        selector,
+        SelectorRequirement {
+            metric: selector.name.clone(),
+            matchers: selector.matchers.clone(),
+            offset_ms,
+            // An `@` anchor was refused above, so an instant selection never has one.
+            at_ms: None,
+        },
+    )?;
     let output = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: Arc::clone(&context.input.fields),
+        fields: Arc::clone(&raw_schema.fields),
         eval_grid: Some(Arc::clone(&output_grid)),
     }));
 
     // One allocation shared by the binding and the node's output, as in the window shape.
-    let raw = NativeType::Samples(Arc::clone(&context.input));
+    let raw = NativeType::Samples(Arc::clone(&raw_schema));
 
     Ok(NativeNode {
         expr: NativeExpr::Instant {
@@ -556,6 +781,28 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
         },
         output,
     })
+}
+
+/// Binds the layout `selector` will be fed in, and records the input it reads.
+///
+/// The bindings decide one thing — what a scan of this selector produces — while the requirement
+/// records what the selector asked for: its metric, its matchers, its offset and its anchor. The two
+/// are recorded together because they belong to one input: a caller that feeds several selectors
+/// has to know which layout and which requirement belong to which position. The position itself is
+/// not known here, since a selector is compiled where its subtree is built, so it is added once the
+/// whole tree exists.
+fn bind_selector(
+    context: &Context,
+    selector: &VectorSelector,
+    requirement: SelectorRequirement,
+) -> Result<Arc<SeriesSchema>> {
+    let schema = (context.bindings)(selector)?;
+    context.inputs.borrow_mut().push(PendingInput {
+        requirement,
+        schema: Arc::clone(&schema),
+        ordering: context.ordering,
+    });
+    Ok(schema)
 }
 
 /// The grid the statement is evaluated on: `(end - start) / step + 1` points, the last of which

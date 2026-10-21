@@ -1,0 +1,573 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! A two-selector query compiled by the real compiler and answered by the real executor.
+//!
+//! This is an external integration test: the tree comes from
+//! [`compile_selectors`], never from a hand-built node, and it is run through
+//! [`promql::native::execute`] the way a consumer above these crates would run it. What it checks
+//! is what per-selector binding exists for: `a + b` reads two inputs, each selector's samples are
+//! fed at the position the compiler says that selector's input sits at, and the operation matches
+//! the two vectors by the labels the query wrote.
+//!
+//! Every case asserts the series count, the label set of each output series and the value at every
+//! grid point, because a case that only asserted "something came out" would pass under a wrong label
+//! mapping. The grid is five points one second apart starting at the Unix epoch, and the statement's
+//! lookback is five seconds, so an instant selection carries the last sample of the previous points
+//! forward.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
+
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datatypes::arrow::array::Float64Array;
+use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::{Label, MetricName, SeriesOrdering};
+use promql::evaluated::EvaluatedChunk;
+use promql::native::execute::{NativeExecutionState, NativeExecutor};
+use promql_parser::parser::VectorSelector;
+use query::promql::native_compile::{CompiledTree, compile_selectors};
+
+/// The layout every selector of these queries is fed in: one float field of raw samples.
+fn raw_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::new([FieldSpec {
+            name: "value".into(),
+        }]),
+        eval_grid: None,
+    })
+}
+
+/// `query` over `0..=4000ms` on a `1000ms` grid with a five-second lookback, which is five points.
+fn eval_stmt(query: &str) -> promql_parser::parser::EvalStmt {
+    promql_parser::parser::EvalStmt {
+        expr: promql_parser::parser::parse(query).unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH + Duration::from_millis(4_000),
+        interval: Duration::from_millis(1_000),
+        lookback_delta: Duration::from_millis(5_000),
+    }
+}
+
+/// `query` compiled by the real compiler, with its tree and the inputs it reads.
+fn compile(query: &str) -> CompiledTree {
+    let schema = raw_schema();
+    let bindings = |_selector: &VectorSelector| Ok(Arc::clone(&schema));
+    compile_selectors(&eval_stmt(query), &bindings, SeriesOrdering::KeyThenTime)
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
+}
+
+/// The metric `name` with `labels`, as a source series of the samples a scan would read.
+fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
+    let tags = labels
+        .iter()
+        .map(|(name, value)| Label {
+            name: (*name).into(),
+            value: (*value).into(),
+        })
+        .collect();
+    MetricName::try_new(Some(name.into()), tags).expect("distinct label names")
+}
+
+/// One raw chunk of `series`, holding `rows` at their source timestamps, closing the series.
+///
+/// The chunk is built against `schema`, the layout the compiler bound that selector to, so a chunk
+/// the input would refuse cannot be pushed here by accident.
+fn raw_chunk(
+    schema: &SeriesSchema,
+    key: &str,
+    series: MetricName,
+    rows: &[(i64, f64)],
+) -> RawSeriesChunk {
+    let timestamps: Vec<i64> = rows.iter().map(|&(time, _)| time).collect();
+    let values: Vec<f64> = rows.iter().map(|&(_, value)| value).collect();
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(key.as_bytes()),
+        Some(series),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps)).expect("increasing timestamps"),
+        SeriesFields::one(Samples::from_float(Float64Array::from(values))),
+        true,
+    )
+    .expect("the chunk is bound to the schema it is built against")
+}
+
+/// Runs `compiled` over `pushes`, each naming the input its chunk belongs to by that input's index.
+///
+/// A binary node retains both operands and decides nothing until its input ends, so every pull
+/// before [`NativeExecutor::finish`] has to answer with nothing; a pull that answered earlier would
+/// mean a node computed over half a vector.
+fn run(compiled: &CompiledTree, pushes: Vec<(usize, RawSeriesChunk)>) -> Vec<EvaluatedChunk> {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let metrics = ExecutionPlanMetricsSet::new();
+    let state = NativeExecutionState::try_new(&compiled.tree, Arc::clone(&pool), &metrics, 0)
+        .expect("the runtime executes this tree");
+    let mut executor = NativeExecutor::new(state);
+    for (index, chunk) in pushes {
+        let path = &compiled.inputs[index].path;
+        executor
+            .push_raw_at(path, chunk)
+            .unwrap_or_else(|error| panic!("the chunk is bound to the input at {path}: {error}"));
+        let pulled = executor.next_chunk().expect("the pull succeeds");
+        assert!(
+            pulled.is_none(),
+            "the answer at {path} came before the input ended: {pulled:?}"
+        );
+    }
+    let chunks = executor.finish().expect("every series closed");
+    assert_eq!(executor.state().reserved_bytes(), 0, "nothing held");
+    assert_eq!(pool.reserved(), 0, "a finished execution reserves nothing");
+    chunks
+}
+
+/// The label set a chunk's series is filed under, rendered with the metric name first.
+fn label_set(chunk: &EvaluatedChunk) -> String {
+    let metric = &chunk.series.metric;
+    let mut parts = Vec::new();
+    if let Some(name) = metric.name() {
+        parts.push(format!("__name__=\"{name}\""));
+    }
+    for label in metric.tags() {
+        parts.push(format!("{}=\"{}\"", label.name, label.value));
+    }
+    format!("{{{}}}", parts.join(", "))
+}
+
+/// What every output series holds, as its rendered label set and its value at each grid position.
+///
+/// A series may arrive as one chunk or as several: a chunk says which series it carries and closes
+/// it, and how a node batches what it produces is not this test's to pin. Rows are therefore
+/// appended to the entry for their label set, and a series split over two chunks reads as one.
+fn results(chunks: &[EvaluatedChunk]) -> BTreeMap<String, Vec<(usize, f64)>> {
+    let mut output: BTreeMap<String, Vec<(usize, f64)>> = BTreeMap::new();
+    for chunk in chunks {
+        let field = chunk
+            .series
+            .fields
+            .as_slice()
+            .first()
+            .expect("the result carries the one field it was bound to");
+        let entry = output.entry(label_set(chunk)).or_default();
+        for (position, row) in chunk.series.time.positions() {
+            match field.sample(row) {
+                SampleRef::Float(value) => entry.push((position, value)),
+                _ => panic!("the row at {row} holds no float"),
+            }
+        }
+    }
+    output
+}
+
+/// The value at every one of the five grid points.
+fn every_point(value: f64) -> Vec<(usize, f64)> {
+    (0..5).map(|position| (position, value)).collect()
+}
+
+/// `a + b` over two genuinely different inputs: different metric names, different matcher sets and
+/// different samples. Each input is fed at the position its own selector was bound to, and the sum
+/// is asserted point by point.
+#[test]
+fn two_selectors_are_summed_from_two_inputs() {
+    let compiled = compile("a{job=\"x\"} + b{job=\"x\", instance=\"i1\"}");
+    assert_eq!(
+        compiled.inputs.len(),
+        2,
+        "`a + b` did not bind one input per selector"
+    );
+    assert_eq!(
+        compiled.inputs[0].requirement.metric.as_deref(),
+        Some("a"),
+        "the first input is not the left selector's"
+    );
+    assert_eq!(
+        compiled.inputs[1].requirement.metric.as_deref(),
+        Some("b"),
+        "the second input is not the right selector's"
+    );
+    // The two selectors asked for different series, so each input records its own matcher set.
+    assert_eq!(
+        compiled.inputs[0].requirement.matchers.matchers.len(),
+        1,
+        "the left input did not record the one matcher its selector wrote"
+    );
+    assert_eq!(
+        compiled.inputs[1].requirement.matchers.matchers.len(),
+        2,
+        "the right input did not record the two matchers its selector wrote"
+    );
+    assert_ne!(
+        compiled.inputs[0].path, compiled.inputs[1].path,
+        "two selectors were bound to one position"
+    );
+
+    // `a` holds 1 at t=0 and 2 at t=2000, so an instant selection carries 1 forward to p0 and p1 and
+    // 2 to p2..p4. `b` holds 10 at t=0 and 40 at t=4000: `[10, 10, 10, 10, 40]`.
+    let chunks = run(
+        &compiled,
+        vec![
+            (
+                0,
+                raw_chunk(
+                    compiled.inputs[0].schema.as_ref(),
+                    "a-job=x-instance=i1",
+                    metric("a", &[("instance", "i1"), ("job", "x")]),
+                    &[(0, 1.0), (2_000, 2.0)],
+                ),
+            ),
+            (
+                1,
+                raw_chunk(
+                    compiled.inputs[1].schema.as_ref(),
+                    "b-job=x-instance=i1",
+                    metric("b", &[("instance", "i1"), ("job", "x")]),
+                    &[(0, 10.0), (4_000, 40.0)],
+                ),
+            ),
+        ],
+    );
+    let output = results(&chunks);
+    assert_eq!(output.len(), 1, "the sum is not one series: {output:?}");
+    // Arithmetic drops the metric name and keeps the labels the match was made on.
+    assert_eq!(
+        output.get("{instance=\"i1\", job=\"x\"}"),
+        Some(&vec![(0, 11.0), (1, 11.0), (2, 12.0), (3, 12.0), (4, 42.0)]),
+        "the sum is not the values each side selected: {output:?}"
+    );
+}
+
+/// `a / on(job) b` matches on `job` alone, so two series that differ in `instance` pair up. The same
+/// inputs through `a / b` — the default matching, which matches on every label but `__name__` — pair
+/// nothing, and that difference is what proves the `on` list reached the kernel.
+#[test]
+fn an_on_matching_pairs_series_the_default_matching_would_not() {
+    // Both inputs are the same in both runs: only the compiled matching differs.
+    let pushes = |compiled: &CompiledTree| {
+        vec![
+            (
+                0,
+                raw_chunk(
+                    compiled.inputs[0].schema.as_ref(),
+                    "a-job=x-instance=i1",
+                    metric("a", &[("instance", "i1"), ("job", "x")]),
+                    &[(0, 1.0), (2_000, 2.0)],
+                ),
+            ),
+            (
+                1,
+                raw_chunk(
+                    compiled.inputs[1].schema.as_ref(),
+                    "b-job=x-instance=i2",
+                    metric("b", &[("instance", "i2"), ("job", "x")]),
+                    &[(0, 10.0), (4_000, 40.0)],
+                ),
+            ),
+        ]
+    };
+
+    let matched = compile("a{job=\"x\"} / on(job) b{job=\"x\"}");
+    let output = results(&run(&matched, pushes(&matched)));
+    assert_eq!(output.len(), 1, "`on(job)` did not match: {output:?}");
+    // `on` keeps only the labels it matched on, so `instance` is gone.
+    assert_eq!(
+        output.get("{job=\"x\"}"),
+        Some(&vec![
+            (0, 0.1),
+            (1, 0.1),
+            (2, 0.2),
+            (3, 0.2),
+            (4, 2.0 / 40.0),
+        ]),
+        "`on(job)` did not divide each side's value: {output:?}"
+    );
+
+    // The default matching matches on `instance` too, and the two sides disagree on it.
+    let unmatched = compile("a{job=\"x\"} / b{job=\"x\"}");
+    let output = results(&run(&unmatched, pushes(&unmatched)));
+    assert!(
+        output.is_empty(),
+        "the default matching paired series that differ in `instance`: {output:?}"
+    );
+}
+
+/// `group_left(env)` reuses one right series for two left series and copies `env` from the right
+/// side into each result, which is the cardinality a one-to-one matching cannot express.
+#[test]
+fn a_group_left_reuses_the_one_side_and_copies_its_label() {
+    let compiled = compile("a{job=\"x\"} / on(job) group_left(env) b{job=\"x\"}");
+    let chunks = run(
+        &compiled,
+        vec![
+            (
+                0,
+                raw_chunk(
+                    compiled.inputs[0].schema.as_ref(),
+                    "a-job=x-instance=i1",
+                    metric("a", &[("instance", "i1"), ("job", "x")]),
+                    &[(0, 1.0)],
+                ),
+            ),
+            (
+                0,
+                raw_chunk(
+                    compiled.inputs[0].schema.as_ref(),
+                    "a-job=x-instance=i3",
+                    metric("a", &[("instance", "i3"), ("job", "x")]),
+                    &[(0, 2.0)],
+                ),
+            ),
+            (
+                1,
+                raw_chunk(
+                    compiled.inputs[1].schema.as_ref(),
+                    "b-env=prod-job=x",
+                    metric("b", &[("env", "prod"), ("job", "x")]),
+                    &[(0, 10.0)],
+                ),
+            ),
+        ],
+    );
+    let output = results(&chunks);
+    // One right series matched both left series, so both are answered, each keeping its own
+    // `instance` and gaining the copied `env`.
+    assert_eq!(
+        output.len(),
+        2,
+        "the left series was not reused: {output:?}"
+    );
+    assert_eq!(
+        output.get("{env=\"prod\", instance=\"i1\", job=\"x\"}"),
+        Some(&every_point(0.1)),
+        "the first left series did not keep its own labels beside the copied one: {output:?}"
+    );
+    assert_eq!(
+        output.get("{env=\"prod\", instance=\"i3\", job=\"x\"}"),
+        Some(&every_point(0.2)),
+        "the second left series did not keep its own labels beside the copied one: {output:?}"
+    );
+}
+
+/// `fill_right(100)` stands in for a right sample a left series found no match for: `a * on(job) b`
+/// drops the left series `job="y"`, and the filled operation answers it from the fill value.
+#[test]
+fn a_fill_answers_a_left_series_that_found_no_match() {
+    let pushes = |compiled: &CompiledTree| {
+        vec![
+            (
+                0,
+                raw_chunk(
+                    compiled.inputs[0].schema.as_ref(),
+                    "a-job=x",
+                    metric("a", &[("job", "x")]),
+                    &[(0, 2.0)],
+                ),
+            ),
+            (
+                0,
+                raw_chunk(
+                    compiled.inputs[0].schema.as_ref(),
+                    "a-job=y",
+                    metric("a", &[("job", "y")]),
+                    &[(0, 3.0)],
+                ),
+            ),
+            (
+                1,
+                raw_chunk(
+                    compiled.inputs[1].schema.as_ref(),
+                    "b-job=x",
+                    metric("b", &[("job", "x")]),
+                    &[(0, 10.0)],
+                ),
+            ),
+        ]
+    };
+
+    let unfilled = compile("a * on(job) b");
+    let output = results(&run(&unfilled, pushes(&unfilled)));
+    assert_eq!(
+        output.len(),
+        1,
+        "a series with no match was answered without a fill: {output:?}"
+    );
+    assert_eq!(
+        output.get("{job=\"x\"}"),
+        Some(&every_point(20.0)),
+        "the matched series is not the product of the two sides: {output:?}"
+    );
+
+    let filled = compile("a * on(job) fill_right(100) b");
+    let output = results(&run(&filled, pushes(&filled)));
+    assert_eq!(
+        output.len(),
+        2,
+        "`fill_right(100)` did not answer the unmatched series: {output:?}"
+    );
+    assert_eq!(
+        output.get("{job=\"x\"}"),
+        Some(&every_point(20.0)),
+        "the fill changed the series that did match: {output:?}"
+    );
+    assert_eq!(
+        output.get("{job=\"y\"}"),
+        Some(&every_point(300.0)),
+        "the filled series is not `3 * 100`: {output:?}"
+    );
+}
+
+/// The two inputs of a two-selector tree are distinct, so a chunk that names no input is refused
+/// rather than matched as whichever operand was found first.
+#[test]
+fn a_two_input_tree_refuses_a_chunk_that_names_no_input() {
+    let compiled = compile("a{job=\"x\"} + b{job=\"x\"}");
+    assert_ne!(
+        compiled.inputs[0].path, compiled.inputs[1].path,
+        "the two selectors were bound to one position"
+    );
+
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let state = NativeExecutionState::try_new(
+        &compiled.tree,
+        Arc::clone(&pool),
+        &ExecutionPlanMetricsSet::new(),
+        0,
+    )
+    .expect("the runtime executes this tree");
+    let mut executor = NativeExecutor::new(state);
+    let chunk = raw_chunk(
+        compiled.inputs[0].schema.as_ref(),
+        "a-job=x",
+        metric("a", &[("job", "x")]),
+        &[(0, 1.0)],
+    );
+    let error = executor
+        .push_raw(chunk)
+        .expect_err("a chunk that names no input was queued");
+    assert!(
+        error.to_string().contains("has 2 inputs"),
+        "the refusal did not say the tree reads two inputs: {error}"
+    );
+}
+
+/// `group_right(env)` makes the right operand the many side and copies `env` from the left one, so
+/// one left series answers two right series. The fill then shows the same swap from the other end:
+/// the kernel fills its many side from `fill.rhs`, and in `group_right` the many side is the right
+/// operand, so a right series with no left match is answered by `fill_right` — the field named
+/// after the side the fill *is* rather than the side it stands in for. That mismatch between the
+/// field's name and the operand the fill becomes is the point of this case: the arithmetic itself is
+/// covered by the kernel's own golden fixtures, so what is pinned here is only that the compiler put
+/// `fill_right`'s value in the field the kernel reads for that side.
+#[test]
+fn a_group_right_swaps_the_many_side_and_fills_the_missing_one_side_sample() {
+    let pushes = |compiled: &CompiledTree, with_unmatched: bool| {
+        let mut pushes = vec![
+            (
+                0,
+                raw_chunk(
+                    compiled.inputs[0].schema.as_ref(),
+                    "a-env=prod-job=x",
+                    metric("a", &[("env", "prod"), ("job", "x")]),
+                    &[(0, 2.0)],
+                ),
+            ),
+            (
+                1,
+                raw_chunk(
+                    compiled.inputs[1].schema.as_ref(),
+                    "b-job=x-instance=i1",
+                    metric("b", &[("instance", "i1"), ("job", "x")]),
+                    &[(0, 10.0)],
+                ),
+            ),
+            (
+                1,
+                raw_chunk(
+                    compiled.inputs[1].schema.as_ref(),
+                    "b-job=x-instance=i2",
+                    metric("b", &[("instance", "i2"), ("job", "x")]),
+                    &[(0, 20.0)],
+                ),
+            ),
+        ];
+        if with_unmatched {
+            pushes.push((
+                1,
+                raw_chunk(
+                    compiled.inputs[1].schema.as_ref(),
+                    "b-job=y-instance=i3",
+                    metric("b", &[("instance", "i3"), ("job", "y")]),
+                    &[(0, 5.0)],
+                ),
+            ));
+        }
+        pushes
+    };
+
+    // One left series, two right ones: each right series is answered and gains `env` from the left.
+    let unfilled = compile("a{job=\"x\"} / on(job) group_right(env) b");
+    let output = results(&run(&unfilled, pushes(&unfilled, true)));
+    assert_eq!(
+        output.len(),
+        2,
+        "the many side was not answered once per right series: {output:?}"
+    );
+    assert_eq!(
+        output.get("{env=\"prod\", instance=\"i1\", job=\"x\"}"),
+        Some(&every_point(0.2)),
+        "the first right series is not `2 / 10`: {output:?}"
+    );
+    assert_eq!(
+        output.get("{env=\"prod\", instance=\"i2\", job=\"x\"}"),
+        Some(&every_point(0.1)),
+        "the second right series is not `2 / 20`: {output:?}"
+    );
+
+    // `fill_right(100)` supplies the stand-in for the left operand: `group_right` makes the right
+    // operand the many side, the kernel fills that side from `fill.rhs`, and so the query writes
+    // `fill_right` for a sample that stands in for a missing left-hand one. The `job="y"` right
+    // series has no left match, so it is answered as `100 / 5` while the two matched series keep
+    // their own values.
+    let filled = compile("a{job=\"x\"} / on(job) group_right(env) fill_right(100) b");
+    let output = results(&run(&filled, pushes(&filled, true)));
+    assert_eq!(
+        output.len(),
+        3,
+        "`fill_right(100)` did not answer the right series with no left match: {output:?}"
+    );
+    assert_eq!(
+        output.get("{env=\"prod\", instance=\"i1\", job=\"x\"}"),
+        Some(&every_point(0.2)),
+        "the fill changed the first matched series: {output:?}"
+    );
+    assert_eq!(
+        output.get("{env=\"prod\", instance=\"i2\", job=\"x\"}"),
+        Some(&every_point(0.1)),
+        "the fill changed the second matched series: {output:?}"
+    );
+    // A fill row pairs no two series, so there is no one side to copy `env` from: `group_right`'s
+    // included label is removed rather than invented, which is why the filled series carries no
+    // `env` while its value is `100 / 5`.
+    assert_eq!(
+        output.get("{instance=\"i3\", job=\"y\"}"),
+        Some(&every_point(20.0)),
+        "the filled series is not `100 / 5`: {output:?}"
+    );
+    assert!(
+        !output.contains_key("{env=\"prod\", instance=\"i3\", job=\"y\"}"),
+        "the filled series invented the included label from the side it stands in for: {output:?}"
+    );
+}

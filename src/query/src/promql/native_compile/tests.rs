@@ -15,20 +15,21 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use datafusion::error::DataFusionError;
+use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::map::MathOp;
+use promql::native::metrics::NodePath;
 use promql::native::plan::{
     BoundInstant, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
-use promql::vector_match::{BinaryMatching, BinaryOp};
+use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use promql_parser::parser::{
-    BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, VectorMatchFillValues,
+    BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, VectorMatchFillValues, VectorSelector,
 };
 
-use super::compile;
+use super::{CompiledTree, compile, compile_selectors};
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
@@ -1489,31 +1490,27 @@ fn a_constant_operand_binds_the_value_it_folds_to() {
     }
 }
 
-/// An operation between two vectors is refused because the tree cannot say which selector each
-/// `Input` reads: `a + b` and `a + a` would compile to the same tree. The refusal names the missing
-/// identity rather than the query it found, so whoever adds it knows what to add.
+/// An operation between two vectors is an ordinary node now that each input names the selector it
+/// was bound to: the shapes that used to be refused for the missing identity compile, and each one
+/// binds one input per selector it reads.
 #[test]
-fn an_operation_between_two_vectors_is_refused_for_the_missing_selector_identity() {
+fn an_operation_between_two_vectors_binds_one_input_per_selector() {
     for query in [
         "a + b",
         "a > b",
         "rate(a[5m]) * rate(b[5m])",
         "abs(a) + abs(b)",
     ] {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .expect_err(&format!("`{query}` compiled, and it should not have"));
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "`{query}` did not report NotImplemented: {error}"
-        );
-        let message = error.to_string();
-        assert!(
-            message.contains("between two vectors"),
-            "`{query}` did not say what it found: {message}"
-        );
-        assert!(
-            message.contains("selector"),
-            "`{query}` did not name what an input is missing: {message}"
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &one_schema(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(
+            input_metrics(&compiled),
+            vec![Some("a".to_string()), Some("b".to_string())],
+            "`{query}` did not bind one input per selector"
         );
     }
 }
@@ -1644,6 +1641,295 @@ fn the_batch_acceptance_queries_compile() {
             grid_of(tree.root()),
             (0, 5_000, 21),
             "`{query}` does not land on the statement's grid"
+        );
+    }
+}
+
+/// A raw series layout of one field named `name`.
+///
+/// Two of these differ in the field they produce, which is the only difference a binding can have
+/// while both selectors read raw samples.
+fn raw_schema_of_field(name: &str) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::new([FieldSpec { name: name.into() }]),
+        eval_grid: None,
+    })
+}
+
+/// The layout every selector is fed in when the query reads only one: `schema`, whatever was asked.
+///
+/// This is what [`compile`] answers for every selector, and the tests that only care about one
+/// layout use it so the callback does not have to be written out at each call site.
+fn one_schema(schema: Arc<SeriesSchema>) -> impl Fn(&VectorSelector) -> Result<Arc<SeriesSchema>> {
+    move |_selector| Ok(Arc::clone(&schema))
+}
+
+/// Whether a matching names its labels with `on` (`true`) or `ignoring` (`false`), and which.
+fn matching_labels(labels: &MatchingLabels) -> (bool, Vec<&str>) {
+    match labels {
+        MatchingLabels::On(names) => (true, names.iter().map(|name| &**name).collect()),
+        MatchingLabels::Ignoring(names) => (false, names.iter().map(|name| &**name).collect()),
+    }
+}
+
+/// Which cardinality a matching declares, and the labels it copies from the one side.
+fn matching_cardinality(cardinality: &Cardinality) -> (&'static str, Vec<&str>) {
+    match cardinality {
+        Cardinality::OneToOne => ("one-to-one", Vec::new()),
+        Cardinality::ManyToOne(names) => {
+            ("many-to-one", names.iter().map(|name| &**name).collect())
+        }
+        Cardinality::OneToMany(names) => {
+            ("one-to-many", names.iter().map(|name| &**name).collect())
+        }
+    }
+}
+
+/// The metric each bound input records, in the order the inputs were bound.
+fn input_metrics(compiled: &CompiledTree) -> Vec<Option<String>> {
+    compiled
+        .inputs
+        .iter()
+        .map(|input| input.requirement.metric.clone())
+        .collect()
+}
+
+/// `a + b`: two selectors bound two inputs, each at the position its own operand gives it, and each
+/// recording the selector it was bound to. The operation itself is an ordinary vector–vector node
+/// whose matching is the default: every label but `__name__` matches, one series to one.
+#[test]
+fn two_selectors_bind_two_inputs_named_by_their_operands() {
+    let compiled = compile_selectors(
+        &eval_stmt("a + b"),
+        &one_schema(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a + b` was refused: {error}"));
+
+    // One input per selector, in the order the executor visits them: left before right.
+    let inputs = &compiled.inputs;
+    assert_eq!(
+        inputs.len(),
+        2,
+        "`a + b` did not bind one input per selector: {inputs:?}"
+    );
+    assert_eq!(
+        inputs[0].path,
+        NodePath::root().left().input(),
+        "the left selector is not bound where its operand's input sits"
+    );
+    assert_eq!(
+        inputs[1].path,
+        NodePath::root().right().input(),
+        "the right selector is not bound where its operand's input sits"
+    );
+    assert_eq!(
+        input_metrics(&compiled),
+        vec![Some("a".to_string()), Some("b".to_string())],
+        "the inputs did not record the selectors they were bound to"
+    );
+    for input in inputs.iter() {
+        assert_eq!(input.ordering, SeriesOrdering::KeyThenTime);
+        assert_eq!(input.requirement.offset_ms, 0, "the selector has no offset");
+        assert_eq!(input.requirement.at_ms, None, "the selector has no anchor");
+        assert!(input.schema.eval_grid.is_none(), "the input is not raw");
+    }
+
+    assert!(
+        matches!(&compiled.tree.root().expr, NativeExpr::Binary { .. }),
+        "`a + b` did not compile to a binary node: {:?}",
+        compiled.tree.root().expr
+    );
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(matching.op, BinaryOp::Add);
+    assert_eq!(
+        matching_labels(&matching.labels),
+        (false, Vec::new()),
+        "the default matching is not `ignoring` nothing, which matches on every label but the name"
+    );
+    assert_eq!(matching_cardinality(&matching.cardinality).0, "one-to-one");
+    assert_eq!(
+        matching.fill,
+        FillValues::default(),
+        "a query without a fill binds no fill value"
+    );
+    assert!(!matching.return_bool, "`+` is not a comparison");
+}
+
+/// `a / on(job) b` matches on the one label it names. The default matches on every label but
+/// `__name__`, so binding `on` as `ignoring` (or dropping it) would match series the query did not
+/// ask to match.
+#[test]
+fn an_on_matching_binds_the_labels_it_names() {
+    let compiled = compile_selectors(
+        &eval_stmt("a / on(job) b"),
+        &one_schema(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a / on(job) b` was refused: {error}"));
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(matching.op, BinaryOp::Div);
+    assert_eq!(
+        matching_labels(&matching.labels),
+        (true, vec!["job"]),
+        "`on(job)` was not bound as an `on` list holding `job`"
+    );
+    assert_eq!(matching_cardinality(&matching.cardinality).0, "one-to-one");
+}
+
+/// `ignoring` and `group_left` are two separate fields of the matching: the labels a series is
+/// matched on, and the labels copied from the one side. Binding one into the other would compute a
+/// different result for a query this compiler accepts.
+#[test]
+fn an_ignoring_with_group_left_binds_both_lists() {
+    let compiled = compile_selectors(
+        &eval_stmt("a / ignoring(instance) group_left(host) b"),
+        &one_schema(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| {
+        panic!("`a / ignoring(instance) group_left(host) b` was refused: {error}")
+    });
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(
+        matching_labels(&matching.labels),
+        (false, vec!["instance"]),
+        "`ignoring(instance)` was not bound as an `ignoring` list holding `instance`"
+    );
+    assert_eq!(
+        matching_cardinality(&matching.cardinality),
+        ("many-to-one", vec!["host"]),
+        "`group_left(host)` was not bound as a many-to-one cardinality copying `host`"
+    );
+}
+
+/// `fill_left` fills a sample of the left side, so it binds [`FillValues::lhs`] and leaves the right
+/// one empty. The two fields are asserted apart because the kernel reads them apart, and a binding
+/// that swapped them would compute the fill of the other side.
+#[test]
+fn fill_left_binds_the_left_fill_value() {
+    let compiled = compile_selectors(
+        &eval_stmt("a + fill_left(0) b"),
+        &one_schema(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a + fill_left(0) b` was refused: {error}"));
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(
+        matching.fill.lhs,
+        Some(0.0),
+        "`fill_left(0)` did not bind the left fill value"
+    );
+    assert_eq!(
+        matching.fill.rhs, None,
+        "`fill_left(0)` bound a right fill value the query did not write"
+    );
+}
+
+/// `fill_right` fills a sample of the right side, so it binds [`FillValues::rhs`]. The value is
+/// asserted exactly, because a fill is a number the query wrote rather than one this compiler may
+/// round.
+#[test]
+fn fill_right_binds_the_right_fill_value() {
+    let compiled = compile_selectors(
+        &eval_stmt("a + fill_right(1.5) b"),
+        &one_schema(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a + fill_right(1.5) b` was refused: {error}"));
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(
+        matching.fill.rhs,
+        Some(1.5),
+        "`fill_right(1.5)` did not bind the right fill value"
+    );
+    assert_eq!(
+        matching.fill.lhs, None,
+        "`fill_right(1.5)` bound a left fill value the query did not write"
+    );
+}
+
+/// `fill` stands for both sides, so both fields carry it. Binding one of them would fill one side
+/// and drop the other's samples, which is a different query.
+#[test]
+fn fill_binds_both_fill_values() {
+    let compiled = compile_selectors(
+        &eval_stmt("a + fill(2) b"),
+        &one_schema(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a + fill(2) b` was refused: {error}"));
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(matching.fill.lhs, Some(2.0), "`fill(2)` left the lhs empty");
+    assert_eq!(matching.fill.rhs, Some(2.0), "`fill(2)` left the rhs empty");
+}
+
+/// Every selector is bound through the callback, so two selectors of one query may be fed
+/// differently shaped samples: each input reports the layout its own selector asked for, and the
+/// requirement beside it names the series and the matchers that selector wrote.
+#[test]
+fn each_selector_is_bound_to_the_layout_it_asked_for() {
+    let (left, right) = (
+        raw_schema_of_field("left_value"),
+        raw_schema_of_field("right_value"),
+    );
+    // One layout per metric name, so a selector bound to the wrong one is visible: a callback that
+    // answered the same schema for both would fail the assertions below.
+    let bindings = |selector: &VectorSelector| match selector.name.as_deref() {
+        Some("a") => Ok(Arc::clone(&left)),
+        Some("b") => Ok(Arc::clone(&right)),
+        other => panic!("the fixture has no layout for the selector `{other:?}`"),
+    };
+    let compiled = compile_selectors(
+        &eval_stmt("a{job=\"left\"} + b{job=\"right\"}"),
+        &bindings,
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| {
+        panic!("`a{{job=\"left\"}} + b{{job=\"right\"}}` was refused: {error}")
+    });
+
+    assert_eq!(compiled.inputs.len(), 2);
+    // The binding is the one the callback answered for that selector, not a copy of the other's.
+    assert!(
+        Arc::ptr_eq(&compiled.inputs[0].schema, &left),
+        "the left selector was not bound to the layout it asked for"
+    );
+    assert!(
+        Arc::ptr_eq(&compiled.inputs[1].schema, &right),
+        "the right selector was not bound to the layout it asked for"
+    );
+    assert_eq!(
+        compiled.inputs[0].schema.fields[0].name.as_ref(),
+        "left_value"
+    );
+    assert_eq!(
+        compiled.inputs[1].schema.fields[0].name.as_ref(),
+        "right_value"
+    );
+
+    // The requirement beside each binding is the selector's own: its metric and its matchers.
+    assert_eq!(
+        input_metrics(&compiled),
+        vec![Some("a".to_string()), Some("b".to_string())]
+    );
+    for (input, value) in compiled.inputs.iter().zip(["left", "right"]) {
+        let matchers: Vec<&str> = input
+            .requirement
+            .matchers
+            .matchers
+            .iter()
+            .map(|matcher| matcher.value.as_str())
+            .collect();
+        assert_eq!(
+            matchers,
+            vec![value],
+            "the input did not record the matchers its selector wrote"
         );
     }
 }
