@@ -1884,6 +1884,9 @@ async fn test_manual_build_treats_compacted_files_as_done() {
     config.inverted_index.create_on_compaction = Mode::Disable;
     config.fulltext_index.create_on_compaction = Mode::Disable;
     config.bloom_filter_index.create_on_compaction = Mode::Disable;
+    // The builds of both SSTs must block at the gate together; the default
+    // limit depends on the CPU count and can be 1.
+    config.max_background_index_builds = 2;
     let engine = Arc::new(
         env.create_engine_with(config, None, Some(gate.clone()), None)
             .await,
