@@ -2658,49 +2658,49 @@ fn an_interleaved_input_is_refused_without_a_window() {
     assert!(message.contains("root.input"), "{message}");
 }
 
-/// A selection over an interleaved input is refused when the execution is built, not run.
+/// A selection over an interleaved input is refused when the tree is bound, before it can run.
 ///
-/// The binding accepts this tree: the plan's `Instant` arm has no ordering check yet -- #9785 adds
-/// one to `validate`, so that half of the refusal arrives in a separate change. The tree can
-/// therefore be *built* here and cannot be *executed*, which is exactly the split this runtime
-/// keeps: an instant selection reads one series to its `is_last` and holds no cross-series state,
-/// but the input node's flag -- and every node above it -- assumes the chunks of a series arrive
-/// together, so an input declaring `Interleaved` is refused before a chunk is read. The shape with
-/// a map between the input and the selection is
-/// [`an_interleaved_input_is_refused_under_a_map_over_a_selection`].
+/// The binding is where the ordering is known, and the plan's `Instant` arm refuses an input that
+/// declares `Interleaved` for the reason the window arm does: a selection's consumer collects one
+/// series' chunks into one buffer, so it reads a series to its last chunk before the next. Nothing
+/// about an interleaved input is therefore left to the runtime along a selection, and the tree
+/// never reaches [`NativeExecutionState::try_new`]. The ordering check there stays for the shape
+/// the binding cannot see through: it only looks at a window's own input, so a window over a map
+/// over the source still reads an interleaved stream, which is
+/// [`a_window_over_an_interleaved_input_is_rejected`]. The shape with a map between the input and
+/// the selection is [`an_interleaved_input_is_refused_under_a_map_over_a_selection`].
 #[test]
 fn an_interleaved_input_is_refused_under_a_selection() {
     let out_grid = grid(0, 60_000, 2);
-    let tree = NativeTree::try_new(instant(
+    let error = NativeTree::try_new(instant(
         raw_input_with_ordering(SeriesOrdering::Interleaved),
         60_000,
         0,
         Arc::clone(&out_grid),
     ))
-    .expect("the binding accepts a selection over an interleaved input");
-    let error =
-        match NativeExecutionState::try_new(&tree, pool(), &ExecutionPlanMetricsSet::new(), 0) {
-            Ok(_) => panic!("the runtime accepted an interleaved input under a selection"),
-            Err(error) => error,
-        };
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "{error}"
-    );
+    .expect_err("a selection over an interleaved input must not bind");
+    // A rejected tree is a compiler defect rather than a query error, so the binding reports it as
+    // `Internal`; what this pins is that the refusal names the ordering it came from, since the
+    // same check refuses a window over the same input.
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
     let message = error.to_string();
-    assert!(message.contains("Interleaved"), "{message}");
-    assert!(message.contains("root.input"), "{message}");
+    assert!(
+        message.contains("interleaved chunks cannot be fed to it"),
+        "{message}"
+    );
 }
 
 /// The same refusal with a map between the input and the selection.
 ///
 /// A map passes chunks through in the order they arrive, so the selection still reads an
 /// interleaved stream even though the node below it is a map: the ordering is a property of the
-/// input, and the runtime records it there rather than at the node that reads it.
+/// input, and the binding records it there rather than at the node that reads it. `validate`
+/// descends through the map to the selection, whose own arm then checks the input it reads, so the
+/// tree is refused at the same point as [`an_interleaved_input_is_refused_under_a_selection`].
 #[test]
 fn an_interleaved_input_is_refused_under_a_map_over_a_selection() {
     let out_grid = grid(0, 60_000, 2);
-    let tree = NativeTree::try_new(map(
+    let error = NativeTree::try_new(map(
         instant(
             raw_input_with_ordering(SeriesOrdering::Interleaved),
             60_000,
@@ -2709,21 +2709,13 @@ fn an_interleaved_input_is_refused_under_a_map_over_a_selection() {
         ),
         vec![MathOp::Abs],
     ))
-    .expect("the binding accepts a map over a selection over an interleaved input");
-    let error =
-        match NativeExecutionState::try_new(&tree, pool(), &ExecutionPlanMetricsSet::new(), 0) {
-            Ok(_) => {
-                panic!("the runtime accepted an interleaved input under a map and a selection")
-            }
-            Err(error) => error,
-        };
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "{error}"
-    );
+    .expect_err("a map over a selection over an interleaved input must not bind");
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
     let message = error.to_string();
-    assert!(message.contains("Interleaved"), "{message}");
-    assert!(message.contains("root.input.input"), "{message}");
+    assert!(
+        message.contains("interleaved chunks cannot be fed to it"),
+        "{message}"
+    );
 }
 
 /// A series that produced values under a label set, followed by one that produced none under the
