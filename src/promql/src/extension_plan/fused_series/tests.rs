@@ -180,6 +180,69 @@ fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
 }
 
+/// Two windows stacked, `rate(last_over_time(x[1s])[2s])`, which no compiler produces.
+///
+/// A range function has to apply directly to a selector, and a selector is raw samples, so a tree
+/// with a window above a window is only reachable by writing it down by hand - which is a tree
+/// [`FusedSeriesExec`](super::FusedSeriesExec) accepts, and therefore one it has to answer correctly.
+///
+/// The inner window is the interesting one: `last_over_time` keeps `__name__`, so the pair it can
+/// split is not two series whose names it dropped but `{host="h", zone=""}` and `{host="h"}`, one
+/// canonical label set and two raw keys. Its fragments are not merged unless the node above it
+/// merges them, and that merge happens once per execution: with one execution per partition each
+/// partition sees one fragment, so the outer window reads one half of the pair.
+fn nested_window_tree() -> NativeTree {
+    let grid = grid();
+    // The inner window's output, which is also the outer window's output: a window reports one value
+    // per input field on its own grid.
+    let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    }));
+    let raw = NativeType::Samples(raw_schema());
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Window {
+                    input: Box::new(NativeNode {
+                        expr: NativeExpr::Input(BoundInput {
+                            output: raw.clone(),
+                            ordering: SeriesOrdering::KeyThenTime,
+                        }),
+                        output: raw,
+                    }),
+                    op: BoundWindow {
+                        function: RangeFunction::LastOverTime,
+                        window: RangeWindow {
+                            range_ms: 1_000,
+                            offset_ms: 0,
+                            anchor_ms: None,
+                        },
+                        // The inner window's input is raw samples, so it has no grid of its own.
+                        input_grid: None,
+                        output_grid: Arc::clone(&grid),
+                    },
+                },
+                output: evaluated.clone(),
+            }),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: 2_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                },
+                // The outer window reads the inner one's evaluated output, on that output's grid,
+                // and reports one value per field there like the inner one does.
+                input_grid: Some(Arc::clone(&grid)),
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated,
+    })
+    .expect("the bound tree is legal")
+}
+
 /// The `rate(x[5m])` tree with a `sum by (job)` over it, which the runtime does not execute.
 fn aggregate_tree() -> NativeTree {
     let rate = rate_tree();
@@ -1361,6 +1424,49 @@ fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
         two.properties().output_partitioning().partition_count(),
         "the node takes the input's count"
     );
+}
+
+/// Two windows stacked are refused over more than one partition, because the inner one's fragments
+/// need not have been merged.
+///
+/// The counterexample is legal PromQL once nesting is expressible: the inner `last_over_time` runs
+/// over two raw series that are one canonical label set, `{host="h", zone=""}` holding `(1s, 1)` and
+/// `{host="h"}` holding `(2s, 2)`, and the outer `rate` needs both in one window. In a single
+/// partition the outer window merges the two fragments and answers `(2s, 1)`; in two partitions each
+/// executor is handed one fragment and has one sample to rate, so the outer window answers nothing.
+/// That is an empty result rather than an error, which is why no check further down can see it.
+///
+/// `last_over_time` keeps `__name__`, so a check that looked only for a dropped metric name accepts
+/// this tree. What makes it unsafe is that a window's output can hold two series under one label set
+/// whenever it did not merge its input, which a bare tree cannot say.
+///
+/// One partition stays accepted: there is nothing to split there, which is what makes the refusal
+/// about the split rather than about the shape of the tree.
+#[test]
+fn a_nested_window_over_two_partitions_is_refused() {
+    let error = plan(
+        nested_window_tree(),
+        memory_exec_partitioned(vec![vec![], vec![]]),
+    )
+    .expect_err("each of two partitions would merge only the fragment it was given");
+    let message = error.to_string();
+    assert!(
+        message.contains("`root.input`"),
+        "the refusal must name the inner window: {message}"
+    );
+    assert!(
+        message.contains("`root`"),
+        "the refusal must name the window above it: {message}"
+    );
+    assert!(
+        message.contains("2 partitions"),
+        "the refusal must name the partition count: {message}"
+    );
+
+    // The same tree over one partition is accepted, because one execution sees every fragment and
+    // merges them into one series before the window above it evaluates.
+    plan(nested_window_tree(), memory_exec(Vec::new()))
+        .expect("a single partition cannot split a logical series");
 }
 
 /// One poll reads at most [`POLL_BUDGET`] chunks of input, and stopping there loses nothing.

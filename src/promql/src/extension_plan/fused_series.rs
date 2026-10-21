@@ -429,23 +429,35 @@ fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
 
 /// Refuses a tree whose logical series can be split across the partitions this node runs.
 ///
-/// A window that drops `__name__`, or a map, can turn two raw series into one logical series. A
-/// stateful node above it needs both halves together, and the runtime does provide that within one
-/// execution: a window whose input can hold two series under one label set collects the fragments,
-/// merges each label set once, and only then evaluates.
+/// Keeping the metric name is not what keeps two raw series apart. An empty tag value and an absent
+/// tag are the same canonical label set, so `{host="h", zone=""}` and `{host="h"}` are one series to
+/// Prometheus while the scan encodes them as two raw keys. A window that evaluated its input without
+/// merging it therefore passes such a pair through as two series under one label set, exactly as the
+/// functions that drop `__name__` do by merging them, and a map drops `__name__` outright.
 ///
-/// That merge is per execution, and this node runs one execution per partition. Two raw series that
-/// become one label set can land in different partitions - the scan keeps a *series* in one
-/// partition, which says nothing about two different series that later become indistinguishable -
-/// so each execution merges only the half it was given. The consumer above then answers from one
-/// half and reports nothing for the other, which is an empty result rather than an error.
+/// A stateful node above one of those needs both halves together, and the runtime does provide that
+/// within one execution: a window whose input can hold two series under one label set collects the
+/// fragments, merges each label set once, and only then evaluates. That merge is per execution, and
+/// this node runs one execution per partition. Two raw series that become one label set can land in
+/// different partitions - the scan keeps a *series* in one partition, which says nothing about two
+/// different series that later become indistinguishable - so each execution merges only the half it
+/// was given. The consumer above then answers from one half and reports nothing for the other, which
+/// is an empty result rather than an error.
 ///
-/// Reading that tree needs an exchange above this node that merges a logical series across
+/// Whether a window merged its input is runtime state this check does not have: it runs over a bare
+/// tree, where a window's input is only something that produces samples. A window below another
+/// window is therefore treated as one that did not merge, whatever function it runs, which refuses
+/// `rate` under `rate` (which drops the name) and `last_over_time` under `rate` (which keeps it)
+/// alike.
+///
+/// Reading such a tree needs an exchange above this node that merges a logical series across
 /// partitions, which does not exist yet. Until it does the tree is refused where it can hurt: over
-/// one partition there is nothing to split, so only a tree run over more than one is checked. The
-/// compiler cannot build the shape today - an outer window reaches an evaluated input only through
-/// a subquery, and [`compile`](crate::promql::native_compile::compile) refuses subqueries - so this
-/// costs no executable query. It is checked because [`FusedSeriesExec::try_new`] accepts any
+/// one partition there is nothing to split, so only a tree run over more than one is checked.
+///
+/// The compiler cannot build a nested window today - [`compile`](crate::promql::native_compile::compile)
+/// requires a range function to apply directly to a selector, `<range function>(<selector>[<range>])`,
+/// and a selector is raw samples - so no tree it produces has a window above a window, and this
+/// check costs no executable query. It is checked because [`FusedSeriesExec::try_new`] accepts any
 /// well-formed tree, and a tree it accepts is a tree it must answer correctly.
 fn reject_a_split_logical_series(
     tree: &NativeTree,
@@ -462,13 +474,18 @@ fn reject_a_split_logical_series(
         if rejection.is_some() {
             return;
         }
-        // A window keeps the metric name only for the functions that return the sample as it was
-        // stored, and only the others can leave two raw series apart. A map always drops it.
-        let rewrites = match &node.expr {
-            NativeExpr::Window { op, .. } => op.function.drops_metric_name(),
-            NativeExpr::Map { .. } => true,
-            _ => false,
-        };
+        // A node can leave two raw series on one canonical label set. A map always can: it drops
+        // `__name__` and every empty-valued tag. A window can whenever it did not merge its input,
+        // because `{zone=""}` and the absent `zone` are one label set and two raw keys, which a bare
+        // tree says nothing about: a check on the function alone accepts `last_over_time`, whose
+        // output keeps the name and can still hold both raw series. Every window is therefore taken
+        // to be a possible rewriter, and the refusal below is what narrows that to the shape that
+        // costs correctness - a window with a window above it, a window being the only consumer
+        // here.
+        let rewrites = matches!(
+            node.expr,
+            NativeExpr::Map { .. } | NativeExpr::Window { .. }
+        );
         if rewrites && let Some(above) = &consumer {
             rejection = Some((path.as_str().to_string(), above.clone()));
             return;
@@ -482,11 +499,13 @@ fn reject_a_split_logical_series(
         return Ok(());
     };
     Err(DataFusionError::Plan(format!(
-        "FusedSeries runs a tree where `{rewriter}` rewrites the series identity and `{above}` \
-         above it reads a whole series, over {partition_count} partitions: two raw series that \
-         become one label set are evaluated in different partitions, so `{above}` would read one \
-         half and answer an empty result. Reading this tree needs an exchange between `{rewriter}` \
-         and `{above}` that merges a logical series across partitions, which is not implemented"
+        "FusedSeries runs a tree where `{rewriter}` can leave two raw series on one canonical label \
+         set and `{above}` above it reads a whole series, over {partition_count} partitions: an \
+         empty tag value and an absent tag are the same label set, the runtime merges such \
+         fragments once per execution, and this node runs one execution per partition, so `{above}` \
+         would read one half and answer an empty result. Reading this tree needs an exchange between \
+         `{rewriter}` and `{above}` that merges a logical series across partitions, which is not \
+         implemented"
     )))
 }
 
