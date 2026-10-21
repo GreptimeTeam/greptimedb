@@ -43,8 +43,8 @@ mod test {
 
     use super::*;
     use crate::functions::test_util::{
-        self, STALE_NAN, TinyPrng, assert_execution_error, build_test_range_arrays,
-        invoke_range_udf, simple_range_udf_runner,
+        self, STALE_NAN, assert_execution_error, build_test_range_arrays, invoke_range_udf,
+        simple_range_udf_runner,
     };
     use crate::range_array::RangeArray;
 
@@ -151,43 +151,17 @@ mod test {
             resets_oracle,
             Resets::scalar_udf(),
         );
-        assert_eq!(expected, vec![Some(1.0), Some(0.0)]);
+        assert_eq!(expected, vec![Some(0.0), None]);
     }
 
     #[test]
     fn resets_range_array_seeded_differential() {
-        let mut prng = TinyPrng(0x2f6e_2b1d_834a_90c5);
-        let raw_values = (0..48)
-            .map(|_| match prng.next_index(12) {
-                0 => -0.0,
-                1 => 0.0,
-                2 => -2.0,
-                3 => -1.0,
-                4 => 1.0,
-                5 => 2.0,
-                6 => f64::INFINITY,
-                7 => f64::NEG_INFINITY,
-                8 | 9 => f64::NAN,
-                _ => STALE_NAN,
-            })
-            .collect::<Vec<_>>();
-        let values = raw_values.iter().copied().map(Some).collect();
-        let mut timestamp_ranges = Vec::new();
-        let mut value_ranges = Vec::new();
-        for _ in 0..32 {
-            let length = prng.next_index(13) as u32;
-            timestamp_ranges.push((prng.next_index(65 - length as usize) as u32, length));
-            value_ranges.push((prng.next_index(49 - length as usize) as u32, length));
-        }
+        test_util::run_seeded_differential(resets_oracle, Resets::scalar_udf(), false);
+    }
 
-        test_util::run_oracle_ranges(
-            values,
-            raw_values,
-            timestamp_ranges,
-            value_ranges,
-            resets_oracle,
-            Resets::scalar_udf(),
-        );
+    #[test]
+    fn resets_range_array_seeded_differential_with_nulls() {
+        test_util::run_seeded_differential(resets_oracle, Resets::scalar_udf(), true);
     }
 
     #[test]
@@ -263,6 +237,8 @@ mod test {
             vec![Some(0.0), Some(0.0), Some(0.0)],
         );
 
+        // The raw payload under the null slot would look like a reset; the sample sequence is
+        // 10 -> 10, which is none. The last window holds no sample at all.
         let values = Arc::new(Float64Array::new(
             vec![10.0, 7.0, 10.0].into(),
             Some(NullBuffer::from(vec![true, false, true])),
@@ -276,10 +252,10 @@ mod test {
         ]));
         simple_range_udf_runner(
             Resets::scalar_udf(),
-            RangeArray::from_ranges(timestamps, [(0, 3)]).unwrap(),
-            RangeArray::from_ranges(values, [(0, 3)]).unwrap(),
+            RangeArray::from_ranges(timestamps, [(0, 3), (1, 1)]).unwrap(),
+            RangeArray::from_ranges(values, [(0, 3), (1, 1)]).unwrap(),
             vec![],
-            vec![Some(1.0)],
+            vec![Some(0.0), None],
         );
     }
 }

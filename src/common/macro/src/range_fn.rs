@@ -16,7 +16,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Ident, ItemFn, Signature, Type, TypeReference, Visibility, parse_macro_input,
+    Attribute, Ident, ItemFn, Path, Signature, Type, TypeReference, Visibility, parse_macro_input,
 };
 
 use crate::utils::extract_input_types;
@@ -34,6 +34,7 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
     let mut name: Option<Ident> = None;
     let mut display_name: Option<Ident> = None;
     let mut ret: Option<Ident> = None;
+    let mut evaluator: Option<Path> = None;
 
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("name") {
@@ -44,6 +45,9 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
             Ok(())
         } else if meta.path.is_ident("ret") {
             ret = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("evaluator") {
+            evaluator = Some(meta.value()?.parse()?);
             Ok(())
         } else {
             Err(meta.error("unsupported property"))
@@ -103,10 +107,19 @@ pub(crate) fn process_range_fn(args: TokenStream, input: TokenStream) -> TokenSt
         arg_types,
         fn_name.clone(),
         ret.expect("ret required"),
+        evaluator.clone(),
     );
-    // preserve this fn, but remove its `pub` modifier
-    let input_fn_code: TokenStream = quote! {
-        #sig { #block }
+    // Preserve this fn, but remove its `pub` modifier. Specialized evaluators
+    // do not call it in production, while tests keep it as the slice oracle.
+    let input_fn_code: TokenStream = if evaluator.is_some() {
+        quote! {
+            #[cfg(test)]
+            #sig { #block }
+        }
+    } else {
+        quote! {
+            #sig { #block }
+        }
     }
     .into();
 
@@ -161,7 +174,19 @@ fn build_calc_fn(
     param_types: Vec<Type>,
     fn_name: Ident,
     ret_type: Ident,
+    evaluator: Option<Path>,
 ) -> TokenStream {
+    if let Some(evaluator) = evaluator {
+        return quote! {
+            impl #name {
+                fn calc(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+                    #evaluator(input, Self::name())
+                }
+            }
+        }
+        .into();
+    }
+
     let param_names = param_types
         .iter()
         .enumerate()

@@ -240,8 +240,6 @@ fn double_exponential_smoothing_impl(values: &[f64], sf: f64, tf: f64) -> Option
         return Some(f64::NAN);
     }
 
-    let values = values.to_vec();
-
     let mut s0 = 0.0;
     let mut s1 = values[0];
     let mut b = values[1] - values[0];
@@ -354,6 +352,109 @@ mod tests {
     }
 
     #[test]
+    fn test_double_exponential_smoothing_impl_copy_oracle() {
+        let normal_values = (0..240)
+            .map(|i| (i as f64 - 120.0) * 0.25)
+            .collect::<Vec<_>>();
+        let special_values = (0..240)
+            .map(|i| match i % 8 {
+                0 => 0.0,
+                1 => -0.0,
+                2 => f64::INFINITY,
+                3 => f64::NEG_INFINITY,
+                4 => f64::NAN,
+                5 => f64::from_bits(0x7ff8_0000_0000_0001),
+                6 => 42.5,
+                _ => -42.5,
+            })
+            .collect::<Vec<_>>();
+        let factors = [
+            (0.0, 0.0),
+            (-0.0, 1.0),
+            (0.5, 0.1),
+            (1.0, 1.0),
+            (-0.5, 0.5),
+            (0.5, -0.5),
+            (1.5, 0.5),
+            (0.5, 1.5),
+            (f64::NAN, 0.5),
+            (0.5, f64::NAN),
+            (f64::INFINITY, 0.5),
+            (0.5, f64::INFINITY),
+            (f64::NEG_INFINITY, 0.5),
+            (0.5, f64::NEG_INFINITY),
+        ];
+
+        for (values_name, values) in [
+            ("normal", normal_values.as_slice()),
+            ("special", special_values.as_slice()),
+        ] {
+            for len in [0, 1, 2, 3, 20, 240] {
+                let values = &values[..len];
+                for (sf, tf) in factors {
+                    let old = double_exponential_smoothing_impl_with_copy(values, sf, tf).unwrap();
+                    let new = double_exponential_smoothing_impl(values, sf, tf).unwrap();
+                    let case = format!("values={values_name}, len={len}, sf={sf:?}, tf={tf:?}");
+
+                    if old.is_nan() || new.is_nan() {
+                        assert!(
+                            old.is_nan() && new.is_nan(),
+                            "NaN mismatch for {case}: old={old:?}, new={new:?}"
+                        );
+                        assert_eq!(
+                            old.to_bits(),
+                            new.to_bits(),
+                            "NaN bit difference for {case}: old={:#018x}, new={:#018x}",
+                            old.to_bits(),
+                            new.to_bits(),
+                        );
+                    } else {
+                        assert_eq!(
+                            old.to_bits(),
+                            new.to_bits(),
+                            "non-NaN bit difference for {case}: old={old:?}, new={new:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn double_exponential_smoothing_impl_with_copy(
+        values: &[f64],
+        sf: f64,
+        tf: f64,
+    ) -> Option<f64> {
+        if sf.is_nan() || tf.is_nan() || values.is_empty() {
+            return Some(f64::NAN);
+        }
+        if sf < 0.0 || tf < 0.0 {
+            return Some(f64::NEG_INFINITY);
+        }
+        if sf > 1.0 || tf > 1.0 {
+            return Some(f64::INFINITY);
+        }
+
+        if values.len() <= 2 {
+            return Some(f64::NAN);
+        }
+
+        let values = values.to_vec();
+        let mut s0 = 0.0;
+        let mut s1 = values[0];
+        let mut b = values[1] - values[0];
+
+        for (i, value) in values.iter().enumerate().skip(1) {
+            let x = sf * value;
+            b = calc_trend_value(i - 1, tf, s0, s1, b);
+            let y = (1.0 - sf) * (s1 + b);
+            s0 = s1;
+            s1 = x + y;
+        }
+        Some(s1)
+    }
+
+    #[test]
     fn test_prom_double_exponential_smoothing_monotonic() {
         let ranges = [(0, 5)];
         let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
@@ -450,7 +551,7 @@ mod tests {
         (ts_range_array, value_range_array)
     }
 
-    /// Converts a prometheus functions test series into a vector of f64 element with respect to resets and trend direction   
+    /// Converts a prometheus functions test series into a vector of f64 element with respect to resets and trend direction
     /// The input example: "0+10x1000 100+30x1000"
     fn create_test_range_from_promql_series(input: &str) -> Vec<f64> {
         input.split(' ').map(parse_promql_series_entry).fold(
