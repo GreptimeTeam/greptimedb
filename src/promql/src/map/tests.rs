@@ -551,3 +551,59 @@ fn math_drops_reserved_metadata_and_empty_labels_with_the_name() {
     assert_eq!(output.metric.name(), None);
     assert_eq!(names, ["__other__", "host"]);
 }
+
+/// `max_of` / `min_of` against Go's `math.Max` / `math.Min`, whose signed-zero, NaN and infinity
+/// rules differ from `f64::max` / `f64::min`.
+#[test]
+fn max_of_and_min_of_follow_go() {
+    let bits = |text: &str| f64::from_bits(u64::from_str_radix(text, 16).unwrap());
+    let same = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+    let mut checked = 0;
+    for line in include_str!("max_min_cases.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+    {
+        let values: Vec<f64> = line.split_whitespace().map(bits).collect();
+        let (a, b) = (values[0], values[1]);
+        assert!(
+            same(ScalarFunction::MaxOf.apply(a, b), values[2]),
+            "max_of({a}, {b})"
+        );
+        assert!(
+            same(ScalarFunction::MinOf.apply(a, b), values[3]),
+            "min_of({a}, {b})"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 64);
+}
+
+/// Time-varying scalars pair by absolute position; a point either one lacks has no result.
+#[test]
+fn scalar_functions_pair_scalars_by_position() {
+    let schema = Arc::new(schema(&["scalar"]));
+    let scalar = |start: usize, values: &[Option<f64>]| {
+        Series::try_new(
+            &schema,
+            MetricName::try_new(None, Vec::new()).unwrap(),
+            TimeAxis::Grid(
+                GridRange::try_new(schema.eval_grid.clone().unwrap(), start, values.len()).unwrap(),
+            ),
+            SeriesFields::try_from_vec(vec![floats(values)]).unwrap(),
+        )
+        .unwrap()
+    };
+    let left = scalar(2, &[Some(1.0), Some(5.0), None, Some(-0.0)]);
+    let right = scalar(3, &[Some(2.0), Some(7.0), Some(0.0), Some(9.0)]);
+    let result = map_scalar_function(&schema, ScalarFunction::MaxOf, &left, &right)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run_floats(&result, 0),
+        vec![((3, 1), vec![Some(5.0)]), ((5, 1), vec![Some(0.0)])]
+    );
+    assert!(
+        run_floats(&result, 0)[1].1[0].unwrap().is_sign_positive(),
+        "max_of(-0, +0) is +0"
+    );
+}

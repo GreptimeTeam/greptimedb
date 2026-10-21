@@ -243,6 +243,10 @@ impl SeriesIndexCoverage {
             .version
             .series_indexes
             .values()
+            // Unimplemented formats cannot replace authoritative SST candidates.
+            .filter(|index| {
+                index.entry().format() == crate::series_index::artifact::ArtifactFormat::Parquet
+            })
             .map(|index| {
                 let files: HashSet<_> = uncovered
                     .iter()
@@ -778,6 +782,7 @@ mod tests {
         ));
         let store = env.access_layer.object_store().clone();
         let entry = SeriesIndexEntry {
+            artifact: None,
             file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
@@ -962,6 +967,48 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn index_merge_releases_permits_before_yielding() {
+        let (_env, scanner, _pruner) = indexed_scanner().await;
+        let semaphore = Arc::new(Semaphore::new(1));
+        let context = scanner.stream_ctx.input.series_index.clone().unwrap();
+        let streams = (0..3)
+            .map(|_| {
+                index_primary_key_stream(
+                    scanner.stream_ctx.clone(),
+                    context.clone(),
+                    scanner.coverage.indexes[0].clone(),
+                    semaphore.clone(),
+                )
+            })
+            .collect();
+        let merged = merge_primary_key_streams(
+            streams,
+            scanner.memory_pool.clone(),
+            &scanner.metrics_set,
+            0,
+            "permit-regression",
+        )
+        .unwrap();
+        let series =
+            decode_metric_series(merged, scanner.stream_ctx.input.region_metadata().clone())
+                .unwrap();
+        let batches = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            series.try_collect::<Vec<_>>(),
+        )
+        .await
+        .expect("index streams must not hold permits across yield")
+        .unwrap();
+        assert_eq!(
+            (0..1001)
+                .map(|tsid| MetricSeriesId { table_id: 1, tsid })
+                .collect::<Vec<_>>(),
+            batches.into_iter().flatten().collect::<Vec<_>>()
+        );
+        assert_eq!(1, semaphore.available_permits());
     }
 
     #[tokio::test]

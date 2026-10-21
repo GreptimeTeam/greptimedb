@@ -320,7 +320,8 @@ pub(crate) fn label_set(metric: &MetricName) -> LabelSet {
 }
 
 /// Merges series that share a label set into one, as Prometheus does after a function that
-/// rewrites labels or drops `__name__`; two of them holding one field at one point fail.
+/// rewrites labels or drops `__name__`; two of them holding one field at one point fail, whether
+/// the samples are floats or native histograms.
 ///
 /// The merge rearranges the payloads instead of rewriting them: a merged row takes the value its
 /// member carries at that position -- a float, a NaN, or a native histogram -- and a field another
