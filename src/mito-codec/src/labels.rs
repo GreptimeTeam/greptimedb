@@ -17,11 +17,12 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_telemetry::debug;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::series::frame::{LabelDecodeEncoding, LabelDecodeSpec};
 use datatypes::series::{Label, MetricName};
 use datatypes::value::Value;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::region_engine::RawLabelSource;
 use store_api::storage::{
@@ -30,8 +31,10 @@ use store_api::storage::{
 };
 
 use crate::error::{
-    InvalidDensePrimaryKeySnafu, InvalidSparsePrimaryKeySnafu, Result, UnsupportedOperationSnafu,
+    InvalidDensePrimaryKeySnafu, InvalidLabelDecodeDescriptionSnafu, InvalidSparsePrimaryKeySnafu,
+    Result, UnsupportedOperationSnafu,
 };
+use crate::row_converter::SortField;
 use crate::row_converter::dense::DensePrimaryKeyCodec;
 use crate::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
 
@@ -68,10 +71,41 @@ struct BoundLabel {
     position: usize,
 }
 
-/// Decodes labels on demand using the metadata snapshot bound to a raw-label source.
-pub struct PrimaryKeyLabelDecoder {
+/// One ordered key column of the minimal decode layout.
+struct KeyColumn {
+    id: ColumnId,
+    name: String,
+    data_type: ConcreteDataType,
+}
+
+/// Minimal primary-key layout labels can be decoded from.
+///
+/// It holds only what decoding reads: the metric name, the primary-key encoding, and the ordered
+/// primary-key columns with their physical types. A scan-bound [`RawLabelSource::PrimaryKey`] and a
+/// frame schema's [`LabelDecodeSpec`] both reduce to this view, so both bind the same decoder.
+/// Every key column is a `Tag` column, which is checked when a decoder is bound, so the layout
+/// carries no per-column role.
+struct KeyLayout {
     metric_name: Arc<str>,
-    physical_metadata: RegionMetadataRef,
+    encoding: PrimaryKeyEncoding,
+    columns: Vec<KeyColumn>,
+}
+
+impl KeyLayout {
+    /// Finds a listed primary-key column.
+    fn column(&self, id: ColumnId) -> Option<&KeyColumn> {
+        self.columns.iter().find(|column| column.id == id)
+    }
+
+    /// Returns the position of a listed primary-key column.
+    fn position(&self, id: ColumnId) -> Option<usize> {
+        self.columns.iter().position(|column| column.id == id)
+    }
+}
+
+/// Decodes labels on demand using the minimal primary-key layout bound to a raw-label source.
+pub struct PrimaryKeyLabelDecoder {
+    key: KeyLayout,
     complete: bool,
     include_name: bool,
     labels: Vec<BoundLabel>,
@@ -85,6 +119,9 @@ impl PrimaryKeyLabelDecoder {
     /// Explicit sources already contain complete labels and are rejected. Dense decoding
     /// requires the full key layout described by the bound snapshot; compatibility with
     /// older key layouts must be normalized upstream.
+    ///
+    /// Every primary-key column must be a `Tag` column; [`RegionMetadata::validate`] enforces it, so
+    /// this only rejects a snapshot built without validation.
     pub fn new(source: &RawLabelSource, projection: LabelProjection) -> Result<Self> {
         let RawLabelSource::PrimaryKey {
             metric_name,
@@ -98,36 +135,113 @@ impl PrimaryKeyLabelDecoder {
             .fail();
         };
         let metadata = physical_metadata.as_ref();
-        let mut labels = Vec::with_capacity(logical_tags.len());
+        if let Some(column) = metadata
+            .primary_key_columns()
+            .find(|column| column.semantic_type != SemanticType::Tag)
+        {
+            return InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "primary-key column {} is not a tag column",
+                    column.column_schema.name
+                ),
+            }
+            .fail();
+        }
+        let key = KeyLayout {
+            metric_name: metric_name.clone(),
+            encoding: metadata.primary_key_encoding,
+            columns: metadata
+                .primary_key_columns()
+                .map(|column| KeyColumn {
+                    id: column.column_id,
+                    name: column.column_schema.name.clone(),
+                    data_type: column.column_schema.data_type.clone(),
+                })
+                .collect(),
+        };
+        Self::bind(
+            key,
+            logical_tags
+                .iter()
+                .map(|tag| (tag.column_id, tag.name.as_ref())),
+            projection,
+        )
+    }
+
+    /// Binds a decoder to a frame schema's label decode description and projection.
+    ///
+    /// This is the decoding path for a consumer that received only the raw frame schema: the
+    /// description carries the metric name, the primary-key encoding, the ordered key columns with
+    /// their physical types, and the logical tags. The description is validated first, so a version
+    /// or structure this revision cannot honour is an error instead of a best-effort decode.
+    ///
+    /// The description lists exactly the encoded key fields, and region metadata guarantees each
+    /// of them is a tag column, so no per-column role is carried or re-checked; an array position
+    /// is an encoding position. The logical tags are still checked here, one by one, exactly as
+    /// for a typed binding, which is the only place the decoder inspects them (a listed column no
+    /// tag selects is not examined).
+    pub fn from_decode_spec(spec: &LabelDecodeSpec, projection: LabelProjection) -> Result<Self> {
+        spec.validate()
+            .context(InvalidLabelDecodeDescriptionSnafu)?;
+        let key = KeyLayout {
+            metric_name: Arc::from(spec.metric_name.as_str()),
+            encoding: match spec.encoding {
+                LabelDecodeEncoding::Dense => PrimaryKeyEncoding::Dense,
+                LabelDecodeEncoding::Sparse => PrimaryKeyEncoding::Sparse,
+            },
+            columns: spec
+                .primary_key
+                .iter()
+                .map(|column| KeyColumn {
+                    id: column.column_id,
+                    name: column.name.clone(),
+                    data_type: column.physical_type.clone(),
+                })
+                .collect(),
+        };
+        Self::bind(
+            key,
+            spec.logical_tags
+                .iter()
+                .map(|tag| (tag.column_id, tag.name.as_str())),
+            projection,
+        )
+    }
+
+    /// Binds the ordered logical tags of `key` to one projection and one decode layout.
+    fn bind<'a, I>(key: KeyLayout, tags: I, projection: LabelProjection) -> Result<Self>
+    where
+        I: IntoIterator<Item = (ColumnId, &'a str)>,
+    {
+        let mut labels = Vec::new();
         let mut names = HashSet::new();
         let mut ids = HashSet::new();
-        for tag in logical_tags.iter() {
-            let column = metadata.column_by_id(tag.column_id);
-            if !names.insert(tag.name.clone())
-                || !ids.insert(tag.column_id)
-                || tag.name.as_ref() == "__name__"
-                || is_internal_column(&tag.name)
-                || is_metric_engine_internal_column(&tag.name)
-                || ReservedColumnId::is_reserved(tag.column_id)
-                || !column.is_some_and(|column| {
-                    column.semantic_type == SemanticType::Tag
-                        && column.column_schema.name.as_str() == tag.name.as_ref()
-                        && metadata.primary_key.contains(&tag.column_id)
-                })
+        let mut logical_tag_count = 0;
+        for (column_id, name) in tags {
+            logical_tag_count += 1;
+            if !names.insert(name)
+                || !ids.insert(column_id)
+                || name == "__name__"
+                || is_internal_column(name)
+                || is_metric_engine_internal_column(name)
+                || ReservedColumnId::is_reserved(column_id)
+                || !key
+                    .column(column_id)
+                    .is_some_and(|column| column.name == name)
             {
                 return InvalidSparsePrimaryKeySnafu {
-                    reason: format!("invalid logical tag binding {}", tag.name),
+                    reason: format!("invalid logical tag binding {name}"),
                 }
                 .fail();
             }
-            let position = metadata.primary_key_index(tag.column_id).context(
-                InvalidSparsePrimaryKeySnafu {
-                    reason: format!("logical tag {} is not a primary-key column", tag.name),
-                },
-            )?;
+            let position = key
+                .position(column_id)
+                .context(InvalidSparsePrimaryKeySnafu {
+                    reason: format!("logical tag {name} is not a primary-key column"),
+                })?;
             labels.push(BoundLabel {
-                id: tag.column_id,
-                name: tag.name.clone(),
+                id: column_id,
+                name: Arc::from(name),
                 position,
             });
         }
@@ -143,14 +257,19 @@ impl PrimaryKeyLabelDecoder {
             let requested: HashSet<_> = requested.iter().map(AsRef::as_ref).collect();
             labels.retain(|label| requested.contains(label.name.as_ref()));
         }
-        let layout = match metadata.primary_key_encoding {
+        let layout = match key.encoding {
             PrimaryKeyEncoding::Sparse => Layout::Sparse(SparseOffsetsCache::new()),
             PrimaryKeyEncoding::Dense => Layout::Dense {
-                codec: DensePrimaryKeyCodec::new(metadata),
+                codec: DensePrimaryKeyCodec::with_fields(
+                    key.columns
+                        .iter()
+                        .map(|column| (column.id, SortField::new(column.data_type.clone())))
+                        .collect(),
+                ),
                 offsets: Vec::new(),
             },
         };
-        let encoding = match metadata.primary_key_encoding {
+        let encoding = match key.encoding {
             PrimaryKeyEncoding::Sparse => "sparse",
             PrimaryKeyEncoding::Dense => "dense",
         };
@@ -158,13 +277,12 @@ impl PrimaryKeyLabelDecoder {
         debug!(
             encoding,
             projection_mode,
-            logical_tag_count = logical_tags.len(),
+            logical_tag_count,
             selected_tag_count = labels.len(),
             "Constructed primary key label decoder"
         );
         Ok(Self {
-            metric_name: metric_name.clone(),
-            physical_metadata: physical_metadata.clone(),
+            key,
             complete,
             include_name,
             labels,
@@ -182,8 +300,8 @@ impl PrimaryKeyLabelDecoder {
         let mut values = Vec::with_capacity(self.labels.len() + usize::from(self.include_name));
         let Self {
             layout,
+            key,
             labels,
-            physical_metadata,
             complete,
             value_scratch,
             ..
@@ -192,12 +310,7 @@ impl PrimaryKeyLabelDecoder {
             Layout::Sparse(cache) => {
                 let mut view = SparsePrimaryKeyView::new(read_key, cache)?;
                 view.visit_label_ids(|id| {
-                    if *complete
-                        && !physical_metadata.column_by_id(id).is_some_and(|column| {
-                            column.semantic_type == SemanticType::Tag
-                                && physical_metadata.primary_key.contains(&id)
-                        })
-                    {
+                    if *complete && key.column(id).is_none() {
                         return InvalidSparsePrimaryKeySnafu {
                             reason: format!("unrecognized sparse tag id {id}"),
                         }
@@ -240,7 +353,7 @@ impl PrimaryKeyLabelDecoder {
         }
         if *complete {
             Ok(DecodedLabels::Complete(
-                MetricName::try_new(Some(self.metric_name.clone()), values).map_err(|error| {
+                MetricName::try_new(Some(key.metric_name.clone()), values).map_err(|error| {
                     InvalidSparsePrimaryKeySnafu {
                         reason: error.to_string(),
                     }
@@ -251,7 +364,7 @@ impl PrimaryKeyLabelDecoder {
             if self.include_name {
                 values.push(Label {
                     name: Arc::from("__name__"),
-                    value: self.metric_name.clone(),
+                    value: self.key.metric_name.clone(),
                 });
                 values.sort_unstable_by(|a, b| a.name.cmp(&b.name));
             }

@@ -23,12 +23,15 @@ use std::task::{Context, Poll, Waker};
 use api::v1::SemanticType;
 use common_error::ext::{BoxedError, ErrorExt, PlainError};
 use common_error::status_code::StatusCode;
-use common_query::series_frame::{pack_raw_series, raw_series_frame_ordering, unpack_raw_series};
+use common_query::series_frame::{
+    label_decode_spec, pack_raw_series, raw_series_frame_ordering, unpack_raw_series,
+};
 use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
 use datatypes::schema::ColumnSchema;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
@@ -162,6 +165,8 @@ fn chunk(key: Buffer, times: &[i64], values: &[f64], is_last: bool) -> RawSeries
 struct TestStream {
     schema: Arc<SeriesSchema>,
     labels: RawLabelSource,
+    /// The description this input declares; `None` means its chunks carry complete labels.
+    decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     items: VecDeque<Poll<Option<Result<RawSeriesChunk, BoxedError>>>>,
     // Delivered once the gate opens, so a blocked body can resume with later chunks.
@@ -204,6 +209,9 @@ impl RawSeriesStream for TestStream {
     fn label_source(&self) -> &RawLabelSource {
         &self.labels
     }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.decode.as_ref()
+    }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
     }
@@ -228,6 +236,9 @@ fn stream_with(
     (
         Box::pin(TestStream {
             schema,
+            // Derived once from the binding this fixture stores, as a producer does; an
+            // explicit-label fixture declares none.
+            decode: label_decode_spec(&labels),
             labels,
             ordering,
             items: items.into_iter().collect(),
@@ -253,6 +264,7 @@ fn gated_stream(
     (
         Box::pin(TestStream {
             schema: schema(),
+            decode: label_decode_spec(&labels),
             labels,
             ordering: SeriesOrdering::KeyThenTime,
             items: [ready(first)].into(),
@@ -280,6 +292,7 @@ fn gated_resuming_stream(
     (
         Box::pin(TestStream {
             schema: schema(),
+            decode: label_decode_spec(&labels),
             labels,
             ordering: SeriesOrdering::KeyThenTime,
             items: [ready(first)].into(),
@@ -326,6 +339,7 @@ fn gated_pending_stream(
     (
         Box::pin(TestStream {
             schema: schema(),
+            decode: label_decode_spec(&labels),
             labels,
             ordering: SeriesOrdering::KeyThenTime,
             items: VecDeque::new(),
@@ -376,10 +390,7 @@ async fn merges_full_encoded_keys_and_interleaved_chunks_with_global_finality() 
     let mut merged = merge_ordered_raw_series(vec![left, right]).unwrap();
     assert_eq!(merged.ordering(), SeriesOrdering::KeyThenTime);
     assert!(merged.schema().eval_grid.is_none());
-    assert!(matches!(
-        merged.label_source(),
-        RawLabelSource::PrimaryKey { .. }
-    ));
+    assert!(matches!(merged.label_source(), RawLabelSource::Explicit));
     let mut observed = Vec::new();
     while let Some(item) = merged.next().await {
         let item = item.unwrap();
@@ -446,11 +457,10 @@ async fn merges_two_unpacked_frames_through_the_frame_codec() {
             chunks.into_iter().map(ready),
         );
         let schema = Arc::clone(stream.schema());
-        let binding = stream.label_source().clone();
         let packed = pack_raw_series(stream).unwrap();
         let ordering = raw_series_frame_ordering(packed.schema().as_ref()).unwrap();
         assert_eq!(SeriesOrdering::KeyThenTime, ordering);
-        unpack_raw_series(packed, schema, binding, ordering).unwrap()
+        unpack_raw_series(packed, Some(schema)).unwrap()
     };
     let left = framed(
         label_source(1),
@@ -1219,198 +1229,141 @@ async fn greater_key_head_allows_finished_series_before_future_eof() {
     assert_eq!(right_drops.load(Ordering::SeqCst), 1);
 }
 
+/// The merge contract is the label layout, which is exactly what a frame can carry: any difference a
+/// frame could state — the metric name, the encoding, the key columns with their physical names,
+/// types, and order, and the logical tag mapping — is a conflict and is rejected before any input is
+/// polled.
 #[tokio::test]
-async fn preflight_rejects_incompatible_primary_key_bindings_without_polling() {
-    let full_baseline = label_source(1);
-    let physical_comparison_baseline = {
+async fn preflight_rejects_incompatible_label_layouts_without_polling() {
+    let sensor = Arc::<[BoundTag]>::from([BoundTag {
+        column_id: 9,
+        name: Arc::from("sensor"),
+    }]);
+    let rack = Arc::<[BoundTag]>::from([BoundTag {
+        column_id: 8,
+        name: Arc::from("rack"),
+    }]);
+    let edited = |edit: &dyn Fn(&mut store_api::metadata::RegionMetadata),
+                  logical_tags: Arc<[BoundTag]>| {
         let RawLabelSource::PrimaryKey {
             metric_name,
             physical_metadata,
             ..
-        } = label_source(1)
+        } = label_source(2)
         else {
             unreachable!()
         };
+        let mut changed = (*physical_metadata).clone();
+        edit(&mut changed);
         RawLabelSource::PrimaryKey {
             metric_name,
-            physical_metadata,
-            logical_tags: Arc::from([BoundTag {
-                column_id: 9,
-                name: Arc::from("sensor"),
-            }]),
+            physical_metadata: Arc::new(changed),
+            logical_tags,
         }
     };
     let cases = [
         (
             "metric name",
             label_source_with(2, PrimaryKeyEncoding::Dense, "other_metric"),
-            "binding",
         ),
         (
             "encoding",
             label_source_with(2, PrimaryKeyEncoding::Sparse, "room_temperature"),
-            "binding",
         ),
         (
-            "primary key column ids",
-            {
-                let RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata,
-                    logical_tags,
-                } = label_source(2)
-                else {
-                    unreachable!()
-                };
-                let mut changed = (*physical_metadata).clone();
-                changed.primary_key = vec![9, 8];
-                RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata: Arc::new(changed),
-                    logical_tags,
-                }
-            },
-            "binding",
+            "primary key column order",
+            edited(
+                &|metadata| metadata.primary_key = vec![9, 8],
+                sensor.clone(),
+            ),
         ),
         (
-            "primary key physical name mismatch",
-            {
-                let RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata,
-                    ..
-                } = label_source(2)
-                else {
-                    unreachable!()
-                };
-                let mut changed = (*physical_metadata).clone();
-                changed
-                    .column_metadatas
-                    .iter_mut()
-                    .find(|column| column.column_id == 8)
-                    .unwrap()
-                    .column_schema
-                    .name = "shelf".to_string();
-                RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata: Arc::new(changed),
-                    logical_tags: Arc::from([BoundTag {
-                        column_id: 9,
-                        name: Arc::from("sensor"),
-                    }]),
-                }
-            },
-            "merge compatibility",
-        ),
-        (
-            "primary key semantic role",
-            {
-                let RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata,
-                    ..
-                } = label_source(2)
-                else {
-                    unreachable!()
-                };
-                let mut changed = (*physical_metadata).clone();
-                changed
-                    .column_metadatas
-                    .iter_mut()
-                    .find(|column| column.column_id == 8)
-                    .unwrap()
-                    .semantic_type = SemanticType::Field;
-                RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata: Arc::new(changed),
-                    logical_tags: Arc::from([BoundTag {
-                        column_id: 9,
-                        name: Arc::from("sensor"),
-                    }]),
-                }
-            },
-            "merge compatibility",
+            "primary key physical name",
+            edited(
+                &|metadata| {
+                    metadata
+                        .column_metadatas
+                        .iter_mut()
+                        .find(|column| column.column_id == 8)
+                        .unwrap()
+                        .column_schema
+                        .name = "shelf".to_string();
+                },
+                sensor.clone(),
+            ),
         ),
         (
             "primary key physical type",
-            {
-                let RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata,
-                    logical_tags,
-                } = label_source(2)
-                else {
-                    unreachable!()
-                };
-                let mut changed = (*physical_metadata).clone();
-                changed
-                    .column_metadatas
-                    .iter_mut()
-                    .find(|column| column.column_id == 8)
-                    .unwrap()
-                    .column_schema
-                    .data_type = ConcreteDataType::int64_datatype();
-                RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata: Arc::new(changed),
-                    logical_tags,
-                }
-            },
-            "binding",
+            edited(
+                &|metadata| {
+                    metadata
+                        .column_metadatas
+                        .iter_mut()
+                        .find(|column| column.column_id == 8)
+                        .unwrap()
+                        .column_schema
+                        .data_type = ConcreteDataType::int64_datatype();
+                },
+                rack.clone(),
+            ),
         ),
-        (
-            "logical tag mapping",
-            {
-                let RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata,
-                    ..
-                } = label_source(2)
-                else {
-                    unreachable!()
-                };
-                RawLabelSource::PrimaryKey {
-                    metric_name,
-                    physical_metadata,
-                    logical_tags: Arc::from([BoundTag {
-                        column_id: 8,
-                        name: Arc::from("rack"),
-                    }]),
-                }
-            },
-            "binding",
-        ),
+        ("logical tag mapping", edited(&|_| {}, rack)),
     ];
-    for (description, incompatible, reason) in cases {
-        let baseline = if reason == "merge compatibility" {
-            &physical_comparison_baseline
-        } else {
-            &full_baseline
-        };
-        let (first, polls_a, drops_a) =
-            stream((*baseline).clone(), SeriesOrdering::KeyThenTime, []);
+    for (description, incompatible) in cases {
+        let (first, polls_a, drops_a) = stream(label_source(1), SeriesOrdering::KeyThenTime, []);
         let (second, polls_b, drops_b) = stream(incompatible, SeriesOrdering::KeyThenTime, []);
         let error = match merge_ordered_raw_series(vec![first, second]) {
             Ok(_) => panic!("{description} mismatch must be rejected"),
             Err(error) => error.to_string(),
         };
-        if reason == "merge compatibility" {
-            assert_eq!(
-                error,
-                "Invalid series: raw merge requires equal raw schemas, primary-key bindings, and ReadKeyThenTime ordering",
-                "{description}"
-            );
-        } else {
-            assert!(
-                error.to_lowercase().contains(reason),
-                "{description}: {error}"
-            );
-        }
+        assert!(
+            error.to_lowercase().contains("decode layouts"),
+            "{description}: {error}"
+        );
         assert_eq!(polls_a.load(Ordering::SeqCst), 0);
         assert_eq!(polls_b.load(Ordering::SeqCst), 0);
         assert_eq!(drops_a.load(Ordering::SeqCst), 1);
         assert_eq!(drops_b.load(Ordering::SeqCst), 1);
     }
+}
+
+/// A difference that lives only in local region metadata — here a primary-key column's semantic
+/// role — is not a merge conflict: a frame cannot state it, and both sides still decode to the same
+/// labels, so holding producer-side inputs to it would make them answerable to a stricter contract
+/// than the wire form can express.
+#[tokio::test]
+async fn preflight_ignores_metadata_the_label_layout_cannot_express() {
+    let base = label_source(1);
+    let RawLabelSource::PrimaryKey {
+        metric_name,
+        physical_metadata,
+        logical_tags,
+    } = label_source(2)
+    else {
+        unreachable!()
+    };
+    let mut changed = (*physical_metadata).clone();
+    changed
+        .column_metadatas
+        .iter_mut()
+        .find(|column| column.column_id == 8)
+        .unwrap()
+        .semantic_type = SemanticType::Field;
+    let incompatible = RawLabelSource::PrimaryKey {
+        metric_name,
+        physical_metadata: Arc::new(changed),
+        logical_tags,
+    };
+
+    let (first, _, _) = stream(base, SeriesOrdering::KeyThenTime, []);
+    let (second, _, _) = stream(incompatible, SeriesOrdering::KeyThenTime, []);
+    let merged = merge_ordered_raw_series(vec![first, second])
+        .expect("the same label layout merges whatever a local metadata snapshot says");
+    assert_eq!(
+        merged.label_decode_spec(),
+        label_decode_spec(&label_source(1)).as_ref(),
+        "the merged stream advertises the layout both sides agree on"
+    );
 }
 
 #[tokio::test]
@@ -1881,4 +1834,187 @@ async fn primary_key_codec_identity_survives_merge_then_label_materialization() 
         _ => panic!("expected NaN sample"),
     }
     assert!(output.is_last);
+}
+
+/// The merged stream advertises one decode description, so an input that describes its own labels
+/// differently is rejected instead of being decoded under the advertised layout. An input carrying
+/// the same layout is accepted, which is what a merge over unpacked frames looks like.
+#[tokio::test]
+async fn merge_rejects_inputs_that_describe_different_decode_layouts() {
+    let carried =
+        label_decode_spec(&label_source(1)).expect("a primary-key binding describes its key");
+    let mut different = carried.clone();
+    different.metric_name = "other_metric".to_string();
+
+    let carried_stream = |decode: LabelDecodeSpec| {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        (
+            Box::pin(TestStream {
+                schema: schema(),
+                labels: label_source(1),
+                decode: Some(decode),
+                ordering: SeriesOrdering::KeyThenTime,
+                items: VecDeque::new(),
+                deferred: VecDeque::new(),
+                polls: polls.clone(),
+                drops: drops.clone(),
+                gate: None,
+                release: None,
+            }) as SendableRawSeriesStream,
+            polls,
+            drops,
+        )
+    };
+
+    let (first, _, _) = carried_stream(carried.clone());
+    let (same_layout, _, _) = carried_stream(carried.clone());
+    let merged = merge_ordered_raw_series(vec![first, same_layout])
+        .expect("inputs that declare the same layout merge");
+    assert_eq!(merged.label_decode_spec(), Some(&carried));
+
+    let (first, _, _) = carried_stream(carried.clone());
+    let (mismatched, mismatched_polls, mismatched_drops) = carried_stream(different);
+    let error = match merge_ordered_raw_series(vec![first, mismatched]) {
+        Ok(_) => panic!("inputs describing different layouts must be rejected"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.to_lowercase().contains("decode"), "{error}");
+    assert_eq!(mismatched_polls.load(Ordering::SeqCst), 0);
+    assert_eq!(mismatched_drops.load(Ordering::SeqCst), 1);
+}
+
+/// A merge whose inputs are frame-decoded has no identity to forward, and the merged stream says so
+/// instead of inventing one: it reports [`NO_BOUND_LABEL_SOURCE`] while its description still states
+/// that its chunks are undecoded key chunks, which is what a consumer decodes from.
+#[tokio::test]
+async fn merge_without_a_bound_identity_still_advertises_the_decode_layout() {
+    use common_query::series_frame::raw_series_frame_ordering;
+    use common_query::series_frame::{pack_raw_series, unpack_raw_series};
+    use store_api::region_engine::NO_BOUND_LABEL_SOURCE;
+
+    use crate::source::materialize_raw_labels;
+
+    let carried =
+        label_decode_spec(&label_source(1)).expect("a primary-key binding describes its key");
+    let key = read_key("rack-a", "sensor-1");
+    let framed_input = |times: &[i64], values: &[f64]| {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        Box::pin(TestStream {
+            schema: schema(),
+            labels: NO_BOUND_LABEL_SOURCE,
+            decode: Some(carried.clone()),
+            ordering: SeriesOrdering::KeyThenTime,
+            items: VecDeque::from([Poll::Ready(Some(Ok(chunk(
+                key.clone(),
+                times,
+                values,
+                true,
+            ))))]),
+            deferred: VecDeque::new(),
+            polls,
+            drops,
+            gate: None,
+            release: None,
+        }) as SendableRawSeriesStream
+    };
+
+    let merged = merge_ordered_raw_series(vec![
+        framed_input(&[10, 30], &[1.0, 3.0]),
+        framed_input(&[20, 40], &[2.0, 4.0]),
+    ])
+    .expect("inputs that declare the same layout merge");
+
+    assert_eq!(merged.label_decode_spec(), Some(&carried));
+    assert!(
+        matches!(merged.label_source(), RawLabelSource::Explicit),
+        "no identity was established, and none is invented for the merged stream: {:?}",
+        NO_BOUND_LABEL_SOURCE
+    );
+    assert_eq!(merged.ordering(), SeriesOrdering::KeyThenTime);
+
+    // Packing advertises that layout under the merge's ordering, so the frame states both.
+    let framed = pack_raw_series(merged).unwrap();
+    assert_eq!(
+        datatypes::series::frame::raw_series_frame_label_decode(framed.schema().as_ref()).unwrap(),
+        Some(carried.clone())
+    );
+    assert_eq!(
+        raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
+        SeriesOrdering::KeyThenTime
+    );
+
+    // And it decodes: materialization reads the advertised description, not an identity.
+    let raw = unpack_raw_series(framed, Some(schema())).unwrap();
+    let rows = materialize_raw_labels(raw)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.time.timestamp(0).unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20, 30, 40]
+    );
+    let metric = rows[0].metric.clone().expect("labels were materialized");
+    assert_eq!(metric.name(), Some("room_temperature"));
+    assert_eq!(metric.get("rack"), Some("rack-a"));
+    assert_eq!(metric.get("sensor"), Some("sensor-1"));
+}
+
+/// A merged stream's label decode description survives the frame wire form: the packed schema
+/// declares that description, so a consumer holding only the schema can rebuild a decoder and decode
+/// the merged keys without a request-side label source.
+#[tokio::test]
+async fn merged_frame_declares_a_label_decode_description_that_decodes_its_keys() {
+    use common_query::series_frame::{pack_raw_series, unpack_raw_series};
+    use datatypes::series::frame::raw_series_frame_label_decode;
+    use mito_codec::labels::{LabelProjection, PrimaryKeyLabelDecoder};
+
+    let key = read_key("rack-a", "sensor-1");
+    let (left, _, _) = stream(
+        label_source(1),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key.clone(), &[10, 30], &[1.0, 3.0], true))],
+    );
+    let (right, _, _) = stream(
+        label_source(2),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key.clone(), &[20, 40], &[2.0, 4.0], true))],
+    );
+    let merged = merge_ordered_raw_series(vec![left, right]).unwrap();
+    let expected = merged
+        .label_decode_spec()
+        .cloned()
+        .expect("the merge advertises a primary-key layout");
+    let series_schema = merged.schema().clone();
+    let binding = label_source(1);
+    let ordering = merged.ordering();
+    let framed = pack_raw_series(merged).unwrap();
+    assert_eq!(
+        common_query::series_frame::raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
+        ordering
+    );
+    let declared = framed.schema();
+    assert_eq!(
+        raw_series_frame_label_decode(declared.as_ref()).unwrap(),
+        Some(expected.clone())
+    );
+
+    // The recovered description alone rebuilds an equivalent decoder; no metadata snapshot from
+    // the merge is consulted.
+    let mut from_schema =
+        PrimaryKeyLabelDecoder::from_decode_spec(&expected, LabelProjection::All).unwrap();
+    let mut from_binding = PrimaryKeyLabelDecoder::new(&binding, LabelProjection::All).unwrap();
+    assert_eq!(
+        from_schema.decode(&key).unwrap(),
+        from_binding.decode(&key).unwrap()
+    );
+
+    let mut decoded = unpack_raw_series(framed, Some(series_schema)).unwrap();
+    let first = decoded.next().await.unwrap().unwrap();
+    assert_eq!(first.primary_key.as_slice(), key.as_slice());
+    assert!(first.metric.is_none(), "key labels stay undecoded");
 }

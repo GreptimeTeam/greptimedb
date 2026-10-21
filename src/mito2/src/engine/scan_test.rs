@@ -5118,7 +5118,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     };
     let native_plan = Arc::new(RegionScanExec::new(native_scanner, request.clone(), None).unwrap());
     let native_plan = native_plan
-        .try_to_series_scan(native_source.clone())
+        .try_to_series_scan(native_source)
         .unwrap()
         .expect("Mito raw-series capability");
     let native_schema = native_plan.series_schema().clone();
@@ -5133,8 +5133,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
         frame_ordering,
         "the legacy producer must declare key-then-time frames"
     );
-    let unpacked =
-        unpack_raw_series(native_frames, native_schema, native_source, frame_ordering).unwrap();
+    let unpacked = unpack_raw_series(native_frames, Some(native_schema)).unwrap();
     let native_schema = unpacked.schema().clone();
     let mut native = unpacked.try_collect::<Vec<_>>().await.unwrap();
     assert_eq!(
@@ -5370,14 +5369,14 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
     let schema = schema.expect("the scan must emit at least one partition stream");
     let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
         Arc::clone(&schema),
-        source.clone(),
+        source,
         SeriesOrdering::Contiguous,
         chunks,
     )))
     .unwrap();
     let ordering = raw_series_frame_ordering(packed.schema().as_ref()).unwrap();
     assert_eq!(SeriesOrdering::Contiguous, ordering);
-    let validated = unpack_raw_series(packed, schema, source, ordering)
+    let validated = unpack_raw_series(packed, Some(schema))
         .unwrap()
         .try_collect::<Vec<_>>()
         .await
@@ -5720,18 +5719,12 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_as
     // not final.
     let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
         Arc::clone(&schema),
-        source.clone(),
+        source,
         SeriesOrdering::Contiguous,
         complete.clone(),
     )))
     .unwrap();
-    let unpacked = unpack_raw_series(
-        packed,
-        Arc::clone(&schema),
-        source,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let unpacked = unpack_raw_series(packed, Some(schema)).unwrap();
     let validated = unpacked.try_collect::<Vec<_>>().await.unwrap();
     assert_eq!(
         complete_rows,
@@ -6064,18 +6057,12 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguo
     // the chunks this reader produced, including the chunks the second assignment added.
     let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
         Arc::clone(&schema),
-        source.clone(),
+        source,
         SeriesOrdering::Contiguous,
         chunks.clone(),
     )))
     .unwrap();
-    let unpacked = unpack_raw_series(
-        packed,
-        Arc::clone(&schema),
-        source,
-        SeriesOrdering::Contiguous,
-    )
-    .unwrap();
+    let unpacked = unpack_raw_series(packed, Some(Arc::clone(&schema))).unwrap();
     let validated = unpacked.try_collect::<Vec<_>>().await.unwrap();
     assert_eq!(
         stream_rows,
@@ -6200,6 +6187,8 @@ fn primary_key_label_source(
 struct ChainedRawSeriesStream {
     schema: Arc<datatypes::series::samples::SeriesSchema>,
     label_source: store_api::region_engine::RawLabelSource,
+    /// The description this stream declares, derived from `label_source` once, like a producer.
+    label_decode_spec: Option<datatypes::series::frame::LabelDecodeSpec>,
     ordering: datatypes::series::SeriesOrdering,
     chunks: std::vec::IntoIter<datatypes::series::raw::RawSeriesChunk>,
 }
@@ -6211,9 +6200,11 @@ impl ChainedRawSeriesStream {
         ordering: datatypes::series::SeriesOrdering,
         chunks: Vec<datatypes::series::raw::RawSeriesChunk>,
     ) -> Self {
+        let label_decode_spec = common_query::series_frame::label_decode_spec(&label_source);
         Self {
             schema,
             label_source,
+            label_decode_spec,
             ordering,
             chunks: chunks.into_iter(),
         }
@@ -6240,8 +6231,218 @@ impl store_api::region_engine::RawSeriesStream for ChainedRawSeriesStream {
         &self.label_source
     }
 
+    fn label_decode_spec(&self) -> Option<&datatypes::series::frame::LabelDecodeSpec> {
+        self.label_decode_spec.as_ref()
+    }
+
     fn ordering(&self) -> datatypes::series::SeriesOrdering {
         self.ordering
+    }
+}
+
+/// Decodes each chunk's primary key through `description`, as a consumer holding only the stream
+/// would, and asserts none of the chunks carries inline labels.
+fn decode_declared_labels(
+    description: &datatypes::series::frame::LabelDecodeSpec,
+    chunks: &[datatypes::series::raw::RawSeriesChunk],
+) -> Vec<datatypes::series::MetricName> {
+    use mito_codec::labels::{DecodedLabels, LabelProjection, PrimaryKeyLabelDecoder};
+
+    let mut decoder =
+        PrimaryKeyLabelDecoder::from_decode_spec(description, LabelProjection::All).unwrap();
+    chunks
+        .iter()
+        .map(|chunk| {
+            assert!(
+                chunk.metric.is_none(),
+                "a key-encoded chunk leaves its labels undecoded"
+            );
+            match decoder.decode(chunk.primary_key.as_slice()).unwrap() {
+                DecodedLabels::Complete(metric) => metric,
+                DecodedLabels::Projected(_) => {
+                    panic!("decoding every label must yield complete labels")
+                }
+            }
+        })
+        .collect()
+}
+
+/// Every key-encoded raw series stream declares its own label decode description before the first
+/// poll, and that declaration is the one derived from the binding the scan read under. Dense and
+/// sparse producers are both covered, plus a stream that ends without producing a chunk, so the
+/// producer and the consumer are exercised against the same declaration.
+#[tokio::test]
+async fn test_mito_raw_series_stream_declares_its_label_decode_description() {
+    use store_api::region_engine::QueryScanContext;
+
+    // Dense encoding: one flushed series under the default region layout.
+    let mut env = TestEnv::with_prefix("test_mito_raw_series_self_describing_dense").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: test_util::build_rows_for_key("host-a", 0, 2, 0),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let mut scanner = engine.handle_query(region_id, request).await.unwrap();
+    let source = primary_key_label_source(&scanner.metadata());
+    let expected = common_query::series_frame::label_decode_spec(&source)
+        .expect("a primary-key binding describes its key");
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let metrics = ExecutionPlanMetricsSet::default();
+    let mut chunks = Vec::new();
+    for partition in 0..ranges.len() {
+        let stream = scanner
+            .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+            .unwrap()
+            .expect("a dense PerSeries scan produces raw series");
+        // The producer states its layout up front, before anything is polled.
+        assert_eq!(
+            Some(&expected),
+            stream.label_decode_spec(),
+            "dense partition {partition} must declare its label decode description before polling"
+        );
+        chunks.extend(stream.try_collect::<Vec<_>>().await.unwrap());
+    }
+    assert_eq!(
+        2,
+        chunks.iter().map(|chunk| chunk.time.len()).sum::<usize>()
+    );
+    let dense_metrics = decode_declared_labels(&expected, &chunks);
+    assert_eq!(dense_metrics.len(), chunks.len());
+    for metric in &dense_metrics {
+        assert_eq!(metric.name(), Some("fixture_metric"));
+        assert_eq!(metric.get("tag_0"), Some("host-a"));
+    }
+
+    // A statically empty stream declares the same layout while producing no chunk at all.
+    let empty_request = ScanRequest {
+        filters: vec![col("field_0").gt(lit(1.0e9_f64))],
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let mut empty_scanner = engine.handle_query(region_id, empty_request).await.unwrap();
+    let empty_source = primary_key_label_source(&empty_scanner.metadata());
+    let empty_expected = common_query::series_frame::label_decode_spec(&empty_source)
+        .expect("a primary-key binding describes its key");
+    let empty_ranges = empty_scanner.properties().partitions.clone();
+    assert!(
+        !empty_ranges.is_empty(),
+        "a filtered PerSeries scan still assigns its pinned input to a partition"
+    );
+    empty_scanner
+        .prepare(PrepareRequest {
+            ranges: Some(empty_ranges.clone()),
+            target_partitions: Some(empty_ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut empty_chunks = Vec::new();
+    for partition in 0..empty_ranges.len() {
+        let stream = empty_scanner
+            .scan_series_partition(
+                &QueryScanContext::default(),
+                &metrics,
+                partition,
+                &empty_source,
+            )
+            .unwrap()
+            .expect("a statically empty PerSeries scan still produces a raw series stream");
+        assert_eq!(
+            Some(&empty_expected),
+            stream.label_decode_spec(),
+            "an empty partition {partition} must still declare its layout before polling"
+        );
+        empty_chunks.extend(stream.try_collect::<Vec<_>>().await.unwrap());
+    }
+    assert!(
+        empty_chunks.is_empty(),
+        "the filtered-out stream produced no chunk"
+    );
+
+    // Sparse encoding: the two-phase producer encodes table id and TSID into the key too.
+    let mut env = TestEnv::with_prefix("test_mito_raw_series_self_describing_sparse").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let (metadata, row_schema) = create_two_phase_sparse_region(&engine, region_id).await;
+    let key = new_sparse_primary_key(&["host-a", "zone-1"], &metadata, 10, 0);
+    put_sparse_rows(
+        &engine,
+        region_id,
+        &row_schema,
+        vec![(key.clone(), 10, 1), (key, 20, 2)],
+    )
+    .await;
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let mut scanner = engine.handle_query(region_id, request).await.unwrap();
+    let source = primary_key_label_source(&scanner.metadata());
+    let expected = common_query::series_frame::label_decode_spec(&source)
+        .expect("a primary-key binding describes its key");
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut chunks = Vec::new();
+    for partition in 0..ranges.len() {
+        let stream = scanner
+            .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+            .unwrap()
+            .expect("a sparse PerSeries scan produces raw series");
+        assert_eq!(
+            Some(&expected),
+            stream.label_decode_spec(),
+            "sparse partition {partition} must declare its label decode description before polling"
+        );
+        chunks.extend(stream.try_collect::<Vec<_>>().await.unwrap());
+    }
+    assert_eq!(
+        2,
+        chunks.iter().map(|chunk| chunk.time.len()).sum::<usize>()
+    );
+    let metrics_seen = decode_declared_labels(&expected, &chunks);
+    assert_eq!(metrics_seen.len(), chunks.len());
+    for metric in &metrics_seen {
+        assert_eq!(metric.name(), Some("fixture_metric"));
+        assert_eq!(metric.get("tag_0"), Some("host-a"));
+        assert_eq!(metric.get("tag_1"), Some("zone-1"));
     }
 }
 
@@ -6388,7 +6589,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         }]),
     };
     let native_plan = Arc::new(RegionScanExec::new(native_scanner, native_request, None).unwrap())
-        .try_to_series_scan(native_source.clone())
+        .try_to_series_scan(native_source)
         .unwrap()
         .expect("typed int64 gate is supported");
     let native_schema = native_plan.series_schema().clone();
@@ -6402,7 +6603,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         ordering,
         "the legacy producer must declare key-then-time frames"
     );
-    let chunks = unpack_raw_series(frames, native_schema, native_source, ordering)
+    let chunks = unpack_raw_series(frames, Some(native_schema))
         .unwrap()
         .try_collect::<Vec<_>>()
         .await
@@ -6447,7 +6648,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         }]),
     };
     let empty_plan = Arc::new(RegionScanExec::new(empty_scanner, empty_request, None).unwrap())
-        .try_to_series_scan(empty_source.clone())
+        .try_to_series_scan(empty_source)
         .unwrap()
         .expect("statically empty scan still has native capability");
     let empty_schema = empty_plan.series_schema().clone();
@@ -6460,7 +6661,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         empty_ordering,
         "a statically empty legacy scan still declares key-then-time frames"
     );
-    let empty_chunks = unpack_raw_series(empty_frames, empty_schema, empty_source, empty_ordering)
+    let empty_chunks = unpack_raw_series(empty_frames, Some(empty_schema))
         .unwrap()
         .try_collect::<Vec<_>>()
         .await

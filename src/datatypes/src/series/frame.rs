@@ -18,11 +18,45 @@
 //! chunk and [`RawSeriesFrameBuilder`] emits rows directly as Arrow arrays once a row or estimated
 //! byte bound is reached. Decoding reuses one prepared schema per stream through
 //! [`RawSeriesFrameDecoder`]. Column layout, metadata, and wire strings stay on the frozen `v1`
-//! contract.
+//! contract; a key-encoded frame additionally declares a versioned [`LabelDecodeSpec`] so its
+//! labels can be decoded from the received schema alone.
+//!
+//! # Label decode description versioning
+//!
+//! The description is one `greptime.series.label_decode` metadata entry, and remote plans compare
+//! `greptime.series.*` metadata **as exact text, byte for byte**: a frontend and a datanode that
+//! write different text for the same labels disagree about the schema, and the query fails instead
+//! of falling back. The rules that follow from that are:
+//!
+//! - A reader rejects a version it does not implement, rather than guessing. This module writes and
+//!   reads [`LABEL_DECODE_VERSION`] only.
+//! - [`LABEL_DECODE_VERSION`] covers the whole text, including each key column's
+//!   [`LabelDecodeColumn::physical_type`]. That field is a [`ConcreteDataType`], so the text embeds
+//!   [`ConcreteDataType`]'s serde shape: it is not spelled here, and a change in that type's
+//!   serialization does alter this text. What keeps such a change from going unnoticed is the
+//!   frozen fixture `tests/compatibility/wire/raw_series_label_decode/v1_physical_types.json`,
+//!   which records the text of every datatype variant and fails the crate's tests when any of them
+//!   is serialized differently.
+//! - Any change to the shape of this text — a renamed or added field, a different
+//!   [`ConcreteDataType`] spelling, a different `logical_tags` order — is a **breaking** change at
+//!   the same version, because it makes two nodes of different builds disagree. Such a change must
+//!   bump [`LABEL_DECODE_VERSION`] and update that fixture with it.
+//! - The text is canonical: [`LabelDecodeSpec::canonicalize`] fixes the only part whose order
+//!   carries no meaning, so equal labels always write equal bytes.
+//!
+//! Deployment rule: during a rolling upgrade a frame may carry a version the receiving node does not
+//! implement, and a byte-for-byte schema comparison may fail for that reason alone. The intended
+//! behaviour is that such a mismatch disables the native series path at planning time and falls back
+//! to the generic path, instead of failing the query at execution.
+//!
+//! TODO(narthex): implement that planning-time fallback. No planner reads
+//! `raw_series_frame_label_decode` to decide support today, so a version or text mismatch currently
+//! surfaces as an execution-time error from the raw-frame decode or the remote schema comparison.
 
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -33,12 +67,14 @@ use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::compute::concat;
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use serde::{Deserialize, Serialize};
 
+use crate::data_type::ConcreteDataType;
 use crate::error::{InvalidSeriesSnafu, Result};
 use crate::series::histogram::{HistogramBatch, fields as histogram_fields};
 use crate::series::raw::{RawSeriesChunk, RawTimestamps};
 use crate::series::samples::{
-    DenseSamplesRef, HistogramSamples, Samples, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, HistogramSamples, Samples, SeriesFields, SeriesSchema,
 };
 use crate::series::{Label, MetricName, invalid_series};
 
@@ -46,6 +82,12 @@ const LAYOUT: &str = "greptime.series.layout";
 const CONTENT: &str = "greptime.series.content";
 const LABELS: &str = "greptime.series.labels";
 const TIME: &str = "greptime.series.time";
+const GRID: &str = "greptime.series.grid";
+/// Metadata key of the versioned label decode description carried by key-encoded frames.
+const LABEL_DECODE: &str = "greptime.series.label_decode";
+
+/// Version of the label decode description this revision writes and reads.
+pub const LABEL_DECODE_VERSION: u32 = 1;
 
 /// Whether a raw frame carries only the complete key or explicit metric labels as well.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +98,166 @@ pub enum RawLabelMode {
     Explicit,
 }
 
+/// Primary-key encoding of the labels a key-encoded frame carries.
+///
+/// This mirrors the storage contract's `PrimaryKeyEncoding` without making this crate depend on
+/// it; Dense and Sparse keys use different decode layouts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelDecodeEncoding {
+    /// Dense key: every primary-key field is encoded in order, with no ids on the wire.
+    Dense,
+    /// Sparse key: `(column id, value)` pairs, so the layout only frames the field stream.
+    Sparse,
+}
+
+/// One ordered key column needed to decode key-encoded labels.
+///
+/// Only tag columns reach this list: region metadata rejects a primary key that holds the time
+/// index or a non-`Tag` column, and it requires the primary key to name every tag column. The
+/// array's position is therefore the encoding position, with nothing to disambiguate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelDecodeColumn {
+    /// Physical column id of this key column.
+    pub column_id: u32,
+    /// Physical column name; a logical tag of the same id must repeat it.
+    pub name: String,
+    /// Physical data type of the encoded value, in [`ConcreteDataType`]'s own serde form. Dense
+    /// keys carry no types on the wire, so the codec is reconstructed from this exact ordered type
+    /// list.
+    pub physical_type: ConcreteDataType,
+}
+
+/// One logical tag name bound to a primary-key column.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelDecodeTag {
+    /// Physical column id this logical tag reads.
+    pub column_id: u32,
+    /// Logical tag name exposed to queries.
+    pub name: String,
+}
+
+/// Versioned, self-contained description of how to decode key-encoded labels.
+///
+/// It carries exactly what decoding a primary-key label source reads and nothing else: no region
+/// identity, no field columns, no time index. A consumer that receives the frame schema can
+/// therefore reconstruct an equivalent decoder without a scan-side binding, while a description
+/// that is missing, of an unknown version, or structurally inconsistent is a hard error instead of
+/// a silent fallback.
+///
+/// It is JSON-encoded in one schema metadata entry, always through
+/// [`raw_series_frame_schema_with_label_decode`], so both the producing and the expecting side of a
+/// `greptime.series.*` exact metadata comparison see byte-identical text. The text is
+/// self-describing but not a general interchange format: readers reject unknown fields here only
+/// at this structure's own levels, while [`LabelDecodeColumn::physical_type`] is decoded by
+/// [`ConcreteDataType`]'s own representation and is therefore exactly as stable as that type's
+/// serde. The frozen text this revision writes is pinned by
+/// `tests/compatibility/wire/raw_series_label_decode/v1_physical_types.json`; see the module
+/// documentation for what a change to it means.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelDecodeSpec {
+    /// Description version; see [`LABEL_DECODE_VERSION`].
+    pub version: u32,
+    /// Metric name attached to every decoded label set; may be empty.
+    pub metric_name: String,
+    /// Primary-key encoding that determines the decode layout.
+    pub encoding: LabelDecodeEncoding,
+    /// Every tag column of the primary key, in primary-key encoding order. This is exactly the
+    /// set of encoded key fields: region metadata forbids a primary key from naming the time
+    /// index or a field column, and requires it to name every tag column, so no time-index or
+    /// field entry can appear here. The order is significant and is compared as written: a dense
+    /// decode reads field *n* at position *n*, so the same columns in another order describe a
+    /// different key, not the same key in another order.
+    pub primary_key: Vec<LabelDecodeColumn>,
+    /// Logical tags, as bound by the producer, in [`LabelDecodeSpec::canonicalize`] order.
+    ///
+    /// The order carries no meaning: the decoder sorts the tags by name when it binds them
+    /// (`src/mito-codec/src/labels.rs:235`), so a decoded label set does not depend on it. It is
+    /// nevertheless fixed rather than left to the caller, because this description is compared as
+    /// exact text across nodes: two producers with the same tags in another order must write
+    /// byte-identical text, or one side rejects the other as a schema mismatch.
+    ///
+    /// The semantic checks on these tags (reserved and internal names, name equality with the bound
+    /// column, membership in `primary_key`) are the decoder's, matching what a typed binding gets.
+    pub logical_tags: Vec<LabelDecodeTag>,
+}
+
+impl LabelDecodeSpec {
+    /// Puts the order-insensitive part of the description in its canonical order.
+    ///
+    /// [`raw_series_frame_schema_with_label_decode`] applies this to a copy before serializing, and
+    /// so does the description a binding derives (in `common_query::series_frame`), so both sides of
+    /// a text comparison produce the same bytes and a reader can compare descriptions structurally.
+    /// `primary_key` is deliberately untouched: its order is the encoding order.
+    ///
+    /// The writer canonicalizes a **copy** on purpose. A caller's binding keeps its own
+    /// `logical_tags` order, and that order is meaningful elsewhere: `src/table/src/table/scan.rs`
+    /// compares two bindings' tag lists positionally (`lt.iter().zip(rt.iter())`), so reordering the
+    /// caller's list here would make two bindings for the same labels compare unequal. Only the
+    /// serialized text is canonical; nothing outside it is rewritten.
+    ///
+    /// Sorting by `(column_id, name)` is a total order for a validated description, which names
+    /// each tag column and each tag name at most once, so the canonical form is unique.
+    pub fn canonicalize(&mut self) {
+        self.logical_tags
+            .sort_unstable_by(|a, b| (a.column_id, &a.name).cmp(&(b.column_id, &b.name)));
+    }
+
+    /// Checks the version and the structural invariants a decoder relies on.
+    ///
+    /// Semantic binding checks (reserved names, internal columns, name equality against the bound
+    /// column) stay in the decoder so both a typed binding and a decoded description fail with the
+    /// same errors.
+    pub fn validate(&self) -> Result<()> {
+        if self.version != LABEL_DECODE_VERSION {
+            return Err(err(format!(
+                "unsupported label decode description version {}",
+                self.version
+            )));
+        }
+        let mut column_ids = HashSet::with_capacity(self.primary_key.len());
+        for column in &self.primary_key {
+            if !column_ids.insert(column.column_id) {
+                return Err(err(format!(
+                    "duplicate primary-key column id {} in label decode description",
+                    column.column_id
+                )));
+            }
+        }
+        let mut tag_ids = HashSet::with_capacity(self.logical_tags.len());
+        let mut tag_names = HashSet::with_capacity(self.logical_tags.len());
+        for tag in &self.logical_tags {
+            if !tag_ids.insert(tag.column_id) {
+                return Err(err(format!(
+                    "duplicate logical tag column id {} in label decode description",
+                    tag.column_id
+                )));
+            }
+            if !tag_names.insert(tag.name.as_str()) {
+                return Err(err(format!(
+                    "duplicate logical tag {} in label decode description",
+                    tag.name
+                )));
+            }
+            if !column_ids.contains(&tag.column_id) {
+                return Err(err(format!(
+                    "logical tag {} is not a primary-key column of the label decode description",
+                    tag.name
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Builds the typed schema for a raw frame, preserving logical field names and order.
+///
+/// This is the column layout shared with the frame builder and decoder; it deliberately carries no
+/// label decode description. A key-encoded stream must be declared through
+/// [`raw_series_frame_schema_with_label_decode`], which refuses such a layout without one.
 pub fn raw_series_frame_schema(schema: &SeriesSchema, mode: RawLabelMode) -> Result<SchemaRef> {
     if schema.eval_grid.is_some() {
         return invalid_series("raw series schema cannot have an evaluation grid");
@@ -135,6 +336,129 @@ pub fn raw_series_frame_schema(schema: &SeriesSchema, mode: RawLabelMode) -> Res
     .into_iter()
     .collect();
     Ok(Arc::new(Schema::new_with_metadata(columns, metadata)))
+}
+
+/// Builds the typed schema for a raw frame together with its label decode description.
+///
+/// The description is written only for [`RawLabelMode::Key`], where labels stay encoded in
+/// `read_key`; explicit-label frames carry complete labels and must not declare one. Both
+/// directions are enforced here so a frame cannot claim a label layout it does not describe.
+pub fn raw_series_frame_schema_with_label_decode(
+    schema: &SeriesSchema,
+    mode: RawLabelMode,
+    decode: Option<&LabelDecodeSpec>,
+) -> Result<SchemaRef> {
+    match (mode, decode) {
+        (RawLabelMode::Key, None) => {
+            return Err(err(
+                "key-encoded raw frames must carry a label decode description",
+            ));
+        }
+        (RawLabelMode::Explicit, Some(_)) => {
+            return Err(err("explicit raw frames carry no label decode description"));
+        }
+        (RawLabelMode::Key, Some(_)) | (RawLabelMode::Explicit, None) => {}
+    }
+    let layout = raw_series_frame_schema(schema, mode)?;
+    let Some(decode) = decode else {
+        return Ok(layout);
+    };
+    // Writing is faithful: the description records what the producer declares, and nothing is
+    // rewritten or dropped. The one exception is the order of `logical_tags`, which carries no
+    // meaning to a decoder and which this text nevertheless has to fix so two producers of the same
+    // labels write the same bytes; a copy is canonicalized and the caller's value is untouched. A
+    // description this revision cannot honour is rejected when it is read, which is the only
+    // direction a consumer can rely on.
+    let mut canonical = decode.clone();
+    canonical.canonicalize();
+    let encoded = serde_json::to_string(&canonical)
+        .map_err(|e| err(format!("cannot encode label decode description: {e}")))?;
+    let mut metadata = layout.metadata().clone();
+    metadata.insert(LABEL_DECODE.to_string(), encoded);
+    Ok(Arc::new(Schema::new_with_metadata(
+        layout.fields().clone(),
+        metadata,
+    )))
+}
+
+/// Recovers the label decode description a raw frame schema declares.
+///
+/// Returns `None` for an explicit-label frame, which must not declare one. A key-encoded frame must
+/// declare one, so a missing description is an error rather than a reason to reuse a caller-side
+/// binding. A present description is parsed strictly: an unknown version, a missing or unknown
+/// field at this structure's own levels, a type mismatch, or a description whose logical tags do
+/// not name listed key columns is an error, never a silent default. Only the description's own
+/// levels reject unknown fields; [`LabelDecodeColumn::physical_type`] is a
+/// [`ConcreteDataType`] and accepts whatever that type's own serde accepts.
+pub fn raw_series_frame_label_decode(schema: &Schema) -> Result<Option<LabelDecodeSpec>> {
+    let mode = match schema.metadata().get(LABELS).map(String::as_str) {
+        Some("key") => RawLabelMode::Key,
+        Some("explicit") => RawLabelMode::Explicit,
+        _ => return Err(err("raw frame schema declares no known label mode")),
+    };
+    let decode = match schema.metadata().get(LABEL_DECODE) {
+        None => None,
+        Some(encoded) => {
+            let decode: LabelDecodeSpec = serde_json::from_str(encoded)
+                .map_err(|e| err(format!("malformed label decode description: {e}")))?;
+            decode.validate()?;
+            Some(decode)
+        }
+    };
+    match (mode, &decode) {
+        (RawLabelMode::Key, None) => Err(err(
+            "key-encoded raw frame declares no label decode description",
+        )),
+        (RawLabelMode::Explicit, Some(_)) => Err(err(
+            "explicit raw frame declares a label decode description",
+        )),
+        (RawLabelMode::Key, Some(_)) | (RawLabelMode::Explicit, None) => Ok(decode),
+    }
+}
+
+/// Reconstructs the series schema a raw frame declares.
+///
+/// A raw frame names its payload fields by name only: every member of the `fields` struct carries
+/// the same payload type ([`raw_series_frame_schema`]), and [`SeriesSchema`] holds nothing else per
+/// field. The reconstruction is therefore exact rather than a projection — the declared names in
+/// declared order, and no evaluation grid, which a raw frame cannot carry.
+///
+/// The reserved layout, content, and time metadata are checked here together with the absence of an
+/// evaluation grid, so a frame this revision cannot read is rejected instead of being silently
+/// interpreted as the current layout.
+pub fn raw_series_frame_series_schema(schema: &Schema) -> Result<SeriesSchema> {
+    for (key, expected) in [(LAYOUT, "v1"), (CONTENT, "raw"), (TIME, "timestamps")] {
+        if schema.metadata().get(key).map(String::as_str) != Some(expected) {
+            return Err(err(format!("raw frame declares no known {key} value")));
+        }
+    }
+    if schema
+        .metadata()
+        .keys()
+        .any(|key| key == GRID || key.starts_with("greptime.series.grid."))
+    {
+        return Err(err("raw series schema cannot have an evaluation grid"));
+    }
+    let fields = schema
+        .fields()
+        .iter()
+        .find(|field| field.name() == "fields")
+        .ok_or_else(|| err("raw frame declares no fields column"))?;
+    let DataType::Struct(members) = fields.data_type() else {
+        return Err(err("raw frame fields column is not a struct"));
+    };
+    if members.is_empty() {
+        return Err(err("raw series schema must have fields"));
+    }
+    Ok(SeriesSchema {
+        fields: members
+            .iter()
+            .map(|member| FieldSpec {
+                name: Arc::from(member.name().as_str()),
+            })
+            .collect(),
+        eval_grid: None,
+    })
 }
 
 /// Bounded multi-row builder for finite raw frame batches.
@@ -871,7 +1195,7 @@ fn decode_raw_series_frame(
     if actual
         .metadata()
         .keys()
-        .any(|key| key == "greptime.series.grid" || key.starts_with("greptime.series.grid."))
+        .any(|key| key == GRID || key.starts_with("greptime.series.grid."))
         || actual.fields() != expected.fields()
     {
         return invalid_series("raw frame schema mismatch");
