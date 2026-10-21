@@ -710,36 +710,36 @@ impl FusedSeriesExec {
             )),
             Some(Arc::clone(&tree_input.schema)),
         )?;
-        // One evaluator runs, over one series stream, so this node takes one input partition.
+        // One evaluator per input partition, and the input's own partitioning kept as it is.
         //
-        // A window holds the state of the series it is reading and a raw series arrives as one
-        // contiguous run, so a single tree can answer a series only if nothing splits that run and
-        // nothing puts part of it in another tree. Those are two different promises and only the
-        // first is a property of a stream: the frame decoder refuses a chunk interleaved with
-        // another series', but nothing it can see tells it that half the series is in a partition it
-        // never reads. Asking for the key to be whole does not buy that either - DataFusion treats
-        // two hash layouts with the same count as co-partitioned and will add its own hash exchange
-        // regardless of whether a requirement is met, when target partitions outnumber the child's,
-        // and a hash exchange does not preserve order. So the partition count is fixed at one here
-        // and reported as one below; a split that cannot happen cannot be answered wrongly.
+        // A window holds the state of the series it is reading and closes it on the chunk carrying
+        // `is_last`, so it can answer a series only if the whole series arrives in the partition it
+        // reads. The input guarantees that: a raw series frame is produced by `SeriesScan`, whose
+        // contract is that the same primary key always reaches the same partition, and the frame
+        // decoder holds each series' chunks contiguous within that partition.
         //
-        // This is the phase-1 contract. Reading a series spread over partitions needs an exchange
-        // above this node that merges the pieces of one logical series before a stateful consumer
-        // reads them, which does not exist yet.
+        // What is *not* asked of the optimizer is a distribution. A `KeyPartitioned` or
+        // `HashPartitioned` requirement is classed as a hash requirement, and a hash requirement
+        // makes a hash exchange necessary whenever the child has more than one partition - even if
+        // the child already satisfies it, and even when the partition counts match. A hash exchange
+        // does not preserve order, so it would interleave the chunks of one series and the decoder
+        // would close a series it has not finished. `UnspecifiedDistribution` leaves the child's
+        // layout alone, and `benefits_from_input_partitioning` is false so no round-robin is added
+        // to raise parallelism either. Between them no exchange can appear between the scan and this
+        // node, and the scan's guarantee arrives intact.
         let input_properties = input.properties();
         let partition_count = input_properties.partitioning.partition_count();
-        if partition_count != 1 {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeriesExec runs over one series stream and needs one input partition, but its \
-                 input has {partition_count}: a series split across partitions would be answered \
-                 from one part of it"
-            )));
+        if partition_count == 0 {
+            return Err(DataFusionError::Plan(
+                "FusedSeriesExec input has no partitions".into(),
+            ));
         }
 
-        // One partition, emitted one batch per evaluated chunk at a time.
+        // As many partitions as the input hands over: the node runs one evaluator per partition and
+        // answers each as it settles.
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(partition_count),
             input_properties.emission_type,
             input_properties.boundedness,
         ));
@@ -794,20 +794,20 @@ impl ExecutionPlan for FusedSeriesExec {
         &self.properties
     }
 
-    /// One partition, and no partitioning is asked of the input.
+    /// Nothing is asked of the input's distribution, and nothing may be inserted above it.
     ///
-    /// [`try_new`](Self::try_new) refuses an input that has any other count, so this node is only
-    /// ever built over one stream; the requirement states that rather than asking an optimizer to
-    /// arrange it. Asking is what does not work here: a distribution requirement is checked against
-    /// the layouts an optimizer considers equal, and it may add a hash exchange above the input even
-    /// when the requirement is already met. A hash exchange reorders, which is exactly what a
-    /// per-series window cannot survive.
+    /// A hash requirement would make a hash exchange necessary as soon as the child has more than
+    /// one partition - even where the child already satisfies the requirement - and a hash exchange
+    /// does not preserve order. The input's own layout is already the one this node needs, because
+    /// the scan it reads from guarantees a series stays in one partition, so the requirement says
+    /// only that the layout is left alone.
     fn input_distribution_requirements(&self) -> InputDistributionRequirements {
-        InputDistributionRequirements::new(vec![Distribution::SinglePartition])
+        InputDistributionRequirements::new(vec![Distribution::UnspecifiedDistribution])
     }
 
-    /// A second partition would be a second set of series answered by a second tree, and this node
-    /// answers one stream.
+    /// Splitting the input further would not help: a second partition is a second set of series
+    /// answered by a second tree, which this node already runs, and raising the count is what an
+    /// optimizer does by adding a round-robin exchange that reorders nothing it can rely on.
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false]
     }
@@ -1006,9 +1006,9 @@ fn render_labels(labels: &LabelSet) -> String {
 /// The grid positions each final label set already occupies, per field and as merged, sorted runs.
 ///
 /// Shared by every partition's stream, because a label-set collision is a property of the whole
-/// output vector and not of one partition. `KeyPartitioned` distribution keeps each series whole
-/// inside one partition, but two series that carry the same labels after the range function and
-/// its maps drop a label can still land in different partitions. Checking only within a partition
+/// output vector and not of one partition. Two series that carry the same labels after the range
+/// function and its maps drop a label land in different partitions, and the runtime's own per-node
+/// `Emitted` table never sees both: it belongs to one execution. Checking only within a partition
 /// would miss exactly those collisions.
 ///
 /// The key is [`crate::grid_series::label_set`]'s normalization of the final labels rather than
@@ -1023,9 +1023,9 @@ fn render_labels(labels: &LabelSet) -> String {
 ///
 /// The map belongs to the plan, not to one stream: a partition that ends leaves what it claimed
 /// for the partitions still running, so the entries are only released with the plan itself. The
-/// charge has the same lifetime, which is what makes bytes the map holds — one entry per label set
-/// of the output, kept until the plan dies — visible to the memory pool. Charging each stream for
-/// what it inserted instead returned those bytes when that stream ended, while the entries the
+/// charge has the same lifetime, which is what makes the bytes the map holds - one entry per label
+/// set of the output, kept until the plan dies - visible to the memory pool. Charging each stream
+/// for what it inserted instead returned those bytes when that stream ended, while the entries the
 /// later partitions are checked against stayed: everything the map held after the first partition
 /// was unaccounted for.
 #[derive(Default)]
