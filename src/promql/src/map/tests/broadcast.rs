@@ -431,3 +431,121 @@ fn a_vector_scalar_operation_of_sparse_operands_keeps_the_shared_positions() {
         "nothing passes, so there is no result series"
     );
 }
+
+/// `round` and the clamp functions with time-varying scalar parameters, evaluated by the
+/// Prometheus v3.15.0 engine; see the header of `scalar_parameter_cases.txt`.
+#[test]
+fn parameterized_math_matches_prometheus() {
+    use std::collections::BTreeMap;
+
+    use crate::grid_series::reference::{Labels, Points, labels_of, points_of};
+
+    let parse = |line: &str| -> (Labels, Points) {
+        let (labels, points) = line.split_once(" ;").unwrap();
+        let labels = labels
+            .split(',')
+            .filter(|pair| *pair != "-")
+            .map(|pair| {
+                let (name, value) = pair.split_once('=').unwrap();
+                (name.to_string(), value.to_string())
+            })
+            .collect();
+        let points = points
+            .split_whitespace()
+            .map(|point| {
+                let (index, bits) = point.split_once(':').unwrap();
+                (
+                    index.parse().unwrap(),
+                    u64::from_str_radix(bits, 16).unwrap(),
+                )
+            })
+            .collect();
+        (labels, points)
+    };
+    let mut checked = 0;
+    for case in include_str!("../scalar_parameter_cases.txt")
+        .split("end\n")
+        .filter(|case| case.contains("case "))
+    {
+        let lines: Vec<&str> = case.lines().filter(|line| !line.starts_with('#')).collect();
+        let function = match lines[0].strip_prefix("case ").unwrap() {
+            "round" => ParameterizedMath::Round,
+            "clamp" => ParameterizedMath::Clamp,
+            "clamp_min" => ParameterizedMath::ClampMin,
+            "clamp_max" => ParameterizedMath::ClampMax,
+            other => panic!("unknown function {other}"),
+        };
+        let points: u64 = lines[2].split_whitespace().nth(3).unwrap().parse().unwrap();
+        let grid = Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(100_000, 10_000, points).unwrap()).unwrap(),
+        );
+        let input_schema = Arc::new(SeriesSchema {
+            fields: vec![FieldSpec {
+                name: "value".into(),
+            }]
+            .into(),
+            eval_grid: Some(grid.clone()),
+        });
+        let dense = |schema: &Arc<SeriesSchema>, labels: &Labels, values: &Points| {
+            crate::grid_series::reference::sparse_series(schema, labels, values)
+        };
+        let (mut inputs, mut parameters, mut expected) = (Vec::new(), Vec::new(), BTreeMap::new());
+        for line in &lines[3..] {
+            let (kind, rest) = line.split_once(' ').unwrap();
+            let (labels, values) = parse(rest);
+            match kind {
+                "series" => inputs.extend(dense(&input_schema, &labels, &values)),
+                // A parameter is `scalar(p)`: unlabelled, with a value at every point.
+                "param" => parameters.push(
+                    dense(&input_schema, &Labels::new(), &values).expect("a value at every point"),
+                ),
+                "result" => {
+                    expected.insert(labels, values);
+                }
+                other => panic!("unexpected line {other}"),
+            }
+        }
+        let parameters: Vec<&Series> = parameters.iter().collect();
+        let mut actual = BTreeMap::new();
+        for input in &inputs {
+            if let Some(output) =
+                map_math_with_parameters(&input_schema, input, function, &parameters).unwrap()
+            {
+                actual.insert(labels_of(&output.metric), points_of(&output));
+            }
+        }
+        // Go's NaN and Rust's differ in their payload; a NaN is a NaN.
+        let canonical = |series: BTreeMap<Labels, Points>| -> BTreeMap<Labels, Points> {
+            series
+                .into_iter()
+                .map(|(labels, points)| {
+                    let points = points
+                        .into_iter()
+                        .map(|(index, bits)| {
+                            (
+                                index,
+                                crate::grid_series::reference::canonical_bits(f64::from_bits(bits)),
+                            )
+                        })
+                        .collect();
+                    (labels, points)
+                })
+                .collect()
+        };
+        assert_eq!(canonical(actual), canonical(expected), "{case}");
+        checked += 1;
+    }
+    assert!(checked >= 40, "{checked}");
+}
+
+/// The parameter count must match the function.
+#[test]
+fn parameterized_math_checks_its_parameter_count() {
+    let schema = Arc::new(schema(&["value"]));
+    let series = series(&schema, 0, vec![floats(&[Some(1.0)])]);
+    let parameter = scalar(&schema, 0, floats(&[Some(1.0)]));
+    assert!(
+        map_math_with_parameters(&schema, &series, ParameterizedMath::Clamp, &[&parameter])
+            .is_err()
+    );
+}

@@ -25,8 +25,8 @@ mod tests;
 
 pub(crate) use broadcast::validate_scalar;
 pub use broadcast::{
-    ScalarFunction, ScalarSeriesOperand, map_arithmetic_series, map_compare_series,
-    map_scalar_function,
+    ParameterizedMath, ScalarFunction, ScalarSeriesOperand, map_arithmetic_series,
+    map_compare_series, map_math_with_parameters, map_scalar_function,
 };
 pub use comparison::{Comparison, ComparisonOp, map_compare, scalar_arithmetic, scalar_compare};
 

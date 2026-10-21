@@ -20,7 +20,9 @@ use datatypes::series::samples::{FieldSpec, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
 use crate::grid_series::GridSeriesBuilder;
-use crate::map::{ArithmeticOp, Comparison, drop_metric_name, float_sample, validate_float_series};
+use crate::map::{
+    ArithmeticOp, Comparison, MathOp, drop_metric_name, float_sample, validate_float_series,
+};
 
 /// A time-varying, unlabelled single-field scalar, with explicit operand direction.
 #[derive(Clone, Copy, Debug)]
@@ -124,6 +126,100 @@ pub fn map_scalar_function(
         left.metric.clone(),
         |left, right, _| Some(function.apply(left, right)),
     )
+}
+
+/// A math function whose parameters are scalar expressions, which Prometheus evaluates at every
+/// step: `round(v, to_nearest)`, `clamp(v, min, max)`, `clamp_min(v, min)` and `clamp_max(v, max)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParameterizedMath {
+    Round,
+    Clamp,
+    ClampMin,
+    ClampMax,
+}
+
+impl ParameterizedMath {
+    /// The function with the parameters of one point, in argument order.
+    fn at(self, parameters: &[f64]) -> MathOp {
+        match self {
+            Self::Round => MathOp::Round {
+                nearest: parameters[0],
+            },
+            Self::Clamp => MathOp::Clamp {
+                min: parameters[0],
+                max: parameters[1],
+            },
+            Self::ClampMin => MathOp::ClampMin { min: parameters[0] },
+            Self::ClampMax => MathOp::ClampMax { max: parameters[0] },
+        }
+    }
+
+    fn arity(self) -> usize {
+        match self {
+            Self::Clamp => 2,
+            Self::Round | Self::ClampMin | Self::ClampMax => 1,
+        }
+    }
+}
+
+/// Applies `function` to every float field with its parameters read at each point from
+/// time-varying scalars, and drops the metric name, as [`crate::map::map_math`] does with
+/// constant parameters.
+///
+/// A point where a parameter has no value has no result. `clamp` with `max < min` at a point has
+/// no result there, as Prometheus returns an empty vector for that step. `None` means no point
+/// holds a result.
+pub fn map_math_with_parameters(
+    schema: &Arc<SeriesSchema>,
+    series: &Series,
+    function: ParameterizedMath,
+    parameters: &[&Series],
+) -> Result<Option<Series>> {
+    if parameters.len() != function.arity() {
+        return Err(DataFusionError::Execution(format!(
+            "{function:?} takes {} scalar parameters, got {}",
+            function.arity(),
+            parameters.len()
+        )));
+    }
+    let time = validate_float_series(schema, series)?;
+    let mut parameter_axes = Vec::with_capacity(parameters.len());
+    for parameter in parameters {
+        parameter_axes.push(validate_scalar(schema, parameter)?);
+    }
+    // Points only increase, so each parameter's row does too and one cursor reads it.
+    let mut parameter_cursors: Vec<_> = parameters
+        .iter()
+        .map(|parameter| parameter.fields.as_slice()[0].cursor())
+        .collect();
+    let mut field_cursors: Vec<_> = series.fields.iter().map(|field| field.cursor()).collect();
+    let mut values = Vec::with_capacity(parameters.len());
+    let mut row = Vec::with_capacity(field_cursors.len());
+    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+    for (point, index) in time.positions() {
+        values.clear();
+        for (axis, cursor) in parameter_axes.iter().zip(&mut parameter_cursors) {
+            let value = axis.row_of(point).and_then(|row| {
+                float_sample(cursor.at(row).expect("parameter rows only increase"))
+            });
+            values.extend(value);
+        }
+        row.clear();
+        let op = (values.len() == parameters.len()).then(|| function.at(&values));
+        for cursor in &mut field_cursors {
+            let sample = float_sample(
+                cursor
+                    .at(index)
+                    .expect("the axis and the fields are aligned"),
+            );
+            row.push(match op {
+                Some(op) if !op.is_empty_clamp() => sample.map(|value| op.calculate(value)),
+                _ => None,
+            });
+        }
+        builder.push(point, &row)?;
+    }
+    builder.finish(drop_metric_name(&series.metric)?)
 }
 
 /// Calls `calculate(left, right, vector_sample)` at each index where both operands exist.
