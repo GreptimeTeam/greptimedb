@@ -34,7 +34,9 @@ use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::metrics::NodePath;
-use promql::native::plan::{BoundInput, BoundMap, NativeExpr, NativeNode, NativeTree, NativeType};
+use promql::native::plan::{
+    BoundInput, BoundMap, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+};
 use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The statement's grid: five points one second apart, starting at zero.
@@ -141,7 +143,7 @@ fn bound_tree(schema: &Arc<SeriesSchema>) -> NativeTree {
         expr: NativeExpr::Map {
             input: Box::new(subtract),
             op: BoundMap {
-                ops: vec![MathOp::Abs].into(),
+                ops: vec![MapOp::Math(MathOp::Abs)].into(),
             },
         },
         output: NativeType::Samples(Arc::clone(schema)),

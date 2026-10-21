@@ -36,6 +36,7 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 
 use crate::map::MathOp;
+use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::BinaryMatching;
 
@@ -174,7 +175,15 @@ pub struct BoundWindow {
 #[derive(Clone, Debug)]
 pub struct BoundMap {
     /// The operations, applied in order.
-    pub ops: Arc<[MathOp]>,
+    pub ops: Arc<[MapOp]>,
+}
+
+/// One operation of a map, applied to each series on its own: math over its values, or a change
+/// of its labels. Either can give two series one label set, which is why both live in a map.
+#[derive(Clone, Debug)]
+pub enum MapOp {
+    Math(MathOp),
+    Label(Arc<LabelRewrite>),
 }
 
 /// Which aggregate a node computes.

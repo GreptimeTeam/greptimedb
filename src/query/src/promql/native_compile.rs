@@ -23,15 +23,19 @@
 //! <range function>(<selector>[<range>])             e.g. rate(x[5m])
 //! <range function>(<constant>, <selector>[<range>]) e.g. quantile_over_time(0.9, x[5m])
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//! <label function>(<expression>, <string>*)         e.g. label_replace(x, "a", "$1", "b", "(.*)")
 //! ```
 //!
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
 //! `Input` (raw samples) → `Window` (the range function over the statement's grid) and
-//! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to). A
+//! `<expression>` → `Map` (a pointwise math function or label change over what its argument
+//! evaluates to). A
 //! selector may carry `offset` in either selection shape and, in the window shape, an `@` anchor.
 //! Everything else is a [`DataFusionError::NotImplemented`] that names what was found and quotes the
 //! shapes above, because rejecting a query the compiler does not understand is the only honest
-//! alternative to compiling it into something else.
+//! alternative to compiling it into something else. A label function whose arguments Prometheus
+//! rejects at evaluation, such as an invalid regular expression, is a [`DataFusionError::Plan`]
+//! instead: the statement is wrong, not merely unsupported.
 //!
 //! Two decisions keep the recursion from growing a branch per query. A constant argument — a
 //! quantile, a rounding step, a clamp bound — is folded out of the statement by [`constant_value`],
@@ -57,16 +61,18 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use promql::map::{ArithmeticOp, MathOp};
+use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
 use promql::native::plan::{
-    BoundInput, BoundInstant, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundInput, BoundInstant, BoundMap, BoundWindow, MapOp, NativeExpr, NativeNode, NativeTree,
+    NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AtModifier, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral, Offset,
-    VectorSelector, token,
+    StringLiteral, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -74,8 +80,8 @@ use crate::promql::label_values::signed_millis_since_epoch;
 /// The shapes this compiler accepts, quoted in every rejection.
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
-                         the selector as in `quantile_over_time(0.9, x[5m])` — or a math function \
-                         over any of them, as in `abs(rate(x[5m]))`: for example `x`, \
+                         the selector as in `quantile_over_time(0.9, x[5m])` — or a math or label \
+                         function over any of them, as in `abs(rate(x[5m]))`: for example `x`, \
                          `rate(x[5m])`, `quantile_over_time(0.9, x[5m])` or `abs(rate(x[5m]))`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
@@ -156,10 +162,10 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
     }
 }
 
-/// Compiles a call: a range function opens a window over the selector it is given, and a math
-/// function maps the value of its first argument.
+/// Compiles a call: a range function opens a window over the selector it is given, and a math or
+/// label function maps the value of its first argument.
 ///
-/// The two name lists are disjoint, and a range function is decided first because it binds its own
+/// The name lists are disjoint, and a range function is decided first because it binds its own
 /// window rather than its argument's value. A name in neither list is refused here, which is where
 /// the difference between "this compiler cannot fold this function" and "this name means nothing"
 /// is still visible.
@@ -172,13 +178,16 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
     // vector to map, and the rejection names the name rather than describing a vector they never
     // wrote.
-    let Some((op, vector)) = math_op(func.name, &args.args)? else {
-        return Err(not_implemented(&format!(
-            "a call to `{}`, which has no native kernel",
-            func.name
-        )));
-    };
-    map_call(context, func.name, op, vector)
+    if let Some((op, vector)) = math_op(func.name, &args.args)? {
+        return map_call(context, func.name, MapOp::Math(op), vector);
+    }
+    if let Some((rewrite, vector)) = label_rewrite(func.name, &args.args)? {
+        return map_call(context, func.name, MapOp::Label(Arc::new(rewrite)), vector);
+    }
+    Err(not_implemented(&format!(
+        "a call to `{}`, which has no native kernel",
+        func.name
+    )))
 }
 
 /// Binds a range function over the range selector it is given, and the window that selector opens.
@@ -215,7 +224,7 @@ fn window_call(
     window_selection(context, function, vs, range)
 }
 
-/// Wraps `op` over the value of `vector`, which is the first argument of a math function.
+/// Wraps `op` over the value of `vector`, which is the first argument of a math or label function.
 ///
 /// The output is the input's own type: a pointwise function moves no value to another grid point
 /// and reports one value per field it was given, so the map's schema is the input's allocation
@@ -224,8 +233,8 @@ fn window_call(
 /// with its input's, so a map that allocated an equal grid of its own would validate the same way.
 /// The only comparison by identity is an input node's, whose output has to be the very binding it
 /// was bound to.
-fn map_call(context: &Context, name: &str, op: MathOp, vector: &PromExpr) -> Result<NativeNode> {
-    // A math function is pointwise over a vector, so its first argument has to be one. The parser
+fn map_call(context: &Context, name: &str, op: MapOp, vector: &PromExpr) -> Result<NativeNode> {
+    // A map is pointwise over a vector, so the function's first argument has to be one. The parser
     // checks the same thing and the tree's validation checks the compiled input's type again, but
     // neither can name the argument the client wrote: this is the check that can.
     if vector.value_type() != ValueType::Vector {
@@ -648,6 +657,48 @@ fn math_op<'a>(
         ),
     };
     Ok(Some((op, vector)))
+}
+
+/// The label change `label_replace` or `label_join` makes, and the vector it is made to, or `None`
+/// when `name` is neither.
+///
+/// The parser checks the argument types and counts; what is left to check is the arguments'
+/// content, which [`LabelRewrite`] does as Prometheus does at evaluation, so an invalid regular
+/// expression or an empty label name fails the statement here as it would there.
+fn label_rewrite<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(LabelRewrite, &'a PromExpr)>> {
+    if !matches!(name, "label_replace" | "label_join") {
+        return Ok(None);
+    }
+    let Some((vector, strings)) = arguments.split_first() else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with no argument"
+        )));
+    };
+    let strings = strings
+        .iter()
+        .map(|argument| match unparen(argument) {
+            PromExpr::StringLiteral(StringLiteral { val }) => Ok(val.as_str()),
+            other => Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{other}` is not a string literal"
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rewrite = match (name, strings.as_slice()) {
+        ("label_replace", [dst, replacement, src, regex]) => {
+            LabelRewrite::replace(dst, replacement, src, regex)?
+        }
+        ("label_join", [dst, separator, src @ ..]) => LabelRewrite::join(dst, separator, src)?,
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` with {} argument(s)",
+                arguments.len()
+            )));
+        }
+    };
+    Ok(Some((rewrite, vector)))
 }
 
 /// The rejection of a math call that wrote `given` arguments where `signature` takes another count.

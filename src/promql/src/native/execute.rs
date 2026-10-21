@@ -47,7 +47,7 @@
 //! half a query or panicking halfway through one.
 //!
 //! A node that rewrites labels — a window drops the metric name and the empty-valued labels, a map
-//! drops the name — can turn two distinct input series into one output label set. That pair is
+//! drops the name or rewrites a label — can turn two distinct input series into one output label set. That pair is
 //! legal when the two hold values at disjoint positions, which is exactly what
 //! [`crate::grid_series::merge_same_labelset`] merges: `is_last` closes the source series whose
 //! data the chunk carries, not the label set it shares with another series, so a second series may
@@ -93,10 +93,10 @@ use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
 };
 use crate::instant_eval::select_instants;
-use crate::map::{MathOp, drop_metric_name, map_math};
+use crate::map::{drop_metric_name, map_math};
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{NodeMetrics, NodePath};
-use crate::native::plan::{BoundInstant, NativeExpr, NativeNode, NativeTree};
+use crate::native::plan::{BoundInstant, MapOp, NativeExpr, NativeNode, NativeTree};
 use crate::range_eval::RangeEvaluator;
 use crate::vector_match::{
     BinaryMatching, binary_vectors_with_reservation, validate_binary_operand,
@@ -611,8 +611,8 @@ impl Run {
 
 /// The positions one node has handed out, per output label set and field.
 ///
-/// A node that rewrites labels — a `Map` dropping the metric name, a `Window` dropping the name
-/// and the empty-valued labels — can turn two input series into one label set, and the node above
+/// A node that rewrites labels — a `Map` dropping the metric name or rewriting a label, a `Window`
+/// dropping the name and the empty-valued labels — can turn two input series into one label set, and the node above
 /// reads the two chunks as one series. What is kept here is which positions of each field were
 /// already handed out under each label set, so a second series onto a set can be refused before
 /// the node above evaluates it.
@@ -948,7 +948,7 @@ fn merge_runs(stored: &mut Vec<Run>, incoming: &[Run]) {
 
 /// What a map node applies.
 struct MapRuntime {
-    ops: Arc<[MathOp]>,
+    ops: Arc<[MapOp]>,
     /// The schema of what the map produces, which is what its input is checked against.
     schema: Arc<SeriesSchema>,
 }
@@ -1893,7 +1893,8 @@ struct NodeRuntime {
     /// the binding is kept per input rather than once for the tree.
     source_schema: Option<Arc<SeriesSchema>>,
     /// What this node has already handed out under each output label set, for a node that rewrites
-    /// labels: a window drops the metric name and the empty-valued labels, a map drops the name.
+    /// labels: a window drops the metric name and the empty-valued labels, a map drops the name or
+    /// rewrites a label.
     emitted: Option<Emitted>,
     /// The input a window collects until its input ends, for a window whose input can hold two
     /// series under one label set; `None` for a window that evaluates its chunks as they arrive,
@@ -2491,8 +2492,8 @@ impl NativeExecutionState {
                         ops: Arc::clone(&op.ops),
                         schema,
                     });
-                    // A map drops the metric name, so it is one of the nodes that can turn two
-                    // series into one label set.
+                    // A map drops the metric name or rewrites a label, so it is one of the nodes
+                    // that can turn two series into one label set.
                     runtime.emitted = Some(Emitted::default());
                 }
                 NativeExpr::Window { input, op } => {
@@ -2581,7 +2582,7 @@ impl NativeExecutionState {
         //
         // A source is a stream of series, each with its own label set, so its output needs no merge:
         // that is what keeps `Input -> Window` streaming and reporting as its input arrives. A map
-        // drops the metric name, so its output can hold two input series under one label set, and
+        // drops the metric name or rewrites a label, so its output can hold two input series under one label set, and
         // every node above it needs the merge. A window collects its input and merges it when its
         // input can hold two series under one label set: reading them as series one after another
         // would end the first in the evaluator before the second arrives, and a window across the
@@ -3415,42 +3416,52 @@ impl NativeExecutor {
 fn map_chunk(
     schema: &SeriesSchema,
     chunk: &EvaluatedChunk,
-    ops: &[MathOp],
+    ops: &[MapOp],
 ) -> Result<Option<EvaluatedChunk>> {
     let mut series = chunk.series.clone();
-    for &op in ops {
-        series = match map_math(schema, &series, op)? {
-            Some(mapped) => mapped,
-            // `clamp` with `max < min` is the empty vector, and math skips native histograms, so a
-            // series without a float value has none left: every position it held was decided and
-            // holds no value now, so there is no row to hand over.
-            None => {
-                return if chunk.is_last {
-                    let empty = no_row_series(schema, &chunk.series)?;
-                    EvaluatedChunk::try_new(empty, true).map(Some)
-                } else {
-                    Ok(None)
-                };
-            }
-        };
+    for (index, op) in ops.iter().enumerate() {
+        match op {
+            MapOp::Label(rewrite) => rewrite.apply(&mut series.metric)?,
+            MapOp::Math(math) => match map_math(schema, &series, *math)? {
+                Some(mapped) => series = mapped,
+                // `clamp` with `max < min` is the empty vector, and math skips native histograms,
+                // so a series without a float value has none left: every position it held was
+                // decided and holds no value now, so there is no row to hand over.
+                None => {
+                    if !chunk.is_last {
+                        return Ok(None);
+                    }
+                    // The closing chunk names the series the map would have produced, so the
+                    // operations not run still decide its labels.
+                    let mut metric = series.metric;
+                    for op in &ops[index..] {
+                        match op {
+                            MapOp::Label(rewrite) => rewrite.apply(&mut metric)?,
+                            MapOp::Math(_) => metric = drop_metric_name(&metric)?,
+                        }
+                    }
+                    let empty = no_row_series(schema, &series.time, metric)?;
+                    return EvaluatedChunk::try_new(empty, true).map(Some);
+                }
+            },
+        }
     }
     EvaluatedChunk::try_new(series, chunk.is_last).map(Some)
 }
 
-/// A series carrying the identity of `series` and no row at all.
+/// A series named `metric` with no row at all, placed after the last position of `time`.
 ///
 /// It is what a closing chunk holds when the operation emptied its input: the labels say which
 /// series closed, and the axis is empty because no position holds a value.
-fn no_row_series(schema: &SeriesSchema, series: &Series) -> Result<Series> {
-    let grid = series.time.grid().ok_or_else(|| {
+fn no_row_series(schema: &SeriesSchema, time: &TimeAxis, metric: MetricName) -> Result<Series> {
+    let grid = time.grid().ok_or_else(|| {
         DataFusionError::Execution("a mapped chunk must be addressed on a grid".to_string())
     })?;
     let fields = (0..schema.fields.len())
         .map(|_| Samples::from_float(Float64Array::from(Vec::<f64>::new())))
         .collect();
     let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
-    let metric = drop_metric_name(&series.metric)?;
-    let at = series.time.last_position().map_or(0, |last| last + 1);
+    let at = time.last_position().map_or(0, |last| last + 1);
     let time = GridRange::try_new(Arc::clone(grid), at, 0).map_err(series_error)?;
     Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)
 }

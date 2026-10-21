@@ -23,6 +23,7 @@ use super::super::plan::{
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::map::MathOp;
+use crate::native::plan::MapOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
@@ -94,7 +95,7 @@ fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
         expr: NativeExpr::Map {
             input: Box::new(inner),
             op: BoundMap {
-                ops: Arc::from(ops),
+                ops: ops.into_iter().map(MapOp::Math).collect(),
             },
         },
         output: evaluated(out),
