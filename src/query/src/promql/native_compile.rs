@@ -36,7 +36,7 @@
 //! single authority on that, so a node added later cannot be legal in one place and illegal in
 //! another. What is refused before a tree exists is the scan's shape: no shape below can consume
 //! chunks of different series that interleave, so an `Interleaved` ordering is refused once, at the
-//! entry, and [`NativeTree::validate`] refuses the same ordering for a tree built some other way.
+//! entry, and [`NativeNode::validate`] refuses the same ordering for a tree built some other way.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +78,7 @@ const SUPPORTED: &str = "a bare selector, a range function over a selector — \
 /// one series to its last chunk before the next, so an `Interleaved` declaration is refused at the
 /// entry, before any shape is built — the bare selector included, which returns before a window
 /// exists — and a shape added later inherits the refusal instead of restating it.
-/// [`NativeTree::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
+/// [`NativeNode::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
 /// backstop for a tree built some other way.
 ///
 /// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
