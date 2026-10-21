@@ -46,7 +46,7 @@ use crate::native::plan::{
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
@@ -870,6 +870,7 @@ fn an_unimplemented_node_is_reported_not_panicked() {
                     return_bool: false,
                     labels: MatchingLabels::Ignoring(Vec::new()),
                     cardinality: Cardinality::OneToOne,
+                    fill: FillValues::default(),
                 },
             },
             output: NativeType::Samples(evaluated_schema(out)),
