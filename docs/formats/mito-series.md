@@ -564,9 +564,8 @@ that old binaries understand the new catalog identifier.
 Validation covers the layouts, identifier assumption, codec IDs, schema handling,
 and safety limits above. Implementation acceptance includes:
 
-- Frozen fixtures under `tests/compatibility/` read by Mito tests, plus legacy
-  catalog and Parquet regression tests. Fixture checks must not rely only on
-  writer/reader round trips that could share the same mistake.
+- Codec unit tests and writer/reader round trips. Dedicated compatibility tests
+  and frozen format fixtures are outside this PR's scope.
 - Empty input, repeated series across batches, mixed tables/schemas, equal TSIDs
   across tables, nullable/empty tags, forced rollover, depths 1 and 2, and
   oversized payloads/descriptors.

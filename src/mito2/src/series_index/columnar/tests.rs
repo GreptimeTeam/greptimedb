@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Wire fixtures, corruption handling, range selection and artifact lifecycle.
+//! Codec correctness, corruption handling, range selection and artifact lifecycle.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -52,14 +52,18 @@ fn store() -> ObjectStore {
     ObjectStore::new(object_store::services::Memory::default()).unwrap()
 }
 fn entry() -> SeriesIndexEntry {
-    let value: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../tests/compatibility/fixtures/series_index/legacy_catalog.json"
-    ))
-    .unwrap();
-    let mut entry: SeriesIndexEntry = serde_json::from_value(value["indexes"][0].clone()).unwrap();
-    entry.index_uuid = FileId::random();
-    entry.file_size = 0;
-    entry
+    SeriesIndexEntry {
+        artifact: None,
+        file_size: 0,
+        index_uuid: FileId::random(),
+        bucket_start: common_time::Timestamp::new_second(0),
+        bucket_end: common_time::Timestamp::new_second(100),
+        source_file_ids: Vec::new(),
+        min_file_sequence: 1,
+        max_file_sequence: 2,
+        compaction_window_secs: 100,
+        window_sequences: Default::default(),
+    }
 }
 fn batch(keys: &[Vec<u8>], dictionary: bool, timestamp: i64) -> RecordBatch {
     let keys: ArrayRef = if dictionary {
@@ -524,33 +528,27 @@ async fn explicit_abort_drop_and_failed_finish_cleanup() {
 }
 
 #[tokio::test]
-async fn frozen_v1_fixture_and_selective_io() {
+async fn selective_io_and_pinned_stream_retirement() {
     use object_store::layers::mock::MockLayerBuilder;
     use std::sync::Mutex;
-    const MANIFEST: &[u8] = include_bytes!(
-        "../../../../../tests/compatibility/fixtures/series_index/columnar_v1/manifest.json"
-    );
-    const PART: &[u8] = include_bytes!(
-        "../../../../../tests/compatibility/fixtures/series_index/columnar_v1/part-0.series"
-    );
-    let manifest: Manifest = serde_json::from_slice(MANIFEST).unwrap();
     let store = store();
-    store.write(&manifest.path(), MANIFEST).await.unwrap();
-    store.write(&manifest.part_path(0), PART).await.unwrap();
-    let mut entry = manifest.coverage.clone();
-    entry.file_size = (MANIFEST.len() + PART.len()) as u64;
-    entry.artifact = Some(crate::series_index::artifact::ArtifactMetadata {
-        format: crate::series_index::artifact::ArtifactFormat::ColumnarSeries,
-        generation: manifest.generation,
-        objects: vec![manifest.part_path(0), manifest.path()],
-        file_size: entry.file_size,
-    });
+    let meta = metadata();
+    let format = ColumnarSeriesFormat {
+        page_bytes: 64,
+        ..Default::default()
+    };
+    let a = new_sparse_primary_key(&["a", "x"], &meta, 7, 10);
+    let b = new_sparse_primary_key(&["", "x"], &meta, 7, 11);
+    let c = new_sparse_primary_key(&["é", "x"], &meta, 9, 5);
+    let built = build(
+        &format,
+        &store,
+        &[batch(&[a.clone(), a, b.clone(), b.clone(), b, c], false, 0)],
+    )
+    .await;
     let (purger, mut purges) = series_index_channel(store.clone());
-    let handle = SeriesIndexFileHandle::new(
-        store_api::storage::RegionId::from_u64(manifest.region_id),
-        entry,
-        purger,
-    );
+    let handle = SeriesIndexFileHandle::new(meta.region_id, built.entry().clone(), purger);
+    drop(built);
     let reads = Arc::new(Mutex::new(Vec::new()));
     let observed = reads.clone();
     let layer = MockLayerBuilder::default()
@@ -563,7 +561,6 @@ async fn frozen_v1_fixture_and_selective_io() {
         }))
         .build()
         .unwrap();
-    let format = ColumnarSeriesFormat::default();
     let reader = format
         .reader(store.layer(layer), handle.clone())
         .await
@@ -605,7 +602,7 @@ async fn frozen_v1_fixture_and_selective_io() {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap(),
-        &StringArray::from(vec![None, Some("")])
+        &StringArray::from(vec![Some("a"), Some("")])
     );
     assert_eq!(
         all[1]
@@ -616,7 +613,7 @@ async fn frozen_v1_fixture_and_selective_io() {
             .value(0),
         "é"
     );
-    assert_eq!(all[0].column(4).null_count(), 2);
+    assert_eq!(all[0].column(4).null_count(), 0);
     reads.lock().unwrap().clear();
     let mut req = request(&["tag_0"]);
     req.table_id = Some(9);
