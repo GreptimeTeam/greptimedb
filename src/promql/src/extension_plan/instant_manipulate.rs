@@ -937,7 +937,7 @@ impl InstantManipulateStream {
     /// clipped grid and not with the samples of the series. Each term below is one allocation, and
     /// the ones this path shares with those are named as they are there.
     ///
-    /// Per selected point, [`Self::grid_points`] points being the most it can decide:
+    /// Per selected point, [`Self::clipped_points`] points being the most it can decide:
     ///
     /// - A `u64` source row index and an `i64` evaluation timestamp: the two vectors
     ///   [`select_instants`] returns, and the scan of [`Self::scan_instants`] returns the same pair.
@@ -969,7 +969,7 @@ impl InstantManipulateStream {
     /// doubles: every vector here is created with its exact capacity and `take` sizes its output by
     /// the point count, unlike the builders that node charges twice.
     fn workspace_bytes(&self, input: &RecordBatch) -> usize {
-        let points = self.grid_points();
+        let points = self.clipped_points(input);
         let mut bytes = points.saturating_mul(4 * std::mem::size_of::<u64>());
         for (index, column) in input.columns().iter().enumerate() {
             // The time column of the output is built from the timestamps counted above.
@@ -989,17 +989,69 @@ impl InstantManipulateStream {
         )
     }
 
-    /// The most grid points one series can be selected at.
+    /// The points [`select_instants`] decides for the series `input` holds.
     ///
-    /// The selection clips this operator's own grid to the series it reads, so the points it
-    /// decides are a subset of the `start..=end` range this operator was planned with: stepping
-    /// that range by the interval is the most any series can reach, whatever it holds.
-    fn grid_points(&self) -> usize {
+    /// That selection clips this operator's `start..=end` to the series it reads before it walks
+    /// the grid, so the points it allocates for are the ones of the clipped range and not the ones
+    /// of the whole planned grid: a series whose samples end long before the query does reaches no
+    /// later point, yet stepping the whole planned range by the interval reserved the workspace of
+    /// every point of it, and a pool that could hold everything such a series selects refused the
+    /// query before selecting anything.
+    ///
+    /// The bounds, the clip and the alignment below are [`select_instants`]'s, kept the same line
+    /// for line because the reservation must cover what that function allocates: a point it misses
+    /// is memory no reservation bounds, and a point it invents is memory reserved for nothing.
+    ///
+    /// This batch holds one complete series -- [`SeriesDivide`] upstream guarantees it -- so the
+    /// first and last timestamp of its time column are the series bounds and reading them is
+    /// constant work, no matter how many samples the series holds.
+    fn clipped_points(&self, input: &RecordBatch) -> usize {
         if self.end < self.start || self.interval <= 0 {
             return 0;
         }
-        usize::try_from((self.end as i128 - self.start as i128) / self.interval as i128 + 1)
-            .unwrap_or(usize::MAX)
+        let time = input.column(self.time_index);
+        if time.is_empty() {
+            return 0;
+        }
+        let Some((timestamps, _)) = timestamp_array_to_primitive(time) else {
+            return 0;
+        };
+        let ticks = timestamps.values();
+        // Milliseconds are the frame `select_instants` clips in. The first tick is rounded up and
+        // the last one down, as the wide scan of [`Self::manipulate`] rounds the ticks it converts,
+        // so a tick that is not a whole millisecond widens the bounds rather than narrowing the
+        // range either selection can reach.
+        let scale = nanoseconds_per_native_tick(self.time_unit);
+        let offset_ns = self.offset as i128 * 1_000_000;
+        let first = (ticks[0] as i128 * scale + offset_ns + 999_999).div_euclid(1_000_000);
+        let last_ns = ticks[ticks.len() - 1] as i128 * scale + offset_ns;
+        // An exact sample remains useful with zero lookback. Otherwise the lower boundary of the
+        // window is exclusive, so the final window ends one nanosecond early.
+        let useful_last_ns = if self.lookback_delta == 0 {
+            last_ns
+        } else {
+            last_ns + self.lookback_delta as i128 * 1_000_000 - 1
+        };
+        let useful_last = useful_last_ns.div_euclid(1_000_000);
+        let query_start = self.start as i128;
+        let query_end = self.end as i128;
+        let step = self.interval as i128;
+        // The clip and the alignment of `select_instants`, which stays the source of truth: a change
+        // there must be mirrored here, or the reservation stops covering what it allocates.
+        let max_start = first.max(query_start);
+        let min_end = useful_last.min(query_end);
+        let (aligned_start, aligned_end) = if max_start > min_end {
+            (1_i128, 0_i128)
+        } else {
+            (
+                query_start + (max_start - query_start) / step * step,
+                query_end - (query_end - min_end) / step * step,
+            )
+        };
+        if aligned_end < aligned_start {
+            return 0;
+        }
+        usize::try_from((aligned_end - aligned_start) / step + 1).unwrap_or(usize::MAX)
     }
 }
 
@@ -1741,9 +1793,15 @@ mod test {
         );
     }
 
-    /// A single row of one series selected at every point of a grid `points` long, with `lookback`
-    /// wide enough that the row answers all of them.
-    fn one_row_selected_everywhere(points: Millisecond) -> Arc<InstantManipulateExec> {
+    /// One series of one `value` column holding `rows` of `(timestamp, value)` decided over
+    /// `start..=end` by `interval` with `lookback`.
+    fn one_series(
+        rows: Vec<(Millisecond, f64)>,
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        lookback: Millisecond,
+    ) -> Arc<InstantManipulateExec> {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 TIME_INDEX_COLUMN,
@@ -1752,11 +1810,12 @@ mod test {
             ),
             Field::new("value", DataType::Float64, true),
         ]));
+        let (timestamps, values): (Vec<Millisecond>, Vec<f64>) = rows.into_iter().unzip();
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(TimestampMillisecondArray::from(vec![0])),
-                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(TimestampMillisecondArray::from(timestamps)),
+                Arc::new(Float64Array::from(values)),
             ],
         )
         .unwrap();
@@ -1765,10 +1824,10 @@ mod test {
         )));
         Arc::new(InstantManipulateExec {
             offset: 0,
-            start: 0,
-            end: points,
-            lookback_delta: points + 1,
-            interval: 1,
+            start,
+            end,
+            lookback_delta: lookback,
+            interval,
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
@@ -1777,6 +1836,12 @@ mod test {
             input,
             metric: ExecutionPlanMetricsSet::new(),
         })
+    }
+
+    /// A single row of one series selected at every point of a grid `points` long, with `lookback`
+    /// wide enough that the row answers all of them.
+    fn one_row_selected_everywhere(points: Millisecond) -> Arc<InstantManipulateExec> {
+        one_series(vec![(0, 1.0)], 0, points, 1, points + 1)
     }
 
     /// A grid of a million and one points used to be refused by a point count of the kernel's own.
@@ -1807,7 +1872,9 @@ mod test {
         let points = 1_000_001;
         let batches = datafusion::physical_plan::collect(
             one_row_selected_everywhere(points),
-            // The estimate of `manipulate_reserved` for this schema is 40 bytes per point, so this
+            // This series' one sample answers every point of the grid under that wide lookback, so
+            // its clipped grid is the whole grid. The estimate of `manipulate_reserved` for this
+            // schema is 41 bytes per point (four `u64`, one `f64` and a validity bit), so this
             // holds the million-odd points it reserves for with room to spare.
             bounded_task_context(64 * 1024 * 1024),
         )
@@ -1819,6 +1886,149 @@ mod test {
             rows,
             points as usize + 1,
             "the grid the removed limit refused was not decided"
+        );
+    }
+
+    /// A series that ends at its first sample is charged for the points it selects, not for the
+    /// grid of the whole query range.
+    ///
+    /// Seven days at a 60 s step is 10 081 grid points, and the whole-grid figure of this schema is
+    /// 41 bytes per point: 413 337 bytes, which a 256 KiB pool refuses. The series holds one sample
+    /// at `t=0` and its lookback is 5 min, so `select_instants` clips it to the six-point grid
+    /// `0..=300 s`, from which the five points `0, 60, ..., 240 s` are selected; the reservation
+    /// covers those six points -- 262 bytes -- and the pool holds it. Before the reservation
+    /// followed the clipped range, the query was refused before anything was selected.
+    #[tokio::test]
+    async fn series_that_ends_at_its_first_sample_is_not_charged_for_the_grid() {
+        let batches = datafusion::physical_plan::collect(
+            one_series(
+                vec![(0, 1.0)],
+                0,
+                7 * 24 * 60 * 60 * 1_000,
+                60_000,
+                5 * 60 * 1_000,
+            ),
+            bounded_task_context(256 * 1024),
+        )
+        .await
+        .unwrap();
+
+        let timestamps: Vec<Millisecond> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("the output time column is in milliseconds")
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(timestamps, vec![0, 60_000, 120_000, 180_000, 240_000]);
+    }
+
+    /// A series whose samples span the whole query range is still charged for the whole grid, so
+    /// the clipped figure is a bound on what is selected and not a reservation of nothing.
+    #[tokio::test]
+    async fn series_that_spans_the_whole_grid_is_still_charged_for_it() {
+        let end = 7 * 24 * 60 * 60 * 1_000;
+        let spanning = || one_series(vec![(0, 1.0), (end, 2.0)], 0, end, 60_000, 5 * 60 * 1_000);
+
+        let err = datafusion::physical_plan::collect(spanning(), bounded_task_context(256 * 1024))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DataFusionError::ResourcesExhausted(_)),
+            "a pool below the clipped grid's workspace did not refuse it: {err}"
+        );
+
+        let batches =
+            datafusion::physical_plan::collect(spanning(), bounded_task_context(1024 * 1024))
+                .await
+                .unwrap();
+        // A sample answers only the points of its own lookback window, so the two samples decide
+        // six rows: the five of the first 5 min and the point of the second sample. The grid they
+        // reach, and the one the reservation covers, is the whole 10 081 points.
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(
+            rows, 6,
+            "the series spanning the whole grid was not decided"
+        );
+    }
+
+    /// The figure `manipulate_reserved` grows is the clipped one: 262 bytes for a series that ends
+    /// at its first sample, 413 337 bytes for one that spans the same seven-day grid of 10 081
+    /// points at a 60 s step. Per point it is the four `u64` of the two index vectors and the
+    /// timestamp allowance, the `f64` and validity bit `take` allocates for `value`, and one
+    /// `ArrayRef` per column.
+    #[test]
+    fn workspace_bytes_follows_the_clipped_grid_not_the_planned_one() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let end = 7 * 24 * 60 * 60 * 1_000;
+        let stream = InstantManipulateStream {
+            offset: 0,
+            start: 0,
+            end,
+            lookback_delta: 5 * 60 * 1_000,
+            interval: 60_000,
+            time_index: 0,
+            time_unit: TimeUnit::Millisecond,
+            field_indices: [Some(1), None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema: schema.clone(),
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(
+                    vec![],
+                    schema.clone(),
+                    None,
+                )
+                .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+            reservation: unbounded(),
+        };
+        let series = |timestamps: Vec<Millisecond>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(timestamps.clone())),
+                    Arc::new(Float64Array::from(vec![1.0; timestamps.len()])),
+                ],
+            )
+            .unwrap()
+        };
+
+        // One sample at `t=0` under a 5 min lookback clips to the six points `0, 60, ..., 300 s`;
+        // the exclusive lower bound leaves five of them selected.
+        let short = series(vec![0]);
+        assert_eq!(stream.clipped_points(&short), 6);
+        assert_eq!(
+            stream.workspace_bytes(&short),
+            6 * 32 + 6 * 9 + 2 * std::mem::size_of::<ArrayRef>()
+        );
+        // Samples at both ends reach every point of the planned grid, and are charged for it.
+        let long = series(vec![0, end]);
+        assert_eq!(stream.clipped_points(&long), 10_081);
+        assert_eq!(
+            stream.workspace_bytes(&long),
+            10_081 * 32 + 10_081 * 9 + 2 * std::mem::size_of::<ArrayRef>()
+        );
+        // An input without samples selects nothing and reserves nothing beyond the batch's columns.
+        let empty = series(vec![]);
+        assert_eq!(stream.clipped_points(&empty), 0);
+        assert_eq!(
+            stream.workspace_bytes(&empty),
+            2 * std::mem::size_of::<ArrayRef>()
         );
     }
 
