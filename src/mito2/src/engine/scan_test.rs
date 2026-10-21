@@ -1489,6 +1489,114 @@ async fn test_series_scan_with_format(flat_format: bool) {
     );
 }
 
+/// Single-source time ranges still need series-sized batches at the cross-range merge.
+#[tokio::test]
+async fn test_series_scan_splits_single_source_ranges() {
+    let mut env = TestEnv::with_prefix("test_series_scan_splits_single_source_ranges").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let mut expected = Vec::new();
+    for start in [0, 3600] {
+        let mut rows = Vec::new();
+        for key in ["a", "b", "c", "d"] {
+            rows.extend(test_util::build_rows_for_key(key, start, start + 64, 0));
+            expected
+                .extend((0..64).map(|i| (key.to_string(), i as f64, (start + i) as i64 * 1000)));
+        }
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    expected.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+
+    // Exercise both newly read and cached range streams at the same merge boundary.
+    for with_cache in [false, true] {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let scanner = engine
+                    .scanner(
+                        region_id,
+                        ScanRequest {
+                            distribution: Some(TimeSeriesDistribution::PerSeries),
+                            // Range caching requires a tag predicate; this one retains every row.
+                            filters: if with_cache {
+                                vec![col("tag_0").gt_eq(lit("a"))]
+                            } else {
+                                vec![]
+                            },
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let Scanner::Series(scanner) = scanner else {
+                    panic!("expected series scan");
+                };
+                assert_eq!(2, scanner.properties().partitions[0].len());
+
+                let ctx = store_api::region_engine::QueryScanContext {
+                    explain_verbose: true,
+                    ..Default::default()
+                };
+                let metrics = ExecutionPlanMetricsSet::default();
+                let stream = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                let actual = collect_and_assert_partition_rows(
+                    batches.schema(),
+                    vec![batches.iter().cloned().collect()],
+                );
+                assert_eq!(expected, actual);
+                let display = format!("{}", VerboseDisplay(scanner));
+                let details: serde_json::Value =
+                    serde_json::from_str(&display[display.find('{').unwrap()..]).unwrap();
+                let partitions = details["metrics_per_partition"].as_array().unwrap();
+                let rows: u64 = partitions
+                    .iter()
+                    .map(|p| {
+                        p["metrics"]["merge_metrics"]["num_fetch_by_rows"]
+                            .as_u64()
+                            .unwrap_or(0)
+                    })
+                    .sum();
+                assert_eq!(0, rows, "{display}");
+                if !with_cache
+                    || partitions
+                        .iter()
+                        .any(|p| p["metrics"]["range_cache_hit"].as_u64().unwrap_or(0) > 0)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn test_two_phase_series_scan() {
     for use_index in [false, true] {
