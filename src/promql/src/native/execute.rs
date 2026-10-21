@@ -92,6 +92,7 @@ use datatypes::series::{MetricName, SeriesOrdering};
 use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
 };
+use crate::histogram_eval::map_native_histogram;
 use crate::instant_eval::select_instants;
 use crate::map::{drop_metric_name, map_math};
 use crate::native::batch::EvaluatedChunk;
@@ -3407,44 +3408,52 @@ impl NativeExecutor {
 
 /// Maps one chunk with `ops`, keeping its axis and its closing.
 ///
-/// Mapping is point-wise over valued positions: a float chunk keeps the rows it came with, and a
-/// chunk holding native histograms loses the rows only histograms filled, as math skips them; a
-/// position no field fills is not a row of any chunk, and mapping does not invent one. `None` means
-/// the operation emptied every position, which yields no chunk at all
-/// unless this chunk closed its series: a closing chunk is still handed over, holding no position,
-/// because a consumer tells "nothing more here" from "no more input" by that chunk alone.
+/// Mapping is point-wise over valued positions: a float chunk keeps the rows it came with under
+/// math, a chunk holding native histograms loses the rows only histograms filled, as math skips
+/// them, and a histogram function keeps only the rows histograms filled; a position no field fills
+/// is not a row of any chunk, and mapping does not invent one. `None` means the operation emptied
+/// every position, which yields no chunk at all unless this chunk closed its series: a closing
+/// chunk is still handed over, holding no position, because a consumer tells "nothing more here"
+/// from "no more input" by that chunk alone.
 fn map_chunk(
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     chunk: &EvaluatedChunk,
     ops: &[MapOp],
 ) -> Result<Option<EvaluatedChunk>> {
     let mut series = chunk.series.clone();
     for (index, op) in ops.iter().enumerate() {
-        match op {
-            MapOp::Label(rewrite) => rewrite.apply(&mut series.metric)?,
-            MapOp::Math(math) => match map_math(schema, &series, *math)? {
-                Some(mapped) => series = mapped,
-                // `clamp` with `max < min` is the empty vector, and math skips native histograms,
-                // so a series without a float value has none left: every position it held was
-                // decided and holds no value now, so there is no row to hand over.
-                None => {
-                    if !chunk.is_last {
-                        return Ok(None);
-                    }
-                    // The closing chunk names the series the map would have produced, so the
-                    // operations not run still decide its labels.
-                    let mut metric = series.metric;
-                    for op in &ops[index..] {
-                        match op {
-                            MapOp::Label(rewrite) => rewrite.apply(&mut metric)?,
-                            MapOp::Math(_) => metric = drop_metric_name(&metric)?,
-                        }
-                    }
-                    let empty = no_row_series(schema, &series.time, metric)?;
-                    return EvaluatedChunk::try_new(empty, true).map(Some);
-                }
-            },
+        let mapped = match op {
+            MapOp::Label(rewrite) => {
+                rewrite.apply(&mut series.metric)?;
+                continue;
+            }
+            MapOp::Math(math) => map_math(schema, &series, *math)?,
+            MapOp::Histogram(function) => map_native_histogram(*function, schema, &series)?,
+        };
+        if let Some(mapped) = mapped {
+            series = mapped;
+            continue;
         }
+        // `clamp` with `max < min` is the empty vector, math skips native histograms and a
+        // histogram function skips floats, so a series left without a value of the kind the
+        // operation reads has none left: every position it held was decided and holds no value
+        // now, so there is no row to hand over.
+        if !chunk.is_last {
+            return Ok(None);
+        }
+        // The closing chunk names the series the map would have produced, so the operations not
+        // run still decide its labels.
+        let mut metric = series.metric;
+        for op in &ops[index..] {
+            match op {
+                MapOp::Label(rewrite) => rewrite.apply(&mut metric)?,
+                MapOp::Math(_) => metric = drop_metric_name(&metric)?,
+                // `simpleHistogramFunc` drops only the name, not the type and unit.
+                MapOp::Histogram(_) => metric.remove("__name__"),
+            }
+        }
+        let empty = no_row_series(schema, &series.time, metric)?;
+        return EvaluatedChunk::try_new(empty, true).map(Some);
     }
     EvaluatedChunk::try_new(series, chunk.is_last).map(Some)
 }

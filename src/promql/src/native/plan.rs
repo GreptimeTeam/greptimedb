@@ -35,6 +35,7 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 
+use crate::histogram_eval::NativeHistogramFunction;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -178,11 +179,13 @@ pub struct BoundMap {
     pub ops: Arc<[MapOp]>,
 }
 
-/// One operation of a map, applied to each series on its own: math over its values, or a change
-/// of its labels. Either can give two series one label set, which is why both live in a map.
+/// One operation of a map, applied to each series on its own: math over its float values, a
+/// function of its native histograms, or a change of its labels. Each can give two series one label
+/// set, which is why all live in a map.
 #[derive(Clone, Debug)]
 pub enum MapOp {
     Math(MathOp),
+    Histogram(NativeHistogramFunction),
     Label(Arc<LabelRewrite>),
 }
 

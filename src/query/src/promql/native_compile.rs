@@ -23,13 +23,14 @@
 //! <range function>(<selector>[<range>])             e.g. rate(x[5m])
 //! <range function>(<constant>, <selector>[<range>]) e.g. quantile_over_time(0.9, x[5m])
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//! <histogram function>(<expression>)                e.g. histogram_count(x)
 //! <label function>(<expression>, <string>*)         e.g. label_replace(x, "a", "$1", "b", "(.*)")
 //! ```
 //!
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
 //! `Input` (raw samples) → `Window` (the range function over the statement's grid) and
-//! `<expression>` → `Map` (a pointwise math function or label change over what its argument
-//! evaluates to). A
+//! `<expression>` → `Map` (a pointwise math function, native histogram function or label change
+//! over what its argument evaluates to). A
 //! selector may carry `offset` in either selection shape and, in the window shape, an `@` anchor.
 //! Everything else is a [`DataFusionError::NotImplemented`] that names what was found and quotes the
 //! shapes above, because rejecting a query the compiler does not understand is the only honest
@@ -60,6 +61,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
+use promql::histogram_eval::NativeHistogramFunction;
 use promql::map::{ArithmeticOp, MathOp};
 use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
@@ -80,9 +82,10 @@ use crate::promql::label_values::signed_millis_since_epoch;
 /// The shapes this compiler accepts, quoted in every rejection.
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
-                         the selector as in `quantile_over_time(0.9, x[5m])` — or a math or label \
-                         function over any of them, as in `abs(rate(x[5m]))`: for example `x`, \
-                         `rate(x[5m])`, `quantile_over_time(0.9, x[5m])` or `abs(rate(x[5m]))`";
+                         the selector as in `quantile_over_time(0.9, x[5m])` — or a math, native \
+                         histogram or label function over any of them, as in \
+                         `abs(rate(x[5m]))`: for example `x`, `rate(x[5m])`, \
+                         `quantile_over_time(0.9, x[5m])` or `abs(rate(x[5m]))`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -162,8 +165,8 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
     }
 }
 
-/// Compiles a call: a range function opens a window over the selector it is given, and a math or
-/// label function maps the value of its first argument.
+/// Compiles a call: a range function opens a window over the selector it is given, and a math,
+/// native histogram or label function maps the value of its first argument.
 ///
 /// The name lists are disjoint, and a range function is decided first because it binds its own
 /// window rather than its argument's value. A name in neither list is refused here, which is where
@@ -180,6 +183,16 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     // wrote.
     if let Some((op, vector)) = math_op(func.name, &args.args)? {
         return map_call(context, func.name, MapOp::Math(op), vector);
+    }
+    if let Some(function) = histogram_function(func.name) {
+        let [vector] = args.args.as_slice() else {
+            return Err(not_implemented(&format!(
+                "a call to `{}` with {} argument(s), where it takes its vector",
+                func.name,
+                args.args.len()
+            )));
+        };
+        return map_call(context, func.name, MapOp::Histogram(function), vector);
     }
     if let Some((rewrite, vector)) = label_rewrite(func.name, &args.args)? {
         return map_call(context, func.name, MapOp::Label(Arc::new(rewrite)), vector);
@@ -224,7 +237,8 @@ fn window_call(
     window_selection(context, function, vs, range)
 }
 
-/// Wraps `op` over the value of `vector`, which is the first argument of a math or label function.
+/// Wraps `op` over the value of `vector`, which is the first argument of a math, native histogram
+/// or label function.
 ///
 /// The output is the input's own type: a pointwise function moves no value to another grid point
 /// and reports one value per field it was given, so the map's schema is the input's allocation
@@ -657,6 +671,22 @@ fn math_op<'a>(
         ),
     };
     Ok(Some((op, vector)))
+}
+
+/// The native histogram function `name` denotes, or `None` when it is not one.
+///
+/// These read only native histogram samples and drop the float ones, as Prometheus'
+/// `simpleHistogramFunc` does; `histogram_quantile` and `histogram_fraction` also read classic
+/// bucket series and are not listed.
+fn histogram_function(name: &str) -> Option<NativeHistogramFunction> {
+    match name {
+        "histogram_count" => Some(NativeHistogramFunction::Count),
+        "histogram_sum" => Some(NativeHistogramFunction::Sum),
+        "histogram_avg" => Some(NativeHistogramFunction::Avg),
+        "histogram_stddev" => Some(NativeHistogramFunction::StdDev),
+        "histogram_stdvar" => Some(NativeHistogramFunction::StdVar),
+        _ => None,
+    }
 }
 
 /// The label change `label_replace` or `label_join` makes, and the vector it is made to, or `None`

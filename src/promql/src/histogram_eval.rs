@@ -44,6 +44,7 @@ use crate::go_sort;
 use crate::grid_series::{
     GridSeriesBuilder, LabelSet, METADATA_LABELS, label_set, merge_same_labelset,
 };
+use crate::map::validate_grid_series;
 
 const BUCKET_LABEL: &str = "le";
 
@@ -249,7 +250,7 @@ pub fn map_native_histogram(
     schema: &Arc<SeriesSchema>,
     series: &Series,
 ) -> Result<Option<Series>> {
-    grid_axis(series)?;
+    validate_grid_series(schema, series)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut buckets = Vec::new();
     let mut values = vec![None; schema.fields.len()];
@@ -279,6 +280,17 @@ pub fn map_native_histogram(
 }
 
 impl NativeHistogramFunction {
+    /// The PromQL name of the function.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Count => "histogram_count",
+            Self::Sum => "histogram_sum",
+            Self::Avg => "histogram_avg",
+            Self::StdDev => "histogram_stddev",
+            Self::StdVar => "histogram_stdvar",
+        }
+    }
+
     fn apply(self, h: &HistogramView<'_>, buckets: &mut Vec<native::NativeBucket>) -> Result<f64> {
         Ok(match self {
             Self::Count => h.count,

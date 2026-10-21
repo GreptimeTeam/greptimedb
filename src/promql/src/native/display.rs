@@ -204,6 +204,7 @@ fn function(function: RangeFunction) -> String {
 fn map_op(op: &MapOp) -> String {
     match op {
         MapOp::Math(op) => math_op(op),
+        MapOp::Histogram(function) => function.name().to_string(),
         MapOp::Label(rewrite) => rewrite.to_string(),
     }
 }
