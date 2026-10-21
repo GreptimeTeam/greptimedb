@@ -315,6 +315,11 @@ fn query_context_durations_match_go() {
         checked += 1;
     }
     assert!(checked > 200, "{checked} durations checked");
+    // Two valid endpoints whose difference leaves `i64` saturate, as `time.Time.Sub` does.
+    assert_eq!(
+        QueryContextFunction::Range.value(i64::MIN / 2, i64::MAX / 2 + 1, 1),
+        QueryContextFunction::Range.value(0, i64::MAX, 1)
+    );
     assert_eq!(QueryContextFunction::Step.value(5_000, 5_000, 1_000), 0.0);
     assert_eq!(QueryContextFunction::Start.value(-1_500, 0, 1), -1.5);
     assert_eq!(QueryContextFunction::End.value(0, 2_250, 1), 2.25);

@@ -60,7 +60,7 @@ impl QueryContextFunction {
         match self {
             Self::Start => start_ms as f64 / 1000.0,
             Self::End => end_ms as f64 / 1000.0,
-            Self::Range => duration_seconds(end_ms - start_ms),
+            Self::Range => duration_seconds(end_ms.saturating_sub(start_ms)),
             Self::Step if start_ms == end_ms => 0.0,
             Self::Step => duration_seconds(step_ms),
         }
