@@ -22,8 +22,8 @@
 use std::fmt::{self, Write};
 use std::sync::Arc;
 
-use datatypes::series::SeriesOrdering;
 use datatypes::series::time::EvalGrid;
+use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
@@ -32,6 +32,7 @@ use crate::native::plan::{
     NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
+use crate::select::SortOrder;
 use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The header line of every tree.
@@ -110,6 +111,15 @@ fn describe(node: &NativeNode) -> String {
             ),
             BoundSelect::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
             BoundSelect::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
+            BoundSelect::Sort(order) => match order {
+                SortOrder::Asc => "sort".to_string(),
+                SortOrder::Desc => "sort_desc".to_string(),
+                SortOrder::ByLabel(labels) => format!("sort_by_label [{}]", label_list(labels)),
+                SortOrder::ByLabelDesc(labels) => {
+                    format!("sort_by_label_desc [{}]", label_list(labels))
+                }
+            },
+            BoundSelect::Absent { labels } => format!("absent {{{}}}", label_pairs(labels)),
         },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} {}",
@@ -253,6 +263,22 @@ fn binary_op(op: BinaryOp) -> &'static str {
         BinaryOp::Ge => ">=",
         BinaryOp::Le => "<=",
     }
+}
+
+/// The labels of `metric` as `name="value"` pairs, the metric name first.
+fn label_pairs(metric: &MetricName) -> String {
+    metric
+        .name()
+        .map(|name| format!("__name__={name:?}"))
+        .into_iter()
+        .chain(
+            metric
+                .tags()
+                .iter()
+                .map(|tag| format!("{}={:?}", tag.name, tag.value)),
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A grouping as `by [labels]` or `without [labels]`.

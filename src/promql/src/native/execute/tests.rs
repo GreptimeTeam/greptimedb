@@ -48,6 +48,7 @@ use crate::native::plan::{
     BoundSelect, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, reset_visited_pairs,
     visited_pairs,
@@ -6598,4 +6599,112 @@ fn a_binary_node_reads_what_a_selection_kept() {
         execution.push_evaluated_at(path, chunk).unwrap();
     }
     assert_eq!(decided(&run(&mut execution)), vec![(1, Some(15.0))]);
+}
+
+/// `absent` answers where its input holds nothing, under the labels it was bound to, and answers
+/// at every point when no series arrives at all.
+#[test]
+fn absent_answers_where_the_input_holds_nothing() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // What `absent_labels` derives from `up{job="x"}`: the name is not one of them.
+    let labels = MetricName::try_new(
+        None,
+        vec![Label {
+            name: "job".into(),
+            value: "x".into(),
+        }],
+    )
+    .unwrap();
+    let tree = NativeTree::try_new(select(
+        evaluated_input(Arc::clone(&grid)),
+        BoundSelect::Absent {
+            labels: labels.clone(),
+        },
+    ))
+    .unwrap();
+
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("up", "y"),
+            1,
+            vec![Some(0.0)],
+            true,
+        ))
+        .unwrap();
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric, labels);
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0)), (2, Some(1.0))]);
+
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(1.0)), (1, Some(1.0)), (2, Some(1.0))]
+    );
+}
+
+/// A sort orders the series of an instant result, and the node hands them over in that order.
+#[test]
+fn sort_desc_hands_over_series_in_value_order() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(select(
+        evaluated_input(Arc::clone(&grid)),
+        BoundSelect::Sort(SortOrder::Desc),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (job, value) in [("b", 1.0), ("a", 3.0), ("c", 2.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("m", job),
+                0,
+                vec![Some(value)],
+                true,
+            ))
+            .unwrap();
+    }
+    let jobs: Vec<String> = run(&mut execution)
+        .iter()
+        .map(|chunk| chunk.series.metric.get("job").unwrap().to_string())
+        .collect();
+    assert_eq!(jobs, ["a", "c", "b"]);
+}
+
+/// A sort hands back the assembled input, whose field is one slice per input chunk of one shared
+/// buffer: it is queued at what the slices hold, as the input was retained, not at the buffer once
+/// per chunk, which here would be ten times the input and more than the pool.
+#[test]
+fn a_sorted_series_is_queued_at_what_its_slices_hold() {
+    let points = 1_000;
+    let grid = grid(0, 60_000, points);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(select(
+        evaluated_input(Arc::clone(&grid)),
+        BoundSelect::Sort(SortOrder::ByLabel(vec!["job".into()])),
+    ))
+    .unwrap();
+    let pool = bounded_pool(48 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let values = Float64Array::from((0..points).map(|v| v as f64).collect::<Vec<_>>());
+    for start in (0..points as usize).step_by(100) {
+        execution
+            .push_evaluated(evaluated_array_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                start,
+                values.slice(start, 100),
+                start + 100 == points as usize,
+            ))
+            .unwrap();
+        // The selection retains each chunk as it arrives, at what its slice holds.
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(decided(&chunks).len(), points as usize);
+    assert_eq!(pool.reserved(), 0);
 }

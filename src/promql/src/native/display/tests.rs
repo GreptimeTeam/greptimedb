@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::super::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
@@ -24,6 +24,7 @@ use super::super::plan::{
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
@@ -426,6 +427,23 @@ fn a_selection_names_its_binding() {
         (
             BoundSelect::LimitRatio { ratio: -0.5 },
             "  root Select limit_ratio -0.5",
+        ),
+        (
+            BoundSelect::Sort(SortOrder::ByLabelDesc(vec!["job".into(), "le".into()])),
+            "  root Select sort_by_label_desc [job, le]",
+        ),
+        (
+            BoundSelect::Absent {
+                labels: MetricName::try_new(
+                    None,
+                    vec![Label {
+                        name: "job".into(),
+                        value: "x".into(),
+                    }],
+                )
+                .unwrap(),
+            },
+            r#"  root Select absent {job="x"}"#,
         ),
     ];
     for (op, line) in lines {

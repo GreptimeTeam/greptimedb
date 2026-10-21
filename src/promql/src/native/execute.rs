@@ -102,7 +102,7 @@ use crate::native::plan::{
     BoundInstant, BoundSelect, Grouping, NativeExpr, NativeNode, NativeTree,
 };
 use crate::range_eval::RangeEvaluator;
-use crate::select;
+use crate::select::{self, SortOrder};
 use crate::vector_match::{
     BinaryMatching, binary_vectors_with_reservation, validate_binary_operand,
 };
@@ -1835,15 +1835,15 @@ impl SelectRuntime {
             assembled.sort_by(|a, b| select::compare_labels(&a.metric, &b.metric));
         }
         buffer.grow(selection_workspace_bytes(
+            &self.op,
+            &self.schema,
             &assembled,
-            self.schema.fields.len(),
         ))?;
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            select_series(&self.op, &self.schema, &assembled)?
+            select_series(&self.op, &self.schema, assembled)?
         };
-        drop(assembled);
         self.input.release();
         self.computed = true;
         Ok(Some(output))
@@ -1862,7 +1862,7 @@ fn select_overflow(path: &NodePath) -> DataFusionError {
 fn select_series(
     op: &BoundSelect,
     schema: &SeriesSchema,
-    series: &[Series],
+    series: Vec<Series>,
 ) -> Result<Vec<Series>> {
     let grouping = |group: &Grouping| match group {
         Grouping::By(labels) => select::Grouping::By(labels.to_vec()),
@@ -1870,22 +1870,61 @@ fn select_series(
     };
     match op {
         BoundSelect::TopK { k, top, group } => {
-            select::topk(*k, *top, &grouping(group), schema, series)
+            select::topk(*k, *top, &grouping(group), schema, &series)
         }
-        BoundSelect::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, series),
-        BoundSelect::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, series),
+        BoundSelect::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, &series),
+        BoundSelect::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, &series),
+        // A sort hands back the series it was given, rebuilding only those `sort` and `sort_desc`
+        // drop histogram samples from.
+        BoundSelect::Sort(order) => select::sort_instant(order, schema, series),
+        BoundSelect::Absent { labels } => Ok(select::absent(schema, &series, labels.clone())?
+            .into_iter()
+            .collect()),
     }
 }
 
-/// A rough estimate of what a selection kernel allocates over `series`, beside the input it reads.
+/// A rough estimate of what the selection `op` allocates over `series`, beside the input it reads.
+/// Like [`merge_workspace_bytes`] it is not an allocation bound: vector slack and the hash table's
+/// own layout are not measured.
 ///
-/// Per row, the `(point, row)` a kept sample is recorded as, the candidate it is ranked as and the
-/// value each field rebuilds it into; per series, its place in the label order and its group, its
-/// label pairs in the group key, its cursor and the series and field descriptors of its result; and
-/// the histograms `limitk` and `limit_ratio` copy into their results, at the widest histogram of
-/// each field. Like [`merge_workspace_bytes`] it is not an allocation bound: vector slack and the
-/// hash table's own layout are not measured.
-fn selection_workspace_bytes(series: &[Series], fields: usize) -> usize {
+/// - `topk`, `bottomk`, `limitk` and `limit_ratio`, per row: the `(point, row)` a kept sample is
+///   recorded as, the candidate it is ranked as and the value each field rebuilds it into; per
+///   series: its place in the label order and its group, its label pairs in the group key, its
+///   cursor and the series and field descriptors of its result; and the histograms `limitk` and
+///   `limit_ratio` copy into their results, at the widest histogram of each field.
+/// - A sort: the value each series is keyed by, and the floats `sort` and `sort_desc` rebuild a
+///   series into when it holds histograms; the label sorts move the series they were given.
+/// - `absent`: a presence flag and a result value per grid point and field.
+fn selection_workspace_bytes(op: &BoundSelect, schema: &SeriesSchema, series: &[Series]) -> usize {
+    let fields = schema.fields.len();
+    match op {
+        BoundSelect::Sort(order) => {
+            let rebuilds = matches!(order, SortOrder::Asc | SortOrder::Desc);
+            return series.iter().fold(0usize, |total, item| {
+                let floats = if rebuilds
+                    && item
+                        .fields
+                        .iter()
+                        .any(|field| histogram_row_bytes(field).is_some())
+                {
+                    item.time.len().saturating_mul(std::mem::size_of::<f64>())
+                } else {
+                    0
+                };
+                total
+                    .saturating_add(std::mem::size_of::<(f64, Series)>())
+                    .saturating_add(floats)
+            });
+        }
+        BoundSelect::Absent { .. } => {
+            let points = schema
+                .eval_grid
+                .as_ref()
+                .map_or(0, |grid| grid.timestamps().len());
+            return points.saturating_mul(fields.saturating_mul(1 + std::mem::size_of::<f64>()));
+        }
+        BoundSelect::TopK { .. } | BoundSelect::LimitK { .. } | BoundSelect::LimitRatio { .. } => {}
+    }
     let row = std::mem::size_of::<(usize, usize)>()
         + std::mem::size_of::<(usize, usize, f64)>()
         + fields * std::mem::size_of::<f64>();
@@ -2326,7 +2365,7 @@ impl NodeRuntime {
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output)
+        self.queue_results(output, false)
     }
 
     /// Retains one chunk of a selection's input, reserved for before it is retained, as
@@ -2363,29 +2402,42 @@ impl NodeRuntime {
 
     /// Runs this node's selection kernel and queues the series it kept.
     fn compute_select(&mut self, path: &NodePath) -> Result<()> {
-        let output = {
+        let (output, shares_input) = {
             let select = self.select.as_mut().ok_or_else(|| no_select(path))?;
-            select.compute(path, &mut self.buffer)?
+            let shares_input = matches!(select.op, BoundSelect::Sort(_));
+            (select.compute(path, &mut self.buffer)?, shares_input)
         };
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output)
+        self.queue_results(output, shares_input)
     }
 
     /// Queues the series a kernel that reads its whole input produced, and settles the reservation
     /// on the queue.
-    fn queue_results(&mut self, output: Vec<Series>) -> Result<()> {
+    ///
+    /// `shares_input` says the series are the assembled input itself, as a sort hands it back: a
+    /// field there is one slice per input chunk of buffers and histogram tables the chunks shared,
+    /// so each series is measured the way the input was ([`operand_chunk_bytes`], each table billed
+    /// once) rather than by the allocations its slices belong to, which would count a buffer once
+    /// per chunk.
+    fn queue_results(&mut self, output: Vec<Series>, shares_input: bool) -> Result<()> {
+        let mut tables = HashSet::new();
         // The results are queued the way a node that produces a chunk per input queues what it
         // hands on: the queue is the one source of chunk order and of the bytes queued chunks hold.
         let mut closed = 0usize;
         for series in output {
             // The kernel decided every point of a result series at once, so the one chunk it is
             // handed over as closes it.
+            let shared = shares_input.then(|| {
+                let (fresh, table_bytes) = unbilled_tables(&series, &tables);
+                tables.extend(fresh);
+                operand_chunk_bytes(&series).saturating_add(table_bytes)
+            });
             let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
             // The result is already admitted, within the workspace reserved for the kernel. What the
             // queue keeps is the estimate of the chunk that holds it.
-            let bytes = chunk.bytes();
+            let bytes = shared.unwrap_or_else(|| chunk.bytes());
             self.queued.push_back((chunk, bytes));
             closed += 1;
         }
@@ -2792,9 +2844,16 @@ impl NativeExecutionState {
                             "the selection at {path} does not produce samples"
                         ))
                     })?;
-                    // `topk`, `bottomk` and `limitk` rank one value per sample, so their kernels
-                    // take one field; `limit_ratio` keeps whole series and takes any number.
-                    if !matches!(op, BoundSelect::LimitRatio { .. }) && schema.fields.len() != 1 {
+                    // `topk`, `bottomk`, `limitk` and the value sorts read one value per sample,
+                    // so their kernels take one field; the others keep or test whole samples and
+                    // take any number.
+                    let one_field = matches!(
+                        op,
+                        BoundSelect::TopK { .. }
+                            | BoundSelect::LimitK { .. }
+                            | BoundSelect::Sort(SortOrder::Asc | SortOrder::Desc)
+                    );
+                    if one_field && schema.fields.len() != 1 {
                         return Err(not_implemented("multi-field Select", &path));
                     }
                     runtime.select = Some(SelectRuntime::new(op.clone(), schema));
@@ -2887,8 +2946,16 @@ impl NativeExecutionState {
                         // A selection keeps samples of the series it read, so pieces of one label
                         // set stay pieces: they hold disjoint points, so ranking them apart picks
                         // what ranking the merged series would, and what is above treats them as
-                        // it treats a map's.
-                        holds_shared[index] = input_holds_shared;
+                        // it treats a map's. `absent` is the exception: it answers with one series
+                        // under the labels it was bound to.
+                        let absent = matches!(
+                            expr,
+                            NativeExpr::Select {
+                                op: BoundSelect::Absent { .. },
+                                ..
+                            }
+                        );
+                        holds_shared[index] = input_holds_shared && !absent;
                     }
                     NodeTag::Window => {
                         let (drops_metric_name, input_schema) = match expr {
