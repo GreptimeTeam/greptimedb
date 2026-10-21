@@ -73,7 +73,7 @@
 //! collects the root's chunks and merges them with the same helper.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -205,6 +205,11 @@ fn series_bytes(series: &Series) -> usize {
 /// counting that buffer once per chunk would make the operand's figure grow with the number of
 /// chunks rather than with the data in them. The slices of one series add up to the allocation they
 /// share, which is the figure a deduplication across the chunks would arrive at.
+///
+/// The histogram tables a chunk's segments reference are not part of the figure: a table is one
+/// allocation however many chunks index into it, so it is not a per-chunk cost at all. Dropping it
+/// here is therefore only half the story -- it must not become a figure the operand never charges.
+/// [`unbilled_tables`] is the other half, and the operand bills each table once through it.
 fn operand_chunk_bytes(series: &Series) -> usize {
     series_bytes(series)
         .saturating_sub(fields_bytes(&series.fields))
@@ -244,6 +249,45 @@ fn sample_slice_bytes(fields: &SeriesFields) -> usize {
             None => 0,
         })
         .fold(0usize, usize::saturating_add)
+}
+
+/// The histogram tables `series` is the first to reference, and the bytes they hold.
+///
+/// A table is one allocation the chunks of a series share, so it is neither a per-chunk cost --
+/// counting it per chunk would make a series delivered in a thousand chunks cost a thousand tables
+/// -- nor no cost at all, which is what leaving it out of every chunk leaves the figure at. What it
+/// is, is a cost of the operand that first retains a chunk referencing it: the identities it returns
+/// are the tables `billed` does not hold yet, and the figure is what those tables hold
+/// ([`table_bytes`]). The caller bills the figure as it stands and adds the identities to `billed`
+/// once the chunk is retained, which is what makes the two halves of the figure agree.
+///
+/// The identity is the address of the allocation behind the `Arc`. It names one table for as long as
+/// it is remembered, because a chunk referencing a table keeps it alive and no later allocation can
+/// be given the same address. A table two segments or two fields of the one chunk reference is
+/// listed once. Each identity is also one slot in the set that remembers it, which is charged as it
+/// is written -- one entry at a time, like the boundary list's, and not from the capacity the set
+/// grows to -- so remembering a table is paid for beside the table itself.
+fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usize) {
+    let mut fresh: Vec<usize> = Vec::new();
+    let mut bytes = 0usize;
+    for field in series.fields.iter() {
+        for segment in field.segments() {
+            let table = match segment.dense() {
+                Some(DenseSamplesRef::Histogram(histograms)) => histograms.batch(),
+                Some(DenseSamplesRef::Mixed(mixed)) => mixed.histograms().batch(),
+                _ => continue,
+            };
+            let identity = Arc::as_ptr(table) as usize;
+            if billed.contains(&identity) || fresh.contains(&identity) {
+                continue;
+            }
+            fresh.push(identity);
+            bytes = bytes
+                .saturating_add(table_bytes(table))
+                .saturating_add(std::mem::size_of::<usize>());
+        }
+    }
+    (fresh, bytes)
 }
 
 /// A rough workspace estimate for merging fragments that hold `rows` rows between them.
@@ -1228,37 +1272,60 @@ struct BinaryOperand {
     /// alone would read them as one. Only a chunk carrying `is_last` records an end, and it does so
     /// whether or not it carries a row.
     ends: Vec<usize>,
+    /// The histogram tables the chunks this operand holds index into, by the address of the
+    /// allocation behind their `Arc`.
+    ///
+    /// A table is one allocation however many chunks of a series index into it, so it is billed
+    /// once -- by the first chunk that references it -- rather than once per chunk, and the tables
+    /// this set names are the ones already billed. That is what keeps a series delivered in a
+    /// thousand chunks from costing a thousand tables, and what keeps a table from costing nothing:
+    /// a chunk's own figure leaves its tables out ([`operand_chunk_bytes`]), so a table billed by
+    /// neither this operand nor this set is a table no reservation covers. One slot per billed
+    /// table is charged with it, so the set's own storage is not a figure no reservation covers
+    /// either.
+    tables: HashSet<usize>,
     /// The bytes `series` and `ends` hold, folded in as chunks arrive.
     ///
     /// Each chunk is measured once, with the figure of what it holds on its own
     /// ([`operand_chunk_bytes`]): the samples its rows occupy and the descriptors it keeps, not the
     /// allocation those samples are slices of, so a series delivered in many chunks is charged the
-    /// data it holds rather than the same buffer once per chunk.
+    /// data it holds rather than the same buffer once per chunk. The histogram tables the chunks
+    /// reference are the other half of that figure: one allocation the chunks share, billed once --
+    /// with the one slot that remembers it -- the first time a chunk referencing it arrives
+    /// ([`unbilled_tables`]).
     held: usize,
 }
 
 impl BinaryOperand {
     /// The bytes `chunk` would add to what this operand holds, read without retaining it.
     ///
-    /// It is what [`Self::enqueue`] adds for the same chunk: what the chunk holds on its own, and the
-    /// one entry a chunk that closes its series records in the boundary list. The boundary list holds
-    /// one `usize` per closed series and is charged one entry at a time as it is written, rather than
-    /// from the capacity it grows to -- following that `Vec`'s first-four-then-double policy would be
-    /// a second copy of it to keep in step, and one entry within a factor of two is the granularity
-    /// the accounting aims at. The figure is what a caller reserves before it retains the chunk, so
-    /// the pool admits it before the operand holds it.
+    /// It is what [`Self::enqueue`] adds for the same chunk: what the chunk holds on its own, the
+    /// histogram tables it is the first to reference, and the one entry a chunk that closes its
+    /// series records in the boundary list. The boundary list holds one `usize` per closed series and
+    /// is charged one entry at a time as it is written, rather than from the capacity it grows to --
+    /// following that `Vec`'s first-four-then-double policy would be a second copy of it to keep in
+    /// step, and one entry within a factor of two is the granularity the accounting aims at. The
+    /// figure is what a caller reserves before it retains the chunk, so the pool admits it before
+    /// the operand holds it.
     fn pending(&self, chunk: &EvaluatedChunk) -> usize {
         let end = if chunk.is_last {
             std::mem::size_of::<usize>()
         } else {
             0
         };
-        operand_chunk_bytes(&chunk.series).saturating_add(end)
+        let (_, tables) = unbilled_tables(&chunk.series, &self.tables);
+        tables
+            .saturating_add(operand_chunk_bytes(&chunk.series))
+            .saturating_add(end)
     }
 
     /// Retains one chunk, folding the estimate it is charged with into what the operand holds.
     fn enqueue(&mut self, chunk: EvaluatedChunk) {
         let closing = chunk.is_last;
+        // The tables this chunk is the first to reference, read before they are recorded: the same
+        // figure `pending` billed, so what is reserved for the chunk and what it grows the operand
+        // by are one.
+        let (tables, bytes) = unbilled_tables(&chunk.series, &self.tables);
         // The boundary list is storage the operand keeps, and it grows before the chunk is recorded
         // in it: an end is charged for before it exists, the same figure `pending` reported.
         self.held = self
@@ -1268,7 +1335,11 @@ impl BinaryOperand {
             } else {
                 0
             })
-            .saturating_add(operand_chunk_bytes(&chunk.series));
+            .saturating_add(operand_chunk_bytes(&chunk.series))
+            .saturating_add(bytes);
+        // From here the operand keeps those tables alive itself, so a chunk arriving later that
+        // references one is charged its own slices and not the table again.
+        self.tables.extend(tables);
         self.series.push(chunk.series);
         if closing {
             self.ends.push(self.series.len());
@@ -1414,6 +1485,10 @@ impl BinaryOperand {
         self.series.shrink_to_fit();
         self.ends.clear();
         self.ends.shrink_to_fit();
+        // The tables the cleared chunks were keeping alive are gone with them, so their addresses
+        // name nothing this operand holds any more.
+        self.tables.clear();
+        self.tables.shrink_to_fit();
         self.held = 0;
     }
 }

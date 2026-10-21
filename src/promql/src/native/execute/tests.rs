@@ -21,7 +21,7 @@ use std::sync::Arc;
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue};
-use datatypes::arrow::array::{Float64Array, UInt32Array};
+use datatypes::arrow::array::{Array, Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
@@ -586,6 +586,48 @@ fn evaluated_array_chunk_of(
         fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
     };
     EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
+/// One evaluated chunk of the series `metric` whose one field holds `indices` into `table`,
+/// addressed at `start` on `schema`'s grid.
+///
+/// Two chunks built with one `table` are two slices of one allocation; two built with tables of the
+/// same shape hold two allocations of the same size.
+fn evaluated_histogram_chunk_of(
+    schema: &SeriesSchema,
+    metric: MetricName,
+    start: usize,
+    indices: Vec<Option<u32>>,
+    table: &Arc<HistogramBatch>,
+    is_last: bool,
+) -> EvaluatedChunk {
+    let samples =
+        Samples::try_from_histogram(UInt32Array::from(indices), Arc::clone(table)).unwrap();
+    let range =
+        GridRange::try_new(schema.eval_grid.clone().unwrap(), start, samples.len()).unwrap();
+    let series = Series {
+        metric,
+        time: TimeAxis::Grid(range),
+        fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+    };
+    EvaluatedChunk::try_new(series, is_last).unwrap()
+}
+
+/// One histogram table of `histograms` histograms of `buckets` buckets each.
+fn histogram_table(histograms: usize, buckets: i32) -> Arc<HistogramBatch> {
+    let mut builder = HistogramBatchBuilder::new();
+    for _ in 0..histograms {
+        push_histogram(&mut builder, buckets);
+    }
+    builder.finish().unwrap()
+}
+
+/// What `table` holds: the batch struct and the arrays its columns view.
+///
+/// Written out here rather than read from the runtime, so a test can size its expectations from the
+/// table it built instead of from the figure it is checking.
+fn histogram_table_bytes(table: &Arc<HistogramBatch>) -> usize {
+    std::mem::size_of::<HistogramBatch>() + table.as_arrow().get_array_memory_size()
 }
 
 /// The series `name{job="job"}`, so two series can share the label a map leaves behind.
@@ -4873,6 +4915,213 @@ fn a_binary_operand_reserves_what_it_retains() {
             "the assembly copied samples instead of sharing the allocation they are slices of"
         );
     }
+}
+
+/// Two chunks that are first to reference a histogram table each are billed a table each.
+///
+/// A histogram field's samples are a column of indices into a table, and the table is the bulk of
+/// what such a chunk costs: the indices are four bytes a row where the table is thousands of bytes
+/// of buckets. Two chunks of the same shape hold two tables, so each costs the other, and each
+/// costs at least the table it holds -- a figure that charged the column of indices alone would
+/// leave both tables outside everything the node reserves.
+#[test]
+fn a_binary_operand_bills_each_histogram_table_it_retains() {
+    const BUCKETS: i32 = 4_000;
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, BUCKETS);
+    let other = histogram_table(2, BUCKETS);
+    let bytes = histogram_table_bytes(&table);
+    assert_eq!(
+        bytes,
+        histogram_table_bytes(&other),
+        "the two tables are not the same shape, so the two chunks are not comparable"
+    );
+    assert!(
+        bytes > 32 * 1024,
+        "a table of {bytes} bytes is no bigger than the descriptors of a one-row chunk, so nothing \
+         here would tell a billed table from an unbilled one"
+    );
+    let first = evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &table, true);
+    let second = evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &other, true);
+
+    let pool = pool();
+    let mut runtime = binary_runtime(&pool, &schema);
+    let before = runtime.buffer.reservation.size();
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    let first_cost = runtime.buffer.reservation.size() - before;
+    let before = runtime.buffer.reservation.size();
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second))
+        .unwrap();
+    let second_cost = runtime.buffer.reservation.size() - before;
+
+    assert_eq!(
+        first_cost, second_cost,
+        "two chunks of one shape and one table each cost different figures: {first_cost} and \
+         {second_cost}"
+    );
+    for (name, cost) in [("first", first_cost), ("second", second_cost)] {
+        assert!(
+            cost >= bytes,
+            "the {name} chunk costs {cost} bytes, less than the {bytes} its histogram table holds"
+        );
+        assert!(
+            cost < 2 * bytes,
+            "the {name} chunk costs {cost} bytes, more than the {bytes} of its table and the rest \
+             of a one-row chunk"
+        );
+    }
+    assert_eq!(
+        runtime.buffer.reservation.size(),
+        first_cost + second_cost,
+        "the operand does not reserve what the two chunks it retains cost"
+    );
+    assert_eq!(pool.reserved(), runtime.buffer.reservation.size());
+}
+
+/// Two chunks that index one histogram table are billed that table once.
+///
+/// A table is one allocation however many chunks of a series index into it, so the second chunk is
+/// charged the descriptor, the index and the end it records, and not the table again. The two
+/// chunks here are the same shape, so what separates their figures is the table: the pair costs one
+/// table plus both chunks' own descriptors, not one table per chunk and not no table at all.
+#[test]
+fn a_binary_operand_bills_a_shared_histogram_table_once() {
+    const BUCKETS: i32 = 4_000;
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, BUCKETS);
+    let bytes = histogram_table_bytes(&table);
+    assert!(
+        bytes > 32 * 1024,
+        "a table of {bytes} bytes is no bigger than the descriptors of a one-row chunk, so nothing \
+         here would tell a shared table from a second one"
+    );
+    let first = evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &table, true);
+    let second = evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &table, true);
+
+    let pool = pool();
+    let mut runtime = binary_runtime(&pool, &schema);
+    let before = runtime.buffer.reservation.size();
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    let first_cost = runtime.buffer.reservation.size() - before;
+    let before = runtime.buffer.reservation.size();
+    runtime
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second))
+        .unwrap();
+    let second_cost = runtime.buffer.reservation.size() - before;
+
+    assert!(
+        first_cost >= bytes,
+        "the chunk that first references the table costs {first_cost} bytes, less than the {bytes} \
+         the table holds"
+    );
+    // The two chunks are the same shape, so the second one is charged its own descriptors and not
+    // the table: it costs a small fraction of what the table holds, where a second table would cost
+    // the table again.
+    assert!(
+        second_cost * 8 < bytes,
+        "the second slice of one table costs {second_cost} bytes, comparable to the {bytes} the \
+         table itself holds"
+    );
+    // What the pair costs past the second chunk is the table the first one billed, and no more than
+    // the few bytes that remembering it takes.
+    let difference = first_cost.saturating_sub(second_cost);
+    assert!(
+        difference >= bytes,
+        "the pair costs {difference} bytes more than its second chunk, less than the {bytes} of the \
+         one table between them"
+    );
+    assert!(
+        difference <= bytes + 64,
+        "the pair costs {difference} bytes more than its second chunk, past the {bytes} of the one \
+         table between them: the table is billed twice"
+    );
+    assert!(
+        runtime.buffer.reservation.size() < bytes + 2 * second_cost + 64,
+        "the operand charges the one table of its two chunks twice: {} bytes for {} bytes of table",
+        runtime.buffer.reservation.size(),
+        bytes
+    );
+    assert_eq!(pool.reserved(), runtime.buffer.reservation.size());
+}
+
+/// A pool with room for one histogram table admits one chunk of a table, refuses a second chunk
+/// holding another table, and admits a second slice of the table it already holds.
+///
+/// This is the figure the reservation is made for: a chunk that is the first to reference a table
+/// costs that table, so two of them do not fit in room for one, while a chunk that indexes a table
+/// the operand already holds costs its own slice and does. The room beside the first chunk is half a
+/// table -- far more than the descriptors of a second chunk and far less than a second table -- and
+/// the refused chunk leaves the operand where it was.
+#[test]
+fn a_pool_that_holds_one_histogram_table_refuses_a_second() {
+    const BUCKETS: i32 = 4_000;
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, BUCKETS);
+    let other = histogram_table(2, BUCKETS);
+    let bytes = histogram_table_bytes(&table);
+    assert!(
+        bytes > 32 * 1024,
+        "a table of {bytes} bytes is no bigger than the descriptors of a one-row chunk, so the room \
+         beside one table would hold a second"
+    );
+    let first = evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &table, true);
+    let second_own =
+        evaluated_histogram_chunk_of(&schema, metric(), 0, vec![Some(0)], &other, true);
+    let second_shared =
+        evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &table, true);
+
+    // What the operand holds once it retains one chunk of a table, measured where the pool admits
+    // anything; the pool below is sized from it and half a table.
+    let mut probe = binary_runtime(&pool(), &schema);
+    probe
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first.clone()))
+        .unwrap();
+    let one_chunk = probe.buffer.reservation.size();
+    let budget = one_chunk + bytes / 2;
+
+    // A second chunk holding a table of its own does not fit: the pool refuses it and the operand
+    // keeps what it had.
+    let mut refused = binary_runtime(&bounded_pool(budget), &schema);
+    refused
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first.clone()))
+        .unwrap();
+    let error = refused
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second_own))
+        .unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "a second chunk holding a table of its own was admitted beside the first: {error}"
+    );
+    assert_eq!(
+        refused.buffer.reservation.size(),
+        one_chunk,
+        "the refused chunk moved what the operand reserves"
+    );
+
+    // The second slice of the one table the operand holds does fit.
+    let mut shared = binary_runtime(&bounded_pool(budget), &schema);
+    shared
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+        .unwrap();
+    shared
+        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second_shared))
+        .unwrap();
+    assert!(
+        shared.buffer.reservation.size() > one_chunk,
+        "the second slice of the table was admitted without being charged its own descriptors"
+    );
+    assert!(
+        shared.buffer.reservation.size() <= budget,
+        "the operand reserves past the pool it was admitted in"
+    );
 }
 
 /// The executor's binary node holds no more than the operands it retains: the peak of its own

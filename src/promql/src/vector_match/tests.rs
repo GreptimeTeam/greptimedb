@@ -3140,6 +3140,11 @@ fn sparse_wide_results_are_charged_their_index_columns() {
 /// pair differs in count and sum as well. What this pins is that a comparison passes the stored
 /// payload through, not a Prometheus result. A `bool` comparison answers in floats, so nothing it
 /// hands out is a histogram and no start timestamp leaves it.
+///
+/// Every comparison is run twice, through both entry points: the public one, and the one the
+/// runtime calls with a reservation. They share one kernel, but only the second walks a comparison
+/// while a budget holds the workspace it allocates, so the payload this test is about is only
+/// pinned under a reservation by the second run.
 #[test]
 fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 3).unwrap()).unwrap());
@@ -3215,29 +3220,51 @@ fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
         fill: FillValues::default(),
     };
 
-    let eq = binary_vectors(&matching(BinaryOp::Eq), &schema, &lhs, &schema, &rhs).unwrap();
-    assert_eq!(
-        kept(&eq),
-        [
-            ("eq".to_string(), 0, 4.0, 6.0, Some(LEFT_START), 2),
-            ("eq".to_string(), 2, 4.0, 6.0, Some(LEFT_START), 2),
-        ],
-        "`==` did not hand back the left histogram it kept: {eq:?}"
-    );
+    // One comparison through both entry points: the answer the public one gives, and the answer the
+    // budgeted one gives, which is asserted to have reserved the workspace it walked.
+    let compare = |matching: &BinaryMatching| -> [Vec<Series>; 2] {
+        let mut reserved = Vec::new();
+        let budgeted =
+            binary_vectors_with_reservation(matching, &schema, &lhs, &schema, &rhs, &mut |total| {
+                reserved.push(total);
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            !reserved.is_empty(),
+            "the budgeted comparison reserved nothing, so it did not run under a reservation"
+        );
+        let public = binary_vectors(matching, &schema, &lhs, &schema, &rhs).unwrap();
+        [public, budgeted]
+    };
 
-    let ne = binary_vectors(&matching(BinaryOp::Ne), &schema, &lhs, &schema, &rhs).unwrap();
-    assert_eq!(
-        kept(&ne),
-        [
-            ("ne".to_string(), 0, 4.0, 6.0, Some(LEFT_START), 2),
-            ("ne".to_string(), 2, 4.0, 6.0, Some(LEFT_START), 2),
-        ],
-        "`!=` did not hand back the left histogram it kept: {ne:?}"
-    );
+    let eq = compare(&matching(BinaryOp::Eq));
+    for eq in &eq {
+        assert_eq!(
+            kept(eq),
+            [
+                ("eq".to_string(), 0, 4.0, 6.0, Some(LEFT_START), 2),
+                ("eq".to_string(), 2, 4.0, 6.0, Some(LEFT_START), 2),
+            ],
+            "`==` did not hand back the left histogram it kept: {eq:?}"
+        );
+    }
+
+    let ne = compare(&matching(BinaryOp::Ne));
+    for ne in &ne {
+        assert_eq!(
+            kept(ne),
+            [
+                ("ne".to_string(), 0, 4.0, 6.0, Some(LEFT_START), 2),
+                ("ne".to_string(), 2, 4.0, 6.0, Some(LEFT_START), 2),
+            ],
+            "`!=` did not hand back the left histogram it kept: {ne:?}"
+        );
+    }
 
     // The right operand's start timestamp is never what comes out, at any point of either
     // comparison.
-    for series in eq.iter().chain(&ne) {
+    for series in eq.iter().chain(&ne).flat_map(|answer| answer.iter()) {
         let mut cursor = series.fields.as_slice()[0].cursor();
         for (point, row) in series.time.positions() {
             let SampleRef::Histogram(view) =
@@ -3260,7 +3287,6 @@ fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
         return_bool: true,
         ..matching(BinaryOp::Eq)
     };
-    let compared = binary_vectors(&bool_matching, &schema, &lhs, &schema, &rhs).unwrap();
     let answers = |series: &[Series]| -> Vec<(String, usize, f64)> {
         let mut answers: Vec<(String, usize, f64)> = Vec::new();
         for series in series {
@@ -3276,16 +3302,19 @@ fn a_histogram_comparison_filter_keeps_the_payload_of_the_operand_it_keeps() {
         answers.sort_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
         answers
     };
-    assert_eq!(
-        answers(&compared),
-        [
-            ("eq".to_string(), 0, 1.0),
-            ("eq".to_string(), 2, 1.0),
-            ("ne".to_string(), 0, 0.0),
-            ("ne".to_string(), 2, 0.0),
-        ],
-        "a `bool` comparison of histograms did not answer in floats: {compared:?}"
-    );
+    let compared = compare(&bool_matching);
+    for compared in &compared {
+        assert_eq!(
+            answers(compared),
+            [
+                ("eq".to_string(), 0, 1.0),
+                ("eq".to_string(), 2, 1.0),
+                ("ne".to_string(), 0, 0.0),
+                ("ne".to_string(), 2, 0.0),
+            ],
+            "a `bool` comparison of histograms did not answer in floats: {compared:?}"
+        );
+    }
 }
 
 /// A set operation hands back the sample it kept, start timestamp included.
