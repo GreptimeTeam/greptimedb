@@ -345,6 +345,7 @@ impl DfLogicalPlanner {
             stmt,
             &self.engine_state,
             promql_annotations,
+            crate::promql::planner::native::native_promql_requested(&query_ctx),
         )
         .await
         .map_err(BoxedError::new)
