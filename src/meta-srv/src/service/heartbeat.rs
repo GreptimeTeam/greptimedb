@@ -916,7 +916,6 @@ mod tests {
             assert_eq!(a1.pusher_epoch(&group).await, Some(e1));
         }
 
-        /// Broadcasts to datanodes while handling a datanode heartbeat.
         struct BroadcastToDatanodes;
 
         #[async_trait::async_trait]
@@ -927,19 +926,17 @@ mod tests {
 
             async fn handle(
                 &self,
-                req: &HeartbeatRequest,
+                _: &HeartbeatRequest,
                 ctx: &mut Context,
                 _: &mut HeartbeatAccumulator,
             ) -> crate::error::Result<HandleControl> {
-                if req.peer.is_some() {
-                    let msg = MailboxMessage {
-                        subject: "broadcast".to_string(),
-                        ..Default::default()
-                    };
-                    ctx.mailbox
-                        .broadcast(&BroadcastChannel::Datanode, &msg)
-                        .await?;
-                }
+                let msg = MailboxMessage {
+                    subject: "broadcast".to_string(),
+                    ..Default::default()
+                };
+                ctx.mailbox
+                    .broadcast(&BroadcastChannel::Datanode, &msg)
+                    .await?;
                 Ok(HandleControl::Continue)
             }
         }
