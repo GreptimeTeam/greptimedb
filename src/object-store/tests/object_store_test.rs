@@ -303,6 +303,9 @@ async fn test_s3_backend() -> Result<()> {
         }
 
         let store = ObjectStore::new(builder).unwrap();
+        // Match production S3 clients: retry transient transport failures without
+        // retrying conditional-write conflicts or weakening their assertions.
+        let store = object_store::util::with_retry_layers(store);
         let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
