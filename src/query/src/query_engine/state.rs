@@ -148,6 +148,39 @@ impl QueryEngineState {
         plugins: Plugins,
         options: QueryOptionsNew,
     ) -> DfResult<Self> {
+        Self::try_new_with_region_transport(
+            catalog_list,
+            partition_rule_manager,
+            region_query_handler,
+            table_mutation_handler,
+            procedure_service_handler,
+            flow_service_handler,
+            with_dist_planner,
+            false,
+            plugins,
+            options,
+        )
+    }
+
+    /// [`QueryEngineState::try_new`], additionally stating how the engine reaches its regions.
+    ///
+    /// `in_process_region_transport` reaches [`DistPlannerAnalyzer`]: when it is `true` the
+    /// distributed planner may hand a region a `LogicalPlan` instead of Substrait bytes, which only
+    /// the in-process read path accepts. Every other caller builds an engine whose regions are
+    /// reached over the wire, which is what [`QueryEngineState::try_new`] states.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_with_region_transport(
+        catalog_list: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
+        with_dist_planner: bool,
+        in_process_region_transport: bool,
+        plugins: Plugins,
+        options: QueryOptionsNew,
+    ) -> DfResult<Self> {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let memory_pool_size = options.memory_pool_size.resolve(total_memory) as usize;
         let runtime_provider = plugins.get::<QueryRuntimeProviderRef>();
@@ -209,7 +242,9 @@ impl QueryEngineState {
             )),
         );
         if with_dist_planner {
-            analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
+            analyzer.rules.push(Arc::new(DistPlannerAnalyzer::new(
+                in_process_region_transport,
+            )));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));

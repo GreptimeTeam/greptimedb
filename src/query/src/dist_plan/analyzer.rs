@@ -106,8 +106,35 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 }
 
-#[derive(Debug)]
-pub struct DistPlannerAnalyzer;
+/// Rewrites a logical plan into a distributed plan: the part above a merge scan runs on the
+/// frontend, and every `MergeScan` carries the sub-plan that runs in a region.
+#[derive(Debug, Default)]
+pub struct DistPlannerAnalyzer {
+    /// Whether every region a rewritten plan reads is reached in process.
+    ///
+    /// A region input normally has to be encoded to Substrait before it can leave the frontend, and
+    /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. When
+    /// regions are reached in process, that input travels as a `LogicalPlan` instead, so nothing is
+    /// encoded and no node has to be cut for encoding's sake.
+    ///
+    /// Whoever builds the query engine sets this, once, from the transport it wired. It is neither a
+    /// query-time decision nor a property of a region.
+    in_process_region_transport: bool,
+}
+
+impl DistPlannerAnalyzer {
+    /// Creates the analyzer.
+    ///
+    /// `in_process_region_transport` must only be `true` for an engine whose region reads are served
+    /// by region servers in the same process. Its plans are then handed to
+    /// `RegionServer::handle_read` as `LogicalPlan`s; the remote read path
+    /// (`RegionServer::handle_remote_read`) decodes Substrait bytes and cannot do that.
+    pub fn new(in_process_region_transport: bool) -> Self {
+        Self {
+            in_process_region_transport,
+        }
+    }
+}
 
 impl AnalyzerRule for DistPlannerAnalyzer {
     fn name(&self) -> &str {
@@ -250,12 +277,15 @@ fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<Logical
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        let in_process_region_transport = self.in_process_region_transport;
         // Use the subquery-aware transform so expression subqueries (including
         // nested scalar subqueries left in place by DataFusion 55's
         // `enable_physical_uncorrelated_scalar_subquery`) are visited at every
         // depth and their table scans get wrapped in `MergeScan`.
-        let plan = plan.transform_with_subqueries(&Self::inspect_plan_with_subquery)?;
-        let mut rewriter = PlanRewriter::new(&plan.data);
+        let plan = plan.transform_with_subqueries(&|plan| {
+            Self::inspect_plan_with_subquery(plan, in_process_region_transport)
+        })?;
+        let mut rewriter = PlanRewriter::new(&plan.data, in_process_region_transport);
         let result = plan.data.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
@@ -267,7 +297,10 @@ impl DistPlannerAnalyzer {
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
-    fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+    fn inspect_plan_with_subquery(
+        plan: LogicalPlan,
+        in_process_region_transport: bool,
+    ) -> DfResult<Transformed<LogicalPlan>> {
         // Workaround for https://github.com/GreptimeTeam/greptimedb/issues/5469 and https://github.com/GreptimeTeam/greptimedb/issues/5799
         // FIXME(yingwen): Remove the `Limit` plan once we update DataFusion.
         if let LogicalPlan::Limit(_) | LogicalPlan::Distinct(_) = &plan {
@@ -277,7 +310,12 @@ impl DistPlannerAnalyzer {
         let exprs = plan
             .expressions_consider_join()
             .into_iter()
-            .map(|e| e.transform(&Self::transform_subquery).map(|x| x.data))
+            .map(|e| {
+                e.transform(|subquery_expr| {
+                    Self::transform_subquery(subquery_expr, in_process_region_transport)
+                })
+                .map(|x| x.data)
+            })
             .collect::<DfResult<Vec<_>>>()?;
 
         // Some plans that are special treated (should not call `with_new_exprs` on them)
@@ -289,27 +327,33 @@ impl DistPlannerAnalyzer {
         }
     }
 
-    fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {
+    fn transform_subquery(
+        expr: Expr,
+        in_process_region_transport: bool,
+    ) -> DfResult<Transformed<Expr>> {
         match expr {
             Expr::Exists(exists) => Ok(Transformed::yes(Expr::Exists(Exists {
-                subquery: Self::handle_subquery(exists.subquery)?,
+                subquery: Self::handle_subquery(exists.subquery, in_process_region_transport)?,
                 negated: exists.negated,
             }))),
             Expr::InSubquery(in_subquery) => Ok(Transformed::yes(Expr::InSubquery(InSubquery {
                 expr: in_subquery.expr,
-                subquery: Self::handle_subquery(in_subquery.subquery)?,
+                subquery: Self::handle_subquery(in_subquery.subquery, in_process_region_transport)?,
                 negated: in_subquery.negated,
             }))),
             Expr::ScalarSubquery(scalar_subquery) => Ok(Transformed::yes(Expr::ScalarSubquery(
-                Self::handle_subquery(scalar_subquery)?,
+                Self::handle_subquery(scalar_subquery, in_process_region_transport)?,
             ))),
 
             _ => Ok(Transformed::no(expr)),
         }
     }
 
-    fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
-        let mut rewriter = PlanRewriter::new(&subquery.subquery);
+    fn handle_subquery(
+        subquery: Subquery,
+        in_process_region_transport: bool,
+    ) -> DfResult<Subquery> {
+        let mut rewriter = PlanRewriter::new(&subquery.subquery, in_process_region_transport);
         let mut rewrote_subquery = subquery
             .subquery
             .as_ref()
@@ -400,7 +444,13 @@ enum RewriterStatus {
 struct PlanRewriter {
     /// Whether the whole plan this rewriter walks can be encoded to Substrait.
     /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
+    ///
+    /// Only read when that gate applies, i.e. when `in_process_region_transport` is false. With
+    /// in-process regions the question has no answer worth computing and the field stays `false`.
     whole_plan_encodable: bool,
+    /// Whether the regions this plan reads are reached in process, so an input crosses to a region
+    /// as a `LogicalPlan` rather than as Substrait bytes. See [`DistPlannerAnalyzer`].
+    in_process_region_transport: bool,
     /// Current level in the tree
     level: usize,
     /// Simulated stack for the `rewrite` recursion
@@ -459,11 +509,16 @@ struct PlanRewriter {
 impl PlanRewriter {
     /// `plan` must be the root of the tree that is about to be rewritten, otherwise
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
-    fn new(plan: &LogicalPlan) -> Self {
+    fn new(plan: &LogicalPlan, in_process_region_transport: bool) -> Self {
         Self {
-            whole_plan_encodable: DFLogicalSubstraitConvertor
-                .encode(plan, DefaultSerializer)
-                .is_ok(),
+            // Only a plan that crosses to a region as Substrait bytes has to encode at all, and
+            // encoding is the expensive part of a pass. With in-process regions the answer is never
+            // read, so it is not computed.
+            whole_plan_encodable: !in_process_region_transport
+                && DFLogicalSubstraitConvertor
+                    .encode(plan, DefaultSerializer)
+                    .is_ok(),
+            in_process_region_transport,
             ..Default::default()
         }
     }
@@ -495,7 +550,17 @@ impl PlanRewriter {
         // is the dominant cost on deep PromQL plans.
         // When the root does not encode, the plan holds at least one node that has to stay
         // on the frontend and only the per-node check locates it.
-        if !self.whole_plan_encodable
+        //
+        // This question only exists for a plan that has to cross to a region as Substrait bytes.
+        // With in-process regions the same `LogicalPlan` is handed to `RegionServer::handle_read`
+        // never having been encoded, so encodability says nothing about where a node may run, and
+        // asking it would cut the plan at the first node with no serializer branch (`FusedSeries`)
+        // before `check_plan` could decide. Skipping it only removes a reason to expand: every
+        // check below still runs, and a node they call `NonCommutative`/`Unimplemented`/
+        // `Unsupported` still expands, so a node no serializer lists only rides to a region when
+        // the categorizer places it there.
+        if !self.in_process_region_transport
+            && !self.whole_plan_encodable
             && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
         {
             debug!(
