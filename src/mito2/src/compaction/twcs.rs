@@ -402,7 +402,9 @@ impl TwcsPicker {
                 allow_unbalanced: (quiet || self.all_windows_inactive) && !settling,
             },
         )?;
-        let (class, branch) = if pick.reduces_files {
+        let (class, branch) = if pick.dense_fallback {
+            (PickClass::FileReduction, "inactive:dense_file_reduction")
+        } else if pick.reduces_files {
             (PickClass::FileReduction, "inactive:pick_l1_file_reduction")
         } else {
             (PickClass::OverlapResolution, "inactive:pick_l1_overlap")

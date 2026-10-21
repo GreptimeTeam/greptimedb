@@ -23,6 +23,10 @@
 //!   outputs cannot add conflicts. Compaction outputs stay inside the bounding
 //!   box of the inputs, so they can only overlap files intruding on that box.
 //!
+//! When a window's split-unit conflict graph is too dense to materialize,
+//! [`pick_closed_merge`] falls back to a bounded file reduction and admits it
+//! only when the same conflict bound holds.
+//!
 //! # Termination
 //!
 //! Let `P` be the number of conflicting file pairs ([`Extent::conflicts`]) in an
@@ -63,6 +67,11 @@ use crate::sst::primary_key::PrimaryKeyRangeMapper;
 /// An L1 file reduction may rewrite at most this many output files' worth of
 /// bytes per SST it removes.
 const MAX_REWRITE_FILES_PER_REDUCED_FILE: u64 = 4;
+
+/// Maximum number of candidate files visited while building conflict structures
+/// for a pick. Above this, the picker falls back to a bounded file reduction
+/// instead of materializing an unbounded conflict graph.
+const CONFLICT_GRAPH_BUDGET: usize = 1 << 20;
 
 /// Output size limits and input limits shared by both picks.
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +123,8 @@ pub(crate) struct UnitPick {
     pub(crate) reduces_files: bool,
     /// Number of units the candidate files were grouped into.
     pub(crate) units: usize,
+    /// Whether this pick came from the bounded dense-window fallback.
+    pub(crate) dense_fallback: bool,
 }
 
 /// Picks L1 files of the active window whose compaction removes files.
@@ -130,9 +141,23 @@ pub(crate) fn pick_active_l1(
     mapper: &PrimaryKeyRangeMapper,
     options: PickLimits,
 ) -> Option<UnitPick> {
+    pick_active_l1_with_budget(l1_files, mapper, options, CONFLICT_GRAPH_BUDGET)
+}
+
+/// [`pick_active_l1`] with an explicit work budget, so tests can exercise the
+/// single-file fallback without a window-sized conflict graph.
+fn pick_active_l1_with_budget(
+    l1_files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    options: PickLimits,
+    work_budget: usize,
+) -> Option<UnitPick> {
     let extents = extents_of(l1_files, mapper);
     let index = ExtentIndex::new(&extents);
-    let mut units = conflict_units(l1_files, &extents, &index);
+    let mut units = match conflict_units(l1_files, &extents, &index, work_budget) {
+        Some(units) => units,
+        None => single_file_units(l1_files, &extents),
+    };
     split_oversized_units(&mut units, l1_files, &extents, options.max_input_files);
     if let Some(pick) = pick_reducing_interval(&mut units, l1_files, options) {
         return Some(pick);
@@ -151,6 +176,16 @@ fn pick_reducing_interval(
     files: &[FileHandle],
     options: PickLimits,
 ) -> Option<UnitPick> {
+    pick_reducing_interval_with_range(units, files, options).map(|(_, pick)| pick)
+}
+
+/// [`pick_reducing_interval`], also returning the selected interval so the
+/// caller can check the pick against the conflict bound.
+fn pick_reducing_interval_with_range(
+    units: &mut [Unit],
+    files: &[FileHandle],
+    options: PickLimits,
+) -> Option<(Range<usize>, UnitPick)> {
     sort_units(units);
     let mut best: Option<(usize, u64, Range<usize>)> = None;
     // File reductions ignore conflicts, so split files are not counted.
@@ -173,10 +208,15 @@ fn pick_reducing_interval(
         }
     });
 
-    best.map(|(_, _, range)| UnitPick {
-        inputs: collect_inputs(&units[range], files),
-        reduces_files: true,
-        units: units.len(),
+    best.map(|(_, _, range)| {
+        let inputs = collect_inputs(&units[range.clone()], files);
+        let pick = UnitPick {
+            inputs,
+            reduces_files: true,
+            units: units.len(),
+            dense_fallback: false,
+        };
+        (range, pick)
     })
 }
 
@@ -209,19 +249,46 @@ pub(crate) struct ClosedMergeOptions {
 ///   [`ClosedMergeOptions::allow_unbalanced`]), and adds at most one tail file.
 ///
 /// The pick maximizes resolved conflicts plus removed files per rewritten byte.
+/// A window whose split-unit conflict graph is too dense to materialize falls
+/// back to a bounded file reduction; see [`pick_dense_closed_merge`].
 pub(crate) fn pick_closed_merge(
     files: &[FileHandle],
     mapper: &PrimaryKeyRangeMapper,
     options: ClosedMergeOptions,
 ) -> Option<UnitPick> {
+    pick_closed_merge_with_budget(files, mapper, options, CONFLICT_GRAPH_BUDGET)
+}
+
+/// [`pick_closed_merge`] with an explicit work budget, so tests can exercise
+/// the dense fallback without building a window-sized conflict graph.
+fn pick_closed_merge_with_budget(
+    files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    options: ClosedMergeOptions,
+    work_budget: usize,
+) -> Option<UnitPick> {
     let limits = options.limits;
     let extents = extents_of(files, mapper);
     let index = ExtentIndex::new(&extents);
-    let mut units = conflict_units(files, &extents, &index);
-    close_units(&mut units, &extents, &index);
-    split_oversized_units(&mut units, files, &extents, limits.max_input_files);
+    let mut dense = false;
+    let mut units = match conflict_units(files, &extents, &index, work_budget) {
+        Some(mut units) => {
+            close_units(&mut units, &extents, &index);
+            split_oversized_units(&mut units, files, &extents, limits.max_input_files);
+            units
+        }
+        None => {
+            dense = true;
+            single_file_units(files, &extents)
+        }
+    };
     sort_units(&mut units);
-    let pairs = split_conflicts(&units, &extents, &index);
+    if dense {
+        return pick_dense_closed_merge(&mut units, files, &extents, &index, options);
+    }
+    let Some(pairs) = split_conflicts(&units, &extents, &index, work_budget) else {
+        return pick_dense_closed_merge(&mut units, files, &extents, &index, options);
+    };
 
     let mut best: Option<(u64, u64, Range<usize>, bool)> = None;
     for_each_interval(&units, &pairs, limits.max_input_files, |range, stats| {
@@ -267,7 +334,84 @@ pub(crate) fn pick_closed_merge(
         inputs: collect_inputs(&units[range], files),
         reduces_files,
         units: units.len(),
+        dense_fallback: false,
     })
+}
+
+/// Picks a bounded file reduction when the split-unit conflict graph is too
+/// dense to materialize.
+///
+/// The candidate comes from [`pick_reducing_interval_with_range`], which
+/// ignores conflicts. It is accepted only if [`adds_no_conflicts`] proves that
+/// its outputs do not add conflict pairs, so the `(P, N)` termination argument
+/// still holds. A rejected candidate leaves the window unchanged.
+fn pick_dense_closed_merge(
+    units: &mut [Unit],
+    files: &[FileHandle],
+    extents: &[Extent],
+    index: &ExtentIndex,
+    options: ClosedMergeOptions,
+) -> Option<UnitPick> {
+    let limits = options.limits;
+    let (range, mut pick) = pick_reducing_interval_with_range(units, files, limits)?;
+    let stats = interval_stats_exact(&units[range.clone()], extents);
+    let outputs = limits.predicted_outputs(&stats);
+    let reduction = stats.num_files.saturating_sub(outputs);
+    let reduces_files = reduction > 0
+        && (options.allow_file_reduction || stats.conflicts > 0)
+        && limits.within_reduction_cost(stats.size, reduction);
+    if !reduces_files
+        || outputs >= stats.num_files
+        || (stats.conflicts > 0 && !options.allow_conflicts)
+    {
+        return None;
+    }
+    if !adds_no_conflicts(&units[range], extents, index, outputs) {
+        return None;
+    }
+    pick.dense_fallback = true;
+    Some(pick)
+}
+
+/// Totals of an interval without materializing [`split_conflicts`].
+///
+/// After [`close_units`], files of different units never conflict, so only
+/// split units can conflict across units, and each split unit holds one file.
+/// The dense fallback may instead treat every file as a split unit, and then
+/// the same pairwise loop covers every cross-unit pair. Counting them takes
+/// `O(K²)` for an interval of at most `K` files, instead of building a
+/// window-wide adjacency.
+fn interval_stats_exact<'a>(units: &'a [Unit], extents: &[Extent]) -> IntervalStats<'a> {
+    let mut stats = IntervalStats::default();
+    let mut first = true;
+    for unit in units {
+        stats.num_files += unit.files.len();
+        stats.size += unit.size;
+        stats.largest_file_size = stats.largest_file_size.max(unit.largest_file_size);
+        stats.conflicts += unit.conflicts;
+        stats.single_key = if first {
+            unit.single_key()
+        } else {
+            stats
+                .single_key
+                .filter(|&key| unit.single_key() == Some(key))
+        };
+        first = false;
+    }
+
+    let split_files: Vec<usize> = units
+        .iter()
+        .filter(|unit| unit.split)
+        .map(|unit| unit.files[0])
+        .collect();
+    for (offset, &lhs) in split_files.iter().enumerate() {
+        for &rhs in &split_files[offset + 1..] {
+            if extents[lhs].conflicts(&extents[rhs]) {
+                stats.conflicts += 1;
+            }
+        }
+    }
+    stats
 }
 
 /// Orders units by minimum primary key, then by time, so adjacent units are
@@ -572,23 +716,52 @@ impl Unit {
 /// its number of conflicting pairs. Each file only checks the files the index
 /// finds near it: O((N + M) log N) for M pairs of files whose key and time
 /// ranges meet.
-fn conflict_units(files: &[FileHandle], extents: &[Extent], index: &ExtentIndex) -> Vec<Unit> {
+///
+/// Returns `None` once more than `work_budget` candidate files are visited, so
+/// a dense window can fall back before building a quadratic graph.
+fn conflict_units(
+    files: &[FileHandle],
+    extents: &[Extent],
+    index: &ExtentIndex,
+    work_budget: usize,
+) -> Option<Vec<Unit>> {
     let mut sets = DisjointSet::new(extents.len());
     let mut conflicts = vec![0; extents.len()];
+    let mut visits = 0;
     for i in 0..extents.len() {
         index.for_each_near(&extents[i], |j| {
+            visits += 1;
+            if visits > work_budget {
+                return;
+            }
             // Counts each pair once, from its smaller index.
             if j > i && extents[i].conflicts(&extents[j]) {
                 sets.union(i, j);
                 conflicts[i] += 1;
             }
         });
+        if visits > work_budget {
+            return None;
+        }
     }
-    sets.groups()
-        .into_iter()
-        .map(|members| {
-            let pairs = members.iter().map(|&i| conflicts[i]).sum();
-            Unit::new(members, files, extents, pairs)
+    Some(
+        sets.groups()
+            .into_iter()
+            .map(|members| {
+                let pairs = members.iter().map(|&i| conflicts[i]).sum();
+                Unit::new(members, files, extents, pairs)
+            })
+            .collect(),
+    )
+}
+
+/// Treats every file as its own split unit, for the dense fallback that cannot
+/// afford to build conflict components.
+fn single_file_units(files: &[FileHandle], extents: &[Extent]) -> Vec<Unit> {
+    (0..files.len())
+        .map(|i| Unit {
+            split: true,
+            ..Unit::new(vec![i], files, extents, 0)
         })
         .collect()
 }
@@ -690,33 +863,49 @@ struct IntervalStats<'a> {
 
 /// Positions of the split units each unit conflicts with, sorted. Files of
 /// different units never conflict, so only split files have any.
-fn split_conflicts(units: &[Unit], extents: &[Extent], index: &ExtentIndex) -> Vec<Vec<usize>> {
+///
+/// Returns `None` once more than `work_budget` candidate files are visited, so
+/// a dense window cannot materialize an unbounded adjacency.
+fn split_conflicts(
+    units: &[Unit],
+    extents: &[Extent],
+    index: &ExtentIndex,
+    work_budget: usize,
+) -> Option<Vec<Vec<usize>>> {
     let mut position = vec![None; extents.len()];
     for (p, unit) in units.iter().enumerate() {
         if unit.split {
             position[unit.files[0]] = Some(p);
         }
     }
-    units
-        .iter()
-        .map(|unit| {
-            if !unit.split {
-                return Vec::new();
+    let mut visits = 0;
+    let mut result = Vec::with_capacity(units.len());
+    for unit in units {
+        if !unit.split {
+            result.push(Vec::new());
+            continue;
+        }
+        let i = unit.files[0];
+        let mut neighbors = Vec::new();
+        index.for_each_near(&extents[i], |j| {
+            visits += 1;
+            if visits > work_budget {
+                return;
             }
-            let i = unit.files[0];
-            let mut neighbors = Vec::new();
-            index.for_each_near(&extents[i], |j| {
-                if let Some(p) = position[j]
-                    && j != i
-                    && extents[i].conflicts(&extents[j])
-                {
-                    neighbors.push(p);
-                }
-            });
-            neighbors.sort_unstable();
-            neighbors
-        })
-        .collect()
+            if let Some(p) = position[j]
+                && j != i
+                && extents[i].conflicts(&extents[j])
+            {
+                neighbors.push(p);
+            }
+        });
+        if visits > work_budget {
+            return None;
+        }
+        neighbors.sort_unstable();
+        result.push(neighbors);
+    }
+    Some(result)
 }
 
 /// Visits every contiguous interval of units with at most `max_input_files`
@@ -946,6 +1135,24 @@ mod tests {
         )
     }
 
+    /// Files that all overlap each other in time and primary key.
+    fn dense_files(count: usize) -> Vec<FileHandle> {
+        (0..count)
+            .map(|idx| file(0, 100, b"a", b"z", 1 + (idx % 3) as u64))
+            .collect()
+    }
+
+    /// A chain of files whose key ranges overlap their immediate neighbors.
+    fn chain_files(count: usize, size: u64) -> Vec<FileHandle> {
+        (0..count)
+            .map(|idx| {
+                let min = format!("{idx:04}");
+                let max = format!("{:04}", idx + 2);
+                file(0, 100, min.as_bytes(), max.as_bytes(), size)
+            })
+            .collect()
+    }
+
     fn limits(max_output_file_size: u64) -> PickLimits {
         PickLimits {
             max_output_file_size: Some(max_output_file_size),
@@ -958,6 +1165,19 @@ mod tests {
             files,
             &primary_key_mapper_for_test(),
             closed_merge_options(max_output_file_size),
+        )
+    }
+
+    fn closed_merge_with_budget(
+        files: &[FileHandle],
+        max_output_file_size: u64,
+        work_budget: usize,
+    ) -> Option<UnitPick> {
+        pick_closed_merge_with_budget(
+            files,
+            &primary_key_mapper_for_test(),
+            closed_merge_options(max_output_file_size),
+            work_budget,
         )
     }
 
@@ -1242,6 +1462,134 @@ mod tests {
         assert_eq!(ids(&pair), ids(&pick.inputs));
     }
 
+    #[test]
+    fn test_conflict_units_respects_work_budget() {
+        let files = dense_files(20);
+        let mapper = primary_key_mapper_for_test();
+        let extents = extents_of(&files, &mapper);
+        let index = ExtentIndex::new(&extents);
+
+        assert!(conflict_units(&files, &extents, &index, 0).is_none());
+        assert!(conflict_units(&files, &extents, &index, usize::MAX).is_some());
+    }
+
+    #[test]
+    fn test_split_conflicts_respects_work_budget() {
+        let files = dense_files(20);
+        let mapper = primary_key_mapper_for_test();
+        let extents = extents_of(&files, &mapper);
+        let index = ExtentIndex::new(&extents);
+        let mut units = conflict_units(&files, &extents, &index, usize::MAX).unwrap();
+        close_units(&mut units, &extents, &index);
+        split_oversized_units(&mut units, &files, &extents, 16);
+        sort_units(&mut units);
+
+        assert_eq!(20, units.iter().filter(|unit| unit.split).count());
+        assert!(split_conflicts(&units, &extents, &index, 0).is_none());
+        assert!(split_conflicts(&units, &extents, &index, usize::MAX).is_some());
+    }
+
+    #[test]
+    fn test_interval_stats_exact_matches_for_each_interval() {
+        let mapper = primary_key_mapper_for_test();
+        // One closed unit with internal conflicts, and one oversized component
+        // split into single-file units with cross-unit conflicts.
+        let mut files = (0..10)
+            .map(|_| file(0, 100, b"a", b"c", 1))
+            .collect::<Vec<_>>();
+        files.extend((0..20).map(|_| file(0, 100, b"x", b"z", 1)));
+        let extents = extents_of(&files, &mapper);
+        let index = ExtentIndex::new(&extents);
+        let mut units = conflict_units(&files, &extents, &index, usize::MAX).unwrap();
+        close_units(&mut units, &extents, &index);
+        split_oversized_units(&mut units, &files, &extents, 16);
+        sort_units(&mut units);
+
+        let pairs = split_conflicts(&units, &extents, &index, usize::MAX).unwrap();
+        for_each_interval(&units, &pairs, 16, |range, stats| {
+            let exact = interval_stats_exact(&units[range], &extents);
+            assert_eq!(stats.num_files, exact.num_files);
+            assert_eq!(stats.size, exact.size);
+            assert_eq!(stats.largest_file_size, exact.largest_file_size);
+            assert_eq!(stats.conflicts, exact.conflicts);
+            assert_eq!(stats.single_key, exact.single_key);
+        });
+    }
+
+    #[test]
+    fn test_active_l1_falls_back_on_dense_conflict_graph() {
+        let files = dense_files(300);
+        let pick = pick_active_l1_with_budget(
+            &files,
+            &primary_key_mapper_for_test(),
+            limits(MAX_OUTPUT),
+            1 << 10,
+        )
+        .unwrap();
+        assert!(!pick.dense_fallback);
+        assert!(pick.reduces_files);
+        assert!((2..=16).contains(&pick.inputs.len()));
+    }
+
+    #[test]
+    fn test_dense_closed_merge_reduces_files() {
+        let files = dense_files(300);
+        let pick = closed_merge_with_budget(&files, MAX_OUTPUT, 1 << 10).unwrap();
+        assert!(pick.dense_fallback);
+        assert!(pick.reduces_files);
+        assert!((2..=16).contains(&pick.inputs.len()));
+    }
+
+    #[test]
+    fn test_dense_closed_merge_resolves_conflicts_without_file_reduction_setting() {
+        let files = dense_files(300);
+        let mapper = primary_key_mapper_for_test();
+        let options = ClosedMergeOptions {
+            allow_file_reduction: false,
+            ..closed_merge_options(MAX_OUTPUT)
+        };
+        let pick = pick_closed_merge_with_budget(&files, &mapper, options, 1 << 10).unwrap();
+        assert!(pick.dense_fallback);
+        assert!(pick.reduces_files);
+    }
+
+    #[test]
+    fn test_dense_closed_merge_defers_when_conflicts_are_not_allowed() {
+        let files = dense_files(300);
+        let mapper = primary_key_mapper_for_test();
+        let options = ClosedMergeOptions {
+            allow_conflicts: false,
+            ..closed_merge_options(MAX_OUTPUT)
+        };
+        assert!(pick_closed_merge_with_budget(&files, &mapper, options, 1 << 10).is_none());
+    }
+
+    #[test]
+    fn test_dense_closed_merge_rejects_candidates_that_add_conflicts() {
+        // A long chain is one oversized component, and the file-reduction pick
+        // selects a long interval. Its outputs would overlap the two neighbors
+        // outside the interval, which is more conflicts than the inputs had
+        // with the rest of the window.
+        let files = chain_files(300, 2);
+        let mapper = primary_key_mapper_for_test();
+        let extents = extents_of(&files, &mapper);
+        let index = ExtentIndex::new(&extents);
+        let mut units = conflict_units(&files, &extents, &index, usize::MAX).unwrap();
+        close_units(&mut units, &extents, &index);
+        split_oversized_units(&mut units, &files, &extents, 16);
+        sort_units(&mut units);
+        assert!(
+            pick_dense_closed_merge(
+                &mut units,
+                &files,
+                &extents,
+                &index,
+                closed_merge_options(MAX_OUTPUT)
+            )
+            .is_none()
+        );
+    }
+
     /// SplitMix64, so the simulation needs no random number dependency.
     struct Rng(u64);
 
@@ -1364,6 +1712,42 @@ mod tests {
             sim_file(start, end, min, max, 1 + rng.next(MAX_OUTPUT))
         }));
         files
+    }
+
+    #[test]
+    fn test_dense_closed_merge_terminates() {
+        let mut rng = Rng(23);
+        let mut files: Vec<_> = (0..300)
+            .map(|_| sim_file(0, 100, 0, 8, 1 + rng.next(2 * MAX_OUTPUT)))
+            .collect();
+        let handles = |files: &[SimFile]| {
+            files
+                .iter()
+                .map(|file| file.handle.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut current = (conflict_pairs(&handles(&files)), files.len());
+        let mut steps = 0;
+        let mut dense_steps = 0;
+        while let Some(pick) = closed_merge_with_budget(&handles(&files), MAX_OUTPUT, 1 << 10) {
+            assert!(pick.inputs.len() >= 2);
+            if pick.dense_fallback {
+                dense_steps += 1;
+            }
+            let picked = ids(&pick.inputs);
+            let (inputs, kept): (Vec<_>, Vec<_>) = files
+                .into_iter()
+                .partition(|file| picked.contains(&file.handle.file_id().file_id()));
+            files = kept;
+            files.extend(merge(&inputs, &mut rng));
+            let next = (conflict_pairs(&handles(&files)), files.len());
+            assert!(next < current, "step {steps}: {current:?} -> {next:?}");
+            current = next;
+            steps += 1;
+            assert!(steps < 1_000);
+        }
+        assert!(dense_steps > 0);
+        assert!(files.len() < 300);
     }
 
     /// Applies `pick` until it picks nothing, asserting that `measure` strictly
