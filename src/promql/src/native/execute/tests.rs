@@ -35,10 +35,11 @@ use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
     Emitted, NativeChunk, NativeExecutionState, NativeExecutor, NodeBuffer, NodeRuntime,
-    absorb_rebuilds, evaluated_bytes, map_chunk, raw_bytes,
+    absorb_rebuilds, evaluated_bytes, grid_end_ms, map_chunk, raw_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
+use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
@@ -3777,11 +3778,15 @@ fn an_instant_selection_reserves_the_series_it_buffers() {
 
 /// The workspace the gather allocates is reserved for before it exists.
 ///
-/// A selection decides its whole grid at once, so its workspace is proportional to the points of
-/// the grid rather than to the samples of the series: the axis it concatenates, the source row and
-/// evaluation timestamp it reports per point, and the rows the builder keeps. One sample selected
-/// by a million points is the review's case: the two selection arrays alone are 16 MB and the built
-/// rows are more, while the series the node holds is one sample of a few hundred bytes.
+/// A selection decides the points of the grid it can be selected at, so its workspace is
+/// proportional to those points rather than to the samples of the series: the axis it concatenates,
+/// the source row and evaluation timestamp it reports per point, and the rows the builder keeps.
+/// The lookback here reaches from the sample to the last point, so this series is decididable at
+/// every one of the million points -- the clipped count equals the grid's -- and the two selection
+/// arrays alone are 16 MB while the built rows are more, against a series the node holds of one
+/// sample of a few hundred bytes. [`a_selection_reserves_the_points_it_decides`] is the other side
+/// of the same figure: a series whose samples cover only the start of a long grid reserves for the
+/// few points it can decide and is admitted by a pool this one is refused by.
 ///
 /// The pool here holds 8 KiB, which is enough for the buffered chunk and nothing near the
 /// workspace, so the gather is refused instead of being performed. Nothing else refuses a million
@@ -3828,6 +3833,89 @@ fn an_instant_selection_reserves_the_workspace_it_gathers() {
         again.to_string().contains("stopped after an earlier error"),
         "{again}"
     );
+}
+
+/// A selection reserves the points it can decide, not the points the grid plans.
+///
+/// The review's shape: a seven-day grid at a one-minute step is 10,081 points, and one sample at
+/// the start of the series read with a five-minute lookback is decided at five of them. The
+/// grid-scaled terms of `InstantRuntime::gather_bytes` at the planned grid -- the selection's two
+/// arrays and the doubled builder columns -- are about 504 KB, which the 64 KiB pool here is far
+/// below; the handful of points really decided need a few hundred bytes, so this gather has to be
+/// admitted. What it hands out is the rows `select_instants` reports for the same series, which is
+/// the count the reservation has to agree with.
+///
+/// The second half is the other direction: the same grid, the same pool, and a series that spans
+/// the grid with a lookback long enough to cover it, so all 10,081 points can be decided. The
+/// figure then exceeds the pool and the gather is refused, which is what keeps this from being a
+/// reservation of nothing.
+#[test]
+fn a_selection_reserves_the_points_it_decides() {
+    let out_grid = grid(0, 60_000, 10_081);
+    let schema = raw_schema();
+    let budget = 64 << 10;
+    // The two grid-scaled terms of `gather_bytes` at the planned grid: 10,081 points x 16 bytes for
+    // the selection's arrays, and 10,081 points x (8 + 8 + 1) x 2 for the doubled builder columns.
+    let full_grid = 10_081 * (8 + 8) + 10_081 * (8 + 8 + 1) * 2;
+    assert!(
+        full_grid > budget,
+        "the pool is not below what the full grid would be reserved: {full_grid} bytes"
+    );
+
+    // One sample at the start, read within five minutes: the kernel reports 0s..240s, and the
+    // candidate bound it sizes its arrays with is 0s..300s.
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
+    let chunk = raw_chunk(&schema, &[0], &[1.0], true);
+    let (_, timestamps) = select_instants(
+        &chunk.time,
+        &chunk.fields,
+        out_grid.spec().start_ms..=grid_end_ms(out_grid.spec()),
+        out_grid.spec().step_ms,
+        300_000,
+        0,
+    )
+    .unwrap();
+    assert_eq!(
+        timestamps.len(),
+        5,
+        "the clipping kernel decides another count"
+    );
+    let mut execution = executor(&tree, bounded_pool(budget), &ExecutionPlanMetricsSet::new());
+    execution.push_raw(chunk).unwrap();
+    let out = run(&mut execution);
+    assert_eq!(out.len(), 1);
+    let expected: Vec<(usize, Option<f64>)> = timestamps
+        .iter()
+        .map(|timestamp| {
+            (
+                usize::try_from((timestamp - out_grid.spec().start_ms) / out_grid.spec().step_ms)
+                    .unwrap(),
+                Some(1.0),
+            )
+        })
+        .collect();
+    assert_eq!(
+        decided(&out),
+        expected,
+        "the gather handed out another set of points than the clipping decides"
+    );
+
+    // The same series spans the grid with a lookback that covers it, so every point can be decided
+    // and the workspace no longer fits the same pool.
+    let tree =
+        NativeTree::try_new(instant(input(), 604_800_001, 0, Arc::clone(&out_grid))).unwrap();
+    let pool = bounded_pool(budget);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_raw(raw_chunk(&schema, &[0, 604_800_000], &[1.0, 2.0], true))
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "a series covering the grid was gathered without asking the pool: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
 /// A grid longer than any point limit is charged for, and the pool is what refuses it.

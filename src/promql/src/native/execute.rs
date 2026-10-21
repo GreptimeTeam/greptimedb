@@ -898,9 +898,9 @@ impl InstantRuntime {
     /// The bytes gathering the series `closing` ends is about to allocate beside its chunks.
     ///
     /// An upper bound derived from what the selection has in hand rather than a measurement: the
-    /// rows the series holds once `closing` has joined it, the fields it carries, the points its
-    /// bound grid decides, and, per field, the largest histogram a row of it can carry. Each term
-    /// is one thing the gather allocates:
+    /// rows the series holds once `closing` has joined it, the fields it carries, the points the
+    /// selection can decide for it, and, per field, the largest histogram a row of it can carry.
+    /// Each term is one thing the gather allocates:
     ///
     /// - The concatenated axis ([`buffered_time`]): one `i64` per row, reserved by the row count.
     /// - The descriptors that read it ([`buffered_fields`]): one [`Samples`] per (chunk, field) for
@@ -913,7 +913,7 @@ impl InstantRuntime {
     ///   validity byte per (row, field). A field of native histograms adds one `Option<u32>` index
     ///   per row and the payload of the histogram that index names, charged at the largest one the
     ///   field holds and per *point* rather than per row: one source row can be selected by every
-    ///   point of the grid, so the point count is what that payload is multiplied by.
+    ///   point the selection decides, so the point count is what that payload is multiplied by.
     /// - The row the selection fills, one [`GridSample`] slot per field, and one [`RowCursor`] per
     ///   field to read the axis with.
     /// - Doubling: every column the builder keeps is a `Vec` that grows by doubling, so each is
@@ -924,16 +924,18 @@ impl InstantRuntime {
     /// gather drops before it returns, `Series`' own header and the runs [`GridSeriesBuilder`]
     /// hands the output over with, which the output chunk is charged for by whoever reads it, and
     /// the temporaries [`FloatHistogram::push_to`] builds for one row. None of those is
-    /// proportional to the points the grid decides, which is the amplification the pool has to be
-    /// asked for, and all of them are constant per gather or already counted row by row.
+    /// proportional to the points the selection decides, which is the amplification the pool has to
+    /// be asked for, and all of them are constant per gather or already counted row by row.
     ///
     /// The estimate applies to every gather: nothing refuses one before it allocates, so the points
-    /// a grid decides are reserved for whatever their number is.
+    /// the series can be decided at are reserved for whatever their number is.
     ///
     /// [`FloatHistogram::push_to`]: crate::histogram_eval::float_histogram::FloatHistogram::push_to
     fn gather_bytes(&self, closing: &RawSeriesChunk) -> usize {
-        // The bound grid validated that its length fits a `usize`.
-        let points = usize::try_from(self.selection.output_grid.spec().len).unwrap_or(usize::MAX);
+        // The points the selection decides, not the points the grid plans: the gather clips its
+        // scan to the series it holds, so a figure over the whole grid would charge the pool for
+        // rows this series can never produce.
+        let points = self.selected_points(closing);
         let chunks = self.chunks.len().saturating_add(1);
         let rows = self
             .chunks
@@ -975,11 +977,66 @@ impl InstantRuntime {
             .saturating_add(rows_of_points.saturating_mul(2))
     }
 
+    /// The number of grid points [`select_instants`] clips the buffered series to.
+    ///
+    /// The gather clips its scan to the series it holds instead of reading the whole planned grid:
+    /// the candidate points run from the first sample's instant to the last sample's plus the
+    /// lookback, aligned to the grid and held inside the query range. A workspace is charged per
+    /// point, so the count has to be the clipped one -- charging the planned grid charges the pool
+    /// for rows a short series can never produce, and a pool sized for what the series costs then
+    /// refuses the gather. The clipping below is [`select_instants`]' own, repeated rather than
+    /// approximated: an estimate that disagrees with the kernel is a bug here rather than a
+    /// conservative bound. It is the kernel's own candidate count -- the one it sizes its arrays
+    /// with and refuses against a point limit -- so it bounds the rows it can report even though a
+    /// candidate at the lookback edge itself selects nothing. Both ends come from chunks the node
+    /// already holds, so the count reads two timestamps rather than the rows.
+    fn selected_points(&self, closing: &RawSeriesChunk) -> usize {
+        let spec = self.selection.output_grid.spec();
+        // The selection refuses these itself, before it can decide anything.
+        if spec.step_ms <= 0 || self.selection.lookback_ms < 0 {
+            return 0;
+        }
+        let query_start = i128::from(spec.start_ms);
+        let query_end = i128::from(grid_end_ms(spec));
+        if query_end < query_start {
+            return 0;
+        }
+        let series = || self.chunks.iter().chain(std::iter::once(closing));
+        let (Some(first), Some(last)) = (
+            series().find_map(|chunk| chunk.time.as_buffer().first().copied()),
+            series()
+                .rev()
+                .find_map(|chunk| chunk.time.as_buffer().last().copied()),
+        ) else {
+            // A series of no sample decides no point.
+            return 0;
+        };
+        let offset = i128::from(self.selection.offset_ms);
+        let lookback = i128::from(self.selection.lookback_ms);
+        let first = i128::from(first) + offset;
+        let last = i128::from(last) + offset;
+        let useful_last = if lookback == 0 {
+            last
+        } else {
+            last + lookback - 1
+        };
+        let max_start = first.max(query_start);
+        let min_end = useful_last.min(query_end);
+        if max_start > min_end {
+            return 0;
+        }
+        let step = i128::from(spec.step_ms);
+        let aligned_start = query_start + (max_start - query_start) / step * step;
+        let aligned_end = query_end - (query_end - min_end) / step * step;
+        let points = (aligned_end - aligned_start) / step + 1;
+        usize::try_from(points).unwrap_or(usize::MAX)
+    }
+
     /// The largest histogram a row of each field can carry, `None` for a field of floats.
     ///
     /// A row of native histograms is copied into the builder once per grid point that selects it,
     /// so what such a field costs is one histogram per point: the largest row is the one to charge,
-    /// because any row can be the one every point of the grid picks.
+    /// because any row can be the one every decided point picks.
     fn largest_histograms(&self, closing: &RawSeriesChunk) -> Vec<Option<usize>> {
         let mut largest = vec![None; self.schema.fields.len()];
         for chunk in self.chunks.iter().chain(std::iter::once(closing)) {
