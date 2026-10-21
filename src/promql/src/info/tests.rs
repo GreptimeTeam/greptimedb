@@ -15,10 +15,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use datatypes::series::samples::{FieldSpec, SeriesSchema};
+use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 
-use crate::grid_series::reference::{Labels, Points, labels_of, points_of, sparse_series};
+use crate::grid_series::reference::{
+    Labels, OwnedHistogram, Points, labels_of, metric_of, points_of, sparse_series,
+};
+use crate::grid_series::{GridSample, GridSeriesBuilder};
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::info::{InfoSelector, info};
 use crate::select::MatchOp;
 
@@ -139,4 +143,125 @@ fn info_matches_prometheus() {
         matched > 200 && failed > 5,
         "{matched} matched, {failed} failed"
     );
+}
+
+fn grid_schema(fields: usize) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: (0..fields)
+            .map(|field| FieldSpec {
+                name: Arc::from(format!("f{field}")),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        eval_grid: Some(Arc::new(
+            EvalGrid::try_new(GridSpec::try_new(0, 10_000, 1).unwrap()).unwrap(),
+        )),
+    })
+}
+
+fn one_point(
+    schema: &Arc<SeriesSchema>,
+    labels: &[(&str, &str)],
+    row: Vec<Option<GridSample>>,
+) -> Series {
+    let labels: Labels = labels
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+    builder.push_samples(0, &row).unwrap();
+    builder.finish(metric_of(&labels)).unwrap().unwrap()
+}
+
+fn target_info() -> Series {
+    one_point(
+        &grid_schema(1),
+        &[
+            ("__name__", "target_info"),
+            ("job", "x"),
+            ("k8s_cluster", "c1"),
+        ],
+        vec![Some(GridSample::Float(0.0))],
+    )
+}
+
+fn all_labels() -> InfoSelector {
+    InfoSelector {
+        name_matchers: Vec::new(),
+        data_labels: Vec::new(),
+        keep_unmatched: true,
+    }
+}
+
+/// Each field is a series of its own: two base series that end up with one label set merge where
+/// they hold different fields, and collide only where both hold the same field.
+#[test]
+fn results_with_one_label_set_merge_by_field() {
+    let schema = grid_schema(2);
+    let float = |value| Some(GridSample::Float(value));
+    let enriched = one_point(
+        &schema,
+        &[("__name__", "a"), ("job", "x")],
+        vec![float(1.0), None],
+    );
+    let labelled = |row| {
+        one_point(
+            &schema,
+            &[("__name__", "a"), ("job", "x"), ("k8s_cluster", "c1")],
+            row,
+        )
+    };
+    let merged = info(
+        &schema,
+        &[enriched.clone(), labelled(vec![None, float(2.0)])],
+        &[target_info()],
+        &all_labels(),
+    )
+    .unwrap();
+    assert_eq!(merged.len(), 1);
+    let fields: Vec<_> = merged[0]
+        .fields
+        .iter()
+        .map(|field| match field.sample(0) {
+            SampleRef::Float(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fields, [Some(1.0), Some(2.0)]);
+
+    let error = info(
+        &schema,
+        &[enriched, labelled(vec![float(3.0), None])],
+        &[target_info()],
+        &all_labels(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("same labelset"), "{error}");
+}
+
+/// A native histogram base sample is enriched like a float one.
+#[test]
+fn histogram_base_samples_are_enriched() {
+    let schema = grid_schema(1);
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let base = one_point(
+        &schema,
+        &[("__name__", "a"), ("job", "x")],
+        vec![Some(GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+        )))],
+    );
+    let output = info(&schema, &[base], &[target_info()], &all_labels()).unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        labels_of(&output[0].metric)
+            .get("k8s_cluster")
+            .map(String::as_str),
+        Some("c1")
+    );
+    assert!(matches!(
+        output[0].fields.as_slice()[0].sample(0),
+        SampleRef::Histogram(_)
+    ));
 }
