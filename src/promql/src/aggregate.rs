@@ -66,39 +66,117 @@ pub fn aggregate_float(
     grouping: Grouping<'_>,
 ) -> Result<Vec<Series>> {
     validate_input(schema, input, grouping)?;
-    let mut group_index = HashMap::new();
-    let mut groups = Vec::new();
+    let mut accumulator = FloatAccumulator::new(op);
     for series in input {
-        let metric = grouping.apply(&series.metric)?;
-        let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
-            groups.push(Group {
-                metric,
-                blocks: BTreeMap::new(),
-            });
-            groups.len() - 1
-        });
-        groups[index].accumulate(series, op)?;
+        accumulator.accumulate(series, grouping)?;
     }
-    let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
-    let mut output = Vec::with_capacity(groups.len());
-    let mut row = Vec::with_capacity(schema.fields.len());
-    for group in groups {
-        // One builder serves every group, so each result series starts explicitly.
-        builder.begin_series();
-        for (&block, states) in &group.blocks {
-            // The last block can extend past the grid; only points with a sample are pushed.
-            for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
-                if !point.iter().any(|state| state.seen) {
-                    continue;
-                }
-                row.clear();
-                row.extend(point.iter().map(|state| state.finish(op)));
-                builder.push(block * BLOCK_POINTS + offset, &row)?;
-            }
+    accumulator.finish(schema)
+}
+
+/// The same fold, grown one series at a time instead of taken as a batch.
+///
+/// [`aggregate_float`] is this type used in one go: the fold's state is the groups it has opened and
+/// the blocks each of them filled, and neither depends on how many series arrived at once. A series
+/// may therefore be folded in chunks, one chunk at a time, and the result is the result of folding
+/// it whole: [`Group::accumulate`] indexes its states by absolute grid position
+/// ([`Series::time`](datatypes::series::time::TimeAxis)), never by a local row number, so the
+/// positions of a later chunk land in the blocks of an earlier one.
+///
+/// Nothing about the input is kept: a folded series leaves its values in the states and nothing else,
+/// so a runtime that folds a stream holds only what the fold has accumulated.
+pub(crate) struct FloatAccumulator {
+    op: AggregateOp,
+    /// The number of fields a folded series carries, which is how many states one grid point holds.
+    /// Kept from the widest series folded, because a block allocates its states when it is opened.
+    width: usize,
+    group_index: HashMap<LabelKey, usize>,
+    groups: Vec<Group>,
+}
+
+impl FloatAccumulator {
+    /// Rejects a grouping this fold cannot key its states by.
+    ///
+    /// It is [`aggregate_float`]'s grouping check, reached by a caller that folds a stream rather
+    /// than a slice: `by` on a value field needs per-point labels and an output schema adapter, which
+    /// this module does not have.
+    pub(crate) fn validate_grouping(schema: &SeriesSchema, grouping: Grouping<'_>) -> Result<()> {
+        grouping.validate(schema)
+    }
+
+    pub(crate) fn new(op: AggregateOp) -> Self {
+        Self {
+            op,
+            width: 0,
+            group_index: HashMap::new(),
+            groups: Vec::new(),
         }
-        output.extend(builder.finish(group.metric)?);
     }
-    Ok(output)
+
+    /// Folds one series (a chunk's, or a whole one) into its group.
+    pub(crate) fn accumulate(&mut self, series: &Series, grouping: Grouping<'_>) -> Result<()> {
+        self.width = self.width.max(series.fields.len());
+        let metric = grouping.apply(&series.metric)?;
+        let index = *self
+            .group_index
+            .entry(label_key(&metric))
+            .or_insert_with(|| {
+                self.groups.push(Group {
+                    metric,
+                    blocks: BTreeMap::new(),
+                });
+                self.groups.len() - 1
+            });
+        self.groups[index].accumulate(series, self.op)
+    }
+
+    /// The groups this fold has opened, which is what finishing it produces, one series each.
+    pub(crate) fn groups(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// An estimate of the bytes the states hold, which the node owning them reserves for.
+    ///
+    /// One state block is [`BLOCK_POINTS`] states per field, so the figure is every group's blocks
+    /// times that block: `groups x blocks x BLOCK_POINTS x fields x size_of::<FloatState>()`. The
+    /// map's buckets, the metric payloads of the groups and the slack of a block's box are left out,
+    /// so it is a rough estimate in the sense the runtime's other figures are, not an allocation
+    /// bound.
+    pub(crate) fn state_bytes(&self) -> usize {
+        let blocks = self
+            .groups
+            .iter()
+            .map(|group| group.blocks.len())
+            .fold(0usize, usize::saturating_add);
+        blocks
+            .saturating_mul(BLOCK_POINTS)
+            .saturating_mul(self.width)
+            .saturating_mul(std::mem::size_of::<FloatState>())
+    }
+
+    /// Every group's result, in the order its first input appeared.
+    pub(crate) fn finish(self, schema: &Arc<SeriesSchema>) -> Result<Vec<Series>> {
+        let op = self.op;
+        let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
+        let mut output = Vec::with_capacity(self.groups.len());
+        let mut row = Vec::with_capacity(schema.fields.len());
+        for group in self.groups {
+            // One builder serves every group, so each result series starts explicitly.
+            builder.begin_series();
+            for (&block, states) in &group.blocks {
+                // The last block can extend past the grid; only points with a sample are pushed.
+                for (offset, point) in states.chunks_exact(schema.fields.len()).enumerate() {
+                    if !point.iter().any(|state| state.seen) {
+                        continue;
+                    }
+                    row.clear();
+                    row.extend(point.iter().map(|state| state.finish(op)));
+                    builder.push(block * BLOCK_POINTS + offset, &row)?;
+                }
+            }
+            output.extend(builder.finish(group.metric)?);
+        }
+        Ok(output)
+    }
 }
 
 /// Schema validation is repeated because Series exposes its fields publicly.
@@ -144,7 +222,10 @@ impl Grouping<'_> {
     }
 }
 
-fn label_key(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
+/// A group's identity: its name under `__name__` and then its tags, in the order they are held.
+type LabelKey = Vec<(Arc<str>, Arc<str>)>;
+
+fn label_key(metric: &MetricName) -> LabelKey {
     let mut labels = Vec::with_capacity(metric.tags().len() + 1);
     if let Some(name) = metric.name() {
         labels.push((Arc::from("__name__"), Arc::from(name)));
