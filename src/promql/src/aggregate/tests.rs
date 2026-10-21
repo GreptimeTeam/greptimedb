@@ -1076,13 +1076,76 @@ fn assert_flat_close(
             "{context} {labels}"
         );
         for (key, &value) in expected {
+            // An epsilon of 0 asks for the same bits, NaN payloads aside.
+            let same = if epsilon == 0.0 {
+                actual[key].to_bits() == value.to_bits() || (actual[key].is_nan() && value.is_nan())
+            } else {
+                crate::grid_series::reference::close(actual[key], value, epsilon)
+            };
             assert!(
-                crate::grid_series::reference::close(actual[key], value, epsilon),
+                same,
                 "{context} {labels} {key:?}: merged {} serial {value}",
                 actual[key]
             );
         }
     }
+}
+
+/// `partial` with only the components its aggregation declares in `state_fields`, as an encoder
+/// that stores the layout and nothing else would hand it over.
+fn to_layout(mut partial: PartialAggregate) -> PartialAggregate {
+    let kept = partial.op.state_fields();
+    for group in &mut partial.groups {
+        for (_, states) in &mut group.points {
+            for state in states.iter_mut().flatten() {
+                let mut stripped = AccumulatorState::default();
+                for field in kept {
+                    match field {
+                        StateField::Value => stripped.value = state.value,
+                        StateField::Mean => stripped.mean = state.mean,
+                        StateField::Compensation => stripped.compensation = state.compensation,
+                        StateField::Count => stripped.count = state.count,
+                        StateField::IncrementalMean => {
+                            stripped.incremental_mean = state.incremental_mean
+                        }
+                    }
+                }
+                *state = stripped;
+            }
+        }
+    }
+    partial
+}
+
+/// One group's value at point 0, folding each list of samples in its own partition and merging
+/// the partitions in order, next to the serial fold of all samples.
+fn merged_and_serial(op: AggregateOp, partitions: &[&[f64]]) -> (f64, f64) {
+    let schema = schema(&["value"]);
+    let series = |samples: &[f64]| -> Vec<Series> {
+        samples
+            .iter()
+            .map(|&value| input(&schema, metric("m", &[]), 0, &[vec![Some(value)]]))
+            .collect()
+    };
+    let mut merger = FloatMerger::try_new(&schema, op).unwrap();
+    for samples in partitions {
+        let mut aggregator = FloatAggregator::try_new(&schema, op, Grouping::By(&[])).unwrap();
+        for series in series(samples) {
+            aggregator.update(&series).unwrap();
+        }
+        merger
+            .merge(to_layout(aggregator.finish_partial()))
+            .unwrap();
+    }
+    let all: Vec<Series> = partitions
+        .iter()
+        .flat_map(|samples| series(samples))
+        .collect();
+    let value = |output: Vec<Series>| values_of(&output, 0, 128).1[0].unwrap();
+    (
+        value(merger.finish().unwrap()),
+        value(aggregate_float(&schema, &all, op, Grouping::By(&[])).unwrap()),
+    )
 }
 
 /// Partial states merged in any partition and merge order give the serial result, within the
@@ -1101,20 +1164,6 @@ fn partials_merge_to_the_serial_result() {
         AggregateOp::Stddev,
         AggregateOp::Stdvar,
     ];
-    let strip = |op: AggregateOp, state: &mut AccumulatorState| {
-        let kept = op.state_fields();
-        let mut stripped = AccumulatorState::default();
-        for field in kept {
-            match field {
-                StateField::Value => stripped.value = state.value,
-                StateField::Mean => stripped.mean = state.mean,
-                StateField::Compensation => stripped.compensation = state.compensation,
-                StateField::Count => stripped.count = state.count,
-                StateField::IncrementalMean => stripped.incremental_mean = state.incremental_mean,
-            }
-        }
-        *state = stripped;
-    };
     for seed in 0..300 {
         let mut rng = StdRng::seed_from_u64(seed);
         let fields: Vec<String> = (0..rng.random_range(1..=3))
@@ -1158,19 +1207,28 @@ fn partials_merge_to_the_serial_result() {
                 for (series, _) in series.iter().zip(&parts).filter(|(_, p)| **p == part) {
                     aggregator.update(series).unwrap();
                 }
-                let mut partial = aggregator.finish_partial();
-                for group in &mut partial.groups {
-                    for (_, states) in &mut group.points {
-                        states
-                            .iter_mut()
-                            .flatten()
-                            .for_each(|state| strip(op, state));
-                    }
-                }
-                merger.merge(partial).unwrap();
+                merger
+                    .merge(to_layout(aggregator.finish_partial()))
+                    .unwrap();
             }
             let merged = merger.finish().unwrap();
             assert_flat_close(&merged, &serial, 1e-10, &format!("seed {seed} {op:?}"));
+
+            // One partition holding every series is the serial fold, bit for bit.
+            let mut aggregator = FloatAggregator::try_new(&schema, op, grouping).unwrap();
+            for series in &series {
+                aggregator.update(series).unwrap();
+            }
+            let mut merger = FloatMerger::try_new(&schema, op).unwrap();
+            merger
+                .merge(to_layout(aggregator.finish_partial()))
+                .unwrap();
+            assert_flat_close(
+                &merger.finish().unwrap(),
+                &serial,
+                0.0,
+                &format!("seed {seed} {op:?} one partition"),
+            );
         }
 
         let serial = count_values(&schema, &series, "value", grouping).unwrap();
@@ -1188,49 +1246,48 @@ fn partials_merge_to_the_serial_result() {
     }
 }
 
-/// Adding two partial sums can lose low bits, which go into the compensation: `1` survives
-/// between `1e100` and `-1e100` in three partials as it does in the serial fold.
+/// The compensation travels with a partial and absorbs what adding two partial sums loses: `1`
+/// survives next to `1e100` and `-1e100` whether it is a partition's own compensation or the
+/// error of a merge, and `avg` divides it like the sum.
 #[test]
-fn a_sum_merge_keeps_the_error_of_adding_partial_sums() {
-    let schema = schema(&["value"]);
-    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
-    for value in [1e100, 1.0, -1e100] {
-        let mut aggregator =
-            FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
-        aggregator
-            .update(&input(&schema, metric("m", &[]), 0, &[vec![Some(value)]]))
-            .unwrap();
-        merger.merge(aggregator.finish_partial()).unwrap();
-    }
+fn compensation_survives_partials_and_merges() {
     assert_eq!(
-        values_of(&merger.finish().unwrap(), 0, 128),
-        (0, vec![Some(1.0)])
+        merged_and_serial(AggregateOp::Sum, &[&[-1e100], &[1e100, 1.0]]),
+        (1.0, 1.0)
     );
+    assert_eq!(
+        merged_and_serial(AggregateOp::Sum, &[&[1e100], &[1.0], &[-1e100]]),
+        (1.0, 1.0)
+    );
+    let (merged, serial) = merged_and_serial(AggregateOp::Avg, &[&[-1e100], &[1e100, 1.0]]);
+    assert_eq!(merged, serial);
+    assert!(crate::grid_series::reference::close(
+        merged,
+        1.0 / 3.0,
+        1e-10
+    ));
 }
 
 /// Merging finite partials does not overflow where the result is finite: `avg` switches to a
-/// mean when the summed partials overflow, and `stdvar` does not square the mean difference on
-/// its own.
+/// count-weighted mean when the summed partials overflow, and `stdvar` does not square the mean
+/// difference on its own.
 #[test]
 fn merges_of_large_finite_partials_stay_finite() {
-    let schema = schema(&["value"]);
-    let merged = |op, values: [f64; 2]| {
-        let mut merger = FloatMerger::try_new(&schema, op).unwrap();
-        for value in values {
-            let mut aggregator = FloatAggregator::try_new(&schema, op, Grouping::By(&[])).unwrap();
-            aggregator
-                .update(&input(&schema, metric("m", &[]), 0, &[vec![Some(value)]]))
-                .unwrap();
-            merger.merge(aggregator.finish_partial()).unwrap();
-        }
-        values_of(&merger.finish().unwrap(), 0, 128).1[0].unwrap()
-    };
-    assert_eq!(merged(AggregateOp::Avg, [1e308, 1e308]), 1e308);
-    let stdvar = merged(AggregateOp::Stdvar, [0.0, 1.5e154]);
+    for partitions in [
+        &[&[1e308][..], &[1e308][..]][..],
+        // Unequal counts, one partition already a mean: the weights decide the result.
+        &[&[1e308, 1e308][..], &[0.0][..]][..],
+        &[&[0.0][..], &[1e308, 1e308][..]][..],
+    ] {
+        let (merged, serial) = merged_and_serial(AggregateOp::Avg, partitions);
+        assert!(
+            merged.is_finite() && crate::grid_series::reference::close(merged, serial, 1e-10),
+            "{partitions:?}: merged {merged} serial {serial}"
+        );
+    }
+    let (stdvar, serial) = merged_and_serial(AggregateOp::Stdvar, &[&[0.0], &[1.5e154]]);
     assert!(stdvar.is_finite(), "{stdvar}");
-    assert!(crate::grid_series::reference::close(
-        stdvar, 5.625e307, 1e-10
-    ));
+    assert!(crate::grid_series::reference::close(stdvar, serial, 1e-10));
 }
 
 /// `min` and `max` keep the first of two equal values, so with `0` and `-0` the sign is that of
