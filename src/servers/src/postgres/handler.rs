@@ -302,6 +302,36 @@ where
         _ => 0,
     };
 
+    // Render timestamps with an explicit session-timezone offset so the
+    // exported text carries the instant unambiguously: the timezone-aware
+    // COPY IN decoder honors embedded offsets, keeping COPY OUT -> COPY IN
+    // round trips exact in non-UTC sessions (matching SQL INSERT parity).
+    // This touches both halves of the encoder: the arrow schema drives
+    // value conversion into a tz-aware DateTime, and the pg field type
+    // selects the offset-bearing text format.
+    let arrow_schema_override = copy_out_schema_with_timezone(&schema, &query_ctx);
+    let pg_fields = if arrow_schema_override.is_some() {
+        pg_fields
+            .into_iter()
+            .map(|mut field| {
+                if field.datatype() == &Type::TIMESTAMP {
+                    field = FieldInfo::new(
+                        field.name().to_string(),
+                        None,
+                        None,
+                        Type::TIMESTAMPTZ,
+                        field.format(),
+                    )
+                    .with_type_size(field.type_size())
+                    .with_type_modifier(field.type_modifier());
+                }
+                field
+            })
+            .collect::<Vec<_>>()
+    } else {
+        pg_fields
+    };
+
     let pg_schema = Arc::new(pg_fields);
     let num_columns = pg_schema.len();
 
@@ -317,7 +347,8 @@ where
         schema.clone(),
         recordbatches_stream,
         copy_encoder,
-    );
+    )
+    .with_arrow_schema_override(arrow_schema_override);
 
     let copy_stream: RowStream<CopyData> = Box::pin(
         row_stream
@@ -824,6 +855,38 @@ impl ErrorHandler for PostgresServerHandlerInner {
             _ => info!("Postgres interface error: {}", error),
         }
     }
+}
+
+/// Rewrites timestamp fields of the table's arrow schema to carry the
+/// session timezone, so COPY OUT renders them with an explicit offset
+/// (`2024-01-01 08:00:00+08:00`). Returns `None` when there is nothing
+/// to rewrite (no naive timestamps or a UTC session leaving output as-is
+/// is fine either way — offsets are always unambiguous on re-import).
+fn copy_out_schema_with_timezone(
+    schema: &SchemaRef,
+    query_ctx: &QueryContextRef,
+) -> Option<Arc<arrow::datatypes::Schema>> {
+    let timezone = query_ctx.timezone().to_string();
+    let arrow_schema = schema.arrow_schema();
+    let mut changed = false;
+    let fields = arrow_schema
+        .fields()
+        .iter()
+        .map(|field| match field.data_type() {
+            arrow::datatypes::DataType::Timestamp(unit, None) => {
+                changed = true;
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(arrow::datatypes::DataType::Timestamp(
+                        *unit,
+                        Some(Arc::from(timezone.as_str())),
+                    ))
+            }
+            _ => field.as_ref().clone(),
+        })
+        .collect::<Vec<_>>();
+    changed.then(|| Arc::new(arrow::datatypes::Schema::new(fields)))
 }
 
 fn check_copy_to_stdout(statement: &SqlParserStatement) -> Option<String> {

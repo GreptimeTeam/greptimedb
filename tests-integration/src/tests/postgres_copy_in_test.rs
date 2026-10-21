@@ -400,3 +400,122 @@ async fn test_postgres_copy_in_session_timezone_parity() {
 
     server.shutdown().await.unwrap();
 }
+
+/// COPY OUT -> COPY IN must preserve timestamp instants in non-UTC
+/// sessions: COPY OUT renders timestamps with an explicit session-tz
+/// offset, which the timezone-aware COPY IN decoder honors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_out_in_timestamp_round_trip() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_out_in_tz").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query(
+            "CREATE TABLE tz_src (host STRING, ts TIMESTAMP, TIME INDEX(ts));
+             CREATE TABLE tz_dst (host STRING, ts TIMESTAMP, TIME INDEX(ts));
+             INSERT INTO tz_src VALUES ('a', '2024-01-01 00:00:00'), ('b', '2024-07-01 12:30:00');",
+        )
+        .await
+        .unwrap();
+
+    client
+        .simple_query("SET TIMEZONE TO 'Asia/Shanghai'")
+        .await
+        .unwrap();
+
+    let mut exported = Vec::new();
+    let mut out = Box::pin(
+        client
+            .copy_out("COPY (SELECT host, ts FROM tz_src ORDER BY ts) TO STDOUT WITH (FORMAT csv)")
+            .await
+            .unwrap(),
+    );
+    use futures::StreamExt;
+    while let Some(chunk) = out.as_mut().next().await {
+        exported.extend_from_slice(&chunk.unwrap());
+    }
+    // The export now carries explicit offsets.
+    let text = String::from_utf8(exported.clone()).unwrap();
+    assert!(
+        text.contains("+08"),
+        "COPY OUT should render timestamps with the session-tz offset, got: {text}"
+    );
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY tz_dst (host, ts) FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from(exported)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    // Epochs must match the source exactly.
+    let compare = client
+        .simple_query(
+            "SELECT (SELECT CAST(ts AS BIGINT) FROM tz_src WHERE host='a') = (SELECT CAST(ts AS BIGINT) FROM tz_dst WHERE host='a') \
+             AND (SELECT CAST(ts AS BIGINT) FROM tz_src WHERE host='b') = (SELECT CAST(ts AS BIGINT) FROM tz_dst WHERE host='b')",
+        )
+        .await
+        .unwrap();
+    let ok: Vec<_> = compare
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ok, vec!["t"], "epochs must round-trip exactly");
+
+    server.shutdown().await.unwrap();
+}
+
+/// PostgreSQL distinguishes an unquoted empty field (NULL) from a quoted
+/// empty string; the import must preserve both in one stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_quoted_empty_string() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_empty").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query("CREATE TABLE empty_str (note STRING, ts TIMESTAMP, TIME INDEX(ts))")
+        .await
+        .unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY empty_str (note, ts) FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from_static(
+            b"plain,2024-01-01 00:00:00\n\"\",2024-01-01 00:00:01\n,2024-01-01 00:00:02\n",
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 3);
+
+    let messages = client
+        .simple_query("SELECT note IS NULL AS is_null, note FROM empty_str ORDER BY ts")
+        .await
+        .unwrap();
+    let rows: Vec<(bool, Option<String>)> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => {
+                Some((row.get(0) == Some("t"), row.get(1).map(str::to_string)))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], (false, Some("plain".to_string())));
+    // Quoted empty string: NOT NULL, empty value.
+    assert_eq!(rows[1], (false, Some("".to_string())));
+    // Unquoted empty field: NULL.
+    assert_eq!(rows[2], (true, None));
+
+    server.shutdown().await.unwrap();
+}

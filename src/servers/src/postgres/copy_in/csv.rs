@@ -24,8 +24,10 @@
 //! converts fields against the targeted columns' schema in one pass.
 //!
 //! Consequences of sharing the engine: JSON and Binary columns are
-//! rejected, timestamps must be date/time strings, and an empty field —
-//! quoted or not — is NULL.
+//! rejected, and timestamps must be date/time strings (offset-free ones
+//! parse in the session timezone). An unquoted empty field is NULL; a
+//! quoted empty string is an empty string, restored by a shadow
+//! quote-mask scan since the decoder nulls both.
 
 use std::sync::Arc;
 
@@ -36,7 +38,7 @@ use arrow_schema::{ArrowError, DataType as ArrowDataType, Field, Schema as Arrow
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
-use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector};
+use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
 use pgwire::error::{PgWireError, PgWireResult};
 
 use crate::postgres::copy_in::codec::{CopyInCodec, ParsedRow, RecordParser};
@@ -170,9 +172,18 @@ impl CopyInCodec for CsvCodec {
         if self.escape != self.quote {
             builder = builder.with_escape(self.escape);
         }
+        let string_columns: Vec<usize> = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.data_type, ConcreteDataType::String(_)))
+            .map(|(i, _)| i)
+            .collect();
         Ok(Box::new(CsvRecordParser {
             decoder: builder.build_decoder(),
             boolean_columns,
+            string_columns,
+            masks: std::collections::VecDeque::new(),
+            scanner: QuoteMaskScanner::new(self.delimiter, self.quote, self.escape, self.header),
         }))
     }
 }
@@ -183,17 +194,30 @@ struct CsvRecordParser {
     /// Indices of Boolean columns, decoded as Utf8 and converted by
     /// [`flush_batch`] to accept PostgreSQL's boolean spellings.
     boolean_columns: Vec<usize>,
+    /// Indices of String columns: the decoder nulls every empty field, so
+    /// a quoted empty string (`""` — an empty STRING in PostgreSQL) is
+    /// indistinguishable from an unquoted empty field (NULL) after the
+    /// decode. A shadow scan of the same bytes records per field whether
+    /// it was quoted; [`flush_batch`] then restores quoted empty strings.
+    string_columns: Vec<usize>,
+    /// Shadow scan of the raw bytes: one quoted-mask per completed record,
+    /// aligned with the decoder's emitted rows.
+    masks: std::collections::VecDeque<Vec<bool>>,
+    scanner: QuoteMaskScanner,
 }
 
 impl RecordParser for CsvRecordParser {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
+        // The shadow scan sees the same bytes as the decoder, so its
+        // per-record masks line up with the decoder's emitted rows.
+        self.masks.extend(self.scanner.feed(data));
         let mut buf = data;
         let mut rows = Vec::new();
         while !buf.is_empty() {
             let consumed = self.decoder.decode(buf).map_err(decode_error)?;
             if consumed == 0 {
                 while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-                    rows.extend(flush_batch(&batch, &self.boolean_columns)?);
+                    rows.extend(self.flush_batch(&batch)?);
                 }
             } else {
                 buf = &buf[consumed..];
@@ -206,43 +230,254 @@ impl RecordParser for CsvRecordParser {
         // An empty decode signals EOF, finalizing a trailing record that
         // lacks its record separator.
         self.decoder.decode(&[]).map_err(decode_error)?;
+        self.masks.extend(self.scanner.finish());
         let mut rows = Vec::new();
         while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
-            rows.extend(flush_batch(&batch, &self.boolean_columns)?);
+            rows.extend(self.flush_batch(&batch)?);
         }
         Ok(rows)
     }
 }
 
-/// Converts one decoded arrow batch into insertable rows with the shared
-/// [`vectors_to_rows`] helper.
-fn flush_batch(
-    batch: &arrow::record_batch::RecordBatch,
-    boolean_columns: &[usize],
-) -> PgWireResult<Vec<ParsedRow>> {
-    let mut vectors = Helper::try_into_vectors(batch.columns())
-        .map_err(|e| bad_copy_data(format!("failed to convert decoded CSV batch: {e}")))?;
-    for &index in boolean_columns {
-        let Some(vector) = vectors[index].as_any().downcast_ref::<StringVector>() else {
-            return Err(bad_copy_data(
-                "expected boolean column to decode as a string vector",
-            ));
-        };
-        let mut values = Vec::with_capacity(batch.num_rows());
-        for row_index in 0..batch.num_rows() {
-            values.push(match vector.get(row_index) {
-                datatypes::value::Value::Null => None,
-                datatypes::value::Value::String(s) => Some(parse_pg_bool(s.as_utf8())?),
-                other => {
-                    return Err(bad_copy_data(format!(
-                        "expected string values in a boolean column, got {other:?}"
-                    )));
-                }
-            });
+impl CsvRecordParser {
+    fn flush_batch(
+        &mut self,
+        batch: &arrow::record_batch::RecordBatch,
+    ) -> PgWireResult<Vec<ParsedRow>> {
+        let mut vectors = Helper::try_into_vectors(batch.columns())
+            .map_err(|e| bad_copy_data(format!("failed to convert decoded CSV batch: {e}")))?;
+        for &index in &self.boolean_columns {
+            let Some(vector) = vectors[index].as_any().downcast_ref::<StringVector>() else {
+                return Err(bad_copy_data(
+                    "expected boolean column to decode as a string vector",
+                ));
+            };
+            let mut values = Vec::with_capacity(batch.num_rows());
+            for row_index in 0..batch.num_rows() {
+                values.push(match vector.get(row_index) {
+                    datatypes::value::Value::Null => None,
+                    datatypes::value::Value::String(s) => Some(parse_pg_bool(s.as_utf8())?),
+                    other => {
+                        return Err(bad_copy_data(format!(
+                            "expected string values in a boolean column, got {other:?}"
+                        )));
+                    }
+                });
+            }
+            vectors[index] = Arc::new(BooleanVector::from(values));
         }
-        vectors[index] = Arc::new(BooleanVector::from(values));
+        // Restore quoted empty strings: after the decode they are NULL
+        // exactly like unquoted empty fields, which stay NULL.
+        if !self.string_columns.is_empty() {
+            for row_index in 0..batch.num_rows() {
+                let Some(mask) = self.masks.pop_front() else {
+                    return Err(bad_copy_data(
+                        "internal error: quote masks out of sync with decoded rows",
+                    ));
+                };
+                for &index in &self.string_columns {
+                    if mask.get(index).copied().unwrap_or(false)
+                        && vectors[index].get(row_index).is_null()
+                    {
+                        vectors[index] = set_string_at(vectors[index].clone(), row_index, "");
+                    }
+                }
+            }
+        }
+        Ok(vectors_to_rows(vectors.iter(), batch.num_rows()))
     }
-    Ok(vectors_to_rows(vectors.iter(), batch.num_rows()))
+}
+
+/// Replaces a null string slot with an empty string, returning a new
+/// vector (immutable vectors cannot be updated in place).
+fn set_string_at(vector: VectorRef, row_index: usize, value: &str) -> VectorRef {
+    let string_vector = vector
+        .as_any()
+        .downcast_ref::<StringVector>()
+        .expect("string column decodes as StringVector");
+    let mut values = Vec::with_capacity(string_vector.len());
+    for i in 0..string_vector.len() {
+        values.push(match string_vector.get(i) {
+            datatypes::value::Value::String(s) => Some(s.as_utf8().to_string()),
+            _ if i == row_index => Some(value.to_string()),
+            _ => None,
+        });
+    }
+    Arc::new(StringVector::from(values))
+}
+
+/// Incremental scan of raw CSV bytes recording, per completed record,
+/// whether each field was quoted. Mirrors the decoder's record and field
+/// splitting rules (delimiter, quoting, escapes, CRLF/LF ends) so the
+/// masks align with its output; field VALUES are not materialized.
+struct QuoteMaskScanner {
+    delimiter: u8,
+    quote: u8,
+    escape: u8,
+    state: MaskState,
+    /// Whether the current field was quoted (indexed by field position).
+    fields: Vec<bool>,
+    /// A byte deferred until the next chunk (see the decoder-side rules).
+    carry: Option<u8>,
+    skip_first: bool,
+    header_seen: bool,
+}
+
+#[derive(PartialEq, Eq)]
+enum MaskState {
+    FieldStart,
+    InUnquoted,
+    InQuoted,
+    QuoteInQuoted,
+}
+
+impl QuoteMaskScanner {
+    fn new(delimiter: u8, quote: u8, escape: u8, has_header: bool) -> Self {
+        Self {
+            delimiter,
+            quote,
+            escape,
+            state: MaskState::FieldStart,
+            fields: Vec::new(),
+            carry: None,
+            skip_first: has_header,
+            header_seen: false,
+        }
+    }
+
+    fn feed(&mut self, data: &[u8]) -> Vec<Vec<bool>> {
+        let mut records = Vec::new();
+        let mut buf;
+        let data: &[u8] = if let Some(b) = self.carry.take() {
+            buf = Vec::with_capacity(data.len() + 1);
+            buf.push(b);
+            buf.extend_from_slice(data);
+            &buf
+        } else {
+            data
+        };
+
+        let mut idx = 0;
+        while idx < data.len() {
+            let b = data[idx];
+            let next = data.get(idx + 1).copied();
+            match self.state {
+                MaskState::FieldStart => {
+                    if b == self.quote {
+                        self.state = MaskState::InQuoted;
+                        self.fields.push(true);
+                        idx += 1;
+                    } else if b == self.delimiter {
+                        self.fields.push(false);
+                        idx += 1;
+                    } else if is_record_end(b, next) {
+                        if let Some(record) = self.end_record() {
+                            records.push(record);
+                        }
+                        idx += record_end_len(b);
+                    } else if is_incomplete_record_end(b, next) {
+                        self.carry = Some(b);
+                        return records;
+                    } else {
+                        self.fields.push(false);
+                        self.state = MaskState::InUnquoted;
+                        idx += 1;
+                    }
+                }
+                MaskState::InUnquoted => {
+                    if b == self.delimiter {
+                        self.state = MaskState::FieldStart;
+                        idx += 1;
+                    } else if is_record_end(b, next) {
+                        if let Some(record) = self.end_record() {
+                            records.push(record);
+                        }
+                        idx += record_end_len(b);
+                    } else if is_incomplete_record_end(b, next) {
+                        self.carry = Some(b);
+                        return records;
+                    } else {
+                        idx += 1;
+                    }
+                }
+                MaskState::InQuoted => {
+                    if self.escape != self.quote && b == self.escape {
+                        if let Some(n) = next {
+                            let _ = n;
+                            idx += 2;
+                        } else {
+                            self.carry = Some(b);
+                            return records;
+                        }
+                    } else if b == self.quote {
+                        self.state = MaskState::QuoteInQuoted;
+                        idx += 1;
+                    } else {
+                        idx += 1;
+                    }
+                }
+                MaskState::QuoteInQuoted => {
+                    if b == self.quote && self.escape == self.quote {
+                        idx += 2.min(data.len() - idx);
+                    } else if b == self.delimiter {
+                        self.state = MaskState::FieldStart;
+                        idx += 1;
+                    } else if is_record_end(b, next) {
+                        if let Some(record) = self.end_record() {
+                            records.push(record);
+                        }
+                        idx += record_end_len(b);
+                    } else if is_incomplete_record_end(b, next) {
+                        self.carry = Some(b);
+                        return records;
+                    } else {
+                        // Stray data after a closing quote: keep scanning
+                        // the field; the decoder is the authority on
+                        // whether this is an error.
+                        idx += 1;
+                    }
+                }
+            }
+        }
+        records
+    }
+
+    fn finish(&mut self) -> Vec<Vec<bool>> {
+        if let Some(b) = self.carry.take()
+            && b == b'\r'
+        {
+            // A lone `\r` at end of stream terminates the record.
+            return self.end_record().into_iter().collect();
+        }
+        if self.state != MaskState::FieldStart || !self.fields.is_empty() {
+            return self.end_record().into_iter().collect();
+        }
+        Vec::new()
+    }
+
+    fn end_record(&mut self) -> Option<Vec<bool>> {
+        self.state = MaskState::FieldStart;
+        let record = std::mem::take(&mut self.fields);
+        if self.skip_first && !self.header_seen {
+            // The header record produces no data row; drop its mask.
+            self.header_seen = true;
+            None
+        } else {
+            Some(record)
+        }
+    }
+}
+
+fn is_record_end(b: u8, next: Option<u8>) -> bool {
+    b == b'\n' || (b == b'\r' && next == Some(b'\n'))
+}
+
+fn is_incomplete_record_end(b: u8, next: Option<u8>) -> bool {
+    b == b'\r' && next.is_none()
+}
+
+fn record_end_len(b: u8) -> usize {
+    if b == b'\r' { 2 } else { 1 }
 }
 
 /// Parses PostgreSQL's boolean spellings: `true`/`false`, `t`/`f`,
@@ -675,6 +910,100 @@ mod tests {
         assert_eq!(millis(&rows[1]), 1704038400000);
         // Explicit Z: parsed as UTC regardless of the session zone.
         assert_eq!(millis(&rows[2]), 1704067200000);
+    }
+
+    #[test]
+    fn test_csv_quoted_empty_string_vs_null() {
+        // PostgreSQL: an unquoted empty field is NULL, a quoted empty
+        // string is an empty string. The decoder nulls both; the shadow
+        // quote-mask scan restores the distinction for string columns.
+        let columns = vec![
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&columns, "UTC")
+            .unwrap();
+        let rows = feed_all(
+            &mut parser,
+            &[b"plain,2024-01-01 00:00:00\n\
+                \"\",2024-01-01 00:00:01\n\
+                ,2024-01-01 00:00:02\n\
+                \" \",2024-01-01 00:00:03\n"],
+        );
+        let note = |row: &ParsedRow| {
+            row.values[0].value_data.as_ref().map(|v| match v {
+                api::v1::value::ValueData::StringValue(s) => s.clone(),
+                other => panic!("expected string, got {other:?}"),
+            })
+        };
+        assert_eq!(rows.len(), 4);
+        assert_eq!(note(&rows[0]), Some("plain".to_string()));
+        // Quoted empty string.
+        assert_eq!(note(&rows[1]), Some("".to_string()));
+        // Unquoted empty field: NULL.
+        assert_eq!(note(&rows[2]), None);
+        // Quoted single space is a non-empty string.
+        assert_eq!(note(&rows[3]), Some(" ".to_string()));
+    }
+
+    #[test]
+    fn test_csv_quoted_empty_across_chunk_boundaries() {
+        // The mask scanner must track quoting across arbitrary chunk
+        // splits, including splits inside a quoted empty field and a
+        // CRLF record end.
+        let columns = vec![
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let payload: Vec<u8> =
+            b"\"\",2024-01-01 00:00:00\r\n,2024-01-01 00:00:01\n\"\",2024-01-01 00:00:02\n"
+                .to_vec();
+        for chunk in [1usize, 2, 3, 5, 7, 11, 64] {
+            let mut parser = build_csv_codec(CopyOptionSet::default())
+                .unwrap()
+                .create_parser(&columns, "UTC")
+                .unwrap();
+            let mut rows = Vec::new();
+            for c in payload.chunks(chunk) {
+                rows.extend(parser.feed(c).unwrap());
+            }
+            rows.extend(parser.finish().unwrap());
+            // Payload rows: quoted empty, unquoted empty (NULL), quoted
+            // empty — the middle NULL must survive and the quoted ones
+            // must decode to empty strings.
+            assert_eq!(rows.len(), 3, "chunk={chunk}");
+            assert!(
+                matches!(
+                    rows[0].values[0].value_data,
+                    Some(api::v1::value::ValueData::StringValue(ref s)) if s.is_empty()
+                ),
+                "chunk={chunk}: row 0 quoted empty must be an empty string, got {:?}",
+                rows[0].values[0].value_data
+            );
+            assert!(
+                rows[1].values[0].value_data.is_none(),
+                "chunk={chunk}: row 1 unquoted empty must be NULL, got {:?}",
+                rows[1].values[0].value_data
+            );
+            assert!(
+                matches!(
+                    rows[2].values[0].value_data,
+                    Some(api::v1::value::ValueData::StringValue(ref s)) if s.is_empty()
+                ),
+                "chunk={chunk}: row 2 quoted empty must be an empty string, got {:?}",
+                rows[2].values[0].value_data
+            );
+        }
     }
 
     #[test]
