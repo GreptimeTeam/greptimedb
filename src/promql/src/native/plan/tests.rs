@@ -96,6 +96,18 @@ fn input_with_fields(count: usize) -> NativeNode {
     }
 }
 
+/// A scan of raw samples whose chunks of different series may interleave.
+fn interleaved_input() -> NativeNode {
+    let output = raw();
+    NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: output.clone(),
+            ordering: SeriesOrdering::Interleaved,
+        }),
+        output,
+    }
+}
+
 /// A constant scalar, which is a scalar type evaluated on the statement's grid.
 fn scalar_on(value: f64, grid: Arc<EvalGrid>) -> NativeNode {
     NativeNode {
@@ -457,15 +469,35 @@ fn a_window_checks_its_declared_input_grid() {
 /// chunks of different series may not interleave.
 #[test]
 fn a_window_cannot_read_interleaved_input() {
-    let output = raw();
-    let interleaved = NativeNode {
-        expr: NativeExpr::Input(BoundInput {
-            output: output.clone(),
-            ordering: SeriesOrdering::Interleaved,
-        }),
-        output,
+    let error = window_over(interleaved_input(), None)
+        .validate()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("interleaved chunks cannot be fed to it"),
+        "{error}"
+    );
+}
+
+/// An instant selection's consumer collects one series' chunks into one buffer, so it reads a
+/// series to its last chunk before the next: it refuses an interleaved input for the reason a
+/// window does.
+#[test]
+fn an_instant_selection_cannot_read_interleaved_input() {
+    let out = grid(0, 60_000, 4);
+    let node = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(interleaved_input()),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(Arc::new([]), out),
     };
-    let error = window_over(interleaved, None).validate().unwrap_err();
+    let error = node.validate().unwrap_err();
     assert!(
         error
             .to_string()

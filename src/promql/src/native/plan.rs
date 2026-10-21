@@ -122,8 +122,8 @@ pub struct AggregateStateSchema {
 /// A scan or exchange boundary bound as a node input.
 ///
 /// The binding records what the input was created for: the output a consumer type-checks against,
-/// and the ordering it guarantees. A window reads the ordering, rejecting an interleaved input; no
-/// other consumer reads it yet.
+/// and the ordering it guarantees. An instant selection and a window both read the ordering,
+/// rejecting an interleaved input; no other consumer reads it yet.
 #[derive(Clone, Debug)]
 pub struct BoundInput {
     /// What the input produces: raw samples from a scan, or state from an exchange boundary.
@@ -329,14 +329,13 @@ impl NativeNode {
                         )));
                     }
                 }
+                ensure_not_interleaved(input)?;
                 ensure_samples(&self.output, "an instant selection")?;
                 // A selection is one source row per grid point: `select_instants` picks row
                 // indices and every field is taken at them, so it carries one value per input
                 // field.
                 ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
-                // `select_instants` reads one series at a time and holds no cross-series state, so
-                // an interleaved input is enough for it: no ordering check here.
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;
@@ -354,17 +353,7 @@ impl NativeNode {
                         "a window reads an empty range: its range must be positive",
                     ));
                 }
-                // A range evaluator consumes one series to its last chunk before it starts the
-                // next, so interleaved chunks of different series cannot be fed to it. Only an
-                // input node carries an ordering, so only there is there one to check.
-                if let NativeExpr::Input(binding) = &input.expr
-                    && binding.ordering == SeriesOrdering::Interleaved
-                {
-                    return Err(invalid(
-                        "a window reads one series to its last chunk before the next, so \
-                         interleaved chunks cannot be fed to it",
-                    ));
-                }
+                ensure_not_interleaved(input)?;
                 // What is checked here and just below is that the declared input grid equals the
                 // input's grid, and that the output grid matches the declared one. The grid is
                 // not checked to cover the window's read range
@@ -622,6 +611,25 @@ fn ensure_grid(ty: &NativeType, expected: &Arc<EvalGrid>, what: &str) -> Result<
         ))),
         None => Err(invalid(&format!("{what} produces values without a grid"))),
     }
+}
+
+/// Checks that `input`, when it is a [`NativeExpr::Input`], does not declare interleaved series.
+///
+/// A native evaluation reads one series to its last chunk before the next: a range evaluator folds
+/// a series completely before it starts another, and an instant selection's consumer collects one
+/// series' chunks into one buffer. Neither can be handed chunks of different series that
+/// interleave, which is the one rule both consumers state. Only an input node carries an ordering,
+/// so only there is there one to check.
+fn ensure_not_interleaved(input: &NativeNode) -> Result<()> {
+    if let NativeExpr::Input(binding) = &input.expr
+        && binding.ordering == SeriesOrdering::Interleaved
+    {
+        return Err(invalid(
+            "a native evaluation reads one series to its last chunk before the next, so \
+             interleaved chunks cannot be fed to it",
+        ));
+    }
+    Ok(())
 }
 
 fn invalid(reason: &str) -> DataFusionError {
