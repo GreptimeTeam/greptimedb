@@ -134,7 +134,7 @@ async fn test_nested_merge_scan_capability_join_across_datanodes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
     use common_meta::node_manager::Datanode;
-    use common_query::request::QueryRequest as LogicalQueryRequest;
+    use common_query::request::{QueryRequest as LogicalQueryRequest, RegionReadKind};
     use futures::TryStreamExt;
     use session::hints::READ_PREFERENCE_EXTENSION_KEY;
 
@@ -172,6 +172,7 @@ async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
                 header: header.clone(),
                 region_id: RegionId::from_u64(*region_id),
                 plan: plan.clone(),
+                read_kind: RegionReadKind::Rows,
             })
             .await
             .err()
@@ -210,6 +211,7 @@ async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
             header,
             region_id: RegionId::from_u64(*region_id),
             plan: plan.clone(),
+            read_kind: RegionReadKind::Rows,
         };
         let flight_message = match Datanode::handle_query(&requester, request).await {
             Err(error) => {
