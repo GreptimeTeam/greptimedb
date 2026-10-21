@@ -80,6 +80,32 @@ impl FloatHistogram {
         })
     }
 
+    /// Estimates the heap held by the bucket lists, custom bounds and preserved span layout.
+    ///
+    /// A histogram can own tens of kilobytes of buckets that its struct size does not include.
+    /// Capacity slack and small header overestimates are acceptable for window reservations.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        fn buckets(side: &Buckets) -> usize {
+            side.capacity() * std::mem::size_of::<(i32, f64)>()
+        }
+        let layout = self.layout.as_ref().map_or(0, |sides| {
+            std::mem::size_of::<[Vec<(i32, i32)>; 2]>().saturating_add(
+                sides
+                    .iter()
+                    .map(|side| side.capacity() * std::mem::size_of::<(i32, i32)>())
+                    .fold(0, usize::saturating_add),
+            )
+        });
+        buckets(&self.positive)
+            .saturating_add(buckets(&self.negative))
+            .saturating_add(
+                self.custom_values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<f64>()),
+            )
+            .saturating_add(layout)
+    }
+
     /// The spans of each side.
     fn spans(&self) -> [Vec<(i32, i32)>; 2] {
         self.layout
