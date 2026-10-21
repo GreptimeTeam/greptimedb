@@ -541,8 +541,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
 
 /// Binds a range function over the range selector it is given, and the window that selector opens.
 ///
-/// The parameters come first and the range selector is last, for both signatures: a function without
-/// parameters has no `parameters` to read.
+/// The selector's place is the signature's, so the constants on either side of it are read as the
+/// signature says: `quantile_over_time` writes its parameter in front of the selector, while
+/// `predict_linear` and `double_exponential_smoothing` write theirs behind it.
 fn window_call(
     context: &Context,
     name: &str,
@@ -570,11 +571,14 @@ fn window_call(
              selector like `x[5m]`"
         )));
     };
-    let constants: Vec<Box<PromExpr>> = args
+    // A constant keeps the position it was written at, because the selector is one of the call's
+    // arguments: a rejection names the argument the query wrote rather than the constant's offset
+    // among the arguments left once the selector is dropped.
+    let constants: Vec<(usize, Box<PromExpr>)> = args
         .iter()
         .enumerate()
         .filter(|(position, _)| *position != selector_index)
-        .map(|(_, argument)| argument.clone())
+        .map(|(position, argument)| (position, argument.clone()))
         .collect();
     let function = signature.bind(name, &constants)?;
     window_selection(context, function, vs, range)
@@ -871,15 +875,17 @@ impl RangeSignature {
 
     /// Binds the function over the `constants` its call wrote, in the order they were written.
     ///
+    /// Each constant is the position it holds among the call's arguments, the selector included, and
+    /// the expression written there, so a rejection names the argument's place in the call.
+    ///
     /// The count is the signature's, so a caller that reached here has already checked it: reading
     /// `constants[0]` and `constants[1]` cannot panic on a call this signature accepted.
-    fn bind(self, name: &str, constants: &[Box<PromExpr>]) -> Result<RangeFunction> {
+    fn bind(self, name: &str, constants: &[(usize, Box<PromExpr>)]) -> Result<RangeFunction> {
         // Each constant is folded by [`constant_argument`], which names the argument it found if the
         // query wrote something only known at run time.
         let mut folded = constants
             .iter()
-            .enumerate()
-            .map(|(position, argument)| constant_argument(name, argument, position));
+            .map(|(position, argument)| constant_argument(name, argument, *position));
         Ok(match self {
             Self::Selector(function) => function,
             Self::ConstantBeforeSelector(bind) | Self::ConstantAfterSelector(bind) => {
@@ -1091,9 +1097,10 @@ fn constant_argument(name: &str, argument: &PromExpr, position: usize) -> Result
 
 /// How a rejection names the argument a parameter was read from.
 ///
-/// The three positions are the ones a signature can read: the vector, and the two constants behind
-/// it. Every caller passes the literal position its signature reads, so there is no fourth position
-/// to name and no default to invent one for.
+/// The three positions are the ones a supported call can write: a math function's vector and the two
+/// constants behind it, or a range function's selector and the constants on either side of it. Every
+/// caller passes the literal position it read, so there is no fourth position to name and no default
+/// to invent one for.
 fn argument_position(position: usize) -> &'static str {
     const POSITIONS: [&str; 3] = ["first argument", "second argument", "third argument"];
     POSITIONS[position]

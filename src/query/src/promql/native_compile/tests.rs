@@ -2304,9 +2304,10 @@ fn the_batch_acceptance_queries_compile() {
     }
 }
 
-/// `predict_linear` reads its horizon before its range selector, so the number the query wrote is the
-/// horizon the kernel extrapolates to. The value is asserted apart from the window, because a
-/// compiler that bound the horizon on the wrong side of the call would still produce a window.
+/// `predict_linear` reads its horizon after its range selector, so the number the query wrote after
+/// the selector is the horizon the kernel extrapolates to. The value is asserted apart from the
+/// window, because a compiler that bound the horizon on the wrong side of the call would still
+/// produce a window.
 #[test]
 fn a_predict_linear_binds_its_horizon_and_its_window() {
     let tree = compile(
@@ -2380,21 +2381,25 @@ fn a_smoothing_with_one_factor_is_refused_and_names_what_it_reads() {
     );
 }
 
-/// A parameter computed at query time is refused for a two-constant function too, and the rejection
-/// names which argument it found: a smoothing factor that only exists at run time has no field in the
-/// tree, the same as a quantile.
+/// A parameter computed at query time is refused by the parameterised range functions, and the
+/// rejection names the argument's position in the call: a smoothing factor that only exists at run
+/// time has no field in the tree, the same as a quantile. The position is the call's rather than the
+/// constants': `quantile_over_time` writes its quantile before the range selector, while
+/// `predict_linear` and `double_exponential_smoothing` write theirs after it, and the selector still
+/// counts as an argument.
 #[test]
-fn a_computed_smoothing_factor_is_refused_and_names_its_position() {
+fn a_computed_range_parameter_is_refused_and_names_its_position() {
     let cases = [
+        ("quantile_over_time(time(), x[5m])", "first argument"),
+        ("predict_linear(x[5m], time())", "second argument"),
         (
             "double_exponential_smoothing(x[5m], time(), 0.1)",
-            "first argument",
+            "second argument",
         ),
         (
             "double_exponential_smoothing(x[5m], 0.5, time())",
-            "second argument",
+            "third argument",
         ),
-        ("predict_linear(x[5m], time())", "first argument"),
     ];
 
     for (query, position) in cases {
