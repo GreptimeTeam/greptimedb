@@ -417,7 +417,7 @@ mod tests {
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::LogicalPlanBuilder;
     use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{Extension, LogicalPlan};
+    use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
     use datafusion_functions::core::coalesce;
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::series::SeriesOrdering;
@@ -572,6 +572,124 @@ mod tests {
         plan.inputs().into_iter().any(holds_fused_series)
     }
 
+    /// An extension node with no `ExtensionSerializer` branch: neither one under its own name nor
+    /// one it shares, since the serializer lists names and not shapes. It stands in for the nodes
+    /// that cannot reach a region as bytes for their own reasons, which the encoding gate must keep
+    /// honouring. The categorizer refuses it, as it refuses every name it does not know.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct UnserializableNode {
+        input: LogicalPlan,
+        schema: DFSchemaRef,
+    }
+
+    impl PartialOrd for UnserializableNode {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            let ordering = self.input.partial_cmp(&other.input);
+            match ordering {
+                Some(std::cmp::Ordering::Equal) if self.schema != other.schema => None,
+                ordering => ordering,
+            }
+        }
+    }
+
+    impl UnserializableNode {
+        fn new(input: LogicalPlan) -> Self {
+            let schema = input.schema().clone();
+            Self { input, schema }
+        }
+    }
+
+    impl UserDefinedLogicalNodeCore for UnserializableNode {
+        fn name(&self) -> &str {
+            "UnserializableNode"
+        }
+
+        fn inputs(&self) -> Vec<&LogicalPlan> {
+            vec![&self.input]
+        }
+
+        fn schema(&self) -> &DFSchemaRef {
+            &self.schema
+        }
+
+        fn expressions(&self) -> Vec<Expr> {
+            vec![]
+        }
+
+        fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "UnserializableNode")
+        }
+
+        fn with_exprs_and_inputs(
+            &self,
+            _exprs: Vec<Expr>,
+            mut inputs: Vec<LogicalPlan>,
+        ) -> DfResult<Self> {
+            Ok(Self::new(inputs.swap_remove(0)))
+        }
+    }
+
+    /// The plan that node builds over `input`.
+    fn unserializable_plan(input: LogicalPlan) -> LogicalPlan {
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(UnserializableNode::new(input)),
+        })
+    }
+
+    fn holds_unserializable_node(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<UnserializableNode>()
+        {
+            return true;
+        }
+        plan.inputs().into_iter().any(holds_unserializable_node)
+    }
+
+    fn holds_table_scan(plan: &LogicalPlan) -> bool {
+        if matches!(plan, LogicalPlan::TableScan(_)) {
+            return true;
+        }
+        plan.inputs().into_iter().any(holds_table_scan)
+    }
+
+    /// The merge scan `plan` is, if it is one.
+    fn as_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
+        if let LogicalPlan::Extension(extension) = plan {
+            extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+        } else {
+            None
+        }
+    }
+
+    /// The first merge scan in `plan`'s visible tree. A merge scan's remote input is not one of its
+    /// children, so this does not look into one.
+    fn first_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
+        if let Some(merge_scan) = as_merge_scan(plan) {
+            return Some(merge_scan);
+        }
+        plan.inputs().into_iter().find_map(first_merge_scan)
+    }
+
+    fn analyze(analyzer: DistPlannerAnalyzer, plan: LogicalPlan) -> LogicalPlan {
+        analyzer.analyze(plan, &ConfigOptions::default()).unwrap()
+    }
+
+    /// Whether the remote input of any merge scan in `plan` holds a node `wanted` accepts.
+    fn any_remote_input_holds(plan: &LogicalPlan, wanted: fn(&LogicalPlan) -> bool) -> bool {
+        let mut holds = false;
+        plan.apply(|node| {
+            if let Some(merge_scan) = as_merge_scan(node) {
+                holds |= wanted(merge_scan.input());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        holds
+    }
+
     #[test]
     fn fused_series_over_its_scan_is_commutative() {
         let plan = fused_series_plan(table_scan_plan());
@@ -659,49 +777,82 @@ mod tests {
         assert!(!reads_across_series(single_selector.root()));
     }
 
-    /// Blocks placement, and pins the blocker rather than the intent.
+    /// The encoding gate is what kept the node on the frontend, and it only exists for a plan that
+    /// has to be encoded.
     ///
-    /// `PlanRewriter::should_expand` asks two questions about a node before it lets the descent
-    /// continue, and the Substrait one comes first: unless the *whole* root plan encodes, every
-    /// subtree that fails to encode is expanded on, whichever way `check_plan` answers. A
-    /// `FusedSeries` node has no serializer branch — `ExtensionSerializer` answers
-    /// `NotImplemented` for every name it does not list — so its subtree does not encode, the
-    /// boundary is drawn at the node, and the region receives the bare scan instead of the node.
+    /// `PlanRewriter::should_expand` asked two questions about a node before it let the descent
+    /// continue, and the Substrait one came first: unless the *whole* root plan encoded, every
+    /// subtree that failed to encode was expanded on, whichever way `check_plan` answered. A
+    /// `FusedSeries` node has no serializer branch — `ExtensionSerializer` answers `NotImplemented`
+    /// for every name it does not list — so over the wire the boundary is still drawn at the node
+    /// and the region receives the bare scan.
     ///
-    /// The commutativity arm above is necessary and not sufficient. This test fails the day the
-    /// node gains a serializer branch (or the analyzer stops asking), which is when the placement
-    /// assertion this one replaces can be written.
+    /// A plan handed to `RegionServer::handle_read` as a `LogicalPlan` is never encoded, so there
+    /// the gate has nothing to say and the commutativity arm decides: the node rides inside the
+    /// merge scan.
     #[test]
-    fn fused_series_does_not_encode_so_the_analyzer_keeps_it_on_the_frontend() {
+    fn fused_series_rides_to_the_region_only_when_regions_are_reached_in_process() {
         let plan = fused_series_plan(table_scan_plan());
 
         assert!(
             DFLogicalSubstraitConvertor
                 .encode(&plan, DefaultSerializer)
                 .is_err(),
-            "the fused node encodes now, so it can be placed inside the merge scan"
+            "the fused node encodes now, so the encoding gate decides nothing"
+        );
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&table_scan_plan(), DefaultSerializer)
+                .is_ok(),
+            "the scan under the fused node encodes, so the fused node is the only reason this plan does not"
         );
 
-        let analyzed = DistPlannerAnalyzer {}
-            .analyze(plan, &ConfigOptions::default())
-            .unwrap();
-        let mut remote_input_holds_fused = false;
-        analyzed
-            .apply(|node| {
-                if let LogicalPlan::Extension(extension) = node
-                    && let Some(merge_scan) = extension
-                        .node
-                        .as_any()
-                        .downcast_ref::<MergeScanLogicalPlan>()
-                {
-                    remote_input_holds_fused = holds_fused_series(merge_scan.input());
-                }
-                Ok(TreeNodeRecursion::Continue)
-            })
-            .unwrap();
+        // Over the wire the plan has to encode, so the boundary is drawn at the node.
+        let encoded = analyze(DistPlannerAnalyzer::new(false), plan.clone());
         assert!(
-            !remote_input_holds_fused,
-            "the analyzer placed the node despite the encoding gate: {analyzed}"
+            !any_remote_input_holds(&encoded, holds_fused_series),
+            "the analyzer placed the node although its plan has to encode: {encoded}"
+        );
+
+        // In process nothing is encoded, so the categorizer places the node.
+        let in_process = analyze(DistPlannerAnalyzer::new(true), plan);
+        assert!(
+            any_remote_input_holds(&in_process, holds_fused_series),
+            "the analyzer kept the node on the frontend although regions are reached in process: {in_process}"
+        );
+    }
+
+    /// Skipping the encoding gate removes one reason to expand and adds none: a node that does not
+    /// encode for its own reasons, and that the categorizer refuses, still draws the boundary at
+    /// itself when regions are reached in process.
+    ///
+    /// Without this, the skip would amount to placing every unencodable node region-side.
+    #[test]
+    fn a_plan_that_does_not_encode_for_another_reason_still_expands_at_that_node() {
+        let plan = unserializable_plan(table_scan_plan());
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "the stand-in node has a serializer branch now, so it no longer proves anything"
+        );
+
+        let analyzed = analyze(DistPlannerAnalyzer::new(true), plan);
+
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_unserializable_node),
+            "the analyzer placed a node the categorizer refuses: {analyzed}"
+        );
+        let inputs = analyzed.inputs();
+        let [input] = inputs.as_slice() else {
+            panic!("expected the node to keep one input in: {analyzed}");
+        };
+        // `expand` keeps a projection over the merge scan to restore the schema of what it wrapped.
+        let merge_scan = first_merge_scan(input)
+            .unwrap_or_else(|| panic!("expected the boundary right below the node in: {analyzed}"));
+        assert!(
+            holds_table_scan(merge_scan.input()),
+            "expected the scan under the node to be the region input in: {analyzed}"
         );
     }
 }
