@@ -365,11 +365,8 @@ fn series_error(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
 }
 
-/// Checks an evaluated float series up front, so no segment of another type yields a result.
-///
-/// Returns the validated axis: it is addressed on a grid, so the caller reads the rows it carries
-/// with the axis traversal rather than assuming a contiguous range.
-pub(crate) fn validate_float_series<'a>(
+/// Checks `series` against `schema` and its evaluation grid, whatever its sample types.
+pub(crate) fn validate_grid_series<'a>(
     schema: &SeriesSchema,
     series: &'a Series,
 ) -> Result<&'a TimeAxis> {
@@ -386,6 +383,18 @@ pub(crate) fn validate_float_series<'a>(
         series.fields.clone(),
     )
     .map_err(series_error)?;
+    Ok(time)
+}
+
+/// Checks an evaluated float series up front, so no segment of another type yields a result.
+///
+/// Returns the validated axis: it is addressed on a grid, so the caller reads the rows it carries
+/// with the axis traversal rather than assuming a contiguous range.
+pub(crate) fn validate_float_series<'a>(
+    schema: &SeriesSchema,
+    series: &'a Series,
+) -> Result<&'a TimeAxis> {
+    let time = validate_grid_series(schema, series)?;
     for field in series.fields.iter() {
         if field
             .segments()

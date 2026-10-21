@@ -254,6 +254,12 @@ fn has_histograms(series: &Series) -> bool {
     })
 }
 
+/// A native histogram as Go's `FloatHistogram.String` writes it, the label value `count_values`
+/// gives a histogram sample.
+pub(crate) fn histogram_string(h: &HistogramView<'_>) -> Result<String> {
+    native::go_string(h)
+}
+
 /// A function of one native histogram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeHistogramFunction {

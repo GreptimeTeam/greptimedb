@@ -44,28 +44,35 @@ pub(crate) fn format_open_metrics_float(value: f64) -> String {
     if let Some(text) = special(value) {
         return text.to_string();
     }
-    let (negative, digits, point) = shortest(value);
-    // The shortest `'g'` format switches to an exponent below 1e-4 and from 1e6 on.
-    let exponent = point - 1;
-    let mut text = if !(-4..6).contains(&exponent) {
-        let mut text = String::from(if negative { "-" } else { "" });
-        text.push_str(&digits[..1]);
-        if digits.len() > 1 {
-            text.push('.');
-            text.push_str(&digits[1..]);
-        }
-        text.push_str(&format!(
-            "e{}{:02}",
-            if exponent < 0 { '-' } else { '+' },
-            exponent.abs()
-        ));
-        text
-    } else {
-        positional(negative, &digits, point)
-    };
+    let mut text = format_float_g(value);
     if !text.contains(['e', '.']) {
         text.push_str(".0");
     }
+    text
+}
+
+/// Go's `strconv.FormatFloat(value, 'g', -1, 64)`, which `%g` and `%v` print a float in: the
+/// shortest digits, with an exponent of at least two digits below 1e-4 and from 1e6 on.
+pub(crate) fn format_float_g(value: f64) -> String {
+    if let Some(text) = special(value) {
+        return text.to_string();
+    }
+    let (negative, digits, point) = shortest(value);
+    let exponent = point - 1;
+    if (-4..6).contains(&exponent) {
+        return positional(negative, &digits, point);
+    }
+    let mut text = String::from(if negative { "-" } else { "" });
+    text.push_str(&digits[..1]);
+    if digits.len() > 1 {
+        text.push('.');
+        text.push_str(&digits[1..]);
+    }
+    text.push_str(&format!(
+        "e{}{:02}",
+        if exponent < 0 { '-' } else { '+' },
+        exponent.abs()
+    ));
     text
 }
 
