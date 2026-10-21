@@ -91,7 +91,8 @@ impl From<&PickerOutput> for SerializedPickerOutput {
 }
 
 impl PickerOutput {
-    /// Converts a [SerializedPickerOutput] to a [PickerOutput].
+    /// Converts a [SerializedPickerOutput] to a [PickerOutput]. File statistics
+    /// retain their original encoding; comparisons supply their own schema context.
     pub fn from_serialized(
         input: SerializedPickerOutput,
         file_purger: Arc<dyn FilePurger>,

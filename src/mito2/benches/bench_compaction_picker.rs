@@ -78,7 +78,7 @@ fn bench_find_sorted_runs(c: &mut Criterion) {
         group.bench_function(format!("{}_new", case_name), |b| {
             let mut files = generate_same_timestamp_files(total_files, files_per_timestamp);
             b.iter(|| {
-                find_sorted_runs(black_box(&mut files));
+                find_sorted_runs(black_box(&mut files), Ranged::overlap);
             });
         });
 
@@ -121,7 +121,12 @@ fn bench_find_overlapping_items(c: &mut Criterion) {
             let mut r2 = SortedRun::from(files2);
             b.iter(|| {
                 let mut result = vec![];
-                find_overlapping_items(black_box(&mut r1), black_box(&mut r2), &mut result);
+                find_overlapping_items(
+                    black_box(&mut r1),
+                    black_box(&mut r2),
+                    &mut result,
+                    Ranged::overlap_inclusive,
+                );
             });
         });
     }
