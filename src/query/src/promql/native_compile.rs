@@ -98,20 +98,22 @@ use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, AtModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, LabelModifier,
-    MatrixSelector, NumberLiteral, Offset, VectorMatchCardinality, VectorMatchFillValues,
-    VectorSelector, token,
+    MatrixSelector, NumberLiteral, Offset, SubqueryExpr, VectorMatchCardinality,
+    VectorMatchFillValues, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
 
 /// The shapes this compiler accepts, quoted in every rejection.
-const SUPPORTED: &str = "a selector, a range function over a range selector — \
+const SUPPORTED: &str = "a selector, a range function over a range selector or a subquery — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
-                         the selector as in `quantile_over_time(0.9, x[5m])` — a math function over \
-                         any of them, a binary operation between one of them and a constant, a \
-                         negation of one of them, or a `sum` over any of them, as in `x`, \
-                         `rate(x[5m])`, `quantile_over_time(0.9, x[5m])`, `abs(rate(x[5m]))`, \
-                         `2 / (x + 1)`, `-x` or `sum by(job)(rate(x[5m]) * 100)`";
+                         the selector as in `quantile_over_time(0.9, x[5m])`, or \
+                         `<range function>(<selector>[<range>:<step>])` as in `rate(x[5m:1m])` — a \
+                         math function over any of them, a binary operation between one of them and \
+                         a constant, a negation of one of them, or a `sum` over any of them, as in \
+                         `x`, `rate(x[5m])`, `quantile_over_time(0.9, x[5m])`, \
+                         `abs(rate(x[5m]))`, `2 / (x + 1)`, `-x`, `rate(x[5m:1m])` or \
+                         `sum by(job)(rate(x[5m]) * 100)`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -166,6 +168,9 @@ pub fn compile(
         stmt,
         input,
         ordering,
+        // The grid is built once for the whole compilation rather than per node: every node of a
+        // tree without a subquery lands on this one, and a subquery replaces it for its own subtree.
+        grid: statement_grid(stmt)?,
     };
     // The whole tree is validated once, here: a node compiled as another node's input is checked as
     // part of the tree rather than on its own, so the same node cannot be legal in one place and
@@ -185,6 +190,13 @@ struct Context<'a> {
     input: Arc<SeriesSchema>,
     /// The ordering the caller's scan guarantees.
     ordering: SeriesOrdering,
+    /// The grid the expression being compiled is evaluated on.
+    ///
+    /// It is the statement's grid for everything except the inside of a subquery, which opens a grid
+    /// of its own: `rate(x[5m:1m])` evaluates `x` at one-minute steps over the five-minute lookback,
+    /// not at the statement's steps. Carrying it here is what lets [`compile_expr`] recurse into a
+    /// subquery without every node builder having to ask which grid it is on.
+    grid: Arc<EvalGrid>,
 }
 
 /// Compiles `expr` into the node it denotes, recursing into whatever it is made of.
@@ -222,7 +234,7 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
 fn scalar_node(context: &Context, value: f64) -> Result<NativeNode> {
     Ok(NativeNode {
         expr: NativeExpr::Scalar(BoundScalar { value }),
-        output: NativeType::Scalar(statement_grid(context.stmt)?),
+        output: NativeType::Scalar(Arc::clone(&context.grid)),
     })
 }
 
@@ -486,25 +498,31 @@ fn window_call(
             signature.arguments()
         )));
     }
-    // The selector sits where the signature says it does, and everything else is a constant. Reading
-    // it by position rather than by "the last argument" is what lets `predict_linear(x[5m], 300)` and
+    // The matrix sits where the signature says it does, and everything else is a constant. Reading it
+    // by position rather than by "the last argument" is what lets `predict_linear(x[5m], 300)` and
     // `quantile_over_time(0.9, x[5m])` share one path.
-    let selector_index = signature.selector_index();
-    let argument = &args[selector_index];
-    let PromExpr::MatrixSelector(MatrixSelector { vs, range }) = unparen(argument) else {
-        return Err(not_implemented(&format!(
-            "a call to `{name}` whose range selector is `{argument}`, where it has to be a range \
-             selector like `x[5m]`"
-        )));
-    };
+    let matrix_index = signature.selector_index();
+    let argument = unparen(&args[matrix_index]);
     let constants: Vec<Box<PromExpr>> = args
         .iter()
         .enumerate()
-        .filter(|(position, _)| *position != selector_index)
+        .filter(|(position, _)| *position != matrix_index)
         .map(|(_, argument)| argument.clone())
         .collect();
     let function = signature.bind(name, &constants)?;
-    window_selection(context, function, vs, range)
+    // A range function folds a matrix, and PromQL writes a matrix two ways: a range selector, which
+    // reads raw samples, and a subquery, which evaluates an expression on a grid of its own. The two
+    // differ in where their samples come from, not in what the function does with them.
+    match argument {
+        PromExpr::MatrixSelector(MatrixSelector { vs, range }) => {
+            window_selection(context, function, vs, range)
+        }
+        PromExpr::Subquery(subquery) => subquery_window(context, name, function, subquery),
+        other => Err(not_implemented(&format!(
+            "a call to `{name}` whose matrix is `{other}`, where it has to be a range selector like \
+             `x[5m]` or a subquery like `x[5m:1m]`"
+        ))),
+    }
 }
 
 /// Wraps `op` over the value of `vector`, which is the first argument of a math function.
@@ -558,7 +576,7 @@ fn window_selection(
     let anchor_ms = selector_anchor_ms(&vs.at, context.stmt)?;
     // The grid is the last thing built: a query refused above, or a window that cannot exist,
     // never pays for a grid nothing would read.
-    let output_grid = statement_grid(context.stmt)?;
+    let output_grid = Arc::clone(&context.grid);
 
     // A range function reports one value per input field, so the layout is the input's.
     let output = NativeType::Samples(Arc::new(SeriesSchema {
@@ -596,6 +614,158 @@ fn window_selection(
     })
 }
 
+/// The step a subquery names when it names none, as in `x[5m:]`.
+///
+/// Prometheus falls back to the global evaluation interval, whose default is a minute, rather than to
+/// the statement's own step. The existing planner folds the same default; the constant is restated
+/// here because that one is private to the planner, and it is a Prometheus protocol constant rather
+/// than a number either caller may choose.
+const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
+
+/// Binds `function` over `subquery`, whose inner expression is evaluated on a grid of its own.
+///
+/// A range function folds a matrix, and PromQL writes a matrix two ways. A range selector reads raw
+/// samples from the scan; a subquery builds one by evaluating an expression. That is why this node
+/// declares `input_grid`: `rate(x[5m:1m])` samples `x` at one-minute steps over the five-minute
+/// lookback, and the window folds those points rather than raw samples. The inner expression is
+/// compiled against the subquery's grid for the same reason — a selector inside it has to land where
+/// the window will read it.
+fn subquery_window(
+    context: &Context,
+    name: &str,
+    function: RangeFunction,
+    subquery: &SubqueryExpr,
+) -> Result<NativeNode> {
+    let SubqueryExpr {
+        expr,
+        range,
+        step,
+        offset,
+        at,
+    } = subquery;
+    // An anchor pins every output point to one read range instead of one per point. That changes both
+    // what the child grid spans and what the window's anchor field would mean, and neither is settled
+    // here, so the query is refused rather than compiled onto a grid that reads the wrong samples.
+    if at.is_some() {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` over the anchored subquery `{subquery}`, whose anchor changes what the \
+             subquery's own grid spans: a subquery is bound by a range, a step and an offset, while \
+             anchoring is bound on a range selector, as in `rate(x[5m] @ 1234)`"
+        )));
+    }
+    // A subquery evaluates an expression and hands the window one value per grid point per field, so
+    // the expression inside it has to be a vector: a scalar has no fields for the window to fold.
+    if expr.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` over the subquery `{subquery}`, whose expression is a {}, where a \
+             subquery has to evaluate a vector",
+            expr.value_type()
+        )));
+    }
+    let range_ms = range_millis(range.as_millis())?;
+    // A subquery step of zero names no evaluation point at all, so it is reported as its own value
+    // rather than as an empty grid.
+    let step_ms = match step {
+        Some(step) => millis(step.as_millis()).ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "the subquery's step of {}ms is out of range",
+                step.as_millis()
+            ))
+        })?,
+        None => DEFAULT_SUBQUERY_STEP_MS,
+    };
+    if step_ms <= 0 {
+        return Err(DataFusionError::Plan(format!(
+            "the subquery's step is {step_ms}ms, and a step has to be longer than zero"
+        )));
+    }
+    let offset_ms = selector_offset_ms(offset)?;
+    let child_grid = subquery_grid(&context.grid, range_ms, offset_ms, step_ms)?;
+    let inner = compile_expr(
+        &Context {
+            stmt: context.stmt,
+            input: Arc::clone(&context.input),
+            ordering: context.ordering,
+            grid: Arc::clone(&child_grid),
+        },
+        expr,
+    )?;
+
+    // A range function reports one value per input field, and the inner expression reports one per
+    // field of the same raw input, so the layout is the input's.
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields: Arc::clone(&context.input.fields),
+        eval_grid: Some(Arc::clone(&context.grid)),
+    }));
+
+    Ok(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(inner),
+            op: BoundWindow {
+                function,
+                window: RangeWindow {
+                    range_ms,
+                    offset_ms,
+                    // The anchor is refused above, so there is none to bind.
+                    anchor_ms: None,
+                },
+                // The one field that tells this window from a raw one: its input was evaluated on the
+                // subquery's grid rather than read from the scan.
+                input_grid: Some(child_grid),
+                output_grid: Arc::clone(&context.grid),
+            },
+        },
+        output,
+    })
+}
+
+/// The grid a subquery's inner expression is evaluated on.
+///
+/// The subquery, evaluated at every point of `output_grid`, reads `(point - offset - range,
+/// point - offset]` sampled at `step`. One grid serves the whole statement, so it spans the union of
+/// those read ranges: from the first step boundary strictly after the earliest one, to the last
+/// statement point shifted by the offset. The bounds are the existing planner's subquery child window
+/// to the millisecond, because the two have to name the same samples for a query to mean one thing.
+fn subquery_grid(
+    output_grid: &Arc<EvalGrid>,
+    range_ms: i64,
+    offset_ms: i64,
+    step_ms: i64,
+) -> Result<Arc<EvalGrid>> {
+    let spec = output_grid.spec();
+    let start = i128::from(spec.start_ms);
+    let last = start + i128::from(spec.len - 1) * i128::from(spec.step_ms);
+    let step = i128::from(step_ms);
+    let offset = i128::from(offset_ms);
+    // Every read window ends at its point minus the offset, so no sample lies after this bound, and
+    // none lies at or before the earliest window's start.
+    let earliest = start - offset - i128::from(range_ms);
+    let grid_start = (earliest.div_euclid(step) + 1) * step;
+    let grid_end = last - offset;
+    // An empty grid cannot be built, and it would not mean the same thing anyway: a subquery whose
+    // every read range ends before its first step boundary names no sample at all.
+    if grid_start > grid_end {
+        return Err(not_implemented(&format!(
+            "the subquery over {range_ms}ms at {step_ms}ms per step, which names no evaluation point \
+             in the statement's range"
+        )));
+    }
+    let bound = |what: &str, value: i128| {
+        i64::try_from(value).map_err(|_| {
+            DataFusionError::Plan(format!(
+                "the subquery's {what} of {value}ms is out of range"
+            ))
+        })
+    };
+    let child = GridSpec::try_from_range(
+        bound("first evaluation", grid_start)?,
+        bound("last evaluation", grid_end)?,
+        step_ms,
+    )
+    .map_err(|error| DataFusionError::Plan(format!("the subquery's grid is invalid: {error}")))?;
+    Ok(Arc::new(EvalGrid::try_new(child).map_err(grid_error)?))
+}
+
 /// Compiles a bare selector into an instant selection over the raw input.
 ///
 /// The lookback, the offset and the grid are the whole of an instant selection: it reports the last
@@ -613,7 +783,7 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
     }
     let lookback_ms = lookback_millis(context.stmt.lookback_delta.as_millis())?;
     let offset_ms = selector_offset_ms(&selector.offset)?;
-    let output_grid = statement_grid(context.stmt)?;
+    let output_grid = Arc::clone(&context.grid);
 
     // An instant selection reports one value per input field, so the layout is the input's.
     let output = NativeType::Samples(Arc::new(SeriesSchema {
