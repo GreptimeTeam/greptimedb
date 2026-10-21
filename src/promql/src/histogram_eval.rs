@@ -62,6 +62,9 @@ pub enum HistogramFunction {
 /// writes it. Results that then share a label set merge as [`merge_same_labelset`] does, so a
 /// repeated `q`, or a `label` that overwrites the label telling two histograms apart, fails at a
 /// point both hold.
+///
+/// Each `q` is a constant. Prometheus evaluates the quantile arguments at every step, so a
+/// quantile that varies over time is not this kernel's to evaluate.
 pub fn histogram_quantiles(
     label: &str,
     quantiles: &[f64],

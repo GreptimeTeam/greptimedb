@@ -151,7 +151,7 @@ fn histogram_quantiles_match_prometheus() {
         let actual = histogram_quantiles(&case.spec[1], &quantiles, &schema, &input);
         failed += usize::from(assert_outcome(case, actual, &case.outcome));
     }
-    assert!(failed > 5, "{failed} failed");
+    assert_eq!(failed, 13, "{failed} failed");
 }
 
 #[test]
