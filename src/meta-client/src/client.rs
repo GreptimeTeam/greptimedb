@@ -1143,7 +1143,8 @@ mod tests {
         });
 
         handle.await.unwrap();
-        //+1 for the initial response
+        // +1 for the cache invalidation broadcast sent when the first heartbeat saves the
+        // node's address.
         assert_eq!(
             request_sent.load(Ordering::Relaxed) + 1,
             heartbeat_count.load(Ordering::Relaxed)

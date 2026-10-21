@@ -839,10 +839,13 @@ mod tests {
             HookedKvBackend, NODE_ID, fence, handshake, heartbeat, new_group, startup_handshake,
         };
         use crate::handler::test_utils::TestEnv;
-        use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher, PusherId};
+        use crate::handler::{
+            HandleControl, HeartbeatAccumulator, HeartbeatHandler, HeartbeatHandlerGroup,
+            HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pusher, PusherId, Pushers,
+        };
         use crate::metasrv::Context;
         use crate::service::heartbeat::{HeartbeatResponseResult, HeartbeatSession};
-        use crate::service::mailbox::Channel;
+        use crate::service::mailbox::{BroadcastChannel, Channel};
 
         type Session = HeartbeatSession<MockHeartbeatRequestStream, MockLeaderStepDown>;
 
@@ -911,6 +914,57 @@ mod tests {
             assert_eq!(fence(&res), Some("accepted"));
             assert!(res.region_lease.is_some());
             assert_eq!(a1.pusher_epoch(&group).await, Some(e1));
+        }
+
+        /// Broadcasts to datanodes while handling a datanode heartbeat.
+        struct BroadcastToDatanodes;
+
+        #[async_trait::async_trait]
+        impl HeartbeatHandler for BroadcastToDatanodes {
+            fn is_acceptable(&self, role: Role) -> bool {
+                role == Role::Datanode
+            }
+
+            async fn handle(
+                &self,
+                req: &HeartbeatRequest,
+                ctx: &mut Context,
+                _: &mut HeartbeatAccumulator,
+            ) -> crate::error::Result<HandleControl> {
+                if req.peer.is_some() {
+                    let msg = MailboxMessage {
+                        subject: "broadcast".to_string(),
+                        ..Default::default()
+                    };
+                    ctx.mailbox
+                        .broadcast(&BroadcastChannel::Datanode, &msg)
+                        .await?;
+                }
+                Ok(HandleControl::Continue)
+            }
+        }
+
+        #[tokio::test]
+        async fn test_first_accepted_request_receives_handler_broadcasts() {
+            let mut builder =
+                HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+            builder
+                .add_handler_after("ResponseHeaderHandler", BroadcastToDatanodes)
+                .unwrap();
+            let group = Arc::new(builder.build().unwrap());
+            let mut ctx = TestEnv::new().ctx();
+            let seq = SequenceBuilder::new("test_seq", Arc::new(MemoryKvBackend::new())).build();
+            ctx.mailbox = HeartbeatMailbox::create(group.pushers(), seq);
+            let (e1, _) = epochs();
+
+            // The pusher is registered before the handlers of the first accepted request run,
+            // so their broadcast reaches the stream ahead of the response.
+            let mut a1 = Stream::open(&group, &ctx, handshake(0)).await;
+            assert!(a1.session.handle_request(heartbeat(e1, "a1"), false).await);
+            let broadcast = a1.rx.recv().await.unwrap().unwrap();
+            assert_eq!(broadcast.mailbox_message.unwrap().subject, "broadcast");
+            let res = a1.rx.recv().await.unwrap().unwrap();
+            assert_eq!(fence(&res), Some("accepted"));
         }
 
         #[tokio::test]
