@@ -43,6 +43,37 @@ pub enum DateFunction {
     Year,
 }
 
+/// `start()`, `end()`, `range()` and `step()`: constants of a query, which Prometheus folds into
+/// number literals before evaluating it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryContextFunction {
+    Start,
+    End,
+    Range,
+    Step,
+}
+
+impl QueryContextFunction {
+    /// The value for a query from `start_ms` to `end_ms` every `step_ms`. `step()` is 0 when the
+    /// start and end are equal, as for an instant query.
+    pub fn value(self, start_ms: i64, end_ms: i64, step_ms: i64) -> f64 {
+        match self {
+            Self::Start => start_ms as f64 / 1000.0,
+            Self::End => end_ms as f64 / 1000.0,
+            Self::Range => duration_seconds(end_ms - start_ms),
+            Self::Step if start_ms == end_ms => 0.0,
+            Self::Step => duration_seconds(step_ms),
+        }
+    }
+}
+
+/// Go's `time.Duration.Seconds` of `ms` milliseconds: whole seconds plus the remainder over 1e9,
+/// two roundings rather than one division. The nanosecond count saturates as `time.Time.Sub` does.
+fn duration_seconds(ms: i64) -> f64 {
+    let nanos = ms.saturating_mul(1_000_000);
+    (nanos / 1_000_000_000) as f64 + (nanos % 1_000_000_000) as f64 / 1e9
+}
+
 /// `time()`: the evaluation time in seconds at every point of the schema's grid, unlabelled.
 pub fn time(schema: &SeriesSchema) -> Result<Series> {
     eval_time_series(schema, |ms| ms as f64 / 1000.0)
