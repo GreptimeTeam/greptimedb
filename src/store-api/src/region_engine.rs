@@ -1096,8 +1096,11 @@ pub trait RegionEngine: Send + Sync {
     /// Sets [RegionRole] for a region from a lease the metasrv grants.
     ///
     /// An engine may keep the lease to stop acknowledging writes that reach the WAL after it
-    /// expires. It ignores a leader grant for a heartbeat sent before the region was demoted,
-    /// as that grant predates the demotion. Returns whether the role is applied.
+    /// expires, and may ignore a leader grant for a heartbeat sent before the region was
+    /// demoted, as that grant predates the demotion. Returns false if the grant is ignored.
+    /// An accepted grant applies its role as [Self::set_region_role] does, which may leave
+    /// the region's current state unchanged. The default implementation delegates to
+    /// [Self::set_region_role] and accepts every grant.
     fn set_region_role_by_lease(
         &self,
         region_id: RegionId,

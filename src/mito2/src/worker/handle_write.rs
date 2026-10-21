@@ -309,7 +309,6 @@ impl<S> RegionWorkerLoop<S> {
         region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
         write_requests: &mut Vec<SenderWriteRequest>,
     ) {
-        let now = Instant::now();
         for mut sender_req in write_requests.drain(..) {
             let region_id = sender_req.request.region_id;
 
@@ -340,7 +339,7 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
-                        if !region.lease.allows_write(&self.node_lease, now) {
+                        if !region.lease.allows_write(&self.node_lease, Instant::now()) {
                             WRITE_LEASE_REJECT_TOTAL
                                 .with_label_values(&["prepare"])
                                 .inc();
@@ -479,7 +478,6 @@ impl<S> RegionWorkerLoop<S> {
         let _timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
             .with_label_values(&["prepare_bulk_request"])
             .start_timer();
-        let now = Instant::now();
         for mut bulk_req in requests.drain(..) {
             let region_id = bulk_req.region_id;
             // If region is waiting for alteration, add requests to pending writes.
@@ -498,7 +496,7 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
-                        if !region.lease.allows_write(&self.node_lease, now) {
+                        if !region.lease.allows_write(&self.node_lease, Instant::now()) {
                             WRITE_LEASE_REJECT_TOTAL
                                 .with_label_values(&["prepare"])
                                 .inc();
