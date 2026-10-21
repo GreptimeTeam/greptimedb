@@ -27,7 +27,7 @@ use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema}
 mod tests;
 
 use crate::extension_plan::instant_manipulate::InstantManipulate;
-use crate::instant_eval::{MAX_INSTANT_MANIPULATE_OUTPUT_POINTS, select_instants};
+use crate::instant_eval::select_instants;
 
 #[derive(Clone)]
 enum Column {
@@ -160,6 +160,10 @@ impl NativeInstantMapping {
     }
 
     /// Estimates the clipped evaluation grid for complete source timestamp bounds.
+    ///
+    /// This count is what the caller reserves the workspace of a selection for before it selects,
+    /// so nothing but the reservation bounds the grid: a grid too long to index is refused as
+    /// exhausted rather than by a point limit of its own.
     pub(crate) fn estimated_points(&self, first: i64, last: i64) -> DataFusionResult<usize> {
         let first = first as i128;
         let last = last as i128;
@@ -185,11 +189,6 @@ impl NativeInstantMapping {
         } else {
             0
         };
-        if points > MAX_INSTANT_MANIPULATE_OUTPUT_POINTS as i128 {
-            return Err(DataFusionError::Execution(format!(
-                "InstantManipulate output points exceed limit: {points} > {MAX_INSTANT_MANIPULATE_OUTPUT_POINTS}"
-            )));
-        }
         usize::try_from(points).map_err(|_| {
             DataFusionError::ResourcesExhausted("native instant point count overflow".into())
         })

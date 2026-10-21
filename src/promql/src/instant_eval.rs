@@ -22,13 +22,17 @@ use datatypes::series::samples::{SampleRef, SeriesFields};
 #[cfg(test)]
 mod tests;
 
-pub(crate) const MAX_INSTANT_MANIPULATE_OUTPUT_POINTS: usize = 1_000_000;
-
 /// Selects source rows for an aligned PromQL instant-evaluation range.
 ///
 /// Returns original logical row indices and evaluation timestamps from a complete source axis
 /// of strictly increasing milliseconds. Any provided field's stale marker suppresses selection;
 /// missing samples are not stale and remain selectable.
+///
+/// The two vectors it returns hold one `u64` source row index and one `i64` evaluation timestamp
+/// per selected point, so what it allocates is 16 bytes per point of the clipped grid rather than
+/// anything proportional to the samples of the axis. It reserves none of that: every caller grows
+/// a memory reservation for those two vectors before it calls, which is what bounds an instant
+/// selection now that the kernel carries no point limit of its own.
 pub fn select_instants(
     time: &RawTimestamps,
     fields: &SeriesFields,
@@ -99,11 +103,6 @@ pub fn select_instants(
     } else {
         0
     };
-    if estimated_points > MAX_INSTANT_MANIPULATE_OUTPUT_POINTS as i128 {
-        return Err(DataFusionError::Execution(format!(
-            "InstantManipulate output points exceed limit: {estimated_points} > {MAX_INSTANT_MANIPULATE_OUTPUT_POINTS}"
-        )));
-    }
     let mut indices = Vec::with_capacity(estimated_points as usize);
     let mut evaluation_timestamps = Vec::with_capacity(estimated_points as usize);
     let mut sample_iters: Vec<_> = fields.iter().map(|field| field.iter()).collect();
