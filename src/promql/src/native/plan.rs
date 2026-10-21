@@ -222,6 +222,22 @@ pub struct BoundAggregate {
     pub stage: AggregateStage,
 }
 
+/// An operator that keeps some of the input's samples at each grid point, with their series' labels
+/// and values: which samples it keeps depends on the whole vector at that point, not on one series.
+///
+/// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
+/// field.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundSelect {
+    /// `topk` (`top`) or `bottomk`: the `k` largest or smallest values of each group.
+    TopK { k: f64, top: bool, group: Grouping },
+    /// `limitk`: the first `k` series of each group that hold a sample, in input order.
+    LimitK { k: f64, group: Grouping },
+    /// `limit_ratio`: the series whose label hash falls in the ratio; it keeps whole series, so it
+    /// has no grouping.
+    LimitRatio { ratio: f64 },
+}
+
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
 #[derive(Clone, Debug)]
 pub enum NativeExpr {
@@ -248,6 +264,11 @@ pub enum NativeExpr {
     Aggregate {
         input: Box<NativeNode>,
         op: BoundAggregate,
+    },
+    /// A selection of samples out of the whole input vector.
+    Select {
+        input: Box<NativeNode>,
+        op: BoundSelect,
     },
     /// A binary operation between two inputs, with its matching rules.
     ///
@@ -389,6 +410,20 @@ impl NativeNode {
                 ensure_samples(&self.output, "a map")?;
                 ensure_same_fields(&input.output, &self.output, "a map")?;
                 ensure_grid(&self.output, input_grid, "a map")?;
+            }
+            NativeExpr::Select { input, .. } => {
+                input.validate()?;
+                // A selection hands on samples of its input unchanged, so it consumes and produces
+                // the same evaluated vector.
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid(&format!(
+                        "a selection consumes an evaluated vector, not {}",
+                        input.output.describe()
+                    )));
+                };
+                ensure_samples(&self.output, "a selection")?;
+                ensure_same_fields(&input.output, &self.output, "a selection")?;
+                ensure_grid(&self.output, input_grid, "a selection")?;
             }
             NativeExpr::Aggregate { input, op } => {
                 input.validate()?;

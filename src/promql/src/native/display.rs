@@ -28,8 +28,8 @@ use datatypes::series::time::EvalGrid;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    AggregateKind, AggregateStage, BoundSelect, BoundWindow, Grouping, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
 use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -102,18 +102,21 @@ fn describe(node: &NativeNode) -> String {
             let ops: Vec<String> = op.ops.iter().map(math_op).collect();
             ops.join(", ")
         }
+        NativeExpr::Select { op, .. } => match op {
+            BoundSelect::TopK { k, top, group } => format!(
+                "{} {k} {}",
+                if *top { "topk" } else { "bottomk" },
+                grouping(group)
+            ),
+            BoundSelect::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
+            BoundSelect::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
+        },
         NativeExpr::Aggregate { op, .. } => format!(
-            "{} {} [{}] {}",
+            "{} {} {}",
             match op.kind {
                 AggregateKind::Sum => "sum",
             },
-            match &op.group {
-                Grouping::By(_) => "by",
-                Grouping::Without(_) => "without",
-            },
-            label_list(match &op.group {
-                Grouping::By(labels) | Grouping::Without(labels) => labels,
-            }),
+            grouping(&op.group),
             match op.stage {
                 AggregateStage::Complete => "complete",
                 AggregateStage::Partial => "partial",
@@ -252,6 +255,14 @@ fn binary_op(op: BinaryOp) -> &'static str {
     }
 }
 
+/// A grouping as `by [labels]` or `without [labels]`.
+fn grouping(group: &Grouping) -> String {
+    match group {
+        Grouping::By(labels) => format!("by [{}]", label_list(labels)),
+        Grouping::Without(labels) => format!("without [{}]", label_list(labels)),
+    }
+}
+
 /// What kind of node this is, as its line names it.
 fn kind(expr: &NativeExpr) -> &'static str {
     match expr {
@@ -261,6 +272,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Window { .. } => "Window",
         NativeExpr::Map { .. } => "Map",
         NativeExpr::Aggregate { .. } => "Aggregate",
+        NativeExpr::Select { .. } => "Select",
         NativeExpr::Binary { .. } => "Binary",
     }
 }

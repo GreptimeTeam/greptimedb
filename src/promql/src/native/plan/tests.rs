@@ -20,7 +20,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundSelect, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -1217,4 +1217,19 @@ fn an_input_can_bind_aggregate_state() {
     };
     let error = other.validate().unwrap_err();
     assert!(error.to_string().contains("not the binding"), "{error}");
+}
+
+/// A selection ranks the values at each grid point, so raw samples, which have no shared points,
+/// are not something it can consume.
+#[test]
+fn a_selection_cannot_consume_raw_samples() {
+    let node = NativeNode {
+        expr: NativeExpr::Select {
+            input: Box::new(input()),
+            op: BoundSelect::LimitRatio { ratio: 0.5 },
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    let error = node.validate().unwrap_err();
+    assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }

@@ -100,7 +100,8 @@ pub fn walk(root: &NativeNode, visit: &mut dyn FnMut(&NativeNode, &NodePath)) {
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
-            | NativeExpr::Aggregate { input, .. } => go(input, &path.input(), visit),
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Select { input, .. } => go(input, &path.input(), visit),
             NativeExpr::Binary { left, right, .. } => {
                 go(left, &path.left(), visit);
                 go(right, &path.right(), visit);

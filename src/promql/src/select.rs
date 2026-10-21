@@ -59,7 +59,8 @@ pub enum SortOrder {
 /// `topk(k, ...)` (`top`) or `bottomk(k, ...)` with a constant `k`.
 ///
 /// At every point each group keeps the `k` largest (or smallest) values, NaN ranking last for
-/// both; the selected samples keep their series' labels and values. Prometheus breaks ties by
+/// both; the selected samples keep their series' labels and values. Histogram samples are not
+/// ranked, as Prometheus ignores them here. Prometheus breaks ties by
 /// the order its storage returns series in, which is not a property of the series; here ties
 /// go to the series whose label set sorts first.
 pub fn topk(
@@ -102,7 +103,10 @@ pub fn topk(
                 let Some(row) = series[member].time.row_of(point) else {
                     continue;
                 };
-                if let Some(value) = cursor_value(&mut cursors[slot], row)? {
+                if let SampleRef::Float(value) = cursors[slot]
+                    .at(row)
+                    .expect("the axis and the fields are aligned")
+                {
                     candidates.push((member, row, value));
                 }
             }
@@ -538,7 +542,7 @@ fn labels_with_name(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
 }
 
 /// Prometheus `labels.Compare`: label pairs in name order, then the shorter set first.
-fn compare_labels(a: &MetricName, b: &MetricName) -> Ordering {
+pub(crate) fn compare_labels(a: &MetricName, b: &MetricName) -> Ordering {
     labels_with_name(a).cmp(&labels_with_name(b))
 }
 

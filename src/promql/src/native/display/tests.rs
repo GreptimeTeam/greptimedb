@@ -20,7 +20,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::super::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundSelect, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -393,4 +393,50 @@ fn a_without_grouping_does_not_read_as_by() {
             "      input Input raw samples",
         ])
     );
+}
+
+/// A selection names its operator, constant and grouping.
+#[test]
+fn a_selection_names_its_binding() {
+    let out = grid(0, 60_000, 4);
+    let window = window_over(
+        raw_input(),
+        RangeFunction::Rate,
+        300_000,
+        0,
+        None,
+        Arc::clone(&out),
+    );
+    let lines = [
+        (
+            BoundSelect::TopK {
+                k: 3.0,
+                top: false,
+                group: Grouping::Without(Arc::new(["job".into()])),
+            },
+            "  root Select bottomk 3 without [job]",
+        ),
+        (
+            BoundSelect::LimitK {
+                k: 2.0,
+                group: Grouping::By(Arc::new([])),
+            },
+            "  root Select limitk 2 by []",
+        ),
+        (
+            BoundSelect::LimitRatio { ratio: -0.5 },
+            "  root Select limit_ratio -0.5",
+        ),
+    ];
+    for (op, line) in lines {
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Select {
+                input: Box::new(window.clone()),
+                op,
+            },
+            output: evaluated(Arc::clone(&out)),
+        })
+        .unwrap();
+        assert_eq!(tree.to_string().lines().nth(1), Some(line));
+    }
 }
