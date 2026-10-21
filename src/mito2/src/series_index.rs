@@ -16,9 +16,13 @@
 //!
 //! Under development. Index files are currently stored on the local filesystem.
 
+pub(crate) mod artifact;
 mod bucket;
 mod builder;
 mod catalog;
+pub(crate) mod format;
+#[cfg(test)]
+mod format_tests;
 mod maintenance;
 mod purger;
 mod searcher;

@@ -74,6 +74,58 @@ pub fn map_compare_series(
     })
 }
 
+/// `max_of(a, b)` and `min_of(a, b)`, which Prometheus evaluates with Go's `math.Max` and
+/// `math.Min`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarFunction {
+    MaxOf,
+    MinOf,
+}
+
+impl ScalarFunction {
+    /// Go's `math.Max` / `math.Min`: an infinity of the function's own sign wins over NaN, NaN
+    /// over any other value, and `+0` is greater than `-0`.
+    pub fn apply(self, a: f64, b: f64) -> f64 {
+        let (wins, signed_zero_wins) = match self {
+            Self::MaxOf => (f64::INFINITY, false),
+            Self::MinOf => (f64::NEG_INFINITY, true),
+        };
+        if a == wins || b == wins {
+            wins
+        } else if a.is_nan() || b.is_nan() {
+            f64::NAN
+        } else if a == 0.0 && a == b {
+            if a.is_sign_negative() == signed_zero_wins {
+                a
+            } else {
+                b
+            }
+        } else if (a > b) == (self == Self::MaxOf) {
+            a
+        } else {
+            b
+        }
+    }
+}
+
+/// Applies `function` to two time-varying scalars, aligned by absolute grid index; a point where
+/// either has no value has no result. Both operands must be unlabelled single-field series.
+pub fn map_scalar_function(
+    schema: &Arc<SeriesSchema>,
+    function: ScalarFunction,
+    left: &Series,
+    right: &Series,
+) -> Result<Option<Series>> {
+    validate_scalar(schema, left)?;
+    map_grid_scalar(
+        schema,
+        left,
+        ScalarSeriesOperand::Right(right),
+        left.metric.clone(),
+        |left, right, _| Some(function.apply(left, right)),
+    )
+}
+
 /// Calls `calculate(left, right, vector_sample)` at each index where both operands exist.
 fn map_grid_scalar(
     schema: &Arc<SeriesSchema>,

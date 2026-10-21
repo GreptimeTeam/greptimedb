@@ -25,6 +25,7 @@ use common_query::error::Error as QueryError;
 use common_query::native_histogram::{
     histogram_samples_from_arrow, is_native_histogram_value_type,
 };
+use common_query::series_frame::label_decode_spec;
 use common_recordbatch::filter;
 use datafusion::physical_plan::PhysicalExpr;
 use datatypes::arrow::array::{
@@ -37,6 +38,7 @@ use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
 use futures::stream::BoxStream;
@@ -128,6 +130,13 @@ fn chunk(
 struct RawStream {
     schema: Arc<SeriesSchema>,
     label_source: RawLabelSource,
+    /// The label decode description this stream declares, derived from `label_source` once.
+    ///
+    /// Key-encoded chunks leave `metric` as `None`, so a consumer that holds only the stream needs
+    /// the description to decode them; deriving it here makes the producer self-describing instead
+    /// of leaving the derivation to whoever packs the chunks. An invalid binding is cached as
+    /// derived and rejected by the decoder downstream, never silently turned into `None`.
+    label_decode_spec: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     inner: BoxStream<'static, Result<RawSeriesChunk, BoxedError>>,
 }
@@ -146,6 +155,11 @@ impl RawSeriesStream for RawStream {
     fn label_source(&self) -> &RawLabelSource {
         &self.label_source
     }
+    /// Returns the description derived from this stream's binding before the first poll; chunks
+    /// carry key-encoded labels, so the description is what decoding needs.
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.label_decode_spec.as_ref()
+    }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
     }
@@ -161,6 +175,7 @@ pub(crate) fn make_stream(
     ordering: SeriesOrdering,
 ) -> SendableRawSeriesStream {
     let output_schema = schema.clone();
+    let label_decode_spec = label_decode_spec(&label_source);
     let stream = async_stream::stream! {
         let mut input = inner;
         let mut pending: Option<RawSeriesChunk> = None;
@@ -267,6 +282,7 @@ pub(crate) fn make_stream(
     Box::pin(RawStream {
         schema,
         label_source,
+        label_decode_spec,
         ordering,
         inner: Box::pin(stream),
     })

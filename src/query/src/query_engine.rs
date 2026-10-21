@@ -29,11 +29,9 @@ use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_query::Output;
-use common_query::request::{PreparedNamedRawSeries, RawSeriesRequest};
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
-use datatypes::series::SeriesOrdering;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -78,44 +76,6 @@ pub trait QueryEngine: Send + Sync {
 
     /// Execute the given [`LogicalPlan`].
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
-
-    /// Non-consumingly checks whether a native single-region raw-series scan is supported.
-    /// Returns its ordering on support, `None` when explicitly unsupported, and propagates errors.
-    /// This point-in-time check does not reserve a plan; execution revalidates support.
-    async fn prepare_raw_series(
-        &self,
-        _plan: LogicalPlan,
-        _query_ctx: QueryContextRef,
-        _binding: RawSeriesRequest,
-    ) -> Result<Option<SeriesOrdering>> {
-        Ok(None)
-    }
-
-    /// Non-consumingly checks whether a named raw-series preflight is supported.
-    ///
-    /// Returns the approved binding and ordering on support, or `None` when the plan is
-    /// explicitly unsupported. Errors propagate unchanged. This point-in-time check does not
-    /// reserve a plan; execution revalidates support.
-    async fn prepare_named_raw_series(
-        &self,
-        _plan: LogicalPlan,
-        _query_ctx: QueryContextRef,
-    ) -> Result<Option<PreparedNamedRawSeries>> {
-        Ok(None)
-    }
-
-    /// Execute a native single-region raw-series scan.
-    async fn execute_raw_series(
-        &self,
-        _plan: LogicalPlan,
-        _query_ctx: QueryContextRef,
-        _binding: RawSeriesRequest,
-    ) -> Result<Output> {
-        crate::error::UnimplementedSnafu {
-            operation: "native raw-series query",
-        }
-        .fail()
-    }
 
     /// Register an aggregate function.
     ///

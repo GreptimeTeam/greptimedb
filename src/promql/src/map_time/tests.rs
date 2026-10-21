@@ -24,7 +24,7 @@ use datatypes::series::samples::{
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 
-use super::{DateFunction, date_of_eval_time, map_date, time};
+use super::{DateFunction, QueryContextFunction, date_of_eval_time, map_date, time};
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
     Labels, Points, canonical_bits, golden_cases, labels_of, metric_of, points_by_labels,
@@ -288,4 +288,39 @@ fn map_date_reads_a_sparse_axis_by_its_positions() {
             (5, 5f64.to_bits()),
         ])
     );
+}
+
+/// `range()` and `step()` are Go `Duration.Seconds` of a millisecond count, which rounds twice
+/// and so differs from `ms / 1000` in the last bit for most values.
+#[test]
+fn query_context_durations_match_go() {
+    let mut checked = 0;
+    for line in include_str!("duration_seconds_cases.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+    {
+        let (ms, bits) = line.split_once(' ').unwrap();
+        let ms: i64 = ms.parse().unwrap();
+        let expected = u64::from_str_radix(bits, 16).unwrap();
+        assert_eq!(
+            QueryContextFunction::Range.value(0, ms, 1).to_bits(),
+            expected,
+            "range() over {ms} ms"
+        );
+        assert_eq!(
+            QueryContextFunction::Step.value(0, 1, ms).to_bits(),
+            expected,
+            "step() of {ms} ms"
+        );
+        checked += 1;
+    }
+    assert!(checked > 200, "{checked} durations checked");
+    // Two valid endpoints whose difference leaves `i64` saturate, as `time.Time.Sub` does.
+    assert_eq!(
+        QueryContextFunction::Range.value(i64::MIN / 2, i64::MAX / 2 + 1, 1),
+        QueryContextFunction::Range.value(0, i64::MAX, 1)
+    );
+    assert_eq!(QueryContextFunction::Step.value(5_000, 5_000, 1_000), 0.0);
+    assert_eq!(QueryContextFunction::Start.value(-1_500, 0, 1), -1.5);
+    assert_eq!(QueryContextFunction::End.value(0, 2_250, 1), 2.25);
 }
