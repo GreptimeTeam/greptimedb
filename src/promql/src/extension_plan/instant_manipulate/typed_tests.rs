@@ -22,6 +22,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::context::SessionContext;
+use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion::physical_plan::memory::MemoryStream;
 use datatypes::arrow::buffer::ScalarBuffer;
 use datatypes::series::raw::RawTimestamps;
@@ -31,6 +32,12 @@ use super::*;
 use crate::extension_plan::range_manipulate::ScanNanoseconds;
 use crate::extension_plan::test_util::TIME_INDEX_COLUMN;
 use crate::instant_eval::select_instants;
+
+/// An unbounded reservation, for the streams built outside an operator's `execute`.
+fn unbounded() -> MemoryReservation {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    MemoryConsumer::new("InstantManipulateStreamTest").register(&pool)
+}
 
 fn stream(
     batch: &RecordBatch,
@@ -56,6 +63,7 @@ fn stream(
         input: Box::pin(MemoryStream::try_new(vec![], schema, None).unwrap()),
         metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
         num_series: Count::new(),
+        reservation: unbounded(),
     }
 }
 

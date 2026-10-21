@@ -386,8 +386,6 @@ fn histogram_points(series: &Series) -> BTreeMap<usize, String> {
         .collect()
 }
 
-/// `histogram_quantile` drops all metadata labels; the single-histogram functions drop only
-/// `__name__`, as Prometheus does.
 /// The start timestamp is payload of a histogram that was read, and not of one that was computed.
 ///
 /// It is read off a sample ([`FloatHistogram::try_from_view`]) and written back
@@ -457,6 +455,8 @@ fn a_start_timestamp_belongs_to_a_read_histogram_and_not_to_a_computed_one() {
     assert_eq!(histogram.start_timestamp, Some(1500));
 }
 
+/// `histogram_quantile` drops all metadata labels; the single-histogram functions drop only
+/// `__name__`, as Prometheus does.
 #[test]
 fn histogram_functions_drop_metadata_labels() {
     let grid = Arc::new(

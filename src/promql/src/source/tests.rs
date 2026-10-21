@@ -21,11 +21,13 @@ use std::task::{Context, Poll};
 use api::v1::SemanticType;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
+use common_query::series_frame::{label_decode_spec, pack_raw_series, unpack_raw_series};
 use datatypes::arrow::array::{Array, Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
 use datatypes::schema::ColumnSchema;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
 };
@@ -175,6 +177,9 @@ fn chunk(read_key: Buffer, metric: Option<MetricName>, final_chunk: bool) -> Raw
 struct MockStream {
     schema: Arc<SeriesSchema>,
     source: RawLabelSource,
+    /// The label decode description this stream declares; a key-mode fake derives it from its
+    /// binding, as a frame producer would write it into the schema.
+    decode: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     items: VecDeque<Poll<Option<Result<RawSeriesChunk, BoxedError>>>>,
     polls: Arc<AtomicUsize>,
@@ -197,6 +202,9 @@ impl RawSeriesStream for MockStream {
     fn label_source(&self) -> &RawLabelSource {
         &self.source
     }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.decode.as_ref()
+    }
     fn ordering(&self) -> SeriesOrdering {
         self.ordering
     }
@@ -216,10 +224,12 @@ fn mock_with(
 ) -> (SendableRawSeriesStream, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let polls = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
+    let decode = label_decode_spec(&source);
     (
         Box::pin(MockStream {
             schema,
             source,
+            decode,
             ordering,
             items: items.into(),
             polls: polls.clone(),
@@ -807,6 +817,7 @@ async fn constructor_and_mode_errors_drop_input_without_polling_ahead() {
         let raw: SendableRawSeriesStream = Box::pin(MockStream {
             schema: invalid_schema,
             source: RawLabelSource::Explicit,
+            decode: None,
             ordering: SeriesOrdering::Contiguous,
             items: VecDeque::new(),
             polls: polls.clone(),
@@ -1036,5 +1047,77 @@ async fn dense_and_sparse_sources_materialize_complete_labels() {
         assert_eq!(metric.get("zeta"), Some("last"));
         assert_eq!(metric.get("private"), None);
         assert_eq!(metric.tags().len(), 2);
+    }
+}
+
+/// A consumer that received only the raw series frame decodes labels with no scan-bound source:
+/// the producer's description travels inside the frame schema, so unpacking needs no binding and
+/// materialization builds its decoder from that description alone.
+#[tokio::test]
+async fn materializes_labels_from_a_frame_with_no_supplied_binding() {
+    for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+        let binding = source(encoding);
+        let description =
+            label_decode_spec(&binding).expect("a primary-key binding describes its key");
+        let read_key = key(
+            encoding,
+            &[
+                (8, Value::String("last".into())),
+                (2, Value::String("hidden".into())),
+                (41, Value::String("first".into())),
+            ],
+        );
+        let (raw, _, _) = mock(
+            binding,
+            vec![Poll::Ready(Some(Ok(chunk(read_key.clone(), None, true))))],
+        );
+        let framed = pack_raw_series(raw).unwrap();
+        assert_eq!(
+            datatypes::series::frame::raw_series_frame_label_decode(framed.schema().as_ref())
+                .unwrap(),
+            Some(description.clone()),
+            "{encoding:?}: the frame schema is the producer's only label statement"
+        );
+
+        // Everything the consumer keeps is the frame stream: no expected schema, no binding, no
+        // region metadata anywhere on the decode path.
+        let framed = unpack_raw_series(framed, None).unwrap();
+        assert_eq!(
+            framed.label_decode_spec(),
+            Some(&description),
+            "{encoding:?}: the parsed description survives unpacking without a binding"
+        );
+        assert!(
+            !matches!(framed.label_source(), RawLabelSource::PrimaryKey { .. }),
+            "{encoding:?}: no physical region key layout was supplied"
+        );
+        assert_eq!(
+            framed
+                .schema()
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect::<Vec<_>>(),
+            schema()
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect::<Vec<_>>(),
+            "{encoding:?}: the consumer held no schema, so these are the producer's declared \
+             fields read back from the frame"
+        );
+
+        let mut output = materialize_raw_labels(framed).unwrap();
+        let materialized = output.next().await.unwrap().unwrap();
+        assert_eq!(materialized.primary_key, read_key);
+        let metric = materialized
+            .metric
+            .expect("labels were materialized from the frame description");
+        assert_eq!(metric.name(), Some("requests_total"));
+        assert_eq!(metric.get("zeta"), Some("last"));
+        assert_eq!(metric.get("alpha"), Some("first"));
+        assert_eq!(metric.get("private"), None);
+        assert_eq!(metric.tags().len(), 2);
+        assert!(output.next().await.is_none());
     }
 }

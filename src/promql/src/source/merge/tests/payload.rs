@@ -18,10 +18,14 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
-use common_query::series_frame::{pack_raw_series, unpack_raw_series};
+use common_query::series_frame::{
+    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series,
+    raw_series_frame_ordering, unpack_raw_series,
+};
 use datatypes::arrow::array::{Array, Float64Array, ListArray, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
 };
@@ -167,6 +171,8 @@ fn payload_chunk(
 struct PayloadStream {
     schema: Arc<SeriesSchema>,
     labels: RawLabelSource,
+    /// The description this fixture declares, derived once from `labels`, as a producer does.
+    decode: Option<LabelDecodeSpec>,
     items: VecDeque<Result<RawSeriesChunk, BoxedError>>,
 }
 
@@ -184,6 +190,9 @@ impl RawSeriesStream for PayloadStream {
     fn label_source(&self) -> &RawLabelSource {
         &self.labels
     }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.decode.as_ref()
+    }
     fn ordering(&self) -> SeriesOrdering {
         SeriesOrdering::KeyThenTime
     }
@@ -192,6 +201,7 @@ impl RawSeriesStream for PayloadStream {
 fn payload_stream(labels: RawLabelSource, chunks: Vec<RawSeriesChunk>) -> SendableRawSeriesStream {
     Box::pin(PayloadStream {
         schema: payload_schema(),
+        decode: label_decode_spec(&labels),
         labels,
         items: chunks.into_iter().map(Ok).collect(),
     })
@@ -243,10 +253,26 @@ async fn merges_typed_multifield_payload_through_frame_and_label_roundtrip() {
     );
     let merged = merge_ordered_raw_series(vec![a, b]).unwrap();
     let frame_schema = merged.schema().clone();
-    let frame_binding = merged.label_source().clone();
     let frame_ordering = merged.ordering();
+    assert!(
+        matches!(merged.label_source(), RawLabelSource::Explicit),
+        "a merge is not a region scan, so it reports no scan-bound identity"
+    );
     let framed = pack_raw_series(merged).unwrap();
-    let raw = unpack_raw_series(framed, frame_schema, frame_binding, frame_ordering).unwrap();
+    // The frame states the layout the decoder uses: it matches the description an input's binding
+    // declares, since the merge only accepts inputs that declare one layout.
+    ensure_frame_matches_label_source(framed.schema().as_ref(), &label_source(1)).unwrap();
+    assert_eq!(
+        raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
+        frame_ordering,
+        "the packed frame declares the merge's ordering"
+    );
+    let raw = unpack_raw_series(framed, Some(frame_schema)).unwrap();
+    assert_eq!(
+        raw.ordering(),
+        frame_ordering,
+        "unpacking derives the ordering from the frame"
+    );
     let rows = materialize_raw_labels(raw)
         .unwrap()
         .try_collect::<Vec<_>>()
@@ -442,7 +468,8 @@ async fn merge_retains_sliced_float_time_and_histogram_owners_until_output_drop(
         ["temperature", "latency", "observations"]
     );
     assert!(
-        matches!(merged.label_source(), RawLabelSource::PrimaryKey { metric_name, .. } if metric_name.as_ref() == "room_temperature")
+        matches!(merged.label_source(), RawLabelSource::Explicit),
+        "a merge is not a region scan, so it reports no scan-bound identity"
     );
     assert_eq!(merged.ordering(), SeriesOrdering::KeyThenTime);
     let prefix = merged.next().await.unwrap().unwrap();

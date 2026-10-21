@@ -1,0 +1,102 @@
+[
+  {
+    "variant": "Null",
+    "text": "{\"Null\":null}"
+  },
+  {
+    "variant": "Boolean",
+    "text": "{\"Boolean\":null}"
+  },
+  {
+    "variant": "Int8",
+    "text": "{\"Int8\":{}}"
+  },
+  {
+    "variant": "Int16",
+    "text": "{\"Int16\":{}}"
+  },
+  {
+    "variant": "Int32",
+    "text": "{\"Int32\":{}}"
+  },
+  {
+    "variant": "Int64",
+    "text": "{\"Int64\":{}}"
+  },
+  {
+    "variant": "UInt8",
+    "text": "{\"UInt8\":{}}"
+  },
+  {
+    "variant": "UInt16",
+    "text": "{\"UInt16\":{}}"
+  },
+  {
+    "variant": "UInt32",
+    "text": "{\"UInt32\":{}}"
+  },
+  {
+    "variant": "UInt64",
+    "text": "{\"UInt64\":{}}"
+  },
+  {
+    "variant": "Float32",
+    "text": "{\"Float32\":{}}"
+  },
+  {
+    "variant": "Float64",
+    "text": "{\"Float64\":{}}"
+  },
+  {
+    "variant": "Decimal128",
+    "text": "{\"Decimal128\":{\"precision\":10,\"scale\":2}}"
+  },
+  {
+    "variant": "Binary",
+    "text": "{\"Binary\":{\"repr_type\":\"Binary\"}}"
+  },
+  {
+    "variant": "String",
+    "text": "{\"String\":{\"size_type\":\"Utf8\"}}"
+  },
+  {
+    "variant": "Date",
+    "text": "{\"Date\":null}"
+  },
+  {
+    "variant": "Timestamp",
+    "text": "{\"Timestamp\":{\"Millisecond\":null}}"
+  },
+  {
+    "variant": "Time",
+    "text": "{\"Time\":{\"Microsecond\":null}}"
+  },
+  {
+    "variant": "Duration",
+    "text": "{\"Duration\":{\"Nanosecond\":null}}"
+  },
+  {
+    "variant": "Interval",
+    "text": "{\"Interval\":{\"MonthDayNano\":null}}"
+  },
+  {
+    "variant": "List",
+    "text": "{\"List\":{\"item_type\":{\"String\":{\"size_type\":\"Utf8\"}}}}"
+  },
+  {
+    "variant": "Dictionary",
+    "text": "{\"Dictionary\":{\"key_type\":{\"Int32\":{}},\"value_type\":{\"String\":{\"size_type\":\"Utf8\"}}}}"
+  },
+  {
+    "variant": "Struct",
+    "text": "{\"Struct\":{\"fields\":[{\"name\":\"host\",\"data_type\":{\"String\":{\"size_type\":\"Utf8\"}},\"nullable\":false,\"metadata\":{}},{\"name\":\"port\",\"data_type\":{\"UInt16\":{}},\"nullable\":true,\"metadata\":{}}]}}"
+  },
+  {
+    "variant": "Json",
+    "text": "{\"Json\":{\"format\":\"Jsonb\"}}"
+  },
+  {
+    "variant": "Vector",
+    "text": "{\"Vector\":{\"dim\":3}}"
+  }
+]

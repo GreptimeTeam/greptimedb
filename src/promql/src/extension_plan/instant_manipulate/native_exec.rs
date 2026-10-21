@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use common_query::series_frame::{raw_series_frame_ordering, unpack_raw_series};
+use common_query::series_frame::{ensure_frame_matches_label_source, unpack_raw_series};
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -31,7 +31,6 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{DenseSamplesRef, Samples, SeriesFields, SeriesSchema};
 use futures::{Stream, ready};
@@ -86,16 +85,16 @@ impl InstantManipulate {
             return Ok(None);
         }
         let declared_schema = input.schema();
-        let ordering = raw_series_frame_ordering(declared_schema.as_ref())?;
-        // Validate the declared raw-frame schema without executing the child.
+        // Validate the declared raw-frame schema without executing the child. The frame states its
+        // own label layout, so the plan's binding is checked against that declaration rather than
+        // supplied to the decoder.
+        ensure_frame_matches_label_source(declared_schema.as_ref(), &label_source)?;
         unpack_raw_series(
             Box::pin(RecordBatchStreamAdapter::new(
                 declared_schema.clone(),
                 futures::stream::empty(),
             )),
-            series_schema.clone(),
-            label_source.clone(),
-            ordering,
+            Some(series_schema.clone()),
         )?;
         Ok(Some(Arc::new(NativeInstantManipulateExec::new(
             input,
@@ -103,7 +102,6 @@ impl InstantManipulate {
             declared_schema,
             series_schema,
             label_source,
-            ordering,
         ))))
     }
 }
@@ -114,7 +112,6 @@ struct NativeInstantManipulateExec {
     raw_schema: SchemaRef,
     series_schema: Arc<SeriesSchema>,
     label_source: RawLabelSource,
-    ordering: SeriesOrdering,
     properties: Arc<PlanProperties>,
 }
 impl NativeInstantManipulateExec {
@@ -124,7 +121,6 @@ impl NativeInstantManipulateExec {
         raw_schema: SchemaRef,
         series_schema: Arc<SeriesSchema>,
         label_source: RawLabelSource,
-        ordering: SeriesOrdering,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(mapping.schema()),
@@ -138,7 +134,6 @@ impl NativeInstantManipulateExec {
             raw_schema,
             series_schema,
             label_source,
-            ordering,
             properties,
         }
     }
@@ -190,7 +185,6 @@ impl ExecutionPlan for NativeInstantManipulateExec {
             self.raw_schema.clone(),
             self.series_schema.clone(),
             self.label_source.clone(),
-            self.ordering,
         )))
     }
     fn execute(
@@ -204,12 +198,10 @@ impl ExecutionPlan for NativeInstantManipulateExec {
             ));
         }
         let frame = self.input.execute(partition, context.clone())?;
-        let source = unpack_raw_series(
-            frame,
-            self.series_schema.clone(),
-            self.label_source.clone(),
-            self.ordering,
-        )?;
+        // The child's frames state their own label layout; the plan's binding is an expectation
+        // checked against that declaration, not a decode input.
+        ensure_frame_matches_label_source(frame.schema().as_ref(), &self.label_source)?;
+        let source = unpack_raw_series(frame, Some(self.series_schema.clone()))?;
         let source = materialize_raw_labels(source)
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
         let reservation =
@@ -311,6 +303,13 @@ impl NativeInstantStream {
                 n.checked_add(field_count.checked_mul(std::mem::size_of::<Vec<Samples>>())?)
             })
             .and_then(|n| {
+                // Per point of the clipped grid, the most `select_instants` and the mapping of its
+                // selection can allocate: 24 bytes per output column, the labels of the row, and
+                // 48 for the two vectors the selection returns and the time column it is mapped
+                // into -- a `u64` source row index, an `i64` evaluation timestamp and the `i64`
+                // of the output column, at 8 bytes each. The point count is what stands in for
+                // the point limit `estimated_points` used to carry, so the selection arrays are
+                // reserved for here rather than refused there.
                 points
                     .checked_mul(
                         self.schema

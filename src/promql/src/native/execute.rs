@@ -2669,16 +2669,6 @@ impl NativeExecutionState {
             .sum()
     }
 
-    /// The number of nodes this execution runs.
-    pub fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
-    /// Whether the tree this state was built from has no nodes at all.
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
-    }
-
     /// How many nodes still hold the state a window buffers into.
     ///
     /// Test-only: releasing a stopped execution has to drop the evaluators and their sample

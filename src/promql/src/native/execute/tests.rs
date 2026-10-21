@@ -2593,9 +2593,12 @@ fn a_window_over_an_interleaved_input_is_rejected() {
     // A window directly over an interleaved source is rejected when the tree is bound: the
     // binding is where the ordering is known, and refusing there fails before a chunk is read.
     let error = tree.expect_err("a window over an interleaved input must not bind");
+    // A rejected tree is a compiler defect rather than a query error, so the binding reports it as
+    // `Internal`; what this pins is that the refusal names the ordering it came from rather than
+    // the node kind, since the same check refuses every input that declares it.
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
     let message = error.to_string();
     assert!(message.contains("interleaved"), "{message}");
-    assert!(message.contains("window"), "{message}");
 
     // A map between them is not caught by the binding, which only looks at a window's own input:
     // the map passes chunks through in the order they arrive, so the window still reads an

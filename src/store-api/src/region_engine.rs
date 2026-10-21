@@ -31,6 +31,7 @@ use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
@@ -495,9 +496,19 @@ pub enum RawLabelSource {
     },
     /// The stream supplies a complete metric name and label set in each chunk, not a partial
     /// label projection; `Some(metric)` is a complete name/label set (the name itself may be
-    /// absent).
+    /// absent), or, for a stream that has no identity at all, see
+    /// [`NO_BOUND_LABEL_SOURCE`].
     Explicit,
 }
+
+/// The identity a stream reports when no scan-bound label source was established for it.
+///
+/// [`RawLabelSource`] has no "absent" variant, and [`RawLabelSource::Explicit`] is the only one that
+/// carries no physical region key layout, so it stands in for "no identity" here. It is not a claim
+/// that the chunks carry labels: [`RawSeriesStream::label_decode_spec`] answers that, and a stream
+/// reporting this value can still return `Some` description and leave `metric` as `None` in every
+/// chunk. Decoding therefore asks the description, and only an identity check asks this.
+pub const NO_BOUND_LABEL_SOURCE: RawLabelSource = RawLabelSource::Explicit;
 
 /// A stream of raw series chunks with stable schema, label binding, and ordering.
 ///
@@ -508,8 +519,10 @@ pub enum RawLabelSource {
 /// per-stream guarantees, not query-global order, partition ownership, or finality. `is_last`
 /// marks the last chunk of that series in this stream only; merging requires recomputing
 /// per-input-series finalization across all related inputs, not aggregate-group finality.
-/// `RawLabelSource` keeps label interpretation self-contained through transport. Stream finality
-/// applies to all related input series, not aggregate groups or vector-match state.
+/// Label interpretation is carried by the stream: [`RawSeriesStream::label_source`] states the
+/// scan-bound identity a producer read under, and [`RawSeriesStream::label_decode_spec`] states the
+/// label layout the stream's own chunks declare. Stream finality applies to all related input
+/// series, not aggregate groups or vector-match state.
 pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send {
     /// Returns the schema shared by all chunks; raw schemas have no evaluation grid.
     fn schema(&self) -> &Arc<SeriesSchema>;
@@ -517,7 +530,26 @@ pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + S
     /// labels are undecoded, not that the metric name is missing; `Explicit` chunks supply
     /// `Some` with the complete name/label set, not a partial projection. The metric name itself
     /// may be absent.
+    ///
+    /// A stream that was decoded from a raw frame has no scan-bound identity and reports
+    /// [`NO_BOUND_LABEL_SOURCE`], which reads as `Explicit` while its chunks may still carry no
+    /// labels at all. That value therefore answers "is this the region I read under", never "are
+    /// these labels complete": [`Self::label_decode_spec`] is the stream's statement about its
+    /// encoding, and every consumer that decides whether to decode reads that instead.
     fn label_source(&self) -> &RawLabelSource;
+    /// Returns the label decode description this stream declares for key-encoded labels.
+    ///
+    /// Every stream whose chunks carry key-encoded labels declares the description here, whether
+    /// it is a storage producer or a stream reassembled from a raw frame. A consumer holding only
+    /// that description can therefore decode labels without a scan-bound [`RawLabelSource`]: the
+    /// description, not the binding, describes the encoding, and a receiver reporting
+    /// [`NO_BOUND_LABEL_SOURCE`] still states through this description that its chunks are
+    /// undecoded key chunks. A stream that carries complete labels instead answers `None`. This is
+    /// the description the stream declares, not an authenticated statement about where the values
+    /// came from.
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        None
+    }
     /// Returns this stream's ordering guarantee.
     fn ordering(&self) -> SeriesOrdering;
 }

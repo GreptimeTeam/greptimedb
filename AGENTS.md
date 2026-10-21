@@ -62,6 +62,7 @@ a module map, read/write paths, change-coupling points, and gotchas:
 - [`src/servers/AGENTS.md`](src/servers/AGENTS.md)
 - [`src/operator/AGENTS.md`](src/operator/AGENTS.md)
 - [`src/mito2/AGENTS.md`](src/mito2/AGENTS.md)
+- [`src/promql/AGENTS.md`](src/promql/AGENTS.md)
 - [`src/metric-engine/AGENTS.md`](src/metric-engine/AGENTS.md)
 - [`src/flow/AGENTS.md`](src/flow/AGENTS.md)
 - [`src/frontend/AGENTS.md`](src/frontend/AGENTS.md)

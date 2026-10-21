@@ -20,7 +20,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_query::prelude::{greptime_native_histogram, greptime_value};
-use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, UInt64Array};
+use datafusion::arrow::array::{
+    Array, ArrayRef, Float64Array, LargeListArray, LargeStringArray, ListArray, StringArray,
+    StructArray, TimestampMillisecondArray, UInt64Array,
+};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -28,6 +31,7 @@ use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::logical_expr::{
     EmptyRelation, Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore,
 };
@@ -58,7 +62,7 @@ use crate::extension_plan::{
     nanoseconds_per_native_tick, prometheus_stale_sample_column, resolve_column_name,
     serialize_column_index, timestamp_unit,
 };
-use crate::instant_eval::{MAX_INSTANT_MANIPULATE_OUTPUT_POINTS, select_instants};
+use crate::instant_eval::select_instants;
 use crate::metrics::PROMQL_SERIES_COUNT;
 
 fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
@@ -75,6 +79,15 @@ fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp.
+///
+/// The memory pool bounds one instant query, not a point count: the execution reserves the
+/// workspace its selection allocates before allocating it, and a pool that cannot meet the
+/// reservation refuses the query with `ResourcesExhausted` (see
+/// [`InstantManipulateStream::manipulate_reserved`]). That bound exists only where the pool does:
+/// a resolved `query.memory_pool_size` of zero leaves DataFusion's unbounded pool attached, whose
+/// growth always succeeds, so an operator that leaves the option unset has no bound on this path
+/// at all. What one query can cost still grows with the number of series, which no reservation of
+/// a single series accounts for.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct InstantManipulate {
     start: Millisecond,
@@ -530,6 +543,10 @@ impl ExecutionPlan for InstantManipulateExec {
                 count: num_series.clone(),
             });
 
+        // The reservation is the operator's own, registered before the child is polled so that a
+        // pool which cannot hold one series' workspace refuses it rather than the child's memory.
+        let reservation =
+            MemoryConsumer::new("InstantManipulateStream").register(context.memory_pool());
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
         let time_index = schema
@@ -559,6 +576,7 @@ impl ExecutionPlan for InstantManipulateExec {
             input,
             metric: baseline_metric,
             num_series,
+            reservation,
         }))
     }
 
@@ -638,6 +656,8 @@ pub struct InstantManipulateStream {
     metric: BaselineMetrics,
     /// Number of series processed.
     num_series: Count,
+    /// What the workspace of the selection being built holds, reserved before it is allocated.
+    reservation: MemoryReservation,
 }
 
 impl RecordBatchStream for InstantManipulateStream {
@@ -656,7 +676,7 @@ impl Stream for InstantManipulateStream {
                 if batch.num_rows() != 0 {
                     self.num_series.add(1);
                 }
-                let result = Ok(batch).and_then(|batch| self.manipulate(batch));
+                let result = self.manipulate_reserved(batch);
                 self.metric.elapsed_compute().add_elapsed(timer);
                 Poll::Ready(Some(result))
             }
@@ -671,6 +691,24 @@ impl Stream for InstantManipulateStream {
 }
 
 impl InstantManipulateStream {
+    /// Manipulates one complete series with the workspace the selection allocates reserved first.
+    ///
+    /// One grid point of the selection is decided per selected sample position, so the workspace is
+    /// proportional to the points of the clipped grid rather than to the samples of the series: the
+    /// two arrays [`select_instants`] returns, the take indices the batch is built with, and one
+    /// value per point for every column of the batch. That is what the point-count limit this
+    /// operator used to carry stood for, and [`Self::workspace_bytes`] derives it term by term.
+    ///
+    /// The reservation goes back as soon as the batch is built, because what it covers is this
+    /// operator's workspace and not its output: the batch belongs to whoever reads it from here and
+    /// is charged to the pool there, as the output of any operator is.
+    fn manipulate_reserved(&mut self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
+        self.reservation.try_grow(self.workspace_bytes(&input))?;
+        let result = self.manipulate(input);
+        self.reservation.free();
+        result
+    }
+
     /// Manipulates one complete series sorted by timestamp. The planner enforces
     /// this input contract with a sort followed by [`SeriesDivide`].
     ///
@@ -722,7 +760,6 @@ impl InstantManipulateStream {
                 return self.take_record_batch_optional(input, indices, evaluation_timestamps);
             }
         }
-        let scale = nanoseconds_per_native_tick(self.time_unit);
         let stale_sample_columns = self.field_indices.map(|index| {
             index.and_then(|index| prometheus_stale_sample_column(input.column(index).as_ref()))
         });
@@ -738,48 +775,8 @@ impl InstantManipulateStream {
         let timestamp_null_count = timestamps.null_count();
         let timestamps = timestamps.values();
         let len = timestamps.len();
-        // Shift the native-tick timeline in i128 before comparing samples. Doing
-        // this in the Arrow storage unit can overflow even when the shifted
-        // PromQL millisecond evaluation time is representable.
-        let to_nanoseconds =
-            |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
-        let first_ns = to_nanoseconds(timestamps[0]);
-        let last_ns = to_nanoseconds(timestamps[len - 1]);
-        // An exact sample remains useful with zero lookback. Otherwise the lower
-        // boundary is exclusive, so subtract one nanosecond from its final window.
-        let last_useful = if self.lookback_delta == 0 {
-            last_ns
-        } else {
-            last_ns + (self.lookback_delta as i128) * 1_000_000 - 1
-        };
-        let first_ms = (first_ns + 999_999).div_euclid(1_000_000);
-        let last_ms = last_useful.div_euclid(1_000_000);
-        let query_start = self.start as i128;
-        let query_end = self.end as i128;
-        let interval = self.interval as i128;
-        let max_start = first_ms.max(query_start);
-        let min_end = last_ms.min(query_end);
-        let (aligned_start, aligned_end) = if max_start > min_end {
-            (1, 0)
-        } else {
-            (
-                query_start + (max_start - query_start) / interval * interval,
-                query_end - (query_end - min_end) / interval * interval,
-            )
-        };
-        let estimated_points = if aligned_end >= aligned_start {
-            (aligned_end - aligned_start) / interval + 1
-        } else {
-            0
-        };
-        if estimated_points > MAX_INSTANT_MANIPULATE_OUTPUT_POINTS as i128 {
-            return Err(DataFusionError::Execution(format!(
-                "InstantManipulate output points exceed limit: {estimated_points} > {MAX_INSTANT_MANIPULATE_OUTPUT_POINTS}"
-            )));
-        }
-        let estimated_points = estimated_points as usize;
-        let aligned_start = aligned_start as i64;
-        let aligned_end = aligned_end as i64;
+        let (aligned_start, aligned_end) = self.clipped_range(timestamps);
+        let estimated_points = self.range_points(aligned_start, aligned_end);
         // Narrow `i64` nanoseconds whenever the batch fits them, exact `i128` otherwise.
         let narrow = (timestamp_null_count == 0)
             .then(|| {
@@ -794,8 +791,19 @@ impl InstantManipulateStream {
             })
             .flatten();
         if let Some(scan) = &narrow {
-            debug_assert_eq!(i64::try_from(first_ns), Ok(scan.shift(timestamps[0])));
-            debug_assert_eq!(i64::try_from(last_ns), Ok(scan.shift(timestamps[len - 1])));
+            // The clip converted the series bounds to milliseconds; this asserts the scan the
+            // selection walks agrees with them on those two samples.
+            let scale = nanoseconds_per_native_tick(self.time_unit);
+            let to_nanoseconds =
+                |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
+            debug_assert_eq!(
+                i64::try_from(to_nanoseconds(timestamps[0])),
+                Ok(scan.shift(timestamps[0]))
+            );
+            debug_assert_eq!(
+                i64::try_from(to_nanoseconds(timestamps[len - 1])),
+                Ok(scan.shift(timestamps[len - 1]))
+            );
         }
         let (take_indices, aligned_ts) = match narrow {
             Some(scan) => self.scan_instants::<i64>(
@@ -895,6 +903,215 @@ impl InstantManipulateStream {
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         Ok(result)
     }
+
+    /// What one selected series' workspace holds, in bytes, before it is allocated.
+    ///
+    /// The figure follows the reasoning of `InstantRuntime::gather_bytes` in `native::execute` and
+    /// of `NativeInstantStream::finish_series` in `native_exec`: a selection decides one point of
+    /// its grid per sample position it reads, so what it allocates grows with the points of the
+    /// clipped grid and not with the samples of the series. Each term below is one allocation, and
+    /// the ones this path shares with those are named as they are there.
+    ///
+    /// Per selected point, [`Self::clipped_points`] points being the most it can decide:
+    ///
+    /// - A `u64` source row index and an `i64` evaluation timestamp: the two vectors
+    ///   [`select_instants`] returns, and the scan of [`Self::scan_instants`] returns the same pair.
+    ///   This is that node's "two arrays [`select_instants`] returns" term.
+    /// - The same indices again, for the `UInt64Array` [`Self::take_record_batch_optional`] takes
+    ///   the column values with: `take_indices.clone()` is a second copy of them.
+    /// - The timestamps again, as an allowance for the output's time column: they are moved into it
+    ///   when they fit and copied when they do not, and a move costs nothing to bound.
+    ///
+    /// Per column, one row per point: `take` allocates a row of the column for every point, so a
+    /// column costs its widest row per point -- the same term as that node's "one `f64` per field"
+    /// -- and one byte per point for the validity buffer it allocates, charged a byte for a bit so
+    /// that the figure stays an upper bound. A reused TSID column is sliced instead of taken
+    /// whenever the output is no longer than it and materialized a row per point otherwise, so the
+    /// same row bounds both. [`row_bytes`] gives the width, and a column of a type the series
+    /// frames of this path do not carry is charged for the bytes it already occupies once rather
+    /// than as a row per point.
+    ///
+    /// Per native histogram column, the widest row is not one value: a histogram row is a struct of
+    /// scalar columns whose values are copied and bucket lists whose values are copied for the row
+    /// the point selects, so a point costs the scalars, the list offsets and the widest payload the
+    /// column holds. That node charges its histogram payload the same way, "at the largest one the
+    /// field holds and per *point* rather than per row", because one source row can be selected by
+    /// every point of the grid and still be copied for each of them.
+    ///
+    /// Not charged, deliberately: the headers this selection builds per batch rather than per point
+    /// (the sample iterators and `Samples` clones of the fast path are constant per field), the
+    /// `Arc` bumps of a shared column, and the input batch, which belongs to the child. No term
+    /// doubles: every vector here is created with its exact capacity and `take` sizes its output by
+    /// the point count, unlike the builders that node charges twice.
+    fn workspace_bytes(&self, input: &RecordBatch) -> usize {
+        let points = self.clipped_points(input);
+        let mut bytes = points.saturating_mul(4 * std::mem::size_of::<u64>());
+        for (index, column) in input.columns().iter().enumerate() {
+            // The time column of the output is built from the timestamps counted above.
+            if index == self.time_index {
+                continue;
+            }
+            bytes = bytes.saturating_add(match row_bytes(column.as_ref()) {
+                Some(width) => points.saturating_mul(width.saturating_add(1)),
+                None => column.get_buffer_memory_size(),
+            });
+        }
+        // The `Arc<[ArrayRef]>` this batch is assembled from, one pointer per column.
+        bytes.saturating_add(
+            input
+                .num_columns()
+                .saturating_mul(std::mem::size_of::<ArrayRef>()),
+        )
+    }
+
+    /// The points [`select_instants`] decides for the series `input` holds.
+    ///
+    /// That selection clips this operator's `start..=end` to the series it reads before it walks
+    /// the grid, so the points it allocates for are the ones of the clipped range and not the ones
+    /// of the whole planned grid: a series whose samples end long before the query does reaches no
+    /// later point, yet stepping the whole planned range by the interval reserved the workspace of
+    /// every point of it, and a pool that could hold everything such a series selects refused the
+    /// query before selecting anything.
+    ///
+    /// The bounds, the clip and the alignment below are [`select_instants`]'s, kept the same line
+    /// for line because the reservation must cover what that function allocates: a point it misses
+    /// is memory no reservation bounds, and a point it invents is memory reserved for nothing.
+    ///
+    /// This batch holds one complete series -- [`SeriesDivide`] upstream guarantees it -- so the
+    /// first and last timestamp of its time column are the series bounds and reading them is
+    /// constant work, no matter how many samples the series holds.
+    fn clipped_points(&self, input: &RecordBatch) -> usize {
+        if self.end < self.start || self.interval <= 0 {
+            return 0;
+        }
+        let time = input.column(self.time_index);
+        if time.is_empty() {
+            return 0;
+        }
+        let Some((timestamps, _)) = timestamp_array_to_primitive(time) else {
+            return 0;
+        };
+        let (start, end) = self.clipped_range(timestamps.values());
+        self.range_points(start, end)
+    }
+
+    /// This operator's grid clipped to the instants one series is selected at.
+    ///
+    /// `ticks` are that series' sample times in the operator's native tick unit, sorted and
+    /// non-empty, and the interval must be positive. The lower bound moves to the first instant at
+    /// or after the first sample and the upper bound to the last instant at or before the last
+    /// sample widened by the lookback, both rounded onto the grid. An instant outside the returned
+    /// range has no sample to select, so [`Self::scan_instants`] never walks it and nothing is
+    /// allocated for it. Returns `(1, 0)` -- an empty range -- when nothing is left.
+    ///
+    /// [`Self::manipulate`] and [`Self::clipped_points`] both call this. They used to carry the
+    /// same arithmetic twice, on the reasoning that the reservation must mirror the selection; one
+    /// copy is the stronger guarantee, because the two cannot drift apart at all.
+    fn clipped_range(&self, ticks: &[i64]) -> (Millisecond, Millisecond) {
+        // Shift the native-tick timeline in i128 before comparing samples. Doing this in the Arrow
+        // storage unit can overflow even when the shifted PromQL millisecond evaluation time is
+        // representable.
+        let scale = nanoseconds_per_native_tick(self.time_unit);
+        let to_nanoseconds =
+            |timestamp: i64| (timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
+        let first_ns = to_nanoseconds(ticks[0]);
+        let last_ns = to_nanoseconds(ticks[ticks.len() - 1]);
+        // An exact sample remains useful with zero lookback. Otherwise the lower boundary is
+        // exclusive, so subtract one nanosecond from its final window.
+        let last_useful = if self.lookback_delta == 0 {
+            last_ns
+        } else {
+            last_ns + (self.lookback_delta as i128) * 1_000_000 - 1
+        };
+        let first_ms = (first_ns + 999_999).div_euclid(1_000_000);
+        let last_ms = last_useful.div_euclid(1_000_000);
+        let query_start = self.start as i128;
+        let query_end = self.end as i128;
+        let interval = self.interval as i128;
+        let max_start = first_ms.max(query_start);
+        let min_end = last_ms.min(query_end);
+        if max_start > min_end {
+            return (1, 0);
+        }
+        (
+            (query_start + (max_start - query_start) / interval * interval) as i64,
+            (query_end - (query_end - min_end) / interval * interval) as i64,
+        )
+    }
+
+    /// The number of instants in `start..=end`, stepping by the interval.
+    fn range_points(&self, start: Millisecond, end: Millisecond) -> usize {
+        if end < start || self.interval <= 0 {
+            return 0;
+        }
+        usize::try_from((end as i128 - start as i128) / self.interval as i128 + 1)
+            .unwrap_or(usize::MAX)
+    }
+}
+
+/// The bytes one selected point copies out of `column`, `None` for a column type this path does not
+/// carry.
+///
+/// `take` allocates one row of the column per point, so one point costs the widest row the column
+/// holds: the width of its value for a fixed-width column, the longest value for a byte column, and
+/// the whole row for a struct such as a native histogram -- its scalar columns, the offsets of its
+/// list columns and the values those lists hold for the widest row of the column.
+fn row_bytes(column: &dyn Array) -> Option<usize> {
+    if let Some(width) = column.data_type().primitive_width() {
+        return Some(width);
+    }
+    // `primitive_width` reports a `Boolean` as unknown, and its values are one byte wide.
+    if let DataType::Boolean = column.data_type() {
+        return Some(1);
+    }
+    if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
+        return Some(values.offsets().lengths().max().unwrap_or(0));
+    }
+    if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
+        return Some(values.offsets().lengths().max().unwrap_or(0));
+    }
+    let values = column.as_any().downcast_ref::<StructArray>()?;
+    Some(
+        values
+            .columns()
+            .iter()
+            .map(|child| match child.data_type() {
+                // One offset per row of a list column, and the values the widest row holds.
+                DataType::List(_) => {
+                    std::mem::size_of::<i32>().saturating_add(widest_list_row(child))
+                }
+                DataType::LargeList(_) => {
+                    std::mem::size_of::<i64>().saturating_add(widest_list_row(child))
+                }
+                // The scalars of a row are fixed width; a nested column counted at the width of the
+                // widest value this crate stores keeps the sum an upper bound.
+                _ => child
+                    .data_type()
+                    .primitive_width()
+                    .unwrap_or(std::mem::size_of::<f64>()),
+            })
+            .fold(0usize, usize::saturating_add),
+    )
+}
+
+/// The values the widest row of a list column holds, in bytes.
+///
+/// A list column of a histogram row is one bucket side or one bucket list of it, so one row of it
+/// is one list's values: the widest row times the width of a value bounds what a point copies.
+fn widest_list_row(column: &dyn Array) -> usize {
+    let (widest, values) = if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
+        (list.offsets().lengths().max().unwrap_or(0), list.values())
+    } else if let Some(list) = column.as_any().downcast_ref::<LargeListArray>() {
+        (list.offsets().lengths().max().unwrap_or(0), list.values())
+    } else {
+        return 0;
+    };
+    widest.saturating_mul(
+        values
+            .data_type()
+            .primitive_width()
+            .unwrap_or(std::mem::size_of::<f64>()),
+    )
 }
 
 fn reuse_constant_column(array: &Arc<dyn Array>, len: usize) -> DataFusionResult<Arc<dyn Array>> {
@@ -925,6 +1142,8 @@ mod test {
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
     use datafusion::logical_expr::{
         EmptyRelation, Extension, LogicalPlan, Projection, UserDefinedLogicalNodeCore,
     };
@@ -936,6 +1155,21 @@ mod test {
     use crate::extension_plan::test_util::{
         TIME_INDEX_COLUMN, native_histogram, prepare_test_data, prepare_test_data_with_stale_marker,
     };
+
+    /// An unbounded reservation, for the streams built outside an operator's `execute`.
+    fn unbounded() -> MemoryReservation {
+        let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+        MemoryConsumer::new("InstantManipulateStreamTest").register(&pool)
+    }
+
+    /// A task context whose pool holds `bytes`, so a reservation larger than that is refused.
+    fn bounded_task_context(bytes: usize) -> Arc<TaskContext> {
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(GreedyMemoryPool::new(bytes)))
+            .build()
+            .unwrap();
+        Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
+    }
 
     async fn do_normalize_test(
         start: Millisecond,
@@ -1553,8 +1787,15 @@ mod test {
         );
     }
 
-    #[tokio::test]
-    async fn manipulate_should_reject_too_many_output_points() {
+    /// One series of one `value` column holding `rows` of `(timestamp, value)` decided over
+    /// `start..=end` by `interval` with `lookback`.
+    fn one_series(
+        rows: Vec<(Millisecond, f64)>,
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        lookback: Millisecond,
+    ) -> Arc<InstantManipulateExec> {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 TIME_INDEX_COLUMN,
@@ -1563,24 +1804,24 @@ mod test {
             ),
             Field::new("value", DataType::Float64, true),
         ]));
+        let (timestamps, values): (Vec<Millisecond>, Vec<f64>) = rows.into_iter().unzip();
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(TimestampMillisecondArray::from(vec![0])),
-                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(TimestampMillisecondArray::from(timestamps)),
+                Arc::new(Float64Array::from(values)),
             ],
         )
         .unwrap();
         let input = Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )));
-        let too_many_points = MAX_INSTANT_MANIPULATE_OUTPUT_POINTS as Millisecond + 1;
-        let normalize_exec = Arc::new(InstantManipulateExec {
+        Arc::new(InstantManipulateExec {
             offset: 0,
-            start: 0,
-            end: too_many_points,
-            lookback_delta: too_many_points + 1,
-            interval: 1,
+            start,
+            end,
+            lookback_delta: lookback,
+            interval,
             time_index_column: TIME_INDEX_COLUMN.to_string(),
             field_column: Some("value".to_string()),
             reuse_tsid_column: false,
@@ -1588,15 +1829,200 @@ mod test {
             properties: input.properties().clone(),
             input,
             metric: ExecutionPlanMetricsSet::new(),
-        });
-        let session_context = SessionContext::default();
-        let err = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
-            .await
-            .unwrap_err();
+        })
+    }
+
+    /// A single row of one series selected at every point of a grid `points` long, with `lookback`
+    /// wide enough that the row answers all of them.
+    fn one_row_selected_everywhere(points: Millisecond) -> Arc<InstantManipulateExec> {
+        one_series(vec![(0, 1.0)], 0, points, 1, points + 1)
+    }
+
+    /// A grid of a million and one points used to be refused by a point count of the kernel's own.
+    /// What refuses it now is the pool, which cannot hold the workspace of the selection.
+    #[tokio::test]
+    async fn manipulate_reports_the_pool_that_cannot_hold_the_workspace() {
+        let points = 1_000_001;
+        let err = datafusion::physical_plan::collect(
+            one_row_selected_everywhere(points),
+            bounded_task_context(1024),
+        )
+        .await
+        .unwrap_err();
 
         assert!(
-            err.to_string()
-                .contains("InstantManipulate output points exceed limit")
+            matches!(err, DataFusionError::ResourcesExhausted(_)),
+            "the pool did not refuse the workspace: {err}"
+        );
+        assert!(
+            !err.to_string().contains("exceed limit"),
+            "a point limit answered in the pool's place: {err}"
+        );
+    }
+
+    /// The same grid, past what the removed limit allowed, is decided against a pool that holds it.
+    #[tokio::test]
+    async fn manipulate_decides_a_grid_past_the_removed_point_limit() {
+        let points = 1_000_001;
+        let batches = datafusion::physical_plan::collect(
+            one_row_selected_everywhere(points),
+            // This series' one sample answers every point of the grid under that wide lookback, so
+            // its clipped grid is the whole grid. The estimate of `manipulate_reserved` for this
+            // schema is 41 bytes per point (four `u64`, one `f64` and a validity bit), so this
+            // holds the million-odd points it reserves for with room to spare.
+            bounded_task_context(64 * 1024 * 1024),
+        )
+        .await
+        .unwrap();
+
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(
+            rows,
+            points as usize + 1,
+            "the grid the removed limit refused was not decided"
+        );
+    }
+
+    /// A series that ends at its first sample is charged for the points it selects, not for the
+    /// grid of the whole query range.
+    ///
+    /// Seven days at a 60 s step is 10 081 grid points, and the whole-grid figure of this schema is
+    /// 41 bytes per point: 413 337 bytes, which a 256 KiB pool refuses. The series holds one sample
+    /// at `t=0` and its lookback is 5 min, so `select_instants` clips it to the six-point grid
+    /// `0..=300 s`, from which the five points `0, 60, ..., 240 s` are selected; the reservation
+    /// covers those six points -- 262 bytes -- and the pool holds it. Before the reservation
+    /// followed the clipped range, the query was refused before anything was selected.
+    #[tokio::test]
+    async fn series_that_ends_at_its_first_sample_is_not_charged_for_the_grid() {
+        let batches = datafusion::physical_plan::collect(
+            one_series(
+                vec![(0, 1.0)],
+                0,
+                7 * 24 * 60 * 60 * 1_000,
+                60_000,
+                5 * 60 * 1_000,
+            ),
+            bounded_task_context(256 * 1024),
+        )
+        .await
+        .unwrap();
+
+        let timestamps: Vec<Millisecond> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("the output time column is in milliseconds")
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(timestamps, vec![0, 60_000, 120_000, 180_000, 240_000]);
+    }
+
+    /// A series whose samples span the whole query range is still charged for the whole grid, so
+    /// the clipped figure is a bound on what is selected and not a reservation of nothing.
+    #[tokio::test]
+    async fn series_that_spans_the_whole_grid_is_still_charged_for_it() {
+        let end = 7 * 24 * 60 * 60 * 1_000;
+        let spanning = || one_series(vec![(0, 1.0), (end, 2.0)], 0, end, 60_000, 5 * 60 * 1_000);
+
+        let err = datafusion::physical_plan::collect(spanning(), bounded_task_context(256 * 1024))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DataFusionError::ResourcesExhausted(_)),
+            "a pool below the clipped grid's workspace did not refuse it: {err}"
+        );
+
+        let batches =
+            datafusion::physical_plan::collect(spanning(), bounded_task_context(1024 * 1024))
+                .await
+                .unwrap();
+        // A sample answers only the points of its own lookback window, so the two samples decide
+        // six rows: the five of the first 5 min and the point of the second sample. The grid they
+        // reach, and the one the reservation covers, is the whole 10 081 points.
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(
+            rows, 6,
+            "the series spanning the whole grid was not decided"
+        );
+    }
+
+    /// The figure `manipulate_reserved` grows is the clipped one: 262 bytes for a series that ends
+    /// at its first sample, 413 337 bytes for one that spans the same seven-day grid of 10 081
+    /// points at a 60 s step. Per point it is the four `u64` of the two index vectors and the
+    /// timestamp allowance, the `f64` and validity bit `take` allocates for `value`, and one
+    /// `ArrayRef` per column.
+    #[test]
+    fn workspace_bytes_follows_the_clipped_grid_not_the_planned_one() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let end = 7 * 24 * 60 * 60 * 1_000;
+        let stream = InstantManipulateStream {
+            offset: 0,
+            start: 0,
+            end,
+            lookback_delta: 5 * 60 * 1_000,
+            interval: 60_000,
+            time_index: 0,
+            time_unit: TimeUnit::Millisecond,
+            field_indices: [Some(1), None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema: schema.clone(),
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(
+                    vec![],
+                    schema.clone(),
+                    None,
+                )
+                .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+            reservation: unbounded(),
+        };
+        let series = |timestamps: Vec<Millisecond>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(timestamps.clone())),
+                    Arc::new(Float64Array::from(vec![1.0; timestamps.len()])),
+                ],
+            )
+            .unwrap()
+        };
+
+        // One sample at `t=0` under a 5 min lookback clips to the six points `0, 60, ..., 300 s`;
+        // the exclusive lower bound leaves five of them selected.
+        let short = series(vec![0]);
+        assert_eq!(stream.clipped_points(&short), 6);
+        assert_eq!(
+            stream.workspace_bytes(&short),
+            6 * 32 + 6 * 9 + 2 * std::mem::size_of::<ArrayRef>()
+        );
+        // Samples at both ends reach every point of the planned grid, and are charged for it.
+        let long = series(vec![0, end]);
+        assert_eq!(stream.clipped_points(&long), 10_081);
+        assert_eq!(
+            stream.workspace_bytes(&long),
+            10_081 * 32 + 10_081 * 9 + 2 * std::mem::size_of::<ArrayRef>()
+        );
+        // An input without samples selects nothing and reserves nothing beyond the batch's columns.
+        let empty = series(vec![]);
+        assert_eq!(stream.clipped_points(&empty), 0);
+        assert_eq!(
+            stream.workspace_bytes(&empty),
+            2 * std::mem::size_of::<ArrayRef>()
         );
     }
 
@@ -1921,6 +2347,7 @@ mod test {
             ),
             metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
             num_series: Count::new(),
+            reservation: unbounded(),
         };
 
         let output = stream.manipulate(input).unwrap();
@@ -1988,6 +2415,7 @@ mod test {
                 ),
                 metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
                 num_series: Count::new(),
+                reservation: unbounded(),
             };
 
             let output = stream.manipulate(input).unwrap();
@@ -2053,6 +2481,7 @@ mod test {
             input: Box::pin(input),
             metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
             num_series: Count::new(),
+            reservation: unbounded(),
         };
         let waker = noop_waker_ref();
         let mut cx = Context::from_waker(waker);
@@ -2136,6 +2565,7 @@ mod test {
             ),
             metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
             num_series: Count::new(),
+            reservation: unbounded(),
         };
 
         let output = stream.manipulate(input).unwrap();
@@ -2208,6 +2638,7 @@ mod test {
                 ),
                 metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
                 num_series: Count::new(),
+                reservation: unbounded(),
             };
             let output = stream.manipulate(input).unwrap();
             assert_eq!(output.num_rows(), 1);
