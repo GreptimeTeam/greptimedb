@@ -13,9 +13,9 @@
 // limitations under the License.
 
 //! Operators that depend on the whole set of evaluated series at each grid point: `topk`,
-//! `bottomk`, `scalar`, `absent` and the instant-result sorts.
+//! `bottomk`, `limitk`, `limit_ratio`, `scalar`, `absent` and the instant-result sorts.
 //!
-//! Semantics follow Prometheus (`aggregationK`, `funcScalar`, `funcAbsent`,
+//! Semantics follow Prometheus (`aggregationK`, `HashRatioSampler`, `funcScalar`, `funcAbsent`,
 //! `createLabelsForAbsentFunction`, `funcSort*`). A scalar is a grid series without labels that
 //! has a value at every point, so `vector(s)` is `s` itself and has no kernel.
 
@@ -29,7 +29,7 @@ use datatypes::series::time::union_positions;
 use datatypes::series::{Label, MetricName};
 
 use crate::go_sort;
-use crate::grid_series::{GridSeriesBuilder, external};
+use crate::grid_series::{GridSeriesBuilder, external, owned};
 
 #[cfg(test)]
 mod tests;
@@ -73,22 +73,9 @@ pub fn topk(
     // Validates the series against the schema and its grid; the walk below visits the carried
     // positions, not the whole grid.
     grid_points(schema, series)?;
-    // Prometheus returns nothing for k below 1, rejects NaN and values out of int64, then
-    // truncates k and caps it at the number of input series.
-    if k < 1.0 {
+    let Some(k) = k_param(k, series.len())? else {
         return Ok(Vec::new());
-    }
-    if k.is_nan() {
-        return Err(DataFusionError::Execution("Parameter value is NaN".into()));
-    }
-    // Prometheus' `maxInt64`, the largest float64 below 2^63.
-    if k >= 9_223_372_036_854_774_784.0 {
-        return Err(DataFusionError::Execution(format!(
-            "Scalar value {k} overflows int64"
-        )));
-    }
-    let k = k.trunc().min(series.len() as f64) as usize;
-
+    };
     let mut order: Vec<usize> = (0..series.len()).collect();
     order.sort_by(|&a, &b| compare_labels(&series[a].metric, &series[b].metric));
     let mut groups: HashMap<GroupKey, Vec<usize>> = HashMap::new();
@@ -147,6 +134,144 @@ pub fn topk(
         result.extend(builder.finish(series[index].metric.clone())?);
     }
     Ok(result)
+}
+
+/// `limitk(k, ...)` with a constant `k`.
+///
+/// At every point each group keeps the first `k` series in input order that hold a sample there,
+/// float or histogram, with their labels and values. Prometheus takes them in the order its
+/// storage returns series: label order once a query reads several queriers (the head and a
+/// block), creation order when the TSDB head alone answers it. A caller that wants Prometheus'
+/// result over persisted data passes the series in label order.
+pub fn limitk(
+    k: f64,
+    grouping: &Grouping,
+    schema: &SeriesSchema,
+    series: &[Series],
+) -> Result<Vec<Series>> {
+    single_field(schema, "limitk")?;
+    grid_points(schema, series)?;
+    let Some(k) = k_param(k, series.len())? else {
+        return Ok(Vec::new());
+    };
+    let mut groups: HashMap<GroupKey, Vec<usize>> = HashMap::new();
+    for (index, item) in series.iter().enumerate() {
+        groups
+            .entry(group_key(&item.metric, grouping))
+            .or_default()
+            .push(index);
+    }
+    let mut selected: Vec<Vec<(usize, usize)>> = vec![Vec::new(); series.len()];
+    for members in groups.values() {
+        let mut cursors: Vec<RowCursor<'_>> = members
+            .iter()
+            .map(|&member| series[member].fields.as_slice()[0].cursor())
+            .collect();
+        for point in union_positions(members.iter().map(|&member| &series[member].time)) {
+            let mut taken = 0;
+            for (slot, &member) in members.iter().enumerate() {
+                if taken == k {
+                    break;
+                }
+                let Some(row) = series[member].time.row_of(point) else {
+                    continue;
+                };
+                if !matches!(
+                    cursors[slot]
+                        .at(row)
+                        .expect("the axis and the fields are aligned"),
+                    SampleRef::Missing
+                ) {
+                    selected[member].push((point, row));
+                    taken += 1;
+                }
+            }
+        }
+    }
+
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
+    let mut result = Vec::new();
+    for (index, points) in selected.into_iter().enumerate() {
+        if points.is_empty() {
+            continue;
+        }
+        builder.begin_series();
+        // A series belongs to one group, whose points are visited in order.
+        let mut cursor = series[index].fields.as_slice()[0].cursor();
+        for (point, row) in points {
+            let sample = cursor.at(row).expect("the axis and the fields are aligned");
+            builder.push_samples(point, &[owned(sample)?])?;
+        }
+        result.extend(builder.finish(series[index].metric.clone())?);
+    }
+    Ok(result)
+}
+
+/// `limit_ratio(r, ...)` with a constant `r`.
+///
+/// Keeps whole series: Prometheus derives an offset in `[0, 1)` from the hash of a series' labels
+/// and keeps the series when the offset is below `r`, or, for a negative `r`, at least `1 + r`.
+/// Which series are kept does not depend on the grouping, so it is not a parameter. The hash is
+/// the one of Prometheus' default `stringlabels` build; the other label builds hash differently.
+pub fn limit_ratio(ratio: f64, schema: &SeriesSchema, series: &[Series]) -> Result<Vec<Series>> {
+    grid_points(schema, series)?;
+    if ratio.is_nan() {
+        return Err(DataFusionError::Execution("Ratio value is NaN".into()));
+    }
+    let ratio = ratio.clamp(-1.0, 1.0);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
+    let mut result = Vec::new();
+    let mut row = Vec::with_capacity(schema.fields.len());
+    for item in series {
+        let offset = sample_offset(&item.metric);
+        let kept = if ratio >= 0.0 {
+            offset < ratio
+        } else {
+            offset >= 1.0 + ratio
+        };
+        if !kept {
+            continue;
+        }
+        // Rebuilt rather than cloned: an input may carry rows without a value, a result may not.
+        builder.begin_series();
+        let mut cursors: Vec<RowCursor<'_>> =
+            item.fields.iter().map(|field| field.cursor()).collect();
+        for (point, index) in item.time.positions() {
+            row.clear();
+            for cursor in &mut cursors {
+                row.push(owned(
+                    cursor
+                        .at(index)
+                        .expect("the axis and the fields are aligned"),
+                )?);
+            }
+            builder.push_samples(point, &row)?;
+        }
+        result.extend(builder.finish(item.metric.clone())?);
+    }
+    Ok(result)
+}
+
+/// Prometheus `HashRatioSampler.SampleOffset`: the xxHash64 of the labels as `stringlabels`
+/// encodes them, each name and value prefixed by its length, over `u64::MAX`.
+fn sample_offset(metric: &MetricName) -> f64 {
+    let mut data = Vec::new();
+    for (name, value) in labels_with_name(metric) {
+        // Prometheus label sets hold no empty value.
+        if value.is_empty() {
+            continue;
+        }
+        for text in [&name, &value] {
+            let len = text.len();
+            if len < 255 {
+                data.push(len as u8);
+            } else {
+                data.extend([255, len as u8, (len >> 8) as u8, (len >> 16) as u8]);
+            }
+            data.extend_from_slice(text.as_bytes());
+        }
+    }
+    twox_hash::XxHash64::oneshot(0, &data) as f64 / u64::MAX as f64
 }
 
 /// `scalar(v)`: the value of the only series present at each point, NaN otherwise.
@@ -359,6 +484,25 @@ fn rank(a: f64, b: f64, top: bool) -> Ordering {
         _ if top => b.partial_cmp(&a).expect("not NaN"),
         _ => a.partial_cmp(&b).expect("not NaN"),
     }
+}
+
+/// The `k` of `topk`, `bottomk` and `limitk` as Prometheus reads it: nothing for `k` below 1, an
+/// error for NaN or a value out of int64, otherwise `k` truncated and capped at the number of
+/// input series.
+fn k_param(k: f64, series: usize) -> Result<Option<usize>> {
+    if k < 1.0 {
+        return Ok(None);
+    }
+    if k.is_nan() {
+        return Err(DataFusionError::Execution("Parameter value is NaN".into()));
+    }
+    // Prometheus' `maxInt64`, the largest float64 below 2^63.
+    if k >= 9_223_372_036_854_774_784.0 {
+        return Err(DataFusionError::Execution(format!(
+            "Scalar value {k} overflows int64"
+        )));
+    }
+    Ok(Some(k.trunc().min(series as f64) as usize))
 }
 
 /// Label pairs identifying a group; empty values are absent, as in Prometheus.

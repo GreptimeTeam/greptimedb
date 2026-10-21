@@ -88,6 +88,17 @@ pub(crate) enum GridSample {
 
 const _: () = assert!(std::mem::size_of::<Option<GridSample>>() == 16);
 
+/// `sample` as an owned value; `None` when missing.
+pub(crate) fn owned(sample: SampleRef<'_>) -> Result<Option<GridSample>> {
+    Ok(match sample {
+        SampleRef::Missing => None,
+        SampleRef::Float(value) => Some(GridSample::Float(value)),
+        SampleRef::Histogram(view) => Some(GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&view)?,
+        ))),
+    })
+}
+
 impl GridSeriesBuilder {
     /// Creates a builder for series of `schema`, which must have an evaluation grid.
     pub fn try_new(schema: Arc<SeriesSchema>) -> Result<Self> {
