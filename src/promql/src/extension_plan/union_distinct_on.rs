@@ -32,7 +32,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, hash_utils,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::compute;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -276,12 +276,12 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
         let mut exprs = self
             .compare_key_indices
             .iter()
-            .filter_map(|index| fields.get(*index).map(|field| col(field.name())))
+            .filter_map(|index| fields.get(*index).map(|field| ident(field.name())))
             .collect::<Vec<_>>();
         if !self.compare_key_indices.contains(&self.ts_col_idx)
             && let Some(field) = fields.get(self.ts_col_idx)
         {
-            exprs.push(col(field.name()));
+            exprs.push(ident(field.name()));
         }
         exprs
     }
