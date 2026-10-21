@@ -255,9 +255,11 @@ impl SeriesIndexFormat for FakeIndex {
 #[tokio::test]
 async fn format_index_rebuild_is_scoped_and_scans_fall_back_to_ssts() {
     let mut env = TestEnv::with_prefix("format-index").await;
+    // Index builds require four SSTs per bucket.
+    let timestamps = [1000, 2000, 3000, 4000, 101000, 102000, 103000, 104000];
     let (engine, region) = prepare_region_with_config(
         &mut env,
-        &[1000, 101000],
+        &timestamps,
         MitoConfig {
             experimental_enable_series_index: true,
             experimental_series_scan_v2: true,
@@ -312,7 +314,7 @@ async fn format_index_rebuild_is_scoped_and_scans_fall_back_to_ssts() {
         .await
         .unwrap();
     assert_eq!(
-        2,
+        timestamps.len(),
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
     );
     drop(scanner);
