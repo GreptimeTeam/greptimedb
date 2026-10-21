@@ -55,6 +55,17 @@ use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
+/// Describes where flat source batches will be merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlatReadMode {
+    /// Each range is consumed independently.
+    Sequential,
+    /// Range outputs feed a later SeriesScan merge.
+    CrossRangeMerge,
+    /// Sources from all ranges feed the compaction merge.
+    Compaction,
+}
+
 /// Scans a region and returns rows in a sorted sequence.
 ///
 /// The output order is always `order by primary keys, time index` inside every
@@ -168,7 +179,7 @@ impl SeqScan {
             build_flat_sources(
                 stream_ctx,
                 part_range,
-                true,
+                FlatReadMode::Compaction,
                 part_metrics,
                 partition_pruner.clone(),
                 &mut sources,
@@ -277,13 +288,19 @@ impl SeqScan {
     pub(crate) async fn build_flat_partition_range_read(
         stream_ctx: &Arc<StreamContext>,
         part_range: &PartitionRange,
-        compaction: bool,
+        read_mode: FlatReadMode,
         part_metrics: &PartitionMetrics,
         partition_pruner: Arc<PartitionPruner>,
         file_scan_semaphore: Option<Arc<Semaphore>>,
         merge_semaphore: Option<Arc<Semaphore>>,
     ) -> Result<(BoxedRecordBatchStream, usize)> {
-        let cache_key = build_range_cache_key(stream_ctx, part_range);
+        let cache_key = build_range_cache_key(stream_ctx, part_range).map(|key| {
+            if read_mode == FlatReadMode::CrossRangeMerge {
+                key.for_cross_range_merge()
+            } else {
+                key
+            }
+        });
 
         if let Some(key) = cache_key.as_ref() {
             if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
@@ -297,7 +314,7 @@ impl SeqScan {
         let split_batch_size = build_flat_sources(
             stream_ctx,
             part_range,
-            compaction,
+            read_mode,
             part_metrics,
             partition_pruner,
             &mut sources,
@@ -410,7 +427,11 @@ impl SeqScan {
                 let (mut reader, _) = Self::build_flat_partition_range_read(
                     &stream_ctx,
                     &part_range,
-                    compaction,
+                    if compaction {
+                        FlatReadMode::Compaction
+                    } else {
+                        FlatReadMode::Sequential
+                    },
                     &part_metrics,
                     partition_pruner.clone(),
                     file_scan_semaphore.clone(),
@@ -633,12 +654,13 @@ impl fmt::Debug for SeqScan {
 pub(crate) async fn build_flat_sources(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
-    compaction: bool,
+    read_mode: FlatReadMode,
     part_metrics: &PartitionMetrics,
     partition_pruner: Arc<PartitionPruner>,
     sources: &mut Vec<BoxedRecordBatchStream>,
     semaphore: Option<Arc<Semaphore>>,
 ) -> Result<Option<usize>> {
+    let compaction = read_mode == FlatReadMode::Compaction;
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
@@ -738,9 +760,11 @@ pub(crate) async fn build_flat_sources(
         }
     }
 
-    // Queries merge one range at a time; compaction merges sources from all ranges.
-    let needs_merge =
-        ordered_sources.iter().flatten().count() > 1 || (compaction && stream_ctx.ranges.len() > 1);
+    // SeriesScan also merges range outputs. Split at the source, before deduplication
+    // and LastRow selection, so their output batching is preserved by the range cache.
+    let needs_merge = ordered_sources.iter().flatten().count() > 1
+        || read_mode == FlatReadMode::CrossRangeMerge
+        || (compaction && stream_ctx.ranges.len() > 1);
     let split_batch_size = if needs_merge {
         should_split_flat_batches_for_merge(stream_ctx, range_meta).filter(|rows_per_series| {
             // Compaction writes every merged batch out, so splitting short series

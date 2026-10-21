@@ -50,10 +50,10 @@ use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, SplitRecordBatchStream,
-    compute_average_batch_size, compute_parallel_channel_size, should_split_flat_batches_for_merge,
+    PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
+    compute_parallel_channel_size,
 };
-use crate::read::seq_scan::SeqScan;
+use crate::read::seq_scan::{FlatReadMode, SeqScan};
 use crate::read::series_candidate::{SeriesCandidateScanner, is_sparse_metric_metadata};
 use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, SeriesReader};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
@@ -749,31 +749,20 @@ impl SeriesDistributor {
                 let file_scan_semaphore = self.range_semaphore.clone();
                 let merge_semaphore = self.range_semaphore.clone();
                 tasks.push(common_runtime::spawn_query(async move {
-                    let (mut stream, mut estimated_batch_size) =
-                        SeqScan::build_flat_partition_range_read(
-                            &stream_ctx,
-                            &part_range,
-                            false,
-                            &part_metrics,
-                            partition_pruner,
-                            file_scan_semaphore,
-                            merge_semaphore,
-                        )
-                        .await?;
-                    // A single-source range skips splitting in SeqScan, but its output
-                    // still participates in this cross-range merge. Split here so cached
-                    // range batches follow the same path, while retaining the density
-                    // heuristic that protects short-series scans from tiny batches.
-                    if needs_merge
-                        && let Some(batch_size) = should_split_flat_batches_for_merge(
-                            &stream_ctx,
-                            &stream_ctx.ranges[part_range.identifier],
-                        )
-                    {
-                        stream = Box::pin(SplitRecordBatchStream::new(stream));
-                        estimated_batch_size = batch_size;
-                    }
-                    Ok::<_, crate::error::Error>((stream, estimated_batch_size))
+                    SeqScan::build_flat_partition_range_read(
+                        &stream_ctx,
+                        &part_range,
+                        if needs_merge {
+                            FlatReadMode::CrossRangeMerge
+                        } else {
+                            FlatReadMode::Sequential
+                        },
+                        &part_metrics,
+                        partition_pruner,
+                        file_scan_semaphore,
+                        merge_semaphore,
+                    )
+                    .await
                 }));
             }
         }
