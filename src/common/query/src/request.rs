@@ -14,13 +14,8 @@
 
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
-mod named_raw_series;
 mod raw_series_request;
 
-pub use self::named_raw_series::{
-    PREPARE_RAW_SERIES_ACTION, PreparedNamedRawSeries, decode_prepare_raw_series_response,
-    encode_prepare_raw_series_response,
-};
 pub use self::raw_series_request::{
     RAW_SERIES_REQUEST_EXTENSION_KEY, RawSeriesRequest, RawSeriesTag, take_raw_series_request,
 };
