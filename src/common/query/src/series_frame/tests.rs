@@ -830,40 +830,6 @@ async fn the_declared_description_is_retained_and_no_binding_is_invented() {
     );
 }
 
-/// A key-encoded stream that stays silent about its layout is rejected, not packed as an
-/// explicit-label frame: the frame would claim its chunks carry complete labels while they carry
-/// none. The rejection happens before the source is polled.
-#[tokio::test]
-async fn key_encoded_stream_without_a_declaration_is_rejected_before_poll() {
-    let polls = Arc::new(AtomicUsize::new(0));
-    let source = Box::pin(RawMock {
-        schema: schema(),
-        items: VecDeque::new(),
-        binding: key_binding("cpu"),
-        label_decode_spec: None,
-        ordering: SeriesOrdering::Contiguous,
-        polls: polls.clone(),
-        drops: Arc::new(AtomicUsize::new(0)),
-        pending_after: None,
-        pending_reported: false,
-        panic_on_poll: false,
-        emitted: 0,
-    });
-    let error = match pack_raw_series(source) {
-        Ok(_) => panic!("a key-encoded stream must not pack without a description"),
-        Err(error) => error.to_string(),
-    };
-    assert!(
-        error.contains("must declare its label decode description"),
-        "expected the missing-declaration error, got: {error}"
-    );
-    assert_eq!(
-        polls.load(Ordering::SeqCst),
-        0,
-        "the rejection is decided from the stream's declarations alone"
-    );
-}
-
 #[tokio::test]
 async fn explicit_mode_rejects_key_payload_and_primary_mode_rejects_explicit_metric() {
     let (input, _, _) = raw(

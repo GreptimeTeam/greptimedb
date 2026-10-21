@@ -188,9 +188,8 @@ pub fn raw_series_frame_ordering(
 ///
 /// The stream's own declaration is the only decode input: a frame unpacked without a scan-bound
 /// [`RawLabelSource`] round trips unchanged instead of being re-declared from a binding it does not
-/// have, and nothing is derived from a binding here. A key-encoded stream that declares no
-/// description is therefore rejected rather than packed as an explicit-label frame, which would
-/// describe chunks that carry no labels as if they carried all of them.
+/// have, and nothing is derived from a binding here. The declaration also decides the frame's label
+/// mode, so a chunk whose labels disagree with it is rejected when that chunk is coded.
 pub fn pack_raw_series(
     source: SendableRawSeriesStream,
 ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
@@ -198,14 +197,6 @@ pub fn pack_raw_series(
     ensure_supported_ordering(ordering)?;
     let schema = source.schema().clone();
     let decode = source.label_decode_spec().cloned();
-    // A stream whose chunks carry key-encoded labels must declare its layout. Packing one as an
-    // explicit-label frame would describe chunks that carry no labels as if they carried all of
-    // them, so the missing declaration is an error rather than a mode.
-    if decode.is_none() && matches!(source.label_source(), RawLabelSource::PrimaryKey { .. }) {
-        return Err(invalid(
-            "a key-encoded raw series stream must declare its label decode description",
-        ));
-    }
     let mode = declared_label_mode(&decode);
     // The declared frame schema carries the producer ordering and the label decode description;
     // the shared builder's schema intentionally omits both, so every ready batch is declared under
