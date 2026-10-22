@@ -104,6 +104,7 @@ use datatypes::series::{MetricName, SeriesOrdering};
 use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
 };
+use crate::histogram_eval::evaluate_histograms;
 use crate::instant_eval::select_instants;
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, MathOp, ScalarOperand, drop_metric_name,
@@ -1892,7 +1893,7 @@ fn vector_overflow(path: &NodePath) -> DataFusionError {
 /// Runs the kernel `op` binds over the whole input.
 fn vector_series(
     op: &BoundVectorOp,
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     series: Vec<Series>,
 ) -> Result<Vec<Series>> {
     let grouping = |group: &Grouping| match group {
@@ -1908,6 +1909,12 @@ fn vector_series(
         // A sort hands back the series it was given, rebuilding only those `sort` and `sort_desc`
         // drop histogram samples from.
         BoundVectorOp::Sort(order) => select::sort_instant(order, schema, series),
+        // The kernel groups bucket series by label set and takes one native histogram series per
+        // set, so pieces of one label set -- an empty tag and an absent one, or what a map folded
+        // -- are merged first, and two of them holding one point fail as they do elsewhere.
+        BoundVectorOp::Histogram(function) => {
+            evaluate_histograms(*function, schema, &merge_same_labelset(schema, series)?)
+        }
         BoundVectorOp::Absent { labels } => Ok(select::absent(schema, &series, labels.clone())?
             .into_iter()
             .collect()),
@@ -1926,6 +1933,9 @@ fn vector_series(
 /// - A sort: the value each series is keyed by, and the floats `sort` and `sort_desc` rebuild a
 ///   series into when it holds histograms; the label sorts move the series they were given.
 /// - `absent`: a presence flag and a result value per grid point and field.
+/// - `histogram_quantile` and `histogram_fraction`: the merge of label-set pieces before the kernel
+///   ([`merge_workspace_bytes`]); per series, its group entry and label pairs and a cursor per
+///   field; per row, the bucket it contributes and a result value per field.
 fn vector_workspace_bytes(op: &BoundVectorOp, schema: &SeriesSchema, series: &[Series]) -> usize {
     let fields = schema.fields.len();
     match op {
@@ -1952,6 +1962,22 @@ fn vector_workspace_bytes(op: &BoundVectorOp, schema: &SeriesSchema, series: &[S
                 usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
             });
             return points.saturating_mul(fields.saturating_mul(1 + std::mem::size_of::<f64>()));
+        }
+        BoundVectorOp::Histogram(_) => {
+            let rows: usize = series.iter().map(|item| item.time.len()).sum();
+            let label = std::mem::size_of::<(Arc<str>, Arc<str>)>();
+            let row = std::mem::size_of::<(f64, f64)>() + fields * std::mem::size_of::<f64>();
+            let per_series = std::mem::size_of::<(f64, &Series)>()
+                + fields * std::mem::size_of::<RowCursor<'_>>();
+            return series.iter().fold(
+                merge_workspace_bytes(rows, series.len(), fields),
+                |total, item| {
+                    total
+                        .saturating_add(per_series)
+                        .saturating_add((item.metric.tags().len() + 1).saturating_mul(label))
+                        .saturating_add(item.time.len().saturating_mul(row))
+                },
+            );
         }
         BoundVectorOp::TopK { .. }
         | BoundVectorOp::LimitK { .. }
@@ -3202,8 +3228,9 @@ impl NativeExecutionState {
                         // set stay pieces: they hold disjoint points, so ranking them apart picks
                         // what ranking the merged series would, and what is above treats them as
                         // it treats a map's. `absent` answers with one series under the labels it
-                        // was bound to, and `limitk` counts series in input order, so it merges the
-                        // pieces first and hands over whole series.
+                        // was bound to, the histogram functions merge the label sets they answer
+                        // with, and `limitk` counts series in input order, so it merges the pieces
+                        // first; none of them hands over pieces.
                         let op = match expr {
                             NativeExpr::Vector { op, .. } => Some(op),
                             _ => None,
@@ -3215,7 +3242,11 @@ impl NativeExecutionState {
                         {
                             vector.merge_input = true;
                         }
-                        let whole = limitk || matches!(op, Some(BoundVectorOp::Absent { .. }));
+                        let whole = limitk
+                            || matches!(
+                                op,
+                                Some(BoundVectorOp::Absent { .. } | BoundVectorOp::Histogram(_))
+                            );
                         holds_shared[index] = input_holds_shared && !whole;
                     }
                     NodeTag::Window => {

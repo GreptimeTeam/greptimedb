@@ -27,6 +27,9 @@
 //!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
 //!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
 //!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
+//!   absent(<expression>)                           e.g. absent(x{job="a"})
+//!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
 //!   <expression> <operator> <constant>             e.g. x * 100, x > bool 0
 //!   <constant> <operator> <expression>             e.g. 1 / x, 0 < x
 //!   -<expression>                                  e.g. -x
@@ -119,23 +122,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
+use datatypes::series::{MetricName, SeriesOrdering};
+use promql::histogram_eval::HistogramFunction;
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::map_time::DateFunction;
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
+use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
 use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use promql_parser::label::MatchOp as ParserMatchOp;
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     AggregateExpr, AtModifier, BinModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr,
-    LabelModifier, MatrixSelector, NumberLiteral, Offset, SubqueryExpr, VectorMatchCardinality,
-    VectorMatchFillValues, VectorSelector, token,
+    LabelModifier, MatrixSelector, NumberLiteral, Offset, StringLiteral, SubqueryExpr,
+    VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -160,7 +166,10 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; a \
-                         range function's own constants sit where that function takes them, before \
+                         sort, `absent` or `histogram_quantile` / `histogram_fraction` over any of \
+                         them (`sort_desc(x)`, `absent(x{job=\"a\"})`, \
+                         `histogram_quantile(0.9, rate(x[5m]))`); a range function's own \
+                         constants sit where that function takes them, before \
                          the matrix for `quantile_over_time(0.9, x[5m])` and after it for \
                          `predict_linear(x[5m], 300)` and \
                          `double_exponential_smoothing(x[5m], 0.5, 0.1)`";
@@ -581,6 +590,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
     }
+    if let Some((op, vector)) = vector_op(func.name, &args.args)? {
+        return vector_call(context, func.name, op, vector);
+    }
     // The name is looked up before the call's arguments are read, so a name this compiler has no
     // kernel for is refused as such whichever argument it was given: `absent(x)` is refused as a
     // name with no kernel, not as a selector this compiler could not compile.
@@ -671,6 +683,148 @@ fn map_call(context: &Context, name: &str, op: MathOp, vector: &PromExpr) -> Res
         },
         output,
     })
+}
+
+/// Wraps the vector operation `op` over the value of `vector`, which keeps its type as a map does.
+fn vector_call(
+    context: &Context,
+    name: &str,
+    op: BoundVectorOp,
+    vector: &PromExpr,
+) -> Result<NativeNode> {
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose vector argument is `{vector}`, which is a {}, where the \
+             function takes a vector",
+            vector.value_type()
+        )));
+    }
+    let input = compile_expr(context, vector)?;
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(input),
+            op,
+        },
+        output,
+    })
+}
+
+/// The vector operation a sort, `absent` or a classic histogram function binds, and the vector it reads,
+/// or `None` when `name` is none of them.
+fn vector_op<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(BoundVectorOp, &'a PromExpr)>> {
+    let order = match name {
+        "sort" => Some(SortOrder::Asc),
+        "sort_desc" => Some(SortOrder::Desc),
+        "sort_by_label" | "sort_by_label_desc" => None,
+        "histogram_quantile" | "histogram_fraction" => {
+            let Some((vector, constants)) = arguments.split_last() else {
+                return Err(not_implemented(&format!(
+                    "a call to `{name}` with no argument"
+                )));
+            };
+            let function = match constants {
+                [quantile] if name == "histogram_quantile" => {
+                    HistogramFunction::Quantile(constant_argument(name, quantile, 0)?)
+                }
+                [lower, upper] if name == "histogram_fraction" => HistogramFunction::Fraction {
+                    lower: constant_argument(name, lower, 0)?,
+                    upper: constant_argument(name, upper, 1)?,
+                },
+                _ => {
+                    return Err(not_implemented(&format!(
+                        "a call to `{name}` with {} argument(s)",
+                        arguments.len()
+                    )));
+                }
+            };
+            return Ok(Some((BoundVectorOp::Histogram(function), vector)));
+        }
+        "absent" => {
+            let [vector] = arguments else {
+                return Err(not_implemented(&format!(
+                    "a call to `absent` with {} argument(s)",
+                    arguments.len()
+                )));
+            };
+            let labels = absent_labels_of(vector)?;
+            return Ok(Some((BoundVectorOp::Absent { labels }, vector)));
+        }
+        _ => return Ok(None),
+    };
+    let Some((vector, strings)) = arguments.split_first() else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with no argument"
+        )));
+    };
+    let order = match order {
+        Some(order) if strings.is_empty() => order,
+        Some(_) => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` with {} argument(s)",
+                arguments.len()
+            )));
+        }
+        None => {
+            let labels = strings
+                .iter()
+                .map(|argument| match unparen(argument) {
+                    PromExpr::StringLiteral(StringLiteral { val }) => Ok(Arc::from(val.as_str())),
+                    other => Err(not_implemented(&format!(
+                        "a call to `{name}` whose argument `{other}` is not a string literal"
+                    ))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if name == "sort_by_label" {
+                SortOrder::ByLabel(labels)
+            } else {
+                SortOrder::ByLabelDesc(labels)
+            }
+        }
+    };
+    Ok(Some((BoundVectorOp::Sort(order), vector)))
+}
+
+/// The labels `absent(expr)` answers with, as Prometheus `createLabelsForAbsentFunction` derives
+/// them: from the matchers of a vector selector, and none for any other expression.
+///
+/// `__field__`, `__schema__` and `__database__` choose what is read rather than match a label, so
+/// they are not labels of the answer, as in the existing planner.
+fn absent_labels_of(expr: &PromExpr) -> Result<MetricName> {
+    let PromExpr::VectorSelector(selector) = unparen(expr) else {
+        return absent_labels(&[]);
+    };
+    if !selector.matchers.or_matchers.is_empty() {
+        return Err(not_implemented(&format!(
+            "`absent` over `{selector}`, whose matchers are alternatives"
+        )));
+    }
+    let matchers = selector
+        .matchers
+        .matchers
+        .iter()
+        .filter(|matcher| {
+            !matches!(
+                matcher.name.as_str(),
+                "__field__" | "__schema__" | "__database__"
+            )
+        })
+        .map(|matcher| LabelMatcher {
+            name: Arc::from(matcher.name.as_str()),
+            op: match matcher.op {
+                ParserMatchOp::Equal => MatchOp::Equal,
+                ParserMatchOp::NotEqual => MatchOp::NotEqual,
+                ParserMatchOp::Re(_) => MatchOp::Regex,
+                ParserMatchOp::NotRe(_) => MatchOp::NotRegex,
+            },
+            value: Arc::from(matcher.value.as_str()),
+            matches_empty: matcher.is_match(""),
+        })
+        .collect::<Vec<_>>();
+    absent_labels(&matchers)
 }
 
 /// Binds `function` over the range selector `vs[range]` into a window over the raw input.
