@@ -3778,7 +3778,7 @@ fn a_million_position_grid_with_two_values_is_one_series_of_two_rows() {
         "the grid really holds a million positions"
     );
     assert_eq!(
-        series.time.spec().len as usize,
+        series.time.timestamps().unwrap().len(),
         2,
         "the axis hands out two timestamps, not one per grid position"
     );
