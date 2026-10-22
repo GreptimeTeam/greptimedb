@@ -479,6 +479,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
             pool,
         ),
         queued: VecDeque::new(),
+        queued_tables: 0,
         instant: None,
         window: None,
         map: None,
@@ -496,6 +497,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
     NodeRuntime {
         buffer: NodeBuffer::new(&NodePath::root(), Arc::new(NodeMetrics::default()), pool),
         queued: VecDeque::new(),
+        queued_tables: 0,
         instant: None,
         window: None,
         map: None,
@@ -6704,4 +6706,76 @@ fn a_sorted_series_is_queued_at_what_its_slices_hold() {
     let chunks = run(&mut execution);
     assert_eq!(decided(&chunks).len(), points as usize);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// Two sorted results share one histogram table, so the table stays charged until the second one
+/// leaves, not only until the first one does.
+#[test]
+fn a_table_shared_by_queued_results_stays_charged_until_the_last_leaves() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::ByLabel(vec!["job".into()])),
+    ))
+    .unwrap();
+    let table = histogram_table(2, 64);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for (job, index) in [("a", 0), ("b", 1)] {
+        execution
+            .push_evaluated(evaluated_histogram_chunk_of(
+                &schema,
+                named_metric("m", job),
+                0,
+                vec![Some(index)],
+                &table,
+                true,
+            ))
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(first.series.metric.get("job"), Some("a"));
+    drop(first);
+    assert!(pool.reserved() >= histogram_table_bytes(&table));
+    let second = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(second.series.metric.get("job"), Some("b"));
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `limitk` takes the order a sort below it decided: `sort_desc` puts `{job="z"}` first, so it is
+/// the one `limitk(1, ...)` keeps, although `{job="a"}` sorts first by label.
+#[test]
+fn limitk_keeps_the_order_a_sort_below_it_decided() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::Sort(SortOrder::Desc),
+        ),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (job, value) in [("a", 1.0), ("z", 2.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("v", job),
+                0,
+                vec![Some(value)],
+                true,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        decided_by_job(&run(&mut execution)),
+        vec![("z".to_string(), vec![(0, Some(2.0))])]
+    );
 }

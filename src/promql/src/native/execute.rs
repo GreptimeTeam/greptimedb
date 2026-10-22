@@ -2114,6 +2114,10 @@ struct NodeRuntime {
     /// uses it for both. A chunk is measured once, as it enters, and the figure it was queued with
     /// is given back as it leaves, so neither the queue nor the handover walks it.
     queued: VecDeque<(NativeChunk, usize)>,
+    /// The histogram tables queued results share with each other, charged to the queue as a whole
+    /// rather than to one result: a table stays alive while any result referencing it is queued,
+    /// so its charge is given back when the queue empties, not when the first result leaves.
+    queued_tables: usize,
     /// What an instant node holds: the chunks of the series it is selecting, and, while it gathers
     /// that series, the workspace the gather reserved for. `None` for every other kind of node.
     instant: Option<InstantRuntime>,
@@ -2190,6 +2194,7 @@ impl NodeRuntime {
             // hold it.
             let _timer = metrics.timer();
             self.buffer.shrink(bytes)?;
+            self.release_queued_tables()?;
         }
         metrics.record_output(1, values(&chunk));
         // An evaluated chunk is addressed on its grid, so its decided positions are grid points; a
@@ -2427,9 +2432,10 @@ impl NodeRuntime {
     ///
     /// `shares_input` says the series are the assembled input itself, as a sort hands it back: a
     /// field there is one slice per input chunk of buffers and histogram tables the chunks shared,
-    /// so each series is measured the way the input was ([`operand_chunk_bytes`], each table billed
-    /// once) rather than by the allocations its slices belong to, which would count a buffer once
-    /// per chunk.
+    /// so each series is measured the way the input was ([`operand_chunk_bytes`]) rather than by
+    /// the allocations its slices belong to, which would count a buffer once per chunk. The tables
+    /// are billed once, to the queue ([`NodeRuntime::queued_tables`]), since several results can
+    /// keep one alive.
     fn queue_results(&mut self, output: Vec<Series>, shares_input: bool) -> Result<()> {
         let mut tables = HashSet::new();
         // The results are queued the way a node that produces a chunk per input queues what it
@@ -2441,7 +2447,8 @@ impl NodeRuntime {
             let shared = shares_input.then(|| {
                 let (fresh, table_bytes) = unbilled_tables(&series, &tables);
                 tables.extend(fresh);
-                operand_chunk_bytes(&series).saturating_add(table_bytes)
+                self.queued_tables = self.queued_tables.saturating_add(table_bytes);
+                operand_chunk_bytes(&series)
             });
             let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
             // The result is already admitted, within the workspace reserved for the kernel. What the
@@ -2460,7 +2467,9 @@ impl NodeRuntime {
         let queued = self
             .queued
             .iter()
-            .fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
+            .fold(self.queued_tables, |total, (_, bytes)| {
+                total.saturating_add(*bytes)
+            });
         self.buffer.resize(queued)
     }
 
@@ -2622,7 +2631,17 @@ impl NodeRuntime {
             return Ok(None);
         };
         self.buffer.shrink(bytes)?;
+        self.release_queued_tables()?;
         Ok(Some(chunk))
+    }
+
+    /// Gives back the shared tables' charge once no queued result references them.
+    fn release_queued_tables(&mut self) -> Result<()> {
+        if self.queued.is_empty() && self.queued_tables > 0 {
+            self.buffer
+                .shrink(std::mem::take(&mut self.queued_tables))?;
+        }
+        Ok(())
     }
 
     /// Records what this node hands out under its output label set.
@@ -2666,6 +2685,7 @@ impl NodeRuntime {
         self.open_source_series = false;
         self.queued.clear();
         self.queued.shrink_to_fit();
+        self.queued_tables = 0;
         // The reservation is returned once, below, for everything this node still held.
         self.buffer.release();
     }
@@ -2757,6 +2777,7 @@ impl NativeExecutionState {
             let mut runtime = NodeRuntime {
                 buffer,
                 queued: VecDeque::new(),
+                queued_tables: 0,
                 instant: None,
                 window: None,
                 map: None,
@@ -2963,10 +2984,11 @@ impl NativeExecutionState {
                             _ => None,
                         };
                         let limitk = matches!(op, Some(BoundVectorOp::LimitK { .. }));
-                        if limitk && input_holds_shared {
-                            if let Some(vector) = runtimes[index].vector.as_mut() {
-                                vector.merge_input = true;
-                            }
+                        if limitk
+                            && input_holds_shared
+                            && let Some(vector) = runtimes[index].vector.as_mut()
+                        {
+                            vector.merge_input = true;
                         }
                         let whole = limitk || matches!(op, Some(BoundVectorOp::Absent { .. }));
                         holds_shared[index] = input_holds_shared && !whole;
