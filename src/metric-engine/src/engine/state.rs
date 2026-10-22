@@ -206,12 +206,16 @@ impl MetricEngineState {
     }
 
     /// Replace the logical columns of the logical region with given columns.
+    /// Caches the columns of a logical region. A load that finishes after the region left the
+    /// mapping, for example because its drop failed, caches nothing.
     pub fn set_logical_columns(
         &mut self,
         logical_region_id: RegionId,
         columns: Vec<ColumnMetadata>,
     ) {
-        self.logical_columns.insert(logical_region_id, columns);
+        if self.logical_regions.contains_key(&logical_region_id) {
+            self.logical_columns.insert(logical_region_id, columns);
+        }
     }
 
     pub fn get_physical_region_id(&self, logical_region_id: RegionId) -> Option<RegionId> {
@@ -323,7 +327,6 @@ impl MetricEngineState {
             .dropping_logical_regions
             .remove(&logical_region_id)
             .is_some()
-            && !self.logical_regions.contains_key(&logical_region_id)
         {
             return Ok(());
         }
@@ -375,6 +378,19 @@ mod tests {
                 .logical_regions()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_dropping_logical_region_caches_no_columns() {
+        let physical = to_data_region_id(RegionId::new(1, 1));
+        let logical = RegionId::new(2, 1);
+        let mut state = state_with_logical_region(physical, logical);
+        state.mark_logical_region_dropping(logical);
+        // A schema load that started before the failed drop publishes its columns.
+        state.set_logical_columns(logical, vec![]);
+        assert!(!state.logical_columns().contains_key(&logical));
+        state.finish_logical_region_drop(logical).unwrap();
+        assert!(!state.logical_columns().contains_key(&logical));
     }
 
     #[test]
