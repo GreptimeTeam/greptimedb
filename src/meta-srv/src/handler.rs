@@ -330,6 +330,29 @@ struct PusherSlots {
     node_epochs: BTreeMap<PusherId, u64>,
 }
 
+impl PusherSlots {
+    fn insert(&mut self, pusher_id: PusherId, pusher: Pusher) -> bool {
+        // Only datanode pushers carry an epoch.
+        if pusher.node_epoch > 0 {
+            let highest = self.node_epochs.entry(pusher_id).or_default();
+            if pusher.node_epoch < *highest {
+                return false;
+            }
+            *highest = pusher.node_epoch;
+        }
+        self.pushers.insert(pusher_id, pusher);
+        true
+    }
+
+    /// Returns whether the slot is empty or holds a pusher with a node epoch lower than
+    /// `node_epoch`.
+    fn is_vacant_for(&self, pusher_id: &PusherId, node_epoch: u64) -> bool {
+        self.pushers
+            .get(pusher_id)
+            .is_none_or(|pusher| pusher.node_epoch < node_epoch)
+    }
+}
+
 impl Pushers {
     async fn push(
         &self,
@@ -389,17 +412,28 @@ impl Pushers {
     /// the slot, so an older datanode process cannot take over a newer one's pusher. Returns
     /// whether the pusher was inserted.
     pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
-        let mut slots = self.0.write().await;
-        // Only datanode pushers carry an epoch.
-        if pusher.node_epoch > 0 {
-            let highest = slots.node_epochs.entry(pusher_id).or_default();
-            if pusher.node_epoch < *highest {
-                return false;
-            }
-            *highest = pusher.node_epoch;
+        self.0.write().await.insert(pusher_id, pusher)
+    }
+
+    /// Inserts a pusher for `sender` with `node_epoch` as [Pushers::insert] does, but only
+    /// when the slot is empty or holds a pusher with a lower node epoch, so it never replaces
+    /// a pusher of the same process. Returns whether the pusher was inserted.
+    async fn insert_if_vacant(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+        node_epoch: u64,
+    ) -> bool {
+        // Usually the slot is taken, which the read guard is enough to tell.
+        if !self.0.read().await.is_vacant_for(&pusher_id, node_epoch) {
+            return false;
         }
-        slots.pushers.insert(pusher_id, pusher);
-        true
+        let mut slots = self.0.write().await;
+        slots.is_vacant_for(&pusher_id, node_epoch)
+            && slots.insert(
+                pusher_id,
+                Pusher::new(sender.clone()).with_node_epoch(node_epoch),
+            )
     }
 
     /// Removes the pusher if it pushes to `sender`'s channel, keeping one that another stream
@@ -473,6 +507,28 @@ impl HeartbeatHandlerGroup {
         } else {
             info!(
                 "Pusher register: {} skipped, a pusher with a higher node epoch than {} exists",
+                pusher_id, node_epoch
+            );
+        }
+    }
+
+    /// Registers a heartbeat response [`Pusher`] for `sender` again if the group holds none
+    /// with the given key, or one registered with a lower node epoch. For example, another
+    /// stream of the same datanode process may have taken over the pusher and then ended.
+    pub(crate) async fn reregister_pusher(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+        node_epoch: u64,
+    ) {
+        if self
+            .pushers
+            .insert_if_vacant(pusher_id, sender, node_epoch)
+            .await
+        {
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
+            info!(
+                "Pusher register again: {}, node epoch: {}",
                 pusher_id, node_epoch
             );
         }

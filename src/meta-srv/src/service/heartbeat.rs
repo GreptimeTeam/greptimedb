@@ -114,6 +114,8 @@ struct HeartbeatSession<R, L> {
     sender_id: PusherId,
     /// Whether the stream has yet to register its pusher. A datanode stream registers it on
     /// its first request that passes the node epoch check, other streams on the handshake.
+    /// Later requests of a datanode stream that pass the check register it again if the slot
+    /// is empty or holds an older process's pusher.
     pusher_pending: bool,
 }
 
@@ -306,6 +308,11 @@ where
                         self.sender_id,
                         Pusher::new(self.tx.clone()).with_node_epoch(node_epoch),
                     )
+                    .await;
+            }
+            NodeEpochCheck::Checked(NodeEpochFence::Accepted) => {
+                self.handler_group
+                    .reregister_pusher(self.sender_id, &self.tx, node_epoch)
                     .await;
             }
             // Keeps the stream open: a datanode that does not understand the fence would
@@ -1005,6 +1012,35 @@ mod tests {
             assert_eq!(a2_reconnected.pusher_epoch(&group).await, Some(e2));
             a2.session.run().await;
             assert_eq!(a2_reconnected.pusher_epoch(&group).await, Some(e2));
+        }
+
+        #[tokio::test]
+        async fn test_stream_registers_again_after_the_other_stream_of_its_process_ends() {
+            let group = Arc::new(new_group());
+            let ctx = TestEnv::new().ctx();
+            let pusher_id = PusherId::new(Role::Datanode, NODE_ID);
+            let (e1, _) = epochs();
+
+            // 1. The process has two streams: S0 is an old one, S1 replaced it.
+            let mut s0 = Stream::open(&group, &ctx, handshake(0)).await;
+            let mut s1 = Stream::open(&group, &ctx, handshake(0)).await;
+            // 2. S1 registers its pusher.
+            s1.send(heartbeat(e1, "a1")).await;
+            assert_eq!(s1.pusher_epoch(&group).await, Some(e1));
+            // 3. S0's first accepted request comes later, and takes over the pusher. S1's
+            // next heartbeat leaves it, since it has the same epoch.
+            s0.send(heartbeat(e1, "a1")).await;
+            assert_eq!(s0.pusher_epoch(&group).await, Some(e1));
+            s1.send(heartbeat(e1, "a1")).await;
+            assert_eq!(s0.pusher_epoch(&group).await, Some(e1));
+            // 4. S0 ends, and removes its pusher.
+            s0.session.run().await;
+            assert!(!group.contains_pusher(&pusher_id).await);
+            // 5. S1's next heartbeat registers its pusher again.
+            let (res, open) = s1.send(heartbeat(e1, "a1")).await;
+            assert!(open);
+            assert_eq!(fence(&res), Some("accepted"));
+            assert_eq!(s1.pusher_epoch(&group).await, Some(e1));
         }
 
         #[tokio::test]

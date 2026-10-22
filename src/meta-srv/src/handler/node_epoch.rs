@@ -15,15 +15,20 @@
 //! Fences stale datanode processes by their `node_epoch`.
 //!
 //! A datanode process reports the wall-clock time it started as `node_epoch`. The leader keeps
-//! the highest epoch of each datanode in the kv backend and reads it, uncached, before it
-//! answers any datanode request that carries an epoch. A lower epoch belongs to a process that
-//! a newer process with the same node id has replaced, so its requests get no grant, whichever
-//! metasrv they reach.
+//! the highest epoch of each datanode in the kv backend, and in memory the highest one it has
+//! read or written there in its current term. It answers a datanode request that carries an
+//! epoch from memory, unless the epoch is higher or the node has no epoch in memory yet: then
+//! it reads the kv backend, uncached, and raises the record when the epoch is higher. A lower
+//! epoch belongs to a process that a newer process with the same node id has replaced, so its
+//! requests get no grant, whichever metasrv they reach.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, Role};
+use common_meta::DatanodeId;
 use common_meta::datanode::{NodeEpochFence, STARTUP_HANDSHAKE_KEY};
 use common_meta::key::MetadataValue;
 use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
@@ -45,15 +50,56 @@ const NODE_EPOCH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 /// a clock that jumped further ahead would fence every later process with the node id.
 const MAX_NODE_EPOCH_AHEAD: Duration = Duration::from_secs(5 * 60);
 
+pub(crate) type NodeEpochCacheRef = Arc<NodeEpochCache>;
+
+/// The highest epoch of each datanode that the leader has read or written in the kv backend
+/// in its current term.
+#[derive(Default)]
+pub(crate) struct NodeEpochCache {
+    inner: Mutex<NodeEpochCacheInner>,
+}
+
+#[derive(Default)]
+struct NodeEpochCacheInner {
+    /// Grows on every reset, so a kv read started before a reset cannot fill the cache after it.
+    term: u64,
+    epochs: HashMap<DatanodeId, u64>,
+}
+
+impl NodeEpochCache {
+    /// Clears the cache. Called on every leader change.
+    pub(crate) fn reset(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.term += 1;
+        inner.epochs.clear();
+    }
+
+    /// Returns the current term and the highest epoch of `node_id` in it.
+    fn get(&self, node_id: DatanodeId) -> (u64, Option<u64>) {
+        let inner = self.inner.lock().unwrap();
+        (inner.term, inner.epochs.get(&node_id).copied())
+    }
+
+    /// Records `node_epoch`, read or written in the kv backend in `term`, as the highest epoch
+    /// of `node_id` if it is higher and the cache has not been reset since.
+    fn fill(&self, term: u64, node_id: DatanodeId, node_epoch: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.term == term {
+            let highest = inner.epochs.entry(node_id).or_default();
+            *highest = (*highest).max(node_epoch);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NodeEpochCheck {
     /// Not a datanode request, or a datanode request without an epoch: the handshake of a
     /// datanode that does not report its epoch on handshakes, or the placeholder a datanode
     /// sends before it reconnects.
     Unchecked,
-    /// This metasrv is not the leader, so the kv backend was not read.
+    /// This metasrv is not the leader, so the epoch was not checked.
     NotLeader,
-    /// The epoch was checked against the highest one in the kv backend.
+    /// The epoch was checked against the highest one in memory or in the kv backend.
     Checked(NodeEpochFence),
 }
 
@@ -80,8 +126,8 @@ pub(crate) async fn check_node_epoch(
             .inc();
         return NodeEpochCheck::Unchecked;
     }
-    // Checks leadership before reading the kv backend, so a metasrv that becomes the leader
-    // while it handles the request cannot grant without reading the epoch.
+    // Checks leadership before reading the epoch, so a metasrv that becomes the leader while
+    // it handles the request cannot grant without checking the epoch.
     if let Some(election) = &ctx.election
         && !election.is_leader()
     {
@@ -89,26 +135,35 @@ pub(crate) async fn check_node_epoch(
     }
 
     let node_epoch = req.node_epoch;
-    let result = {
-        let _timer = METRIC_META_NODE_EPOCH_CHECK_ELAPSED.start_timer();
-        tokio::time::timeout(
-            NODE_EPOCH_CHECK_TIMEOUT,
-            fence_node_epoch(&ctx.kv_backend, node_id, node_epoch),
-        )
-        .await
-    };
-    let fence = match result {
-        Ok(Ok(fence)) => fence,
-        Ok(Err(err)) => {
-            warn!(err; "Failed to check epoch {} of datanode {}", node_epoch, node_id);
-            NodeEpochFence::Unverified
-        }
-        Err(_) => {
-            warn!(
-                "Timed out checking epoch {} of datanode {} after {:?}",
-                node_epoch, node_id, NODE_EPOCH_CHECK_TIMEOUT
-            );
-            NodeEpochFence::Unverified
+    let (term, cached) = ctx.node_epoch_cache.get(node_id);
+    let fence = match cached.and_then(|highest| compare_epoch(node_id, node_epoch, highest)) {
+        Some(fence) => fence,
+        None => {
+            let result = {
+                let _timer = METRIC_META_NODE_EPOCH_CHECK_ELAPSED.start_timer();
+                tokio::time::timeout(
+                    NODE_EPOCH_CHECK_TIMEOUT,
+                    fence_node_epoch(&ctx.kv_backend, node_id, node_epoch),
+                )
+                .await
+            };
+            match result {
+                Ok(Ok((fence, highest))) => {
+                    ctx.node_epoch_cache.fill(term, node_id, highest);
+                    fence
+                }
+                Ok(Err(err)) => {
+                    warn!(err; "Failed to check epoch {} of datanode {}", node_epoch, node_id);
+                    NodeEpochFence::Unverified
+                }
+                Err(_) => {
+                    warn!(
+                        "Timed out checking epoch {} of datanode {} after {:?}",
+                        node_epoch, node_id, NODE_EPOCH_CHECK_TIMEOUT
+                    );
+                    NodeEpochFence::Unverified
+                }
+            }
         }
     };
     METRIC_META_NODE_EPOCH_CHECK
@@ -129,11 +184,28 @@ fn request_kind(req: &HeartbeatRequest, is_handshake: bool) -> &'static str {
     }
 }
 
+/// Compares `node_epoch` with the highest epoch of `node_id`. Returns `None` if it is higher.
+fn compare_epoch(node_id: u64, node_epoch: u64, highest: u64) -> Option<NodeEpochFence> {
+    match node_epoch.cmp(&highest) {
+        Ordering::Less => {
+            warn!(
+                "Fenced datanode {} with epoch {}: a newer process with epoch {} has been accepted",
+                node_id, node_epoch, highest
+            );
+            Some(NodeEpochFence::Stale)
+        }
+        Ordering::Equal => Some(NodeEpochFence::Accepted),
+        Ordering::Greater => None,
+    }
+}
+
+/// Checks `node_epoch` against the highest epoch of `node_id` in the kv backend, raising it
+/// first when `node_epoch` is higher. Returns the result and the highest epoch afterwards.
 async fn fence_node_epoch(
     kv_backend: &KvBackendRef,
     node_id: u64,
     node_epoch: u64,
-) -> Result<NodeEpochFence> {
+) -> Result<(NodeEpochFence, u64)> {
     let key = DatanodeEpochKey::new(node_id).to_bytes();
     let mut current = kv_backend.get(&key).await.context(error::KvBackendSnafu)?;
     loop {
@@ -145,16 +217,8 @@ async fn fence_node_epoch(
             }
             None => (vec![], 0),
         };
-        match node_epoch.cmp(&highest) {
-            Ordering::Less => {
-                warn!(
-                    "Fenced datanode {} with epoch {}: a newer process with epoch {} has been accepted",
-                    node_id, node_epoch, highest
-                );
-                return Ok(NodeEpochFence::Stale);
-            }
-            Ordering::Equal => return Ok(NodeEpochFence::Accepted),
-            Ordering::Greater => {}
+        if let Some(fence) = compare_epoch(node_id, node_epoch, highest) {
+            return Ok((fence, highest));
         }
 
         let limit = (current_time_millis().max(0) as u64)
@@ -164,7 +228,7 @@ async fn fence_node_epoch(
                 "Refused to record epoch {} of datanode {}: it is more than {:?} ahead of this metasrv's clock",
                 node_epoch, node_id, MAX_NODE_EPOCH_AHEAD
             );
-            return Ok(NodeEpochFence::ClockAhead);
+            return Ok((NodeEpochFence::ClockAhead, highest));
         }
 
         let value = DatanodeEpochValue { node_epoch }
@@ -183,7 +247,7 @@ async fn fence_node_epoch(
                 "Raised the epoch of datanode {} from {} to {}",
                 node_id, highest, node_epoch
             );
-            return Ok(NodeEpochFence::Accepted);
+            return Ok((NodeEpochFence::Accepted, node_epoch));
         }
         current = resp.prev_kv;
     }
@@ -234,11 +298,12 @@ pub(crate) mod tests {
     pub(crate) const NODE_ID: u64 = 1;
 
     /// A memory kv backend whose reads can be slowed down, failed or held after they read,
-    /// and whose compare-and-put can be held.
+    /// and whose compare-and-put can be held. It counts reads and compare-and-puts.
     #[derive(Default)]
     pub(crate) struct HookedKvBackend {
         inner: MemoryKvBackend<common_meta::error::Error>,
         reads: AtomicUsize,
+        writes: AtomicUsize,
         read_delay: std::sync::Mutex<Option<Duration>>,
         fail_reads: AtomicBool,
         /// Holds the next read after it has read: notifies the first, waits for the second.
@@ -331,6 +396,7 @@ pub(crate) mod tests {
             &self,
             req: CompareAndPutRequest,
         ) -> common_meta::error::Result<CompareAndPutResponse> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
             self.cas_entered.notify_one();
             let gate = self.cas_gate.lock().unwrap().clone();
             if let Some(gate) = gate {
@@ -466,6 +532,29 @@ pub(crate) mod tests {
         res.extensions
             .get(NodeEpochFence::NODE_EPOCH_FENCE_KEY)
             .map(|value| std::str::from_utf8(value).unwrap())
+    }
+
+    impl HookedKvBackend {
+        /// Returns the reads and compare-and-puts so far.
+        fn ops(&self) -> (usize, usize) {
+            (
+                self.reads.load(Ordering::Relaxed),
+                self.writes.load(Ordering::Relaxed),
+            )
+        }
+
+        async fn record(&self, node_epoch: u64) {
+            self.inner
+                .put(PutRequest {
+                    key: DatanodeEpochKey::new(NODE_ID).to_bytes(),
+                    value: DatanodeEpochValue { node_epoch }
+                        .try_as_raw_value()
+                        .unwrap(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
     }
 
     async fn recorded_epoch(kv_backend: &KvBackendRef) -> Option<u64> {
@@ -606,40 +695,94 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_epoch_is_read_from_kv_on_every_leader() {
+    async fn test_epoch_is_read_from_kv_once_per_leader_term() {
+        let now = current_time_millis() as u64;
+        let (e0, e1, e2) = (now - 2000, now - 1000, now);
+        let group = new_group();
+        let kv_backend = Arc::new(HookedKvBackend::default());
+        let ctx = new_ctx(kv_backend.clone(), None);
+
+        // The first request of the node in the term reads the kv backend, and records the
+        // epoch since there is none.
+        let res = group
+            .handle(heartbeat(e1, "a1"), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        assert_eq!(kv_backend.ops(), (1, 1));
+
+        // Equal and lower epochs are answered from memory.
+        for _ in 0..3 {
+            let res = group
+                .handle(heartbeat(e1, "a1"), ctx.clone())
+                .await
+                .unwrap();
+            assert_eq!(fence(&res), Some("accepted"));
+            assert!(res.region_lease.is_some());
+        }
+        let res = group
+            .handle(mailbox_reply(e1, 1), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        let res = group
+            .handle(heartbeat(e0, "a0"), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("stale"));
+        assert_eq!(kv_backend.ops(), (1, 1));
+
+        // A higher epoch reads the record and raises it.
+        let res = group
+            .handle(heartbeat(e2, "a2"), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        assert_eq!(kv_backend.ops(), (2, 2));
+        let res = group
+            .handle(heartbeat(e1, "a1"), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("stale"));
+        let res = group
+            .handle(heartbeat(e2, "a2"), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        assert_eq!(kv_backend.ops(), (2, 2));
+
+        // A leader change clears the memory, so the next request reads the kv backend again.
+        ctx.node_epoch_cache.reset();
+        let res = group
+            .handle(heartbeat(e1, "a1"), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("stale"));
+        let res = group.handle(heartbeat(e2, "a2"), ctx).await.unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        assert_eq!(kv_backend.ops(), (3, 2));
+    }
+
+    #[tokio::test]
+    async fn test_epoch_is_read_again_after_leadership_moves() {
         let now = current_time_millis() as u64;
         let (e1, e2) = (now - 1000, now);
         let (m1_group, m2_group) = (new_group(), new_group());
 
-        // M2 accepts A1, then A2 is accepted on M1. When A1 returns to M2, M2 sees A2's epoch.
+        // M1 accepts A1, steps down while M2 accepts A2, and is elected again. Each leader
+        // change clears the leader's memory, as the leader change loop of the metasrv does.
         let kv_backend = Arc::new(HookedKvBackend::default());
-        let m1 = new_ctx(kv_backend.clone(), None);
-        let m2 = new_ctx(kv_backend.clone(), None);
-        let res = m2_group
-            .handle(heartbeat(e1, "a1"), m2.clone())
-            .await
-            .unwrap();
-        assert_eq!(fence(&res), Some("accepted"));
-        let res = m1_group.handle(heartbeat(e2, "a2"), m1).await.unwrap();
-        assert_eq!(fence(&res), Some("accepted"));
-        let res = m2_group.handle(heartbeat(e1, "a1"), m2).await.unwrap();
-        assert_eq!(fence(&res), Some("stale"));
-        assert!(res.region_lease.is_none());
-        // One read per check.
-        assert_eq!(kv_backend.reads.load(Ordering::Relaxed), 3);
-
-        // M1 accepts A1, steps down while M2 accepts A2, and is elected again.
-        let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
         let election = Arc::new(TestElection::default());
         election.leader.store(true, Ordering::Relaxed);
         let m1 = new_ctx(kv_backend.clone(), Some(election.clone()));
-        let m2 = new_ctx(kv_backend, None);
+        let m2 = new_ctx(kv_backend.clone(), None);
         let res = m1_group
             .handle(heartbeat(e1, "a1"), m1.clone())
             .await
             .unwrap();
         assert_eq!(fence(&res), Some("accepted"));
         election.leader.store(false, Ordering::Relaxed);
+        m1.node_epoch_cache.reset();
         let res = m1_group
             .handle(heartbeat(e1, "a1"), m1.clone())
             .await
@@ -648,9 +791,44 @@ pub(crate) mod tests {
         let res = m2_group.handle(heartbeat(e2, "a2"), m2).await.unwrap();
         assert_eq!(fence(&res), Some("accepted"));
         election.leader.store(true, Ordering::Relaxed);
+        m1.node_epoch_cache.reset();
         let res = m1_group.handle(heartbeat(e1, "a1"), m1).await.unwrap();
         assert_eq!(fence(&res), Some("stale"));
         assert!(res.region_lease.is_none());
+        // One read per leader term, none on the follower.
+        assert_eq!(kv_backend.ops(), (3, 2));
+    }
+
+    #[tokio::test]
+    async fn test_read_from_an_earlier_term_does_not_fill_memory() {
+        let now = current_time_millis() as u64;
+        let (e1, e2) = (now - 1000, now);
+        let group = Arc::new(new_group());
+        let kv_backend = Arc::new(HookedKvBackend::default());
+        let ctx = new_ctx(kv_backend.clone(), None);
+        kv_backend.record(e1).await;
+
+        // A1's check reads e1, then waits while the leader changes and another leader
+        // accepts A2.
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        *kv_backend.hold_next_read.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let a1 = tokio::spawn({
+            let group = group.clone();
+            let ctx = ctx.clone();
+            async move { group.handle(heartbeat(e1, "a1"), ctx).await.unwrap() }
+        });
+        entered.notified().await;
+        ctx.node_epoch_cache.reset();
+        kv_backend.record(e2).await;
+        release.notify_one();
+        a1.await.unwrap();
+
+        // The read from the earlier term is not kept, so A1's next request reads A2's epoch.
+        let res = group.handle(heartbeat(e1, "a1"), ctx).await.unwrap();
+        assert_eq!(fence(&res), Some("stale"));
+        assert!(res.region_lease.is_none());
+        assert_eq!(kv_backend.ops(), (2, 0));
     }
 
     #[tokio::test]
@@ -662,17 +840,7 @@ pub(crate) mod tests {
         let ctx = new_ctx(kv_backend.clone(), None);
         let now = current_time_millis() as u64;
         let (e1, e2) = (now - 1000, now);
-        kv_backend
-            .inner
-            .put(PutRequest {
-                key: DatanodeEpochKey::new(NODE_ID).to_bytes(),
-                value: DatanodeEpochValue { node_epoch: e1 }
-                    .try_as_raw_value()
-                    .unwrap(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        kv_backend.record(e1).await;
 
         let a2 = tokio::spawn({
             let group = group.clone();
@@ -694,11 +862,12 @@ pub(crate) mod tests {
         gate.notify_one();
         let res = a2.await.unwrap();
         assert_eq!(fence(&res), Some("accepted"));
-        let kv_backend: KvBackendRef = kv_backend;
-        assert_eq!(recorded_epoch(&kv_backend).await, Some(e2));
 
+        // A2's epoch is in memory once A2 is answered.
         let res = group.handle(heartbeat(e1, "a1"), ctx).await.unwrap();
         assert_eq!(fence(&res), Some("stale"));
+        assert_eq!(kv_backend.ops(), (2, 1));
+        assert_eq!(recorded_epoch(&(kv_backend as _)).await, Some(e2));
     }
 
     #[tokio::test]
@@ -786,12 +955,21 @@ pub(crate) mod tests {
 
         *kv_backend.read_delay.lock().unwrap() = Some(Duration::from_secs(3600));
         let res = group
-            .handle(heartbeat(epoch, "a"), ctx.clone())
+            .handle(heartbeat(epoch + 1, "b"), ctx.clone())
             .await
             .unwrap();
         assert_eq!(fence(&res), Some("unverified"));
         assert!(res.region_lease.is_none());
-        assert_eq!(lease_addr(&ctx).await.as_deref(), Some("a"));
+        assert_eq!(lease_addr(&ctx).await.as_deref(), Some("b"));
+
+        // A request answered from memory does not wait for the kv backend.
+        let res = group
+            .handle(heartbeat(epoch, "a"), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+        assert!(res.region_lease.is_some());
+        assert_eq!(kv_backend.ops(), (2, 1));
     }
 
     #[tokio::test]
@@ -837,7 +1015,7 @@ pub(crate) mod tests {
         assert!(res.region_lease.is_none());
 
         kv_backend.fail_reads.store(true, Ordering::Relaxed);
-        let res = group.handle(heartbeat(now, "a2"), ctx).await.unwrap();
+        let res = group.handle(heartbeat(now + 1, "a3"), ctx).await.unwrap();
         assert_eq!(fence(&res), Some("unverified"));
         assert!(res.region_lease.is_none());
     }
@@ -865,6 +1043,8 @@ pub(crate) mod tests {
         assert_eq!(fence(&res), Some("accepted"));
         assert_eq!(recorded_epoch(&m1_kv).await, Some(e2));
 
+        // M2 is elected again, which clears its memory.
+        m2.node_epoch_cache.reset();
         let res = m2_group
             .handle(heartbeat(e1, "a1"), m2.clone())
             .await

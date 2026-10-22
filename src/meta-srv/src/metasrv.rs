@@ -73,6 +73,7 @@ use crate::error::{
 };
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::gc::{GcSchedulerOptions, GcTickerRef};
+use crate::handler::node_epoch::NodeEpochCacheRef;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
@@ -452,6 +453,7 @@ pub struct Context {
     /// must not act on its behalf, such as delivering its mailbox reply.
     pub datanode_unverified: bool,
     pub datanode_restart_grace: DatanodeRestartGraceRef,
+    pub(crate) node_epoch_cache: NodeEpochCacheRef,
 }
 
 impl Context {
@@ -610,6 +612,7 @@ pub struct Metasrv {
     leader_region_registry: LeaderRegionRegistryRef,
     topic_stats_registry: TopicStatsRegistryRef,
     datanode_restart_grace: DatanodeRestartGraceRef,
+    node_epoch_cache: NodeEpochCacheRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
     region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_allocator: ResourceIdAllocatorRef,
@@ -663,6 +666,7 @@ impl Metasrv {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();
+            let node_epoch_cache = self.node_epoch_cache.clone();
             let subscribe_manager = self.subscription_manager();
             let mut rx = election.subscribe_leader_change();
             let greptimedb_telemetry_task = self.greptimedb_telemetry_task.clone();
@@ -708,6 +712,7 @@ impl Metasrv {
                         Ok(msg) => {
                             in_memory.reset();
                             leader_cached_kv_backend.reset();
+                            node_epoch_cache.reset();
                             info!("Leader's cache has bean cleared on leader change: {msg}");
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
@@ -956,6 +961,7 @@ impl Metasrv {
         let leader_region_registry = self.leader_region_registry.clone();
         let topic_stats_registry = self.topic_stats_registry.clone();
         let datanode_restart_grace = self.datanode_restart_grace.clone();
+        let node_epoch_cache = self.node_epoch_cache.clone();
 
         Context {
             server_addr,
@@ -975,6 +981,7 @@ impl Metasrv {
             is_handshake: false,
             datanode_unverified: false,
             datanode_restart_grace,
+            node_epoch_cache,
         }
     }
 }

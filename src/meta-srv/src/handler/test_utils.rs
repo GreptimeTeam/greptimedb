@@ -30,6 +30,7 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::stats::topic::{TopicStatsRegistry, TopicStatsRegistryRef};
 
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
+use crate::handler::node_epoch::NodeEpochCacheRef;
 use crate::handler::{HeartbeatMailbox, Pushers};
 use crate::metasrv::Context;
 use crate::region::restart_grace::{DatanodeRestartGrace, DatanodeRestartGraceRef};
@@ -47,6 +48,7 @@ pub struct TestEnv {
     leader_region_registry: LeaderRegionRegistryRef,
     topic_stats_registry: TopicStatsRegistryRef,
     datanode_restart_grace: DatanodeRestartGraceRef,
+    node_epoch_cache: NodeEpochCacheRef,
 }
 
 impl Default for TestEnv {
@@ -84,6 +86,7 @@ impl TestEnv {
             datanode_restart_grace: Arc::new(DatanodeRestartGrace::new(
                 default_distributed_time_constants().region_lease,
             )),
+            node_epoch_cache: Default::default(),
         }
     }
 
@@ -107,6 +110,7 @@ impl TestEnv {
             is_handshake: false,
             datanode_unverified: false,
             datanode_restart_grace: self.datanode_restart_grace.clone(),
+            node_epoch_cache: self.node_epoch_cache.clone(),
         }
     }
 }

@@ -682,6 +682,7 @@ impl MetasrvBuilder {
             reconciliation_manager,
             topic_stats_registry,
             datanode_restart_grace,
+            node_epoch_cache: Default::default(),
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
             database_operator,
