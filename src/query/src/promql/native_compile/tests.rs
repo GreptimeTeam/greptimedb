@@ -1396,6 +1396,26 @@ fn a_comparison_carries_whether_it_filters_or_reports_bool() {
         );
     }
 
+    // The constant keeps the side it was written on. `0 < x` and `x > 0` keep the same values but
+    // are not the same tree: a compiler that normalised the comparison would answer the other
+    // query's filter, which is why the side is asserted rather than only the operator.
+    let left_constant = compile(
+        &eval_stmt("0 < x"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let (left, right, _) = binary_parts(left_constant.root());
+    assert_eq!(
+        constant(left),
+        Some(0.0),
+        "`0 < x` did not keep its constant on the left"
+    );
+    assert!(
+        constant(right).is_none(),
+        "`0 < x` put the constant on the right, which is `x > 0`"
+    );
+
     // The two modes are one tree otherwise: the query text is what differs, and a tree that recorded
     // the mode somewhere else would fail the assertions above rather than this one.
     let filters = compile(
@@ -1435,6 +1455,35 @@ fn a_negation_binds_as_a_multiplication_by_minus_one() {
             panic!("`{query}`'s operand is not the selector: {:?}", right.expr);
         };
     }
+}
+
+/// A doubled negation is a negation of a negation, not a compile error or a dropped sign.
+///
+/// `--x` binds as `-1 * (-1 * x)`: the outer multiplication is the one the query's first minus asks
+/// for, and the inner one is what the second minus lowered to. Nothing here cancels the two into
+/// `x`, because the tree has no rule for that and the kernel computes the product anyway.
+#[test]
+fn a_doubled_negation_nests_two_multiplications() {
+    let tree = compile(&eval_stmt("--x"), raw_schema(), SeriesOrdering::KeyThenTime)
+        .unwrap_or_else(|error| panic!("`--x` was refused: {error}"));
+    let (left, right, matching) = binary_parts(tree.root());
+    assert_eq!(matching.op, BinaryOp::Mul, "`--x` is not a multiplication");
+    assert_eq!(
+        constant(left),
+        Some(-1.0),
+        "`--x` did not bind its outer `-1` on the left"
+    );
+    let (inner_left, _, inner_matching) = binary_parts(right);
+    assert_eq!(
+        inner_matching.op,
+        BinaryOp::Mul,
+        "the operand of `--x` is not the inner multiplication"
+    );
+    assert_eq!(
+        constant(inner_left),
+        Some(-1.0),
+        "the inner negation did not bind its own `-1`"
+    );
 }
 
 /// The negation applies to whatever its operand compiles to, so a window can be negated: `-rate(x[5m])`
@@ -1617,6 +1666,174 @@ fn a_vector_matching_modifier_over_a_constant_is_refused() {
             "`{query}` blamed the wrong operand: {message}"
         );
     }
+}
+
+/// A modifier inside a constant argument is refused for every call that folds one, not just for an
+/// arithmetic operand.
+///
+/// A call's constant is folded by the same [`constant_value`], so a fill written inside one has to
+/// reach the same refusal: `quantile(0.5 + fill(0) 0.1, x)` used to bind `Quantile{0.6}`, and
+/// `predict_linear(x[5m], 1 + fill(0) 2)` used to bind its second argument as `3`. Both dropped the
+/// fill the query wrote.
+#[test]
+fn a_modifier_inside_a_folded_call_argument_is_refused() {
+    for (stmt, query, argument) in [
+        (
+            eval_stmt("quantile(0.5 + fill(0) 0.1, x)"),
+            "quantile(0.5 + fill(0) 0.1, x)",
+            "first argument",
+        ),
+        (
+            eval_stmt("predict_linear(x[5m], 1 + fill(0) 2)"),
+            "predict_linear(x[5m], 1 + fill(0) 2)",
+            "second argument",
+        ),
+    ] {
+        let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        // The two calls refuse it on different paths -- `quantile` reads its parameter as a constant
+        // expression, a range function's constant is bound by the signature -- so what is asserted is
+        // what both have to say: which argument was folded, and that a fill is what it found.
+        let message = error.to_string();
+        assert!(
+            message.contains(argument),
+            "`{query}` blamed the wrong argument: {message}"
+        );
+        assert!(
+            message.contains("fill"),
+            "`{query}` did not name the fill it found: {message}"
+        );
+    }
+}
+
+/// A `bool` comparison of two constants folds to the number it reports, so the query runs.
+///
+/// `x * (1 < bool 2)` is `x * 1`: the inner comparison is a value, not an operation over a vector.
+/// Leaving it unfolded produces a `Binary` of two constants, which `validate` accepts and the
+/// executor refuses only when it builds the state — a legal query that fails at run time instead of
+/// answering. The fold keeps it a number, and the number is the kernel's own answer.
+#[test]
+fn a_bool_comparison_of_two_constants_folds_to_its_number() {
+    for (query, folded) in [
+        ("x * (1 < bool 2)", 1.0),
+        ("x * (1 > bool 2)", 0.0),
+        ("x * (1 == bool 1)", 1.0),
+        ("x * (1 != bool 1)", 0.0),
+        // NaN satisfies only `!=`, which the fold inherits from the kernel rather than restating.
+        ("x * (0 / 0 == bool 0)", 0.0),
+        ("x * (0 / 0 != bool 0)", 1.0),
+    ] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (left, right, _) = binary_parts(tree.root());
+        let scalar_side = if constant(left).is_some() {
+            left
+        } else {
+            right
+        };
+        assert_eq!(
+            constant(scalar_side),
+            Some(folded),
+            "`{query}` did not fold its comparison to {folded}"
+        );
+    }
+}
+
+/// A comparison of two constants without `bool` has no value to report, and is refused as such.
+///
+/// The parser refuses this shape outright — "comparisons between scalars must use BOOL modifier" is
+/// its own message for `1 > 2` — so the only way to hand the compiler one is to clear the flag on a
+/// tree it accepted. The compiler has to refuse it all the same: a caller that builds a statement
+/// without going through the parser would otherwise get a node that only fails when it runs.
+#[test]
+fn a_comparison_of_two_constants_without_bool_is_refused() {
+    let mut stmt = eval_stmt("x * (1 > bool 2)");
+    let PromExpr::Binary(outer) = &mut stmt.expr else {
+        unreachable!("`x * (1 > bool 2)` parses to a binary operation");
+    };
+    // The comparison is written in parentheses, which the parser keeps as a node of their own.
+    let PromExpr::Paren(grouped) = &mut *outer.rhs else {
+        unreachable!("the right operand is a parenthesised expression");
+    };
+    let PromExpr::Binary(inner) = &mut *grouped.expr else {
+        unreachable!("the parenthesised operand is the comparison");
+    };
+    inner
+        .modifier
+        .get_or_insert_with(BinModifier::default)
+        .return_bool = false;
+
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime).expect_err(
+        "a comparison of two constants without `bool` compiled, and it should not have",
+    );
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the comparison did not report NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("between two constants"),
+        "the comparison did not say what it found: {message}"
+    );
+}
+
+/// An aggregate is a shape this batch does not bind, and it is refused as the expression it is.
+///
+/// The later batch that binds `sum` and the rest replaces the shape this test names, which is why
+/// the refusal is asserted here rather than left to whichever expression the match happens to reach.
+#[test]
+fn an_aggregate_is_refused_as_an_expression() {
+    for query in ["sum(x)", "avg by(job)(rate(x[5m]))"] {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("the expression `"),
+            "`{query}` did not name the expression it found: {message}"
+        );
+    }
+}
+
+/// A modifier inside a constant subexpression is refused rather than folded away.
+///
+/// `x * (1 + fill(0) 2)` asks for a fill, which the tree has no field for. The inner addition is a
+/// constant, so the fold runs before the binary operation is dispatched: a fold that computes the
+/// number without reading the modifier answers `x * 3` and the fill disappears from a query that
+/// wrote one.
+#[test]
+fn a_modifier_inside_a_folded_constant_is_refused() {
+    let error = compile(
+        &eval_stmt("x * (1 + fill(0) 2)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("`x * (1 + fill(0) 2)` compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "`x * (1 + fill(0) 2)` did not report NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("vector matching"),
+        "`x * (1 + fill(0) 2)` did not say what it found: {message}"
+    );
+
+    // An unmodified constant subexpression still folds: the refusal is about the modifier, not
+    // about the fold.
+    compile(
+        &eval_stmt("x * (1 + 2)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("`x * (1 + 2)` has no modifier to refuse");
 }
 
 /// The shared acceptance queries of this batch, compiled whole: each one combines the shapes the

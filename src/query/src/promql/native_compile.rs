@@ -75,7 +75,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
-use promql::map::{ArithmeticOp, MathOp};
+use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::native::plan::{
     BoundInput, BoundInstant, BoundMap, BoundScalar, BoundWindow, NativeExpr, NativeNode,
     NativeTree, NativeType,
@@ -85,8 +85,8 @@ use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, Ma
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AtModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral,
-    Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
+    AtModifier, BinModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector,
+    NumberLiteral, Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -266,20 +266,30 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
              not which selector it was bound to"
         )));
     }
-    // What is left has a constant on at least one side, and a modifier is refused rather than
-    // dropped: a scalar carries no labels, so there is nothing to match or name, and Prometheus
-    // rejects these words on a scalar operand for the same reason. A fill value is refused because
-    // the tree's matching has no field for one, so binding the operation would compute it without
-    // the fill the query asked for.
-    if let Some(modifier) = &binary.modifier
-        && (modifier.matching.is_some()
-            || modifier.card != VectorMatchCardinality::OneToOne
-            || modifier.fill_values != VectorMatchFillValues::default())
-    {
+    // What is left has a constant on one side, and a modifier is refused rather than dropped. This
+    // is deliberately narrower than Prometheus, which drops an `on` or `ignoring` written on a
+    // scalar rather than refusing it; refusing is the conservative choice here, because the tree's
+    // matching has no field that could carry the modifier, so binding the operation would compute
+    // something the query did not ask for. A fill value is refused for the same reason: the tree's
+    // matching has no field for one, and dropping it would compute the operation without the fill
+    // the query asked for.
+    if refuses_modifier(binary.modifier.as_ref()) {
         return Err(not_implemented(&format!(
             "the vector matching in `{binary}`, which a constant operand has nothing to match: \
              `on`, `ignoring`, `group_left` and `group_right` name labels of a vector, and a fill \
              value fills in a match group that could miss"
+        )));
+    }
+    // Two constants are a value rather than an operation over a vector. A `bool` comparison of two
+    // of them folded to its number before this point, so what arrives here is a comparison without
+    // `bool`, which Prometheus refuses to parse at all. Binding it would produce a node that only
+    // fails when it is run, so it is refused here with what was found.
+    if binary.lhs.value_type() == ValueType::Scalar && binary.rhs.value_type() == ValueType::Scalar
+    {
+        return Err(not_implemented(&format!(
+            "the binary operation `{binary}` between two constants, which reports no value: a \
+             comparison of two scalars is written with `bool` to say whether it holds, and one \
+             written that way is folded to the number it means"
         )));
     }
     // Both operands are compiled before the node is built, so `2 / (x + 1)` nests. The constant side
@@ -881,6 +891,21 @@ fn argument_position(position: usize) -> &'static str {
     POSITIONS[position]
 }
 
+/// Whether a binary operation carries a modifier this compiler refuses to bind.
+///
+/// A scalar carries no labels, so there is nothing to match or name, and the tree's matching has no
+/// field for a fill value: binding the operation would compute it without the modifier the query
+/// asked for. The fold and [`binary_operation`] share this test rather than restating it, because a
+/// fold that computed a constant without reading its modifier would answer a query the dispatch
+/// below refuses.
+fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
+    modifier.is_some_and(|modifier| {
+        modifier.matching.is_some()
+            || modifier.card != VectorMatchCardinality::OneToOne
+            || modifier.fill_values != VectorMatchFillValues::default()
+    })
+}
+
 /// The number `expr` folds to, or `None` when its value is not the statement's to know.
 ///
 /// Only what the statement itself decides is folded: a number literal, a group around one, a negated
@@ -900,10 +925,28 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
         PromExpr::Paren(paren) => constant_value(&paren.expr),
         PromExpr::Unary(unary) => constant_value(&unary.expr).map(|value| -value),
         PromExpr::Binary(binary) => {
-            let op = arithmetic_op(&binary.op)?;
+            // A modifier is read before the operands are folded: `x * (1 + fill(0) 2)` asks for a
+            // fill, and folding the inner addition would answer `x * 3` with the fill gone. The
+            // expression is left unfolded so the dispatch below refuses it with the reason it
+            // writes, which is also why this is a `None` rather than an error here.
+            if refuses_modifier(binary.modifier.as_ref()) {
+                return None;
+            }
             let left = constant_value(&binary.lhs)?;
             let right = constant_value(&binary.rhs)?;
-            Some(op.calculate(left, right))
+            if let Some(op) = arithmetic_op(&binary.op) {
+                return Some(op.calculate(left, right));
+            }
+            // A comparison of two constants is the number it reports when it is written with
+            // `bool`: Prometheus reads `1 > bool 2` as `0`, and [`ComparisonOp::apply`] is the same
+            // answer the kernel gives. Without `bool` there is no number to report -- `1 > 2` is a
+            // parse error in Prometheus -- so it is left unfolded and the dispatch refuses it.
+            if binary.return_bool()
+                && let Some(op) = comparison_op(&binary.op)
+            {
+                return Some(f64::from(op.apply(left, right)));
+            }
+            None
         }
         // Calls (`time()`, `scalar(v)`), selectors, range selectors, aggregates and subqueries all
         // read something this compiler cannot know before the query runs.
@@ -915,8 +958,9 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
 ///
 /// The token is matched by its id, which is stable and is what the rest of the planner matches on,
 /// rather than by the text it displays as: a symbol this compiler does not recognise is not
-/// arithmetic here rather than a wrong operator. A comparison and a set operator are the cases that
-/// reach this and fold nothing, which is this batch's boundary rather than an accident of the map.
+/// arithmetic here rather than a wrong operator. A comparison is `None` here and is folded by
+/// [`comparison_op`] instead, because only a `bool` comparison of two constants has a number to
+/// report; a set operator folds nothing at all.
 fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
     match op.id() {
         token::T_ADD => Some(ArithmeticOp::Add),
@@ -926,6 +970,22 @@ fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
         token::T_MOD => Some(ArithmeticOp::Modulo),
         token::T_POW => Some(ArithmeticOp::Power),
         token::T_ATAN2 => Some(ArithmeticOp::Atan2),
+        _ => None,
+    }
+}
+
+/// The comparison operator a PromQL token denotes, or `None` when the token is not a comparison.
+///
+/// This is the folding half of [`binary_op`], which binds the same tokens to a node: the fold and
+/// the node have to agree on which token is which comparison, so the two maps sit beside each other.
+fn comparison_op(op: &TokenType) -> Option<ComparisonOp> {
+    match op.id() {
+        token::T_EQLC => Some(ComparisonOp::Equal),
+        token::T_NEQ => Some(ComparisonOp::NotEqual),
+        token::T_GTR => Some(ComparisonOp::Greater),
+        token::T_LSS => Some(ComparisonOp::Less),
+        token::T_GTE => Some(ComparisonOp::GreaterEqual),
+        token::T_LTE => Some(ComparisonOp::LessEqual),
         _ => None,
     }
 }
