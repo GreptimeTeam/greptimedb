@@ -382,7 +382,8 @@ impl From<StatusCode> for PgErrorCode {
             StatusCode::DeadlineExceeded => PgErrorCode::Ec57000,
             StatusCode::External => PgErrorCode::Ec58000,
 
-            StatusCode::Unknown
+            StatusCode::PartialFailure
+            | StatusCode::Unknown
             | StatusCode::Unexpected
             | StatusCode::IllegalState
             | StatusCode::Internal => PgErrorCode::EcXX000,

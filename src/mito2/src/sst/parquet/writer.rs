@@ -39,11 +39,9 @@ use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{FileId, SequenceNumber};
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
@@ -63,7 +61,7 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
-    apply_column_compression, apply_float_field_encoding,
+    apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
 };
 use crate::sst::{
     DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
@@ -547,17 +545,7 @@ where
                 .set_max_row_group_row_count(Some(opts.row_group_size))
                 .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
-            let ts_col = ColumnPath::new(vec![
-                self.metadata.time_index_column().column_schema.name.clone(),
-            ]);
-            let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
-            let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
-            let props_builder = props_builder
-                .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_dictionary_enabled(seq_col, false)
-                .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
-                .set_column_dictionary_enabled(ts_col, false)
-                .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
+            let props_builder = apply_internal_column_encoding(props_builder, &self.metadata);
             let props_builder = apply_float_field_encoding(
                 props_builder,
                 &self.metadata,

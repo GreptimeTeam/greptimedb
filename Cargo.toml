@@ -141,7 +141,7 @@ datafusion-functions-aggregate-common = "=55.1.0"
 datafusion-functions-window-common = "=55.1.0"
 datafusion-optimizer = "=55.1.0"
 datafusion-orc = "0.10.0"
-datafusion-pg-catalog = "0.18.3"
+datafusion-pg-catalog = "0.19.0"
 datafusion-physical-expr = "=55.1.0"
 datafusion-physical-plan = "=55.1.0"
 datafusion-proto = "=55.1.0"
@@ -162,7 +162,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9533078d6fd4bdaddbca0750cb9bf7ad64b2e568" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "acb247415b8f4c2f0750783dab4e1f38c71f5860" }
 hdfs-native = "0.14.6"
 hex = "0.4"
 hostname = "0.4.0"
@@ -250,7 +250,7 @@ similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
 sqlparser = { version = "0.62.0", default-features = false, features = ["std", "visitor", "serde"] }
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "any",
     "macros",
     "json",
@@ -382,8 +382,8 @@ datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.g
 datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e3221b8f74b15c7192621576e5d1e354a6cf097a" }
-datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
-arrow-pg = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
+datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "3ae0a6cb30b1c5131687f4637247ff4f84ac11e4" }
+arrow-pg = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "3ae0a6cb30b1c5131687f4637247ff4f84ac11e4" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
 
 # pprof 0.15.0 initializes framehop inside SIGPROF; pin the unreleased fix

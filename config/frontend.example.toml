@@ -482,7 +482,9 @@ enable = true
 
 ## The record type of slow queries. It can be `system_table` or `log`.
 ## If `system_table` is selected, the slow queries will be recorded in a system table `greptime_private.slow_queries`.
-## If `log` is selected, the slow queries will be logged in a log file `greptimedb-slow-queries.*`.
+## If `log` is selected, slow queries are logged to stdout when `logging.append_stdout` is enabled,
+## and to `greptimedb-slow-queries.*` when `logging.enable_file_logging` is enabled and `logging.dir` is nonempty.
+## Slow query logging is independent of `logging.level` and uses `logging.log_format` and the logging retention settings.
 record_type = "system_table"
 
 ## The threshold of slow query. It can be human readable time string, for example: `10s`, `100ms`, `1s`.

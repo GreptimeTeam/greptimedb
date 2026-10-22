@@ -1005,6 +1005,7 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         StatusCode::Internal
         | StatusCode::Unexpected
         | StatusCode::IllegalState
+        | StatusCode::PartialFailure
         | StatusCode::Unknown
         | StatusCode::RuntimeResourcesExhausted
         | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,

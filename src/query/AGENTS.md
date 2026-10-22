@@ -24,6 +24,9 @@ side effects live in `operator`.
 - Optimizer or `MergeScan` changes usually touch rule ordering, physical
   planning, serialization, and distributed-plan tests together.
 - User-visible SQL/PromQL/log behavior needs planner coverage and a sqlness case.
+- `MergeScanExec` sends remote dyn filters captured in every filter pushdown
+  phase in one request; the initial registration budget applies to all of them
+  together (`dist_plan/dyn_filter_bridge.rs`).
 - `RegionQueryHandler` changes require the frontend implementation to move with
   it.
 - DataFusion dependency changes follow the pinned-fork rule in the repo-wide

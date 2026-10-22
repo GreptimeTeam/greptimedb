@@ -48,6 +48,7 @@ runs:
       run: make test sqlness-test
       env:
         RUST_BACKTRACE: 1
+        RUST_MIN_STACK: 8388608 # 8 MiB, aligned with Rust CI tests.
         SQLNESS_OPTS: "--preserve-state"
 
     - name: Upload sqlness logs
