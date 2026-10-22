@@ -166,7 +166,7 @@ impl TableProvider for DummyTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -175,6 +175,10 @@ impl TableProvider for DummyTableProvider {
         request.projection = projection.cloned();
         request.filters = filters.to_vec();
         request.limit = limit;
+        // Distribution selects Mito's series scanner, so set it before `handle_query`.
+        if self.raw_series_metric().is_some() {
+            request.distribution = Some(TimeSeriesDistribution::PerSeries);
+        }
         if let Some(query_ctx) = &self.query_ctx {
             let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -206,7 +210,13 @@ impl TableProvider for DummyTableProvider {
         let Some(metric_name) = self.raw_series_metric() else {
             return Ok(Arc::new(scan_exec));
         };
-        self.raw_series_leaf(scan_exec, projection, limit, &metric_name)
+        self.raw_series_leaf(
+            scan_exec,
+            projection,
+            limit,
+            &metric_name,
+            state.config_options().execution.target_partitions,
+        )
     }
 
     fn supports_filters_pushdown(
@@ -351,6 +361,7 @@ impl DummyTableProvider {
         projection: Option<&Vec<usize>>,
         limit: Option<usize>,
         metric_name: &str,
+        target_partitions: usize,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let region_id = self.region_id;
         if limit.is_some() {
@@ -366,11 +377,20 @@ impl DummyTableProvider {
             ))
         })?;
         let logical_tags = self.raw_series_logical_tags();
-        // One partition, with every range inside it: see the note above on why this is the named
-        // binding's limit and not the frame's.
+        let ranges = scan_exec.get_partition_ranges();
+        // Use the configured plan target where possible, capped by available ranges. Raw frame
+        // consumers must read each partition separately and merge without coalescing/interleaving;
+        // each series remains within one partition, preserving series contiguity.
+        let target = if target_partitions > 0 {
+            target_partitions
+        } else {
+            std::thread::available_parallelism().map_or(1, usize::from)
+        }
+        .min(ranges.len().max(1));
+        let partitions = table::table::scan::assign_partition_ranges(ranges, target);
         let prepared = Arc::new(
             scan_exec
-                .with_new_partitions(vec![scan_exec.get_partition_ranges()], 1)
+                .with_new_partitions(partitions, target)
                 .map_err(|e| DataFusionError::External(e.into_inner()))?,
         );
         let frames = prepared
@@ -1294,6 +1314,7 @@ mod tests {
     use common_recordbatch::adapter::SERIES_SCAN_EXEC_NAME;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::execution::context::TaskContext;
+    use datafusion::physical_plan::ExecutionPlanProperties;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::series::SeriesOrdering;
@@ -1302,10 +1323,11 @@ mod tests {
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_engine::{
-        PrepareRequest, QueryScanContext, RawLabelSource, RawSeriesStream, RegionEngine,
-        RegionRole, RegionScanner, RegionStatistic, RemapManifestsRequest, RemapManifestsResponse,
-        ScannerProperties, SendableRawSeriesStream, SetRegionRoleStateResponse,
-        SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
+        PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RawSeriesStream,
+        RegionEngine, RegionRole, RegionScanner, RegionStatistic, RemapManifestsRequest,
+        RemapManifestsResponse, ScannerProperties, SendableRawSeriesStream,
+        SetRegionRoleStateResponse, SettableRegionRoleState, SyncRegionFromRequest,
+        SyncRegionFromResponse,
     };
     use store_api::region_request::RegionRequest;
     use store_api::storage::SequenceNumber;
@@ -1321,22 +1343,32 @@ mod tests {
     struct FrameRegionEngine {
         metadata: RegionMetadataRef,
         serves_frames: bool,
-        /// Target partitions each `prepare` was asked for, in call order.
+        distributions: Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
         prepares: Arc<Mutex<Vec<usize>>>,
     }
 
     impl FrameRegionEngine {
-        fn new(serves_frames: bool) -> (Self, RegionMetadataRef, Arc<Mutex<Vec<usize>>>) {
+        fn new(
+            serves_frames: bool,
+        ) -> (
+            Self,
+            RegionMetadataRef,
+            Arc<Mutex<Vec<usize>>>,
+            Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
+        ) {
             let metadata = Arc::new(frame_region_metadata());
             let prepares = Arc::new(Mutex::new(Vec::new()));
+            let distributions = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     metadata: metadata.clone(),
                     serves_frames,
+                    distributions: distributions.clone(),
                     prepares: prepares.clone(),
                 },
                 metadata,
                 prepares,
+                distributions,
             )
         }
     }
@@ -1573,11 +1605,16 @@ mod tests {
             _region_id: RegionId,
             request: ScanRequest,
         ) -> RegionResult<store_api::region_engine::RegionScannerRef> {
+            self.distributions
+                .lock()
+                .unwrap()
+                .push(request.distribution);
             Ok(Box::new(FrameScanner {
                 metadata: self.metadata.clone(),
                 projection: request.projection.clone(),
-                properties: ScannerProperties::new(vec![Vec::new(); 2], false, 0),
-                serves_frames: self.serves_frames,
+                properties: ScannerProperties::new(frame_partition_ranges(), false, 0),
+                serves_frames: self.serves_frames
+                    && request.distribution == Some(TimeSeriesDistribution::PerSeries),
                 prepares: self.prepares.clone(),
             }))
         }
@@ -1641,9 +1678,13 @@ mod tests {
     async fn frame_provider(
         serves_frames: bool,
         raw_metric: Option<&str>,
-    ) -> (DummyTableProvider, Arc<Mutex<Vec<usize>>>) {
+    ) -> (
+        DummyTableProvider,
+        Arc<Mutex<Vec<usize>>>,
+        Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
+    ) {
         let region_id = RegionId::new(2048, 1);
-        let (engine, _, prepares) = FrameRegionEngine::new(serves_frames);
+        let (engine, _, prepares, distributions) = FrameRegionEngine::new(serves_frames);
         let mut builder = QueryContextBuilder::default();
         if let Some(metric) = raw_metric {
             builder = builder.extensions(HashMap::from([(
@@ -1659,7 +1700,23 @@ mod tests {
             )
             .await
             .unwrap();
-        (provider, prepares)
+        (provider, prepares, distributions)
+    }
+
+    fn frame_partition_ranges() -> Vec<Vec<PartitionRange>> {
+        (0..3)
+            .map(|i| {
+                vec![PartitionRange {
+                    start: common_time::Timestamp::new(i, common_time::timestamp::TimeUnit::Second),
+                    end: common_time::Timestamp::new(
+                        i + 1,
+                        common_time::timestamp::TimeUnit::Second,
+                    ),
+                    num_rows: 10,
+                    identifier: i as usize,
+                }]
+            })
+            .collect()
     }
 
     fn has_series_frame_metadata(schema: &datatypes::arrow::datatypes::Schema) -> bool {
@@ -1679,7 +1736,7 @@ mod tests {
 
     #[tokio::test]
     async fn ordinary_read_keeps_the_region_scan_exec() {
-        let (provider, prepares) = frame_provider(true, None).await;
+        let (provider, prepares, distributions) = frame_provider(true, None).await;
         let state = test_session();
         let plan = provider
             .scan(&state, Some(&vec![2]), &[], None)
@@ -1694,11 +1751,12 @@ mod tests {
         );
         // Nothing prepared the scan on the ordinary path, so its partitioning is untouched.
         assert!(prepares.lock().unwrap().is_empty());
+        assert_eq!(*distributions.lock().unwrap(), vec![None]);
     }
 
     #[tokio::test]
     async fn raw_series_read_answers_with_a_frame_carrying_its_own_layout() {
-        let (provider, prepares) = frame_provider(true, Some("cpu_usage")).await;
+        let (provider, prepares, distributions) = frame_provider(true, Some("cpu_usage")).await;
         let state = test_session();
         let plan = provider
             .scan(&state, Some(&vec![2]), &[], None)
@@ -1708,9 +1766,14 @@ mod tests {
         assert_eq!(plan.name(), SERIES_SCAN_EXEC_NAME);
         let frames = Arc::clone(&plan);
         let frames = frames.downcast_ref::<SeriesScanExec>().unwrap();
-        // The conversion requires a prepared single-partition scan, and the region prepares it
-        // exactly once for exactly that target.
-        assert_eq!(*prepares.lock().unwrap(), vec![1usize]);
+        // The conversion requires a prepared scan; the fixture has three ranges/partitions.
+        assert_eq!(*prepares.lock().unwrap(), vec![3usize]);
+        assert_eq!(
+            *distributions.lock().unwrap(),
+            vec![Some(TimeSeriesDistribution::PerSeries)]
+        );
+        assert!(plan.output_partitioning().partition_count() > 1);
+        assert_eq!(plan.output_partitioning().partition_count(), 3);
         // Fields come from the projection, labels and the metric from the region and its request.
         assert_eq!(
             frames
@@ -1775,7 +1838,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_series_read_over_an_ineligible_region_fails_naming_the_reason() {
-        let (provider, prepares) = frame_provider(false, Some("cpu_usage")).await;
+        let (provider, prepares, _) = frame_provider(false, Some("cpu_usage")).await;
         let state = test_session();
         let error = provider
             .scan(&state, Some(&vec![2]), &[], None)
@@ -1799,14 +1862,14 @@ mod tests {
             "unexpected error: {message}"
         );
         // It failed after preparing the scan the conversion needs, not by skipping the attempt.
-        assert_eq!(*prepares.lock().unwrap(), vec![1usize]);
+        assert_eq!(*prepares.lock().unwrap(), vec![3usize]);
     }
 
     #[tokio::test]
     async fn raw_series_read_falls_back_to_no_frames_only_by_being_asked_for_rows() {
         // The same ineligible region answers normally once the request is an ordinary one: the
         // way to get rows is to ask for rows, not to ask for frames and receive them.
-        let (provider, _) = frame_provider(false, None).await;
+        let (provider, _, _distributions) = frame_provider(false, None).await;
         let state = test_session();
         let plan = provider
             .scan(&state, Some(&vec![2]), &[], None)

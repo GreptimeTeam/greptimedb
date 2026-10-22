@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -66,6 +66,59 @@ use store_api::region_engine::{
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
+
+/// Distributes scan ranges among partitions, balancing the estimated row counts.
+pub fn assign_partition_ranges(
+    mut ranges: Vec<PartitionRange>,
+    expected_partition_num: usize,
+) -> Vec<Vec<PartitionRange>> {
+    if ranges.is_empty() {
+        return vec![vec![]; expected_partition_num];
+    }
+
+    if ranges.len() == 1 {
+        let mut vec = vec![vec![]; expected_partition_num];
+        vec[0] = ranges;
+        return vec;
+    }
+
+    ranges.sort_by_key(|b| std::cmp::Reverse(b.num_rows));
+    let mut partition_ranges = vec![vec![]; expected_partition_num];
+
+    #[derive(Eq, PartialEq)]
+    struct HeapNode {
+        num_rows: usize,
+        partition_idx: usize,
+    }
+
+    impl Ord for HeapNode {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.num_rows.cmp(&other.num_rows).reverse()
+        }
+    }
+
+    impl PartialOrd for HeapNode {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let mut part_heap =
+        BinaryHeap::from_iter((0..expected_partition_num).map(|partition_idx| HeapNode {
+            num_rows: 0,
+            partition_idx,
+        }));
+
+    for range in ranges {
+        let mut node = part_heap.pop().unwrap();
+        let partition_idx = node.partition_idx;
+        node.num_rows += range.num_rows;
+        partition_ranges[partition_idx].push(range);
+        part_heap.push(node);
+    }
+
+    partition_ranges
+}
 
 /// The name of [`RegionScanExec`] plan node.
 pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
@@ -458,7 +511,8 @@ impl RegionScanExec {
     /// Builds the raw-series binding of authorized logical names from this scanner's metadata.
     ///
     /// The binding copies this scanner's metadata snapshot, and every requested name must resolve
-    /// to a distinct logical column of that snapshot. `None` means at least one name does not.
+    /// to a distinct logical column of that snapshot. Multiple prepared partitions are supported;
+    /// each must preserve series contiguity. `None` means at least one name does not.
     fn resolve_named_series_binding(
         &self,
         metric_name: &str,
@@ -474,10 +528,6 @@ impl RegionScanExec {
         }
         let scanner = self.scanner.lock().unwrap();
         let metadata = scanner.metadata();
-        if scanner.properties().num_partitions().max(1) != 1 {
-            return None;
-        }
-
         let primary_key_ids = metadata
             .primary_key_columns()
             .map(|column| column.column_id)
