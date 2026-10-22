@@ -290,22 +290,24 @@ impl DowngradeLeaderRegion {
         );
     }
 
-    /// Extends the deadline to wait for, after the downgrade failed, to when the region leases
-    /// granted to the leader expire, as in [`Self::update_leader_region_lease_deadline`].
+    /// Extends the deadline to wait for, after the downgrade failed, to when the Leader grants
+    /// of former metasrv leaders have expired.
     ///
-    /// The leader may not have applied the downgrade, and a former metasrv leader may have
-    /// granted it leases after this step started.
+    /// The leader may not have applied the downgrade. The deadline is already one lease after
+    /// this step started, which covers this metasrv's Leader grants: it records a grant before
+    /// it reads the route the grant comes from, so every Leader grant computed from the route
+    /// before the region was marked as downgrading was recorded before this step started. Later
+    /// grants are DowngradingLeader, which do not extend a region's Leader deadline.
     fn extend_leader_region_lease_deadline(&self, ctx: &mut Context) {
-        let leader = &ctx.persistent_ctx.from_peer;
         let region_lease = default_distributed_time_constants().region_lease;
-        let lease_expiry = ctx
+        let former_leader_expiry = ctx
             .lease_grant_tracker
-            .lease_expiry(leader.id, region_lease);
+            .former_leader_lease_expiry(region_lease);
         let deadline = ctx
             .volatile_ctx
             .leader_region_lease_deadline
-            .get_or_insert(lease_expiry);
-        *deadline = (*deadline).max(lease_expiry);
+            .get_or_insert_with(|| Instant::now() + region_lease);
+        *deadline = (*deadline).max(former_leader_expiry);
     }
 
     /// Downgrades a leader region.
@@ -813,6 +815,50 @@ mod tests {
             leader_since + Duration::from_secs(META_LEASE_SECS) + region_lease,
             Instant::now()
         );
+        let _ = next
+            .as_any()
+            .downcast_ref::<UpgradeCandidateRegion>()
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_failed_downgrade_ignores_grants_after_step_start() {
+        let mut state = Box::<DowngradeLeaderRegion>::default();
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        prepare_table_metadata(&ctx, HashMap::default()).await;
+        let region_lease = default_distributed_time_constants().region_lease;
+
+        // The leader keeps sending heartbeats while its downgrade fails. The region is already
+        // marked as downgrading, so they are granted DowngradingLeader, which does not extend
+        // its Leader deadline.
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
+            .await;
+        let tracker = ctx.lease_grant_tracker.clone();
+        tokio::spawn(async move {
+            while let Some(Ok(resp)) = rx.recv().await {
+                tracker.record_grant(from_peer_id);
+                let reply_id = resp.mailbox_message.unwrap().id;
+                let reply =
+                    new_downgrade_region_reply(reply_id, None, true, Some("test mocked".into()));
+                mailbox.on_recv(reply_id, Ok(reply)).await.unwrap();
+            }
+        });
+
+        // This metasrv has been the leader for longer than `META_LEASE_SECS`.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let step_start = Instant::now();
+        let (next, _) = state
+            .next(&mut ctx, &new_procedure_context())
+            .await
+            .unwrap();
+        assert_eq!(step_start + region_lease, Instant::now());
         let _ = next
             .as_any()
             .downcast_ref::<UpgradeCandidateRegion>()

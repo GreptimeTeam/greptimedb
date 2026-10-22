@@ -68,6 +68,13 @@ impl LeaseGrantTracker {
         inner.granted_at.insert(datanode_id, Instant::now());
     }
 
+    /// Returns when the region leases granted by former leaders have expired, given the lease
+    /// duration `region_lease` and the assumption about former leaders above.
+    pub fn former_leader_lease_expiry(&self, region_lease: Duration) -> Instant {
+        let leader_since = self.inner.read().unwrap().leader_since;
+        leader_since + Duration::from_secs(META_LEASE_SECS) + region_lease
+    }
+
     /// Returns when the region leases granted to `datanode_id` have expired, given the lease
     /// duration `region_lease` and the assumption about former leaders above.
     pub fn lease_expiry(&self, datanode_id: DatanodeId, region_lease: Duration) -> Instant {
