@@ -181,7 +181,7 @@ impl ObjectStoreIo {
     /// dropping the stream stops the listing.
     pub(crate) fn list_ahead(&self) -> BoxStream<'static, Result<ListedObject>> {
         let io = self.clone();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let listing = AbortOnDropHandle::new(common_runtime::spawn_global(async move {
             let mut lister = io.store.lister(&io.object_prefix).await?;
             while let Some(entry) = lister.try_next().await? {
@@ -192,31 +192,7 @@ impl ObjectStoreIo {
             }
             Ok::<_, object_store::Error>(())
         }));
-        let mut listing = Some(listing);
-        let path = self.object_prefix.clone();
-        Box::pin(try_stream! {
-            loop {
-                let object = rx.recv().await;
-                // A finished listing is settled before any object it listed
-                // is yielded, so its failure goes first.
-                if let Some(listing) =
-                    listing.take_if(|listing| object.is_none() || listing.is_finished())
-                {
-                    listing
-                        .await
-                        .unwrap_or_else(|error| {
-                            let stopped = "the listing task did not complete";
-                            Err(object_store::Error::new(ErrorKind::Unexpected, stopped)
-                                .set_source(error))
-                        })
-                        .context(WalObjectStoreSnafu { operation: "list", path: &path })?;
-                }
-                let Some(object) = object else {
-                    break;
-                };
-                yield object;
-            }
-        })
+        settle_listing(rx, listing, self.object_prefix.clone())
     }
 
     pub(crate) fn object_path(&self, object_seq: u64) -> String {
@@ -256,6 +232,38 @@ impl ObjectStoreIo {
         }
         value.parse().ok()
     }
+}
+
+/// Yields the objects `listing` sends over `rx`. Once the listing finished it
+/// is settled before any further object is yielded, so its failure goes
+/// before the objects it listed that the caller has not taken yet.
+fn settle_listing(
+    mut rx: mpsc::UnboundedReceiver<ListedObject>,
+    listing: AbortOnDropHandle<object_store::Result<()>>,
+    path: String,
+) -> BoxStream<'static, Result<ListedObject>> {
+    let mut listing = Some(listing);
+    Box::pin(try_stream! {
+        loop {
+            let object = rx.recv().await;
+            if let Some(listing) =
+                listing.take_if(|listing| object.is_none() || listing.is_finished())
+            {
+                listing
+                    .await
+                    .unwrap_or_else(|error| {
+                        let stopped = "the listing task did not complete";
+                        Err(object_store::Error::new(ErrorKind::Unexpected, stopped)
+                            .set_source(error))
+                    })
+                    .context(WalObjectStoreSnafu { operation: "list", path: &path })?;
+            }
+            let Some(object) = object else {
+                break;
+            };
+            yield object;
+        }
+    })
 }
 
 /// Returns true when a conditional create failed because the object exists.
@@ -593,6 +601,41 @@ mod tests {
         let mut listed = io.list_ahead().try_collect::<Vec<_>>().await.unwrap();
         listed.sort_unstable_by_key(|object| object.object_seq);
         assert_eq!(io.list().await.unwrap(), listed);
+    }
+
+    #[tokio::test]
+    async fn test_io_failed_listing_goes_before_the_objects_it_listed() {
+        let io = memory_io();
+        let (tx, rx) = mpsc::unbounded_channel();
+        for object_seq in 0..1000 {
+            let path = io.object_path(object_seq);
+            tx.send(ListedObject {
+                object_seq,
+                path,
+                size: 0,
+            })
+            .unwrap();
+        }
+        let listing = AbortOnDropHandle::new(tokio::spawn(async move {
+            drop(tx);
+            Err(injected_failure("list"))
+        }));
+        while !listing.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let mut objects = settle_listing(rx, listing, io.object_prefix.clone());
+        let error = objects.try_next().await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::WalObjectStore {
+                    operation: "list",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[tokio::test]
