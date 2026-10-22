@@ -151,7 +151,7 @@ fn add_nullable_field1() -> RegionAlterRequest {
 #[case::default_flat(true, None, true)]
 #[case::flat_overrides_time_series(true, Some("time_series"), true)]
 #[tokio::test]
-async fn test_engine_add_json2_memtable_validation(
+async fn test_engine_add_json2_format_validation(
     #[case] default_flat_format: bool,
     #[case] memtable: Option<&str>,
     #[case] accepted: bool,

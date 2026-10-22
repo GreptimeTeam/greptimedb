@@ -795,26 +795,10 @@ pub(crate) fn version_builder_from_manifest(
 
 /// Updates region options by persistent options.
 pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
-    // The caller-supplied options win when they specify an explicit `sst_format`,
-    // so re-parsed options (e.g. bulk memtable forcing flat format) take effect on
-    // the running region instead of being clobbered by the persisted manifest value.
-    // Fall back to the manifest only when the caller did not provide a value.
-    match options.sst_format {
-        Some(format) if format != manifest.sst_format => {
-            common_telemetry::warn!(
-                "Overriding SST format from {:?} (manifest) to {:?} (options) for region {}",
-                manifest.sst_format,
-                format,
-                manifest.metadata.region_id,
-            );
-        }
-        Some(_) => {}
-        None => {
-            options.sst_format = Some(manifest.sst_format);
-        }
-    }
+    // Caller options take precedence over the manifest, except JSON2 always requires flat output.
+    let format = options.sst_format.unwrap_or(manifest.sst_format);
     // Older versions allowed JSON2 with primary-key output; recover without rewriting its history.
-    if options.sst_format != Some(FormatType::Flat)
+    if format != FormatType::Flat
         && manifest
             .metadata
             .column_metadatas
@@ -822,10 +806,18 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
             .any(|column| column.column_schema.data_type.is_json2())
     {
         warn!(
-            "Overriding SST format to flat for existing JSON2 region {}",
-            manifest.metadata.region_id,
+            "Overriding SST format from {:?} to flat for existing JSON2 region {}",
+            format, manifest.metadata.region_id,
         );
         options.sst_format = Some(FormatType::Flat);
+    } else {
+        if format != manifest.sst_format {
+            warn!(
+                "Overriding SST format from {:?} (manifest) to {:?} (options) for region {}",
+                manifest.sst_format, format, manifest.metadata.region_id,
+            );
+        }
+        options.sst_format = Some(format);
     }
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
@@ -1662,7 +1654,6 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[test]
     fn test_sanitize_region_options_recovers_json2(
         #[values(FormatType::PrimaryKey, FormatType::Flat)] persisted: FormatType,
         #[values(None, Some(FormatType::PrimaryKey), Some(FormatType::Flat))] requested: Option<

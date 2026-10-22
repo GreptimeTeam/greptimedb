@@ -132,7 +132,7 @@ async fn test_engine_create_new_region() {
 #[case::default_flat_overrides_time_series(true, Some("time_series"), None, true)]
 #[case::primary_key_overrides_default_flat(true, None, Some("primary_key"), false)]
 #[tokio::test]
-async fn test_engine_create_json2_memtable_validation(
+async fn test_engine_create_json2_format_validation(
     #[case] default_flat_format: bool,
     #[case] memtable: Option<&str>,
     #[case] sst_format: Option<&str>,
