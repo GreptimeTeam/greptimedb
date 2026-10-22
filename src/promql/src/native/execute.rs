@@ -1948,10 +1948,9 @@ fn vector_workspace_bytes(op: &BoundVectorOp, schema: &SeriesSchema, series: &[S
             });
         }
         BoundVectorOp::Absent { .. } => {
-            let points = schema
-                .eval_grid
-                .as_ref()
-                .map_or(0, |grid| grid.timestamps().len());
+            let points = schema.eval_grid.as_ref().map_or(0, |grid| {
+                usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
+            });
             return points.saturating_mul(fields.saturating_mul(1 + std::mem::size_of::<f64>()));
         }
         BoundVectorOp::TopK { .. }

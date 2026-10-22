@@ -310,7 +310,7 @@ fn sort_drops_histogram_samples() {
                 )))],
             )
             .unwrap();
-        if schema.eval_grid.as_ref().unwrap().timestamps().len() > 1 {
+        if schema.eval_grid.as_ref().unwrap().spec().len > 1 {
             builder
                 .push_samples(1, &[Some(GridSample::Float(2.0))])
                 .unwrap();
