@@ -30,7 +30,7 @@
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
 //! `Input` (raw samples) → `Window` (the range function over the statement's grid) and
 //! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to), and
-//! `<expression>` → `Select` (a sort or `absent`, which read the whole vector). A
+//! `<expression>` → `Vector` (a sort or `absent`, which read the whole vector). A
 //! selector may carry `offset` in either selection shape and, in the window shape, an `@` anchor.
 //! Everything else is a [`DataFusionError::NotImplemented`] that names what was found and quotes the
 //! shapes above, because rejecting a query the compiler does not understand is the only honest
@@ -61,7 +61,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{MetricName, SeriesOrdering};
 use promql::map::{ArithmeticOp, MathOp};
 use promql::native::plan::{
-    BoundInput, BoundInstant, BoundMap, BoundSelect, BoundWindow, NativeExpr, NativeNode,
+    BoundInput, BoundInstant, BoundMap, BoundVectorOp, BoundWindow, NativeExpr, NativeNode,
     NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
@@ -174,8 +174,8 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
     }
-    if let Some((op, vector)) = select_op(func.name, &args.args)? {
-        return select_call(context, func.name, op, vector);
+    if let Some((op, vector)) = vector_op(func.name, &args.args)? {
+        return vector_call(context, func.name, op, vector);
     }
     // The name is looked up before the call's arguments are read, so a name this compiler has no
     // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
@@ -257,11 +257,11 @@ fn map_call(context: &Context, name: &str, op: MathOp, vector: &PromExpr) -> Res
     })
 }
 
-/// Wraps the selection `op` over the value of `vector`, which keeps its type as a map does.
-fn select_call(
+/// Wraps the vector operation `op` over the value of `vector`, which keeps its type as a map does.
+fn vector_call(
     context: &Context,
     name: &str,
-    op: BoundSelect,
+    op: BoundVectorOp,
     vector: &PromExpr,
 ) -> Result<NativeNode> {
     if vector.value_type() != ValueType::Vector {
@@ -274,7 +274,7 @@ fn select_call(
     let input = compile_expr(context, vector)?;
     let output = input.output.clone();
     Ok(NativeNode {
-        expr: NativeExpr::Select {
+        expr: NativeExpr::Vector {
             input: Box::new(input),
             op,
         },
@@ -282,12 +282,12 @@ fn select_call(
     })
 }
 
-/// The selection a sort or `absent` binds, and the vector it reads, or `None` when `name` is
+/// The vector operation a sort or `absent` binds, and the vector it reads, or `None` when `name` is
 /// neither.
-fn select_op<'a>(
+fn vector_op<'a>(
     name: &str,
     arguments: &'a [Box<PromExpr>],
-) -> Result<Option<(BoundSelect, &'a PromExpr)>> {
+) -> Result<Option<(BoundVectorOp, &'a PromExpr)>> {
     let order = match name {
         "sort" => Some(SortOrder::Asc),
         "sort_desc" => Some(SortOrder::Desc),
@@ -300,7 +300,7 @@ fn select_op<'a>(
                 )));
             };
             let labels = absent_labels_of(vector)?;
-            return Ok(Some((BoundSelect::Absent { labels }, vector)));
+            return Ok(Some((BoundVectorOp::Absent { labels }, vector)));
         }
         _ => return Ok(None),
     };
@@ -334,7 +334,7 @@ fn select_op<'a>(
             }
         }
     };
-    Ok(Some((BoundSelect::Sort(order), vector)))
+    Ok(Some((BoundVectorOp::Sort(order), vector)))
 }
 
 /// The labels `absent(expr)` answers with, as Prometheus `createLabelsForAbsentFunction` derives
