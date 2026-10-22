@@ -67,7 +67,11 @@ impl ExtensionPlanner for PromExtensionPlanner {
         } else if let Some(node) = node.as_any().downcast_ref::<Absent>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
         } else if let Some(node) = node.as_any().downcast_ref::<FusedSeries>() {
-            plan_fused_series(node, physical_inputs)
+            plan_fused_series(
+                node,
+                physical_inputs,
+                session.config_options().execution.target_partitions,
+            )
         } else {
             Ok(None)
         }
@@ -90,9 +94,13 @@ const METRIC_NAME: &str = "__name__";
 /// found but refuses the raw path is a different case — the logical route chose this node for this
 /// scan and nothing here can undo that choice, because the logical plan is not available — so it is
 /// reported as an error that names the reason instead of silently producing no plan.
+/// The fused leaf needs a prepared scan: range assignment runs after physical planning and cannot
+/// see a `SeriesScanExec`. Preparation keeps the scan's parallel layout, and the series-producer
+/// contract guarantees that one series stays in one scan partition.
 fn plan_fused_series(
     fused: &FusedSeries,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
+    target_partitions: usize,
 ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
     let Some(input) = physical_inputs.first() else {
         return Ok(None);
@@ -124,7 +132,18 @@ fn plan_fused_series(
         .map(|field| field.name.to_string())
         .collect::<Vec<_>>();
 
-    let scan = single_partition_scan(scan)?;
+    let scan = if scan.is_partition_set() {
+        Arc::new(scan.clone())
+    } else {
+        let partitions = table::table::scan::assign_partition_ranges(
+            scan.get_partition_ranges(),
+            target_partitions.max(1),
+        );
+        Arc::new(
+            scan.with_new_partitions(partitions, target_partitions.max(1))
+                .map_err(|error| DataFusionError::External(error.into_inner()))?,
+        )
+    };
     // The scan resolves the label source and the ordering it will declare itself, against its own
     // metadata snapshot, and hands both back through the leaf it builds. Naming them here instead
     // would be a second copy of a binding only the scanner can make: the physical metadata and
@@ -145,25 +164,4 @@ fn plan_fused_series(
     fused
         .to_execution_plan(series_scan, label_source, ordering)
         .map(Some)
-}
-
-/// The scan as one partition holding every range it already has.
-///
-/// A raw-series binding is resolvable only once the scan holds exactly one partition: the label
-/// source is decoded against the scanner's own metadata snapshot and the frames it produces carry
-/// whole series, so a scan spread over several partitions has no single binding to name. The rule
-/// that assigns partition ranges (`ParallelizeScan`) runs *after* physical planning, i.e. after
-/// this node is built, so a scan reaching here is unprepared; preparing it here keeps the node from
-/// reading one partition of the series it was bound to. A scan that is already prepared — several
-/// partitions, assigned by whatever ran before — is passed through as it is, and the binding below
-/// declines it if it cannot name one partition.
-fn single_partition_scan(scan: &RegionScanExec) -> DfResult<Arc<RegionScanExec>> {
-    if scan.is_partition_set() {
-        return Ok(Arc::new(scan.clone()));
-    }
-    let ranges = scan.get_partition_ranges();
-    let prepared = scan
-        .with_new_partitions(vec![ranges], 1)
-        .map_err(|error| DataFusionError::External(error.into_inner()))?;
-    Ok(Arc::new(prepared))
 }
