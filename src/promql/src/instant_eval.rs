@@ -27,6 +27,26 @@ use crate::map::drop_metric_name;
 #[cfg(test)]
 mod tests;
 
+/// Selects the one source row an anchored instant reads, with the lookback, offset and staleness
+/// rules of [`select_instants`]: the last sample at or before `at_ms` (shifted by `offset_ms`) and
+/// not more than the lookback before it, unless a stale marker is the latest sample there.
+///
+/// `None` means the anchor selects nothing, which is what an anchor outside the series' data or one
+/// whose only candidate is too old or stale reports.
+pub fn select_instant_at(
+    time: &RawTimestamps,
+    fields: &SeriesFields,
+    at_ms: i64,
+    lookback_ms: i64,
+    offset_ms: i64,
+) -> Result<Option<u64>> {
+    // One point at the anchor is the same rule `select_instants` applies per grid point, so the
+    // anchor is asked of it rather than re-derived here: a second copy of the boundary arithmetic
+    // is a second place for the lookback edge to disagree.
+    let (indices, _) = select_instants(time, fields, at_ms..=at_ms, 1, lookback_ms, offset_ms)?;
+    Ok(indices.into_iter().next())
+}
+
 /// Selects source rows for an aligned PromQL instant-evaluation range.
 ///
 /// Returns original logical row indices and evaluation timestamps from a complete source axis
@@ -158,8 +178,12 @@ pub fn select_instants(
 /// the evaluation grid the timestamps lie on and one field per field of `fields`. A field without a
 /// sample in the selected row has no result there.
 ///
-/// `timestamp(x @ t)` selects at `t` for every point, so its selection repeats one row; Prometheus
-/// ignores an offset next to `@` here, while `info()` applies it.
+/// `timestamp(x @ t)` selects at `t` for every point, so its selection repeats one row. This
+/// kernel reports the sample the caller selected and does not decide the selector's time
+/// modifiers: the native Instant caller passes its offset into the selection, so
+/// `timestamp(x @ t offset d)` reports the sample at `t - d`, matching GreptimeDB's existing
+/// planner rather than Prometheus' special case for #8433, which ignores the offset here. `info()`
+/// applies it too.
 pub fn timestamp_of_selection(
     schema: &Arc<SeriesSchema>,
     metric: &MetricName,

@@ -502,3 +502,58 @@ fn evaluated_timestamps_follow_each_field() {
         ]
     );
 }
+
+#[test]
+fn anchored_instant_uses_lookback_offset_and_staleness_rules() {
+    use super::select_instant_at;
+    let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+        Some(7.0),
+        Some(1.0),
+    ])));
+    let raw_axis = axis(&[-1500, 500]);
+    assert_eq!(
+        select_instant_at(&raw_axis, &fields, 500, 2000, 0).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        select_instant_at(&raw_axis, &fields, 500, 2000, 800).unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        select_instant_at(&raw_axis, &fields, 500, 2000, 0).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        select_instant_at(&raw_axis, &fields, 500, 1000, 0).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        select_instant_at(&raw_axis, &fields, 500, 0, 0).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        select_instant_at(&raw_axis, &fields, 499, 0, 0).unwrap(),
+        None
+    );
+    let stale = Samples::from_float(Float64Array::from(vec![
+        Some(7.0),
+        Some(f64::from_bits(
+            common_query::prometheus::PROMETHEUS_STALE_NAN_BITS,
+        )),
+    ]));
+    assert_eq!(
+        select_instant_at(&raw_axis, &SeriesFields::one(stale), 500, 2000, 0).unwrap(),
+        None
+    );
+    assert_eq!(
+        select_instant_at(
+            &axis(&[]),
+            &SeriesFields::one(Samples::from_float(Float64Array::new_null(0))),
+            500,
+            2000,
+            0
+        )
+        .unwrap(),
+        None
+    );
+}
