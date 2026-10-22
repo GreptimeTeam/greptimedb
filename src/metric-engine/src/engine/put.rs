@@ -818,6 +818,7 @@ mod tests {
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
+    use tokio::sync::OwnedRwLockReadGuard;
 
     use super::*;
     use crate::engine::MetricEngine;
@@ -2404,13 +2405,20 @@ mod tests {
             engine.handle_request(logical_region_id, request)
         };
         // Holds `request` after its metadata region append while the lease from `grant(n)`
-        // expires.
-        let expire_after_append = async |request, n| {
+        // expires. The request does not reach the append while `fill` holds the read lock of
+        // the logical region, as a fill of the cached logical columns does.
+        let expire_after_append = async |request, n, fill: Option<OwnedRwLockReadGuard<()>>| {
             listener.pause_next();
             let mut task = {
                 let engine = engine.clone();
                 tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
             };
+            if let Some(fill) = fill {
+                let appended =
+                    tokio::time::timeout(Duration::from_millis(100), listener.wait_appended());
+                assert!(appended.await.is_err());
+                drop(fill);
+            }
             tokio::select! {
                 () = listener.wait_appended() => {}
                 result = &mut task => panic!("the request finished before its append: {result:?}"),
@@ -2442,7 +2450,9 @@ mod tests {
         put(&["job"]).await.unwrap();
 
         // The metadata write of the ALTER is applied, so the cached metadata must not hide it.
-        let err = expire_after_append(alter("tag1"), 1).await.unwrap_err();
+        let err = expire_after_append(alter("tag1"), 1, None)
+            .await
+            .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
         let metadata = engine.get_metadata(logical_region_id).await.unwrap();
         assert!(metadata.column_by_name("tag1").is_some());
@@ -2460,7 +2470,15 @@ mod tests {
         put(&["job", "tag1", "tag2"]).await.unwrap();
 
         // The metadata delete of the DROP is applied, so writes must not use the cached columns.
-        let err = expire_after_append(drop_request(), 2).await.unwrap_err();
+        let fill = engine
+            .inner
+            .metadata_region
+            .read_lock_logical_region(logical_region_id)
+            .await
+            .unwrap();
+        let err = expire_after_append(drop_request(), 2, Some(fill))
+            .await
+            .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
         grant(3);
         put(&["job"]).await.unwrap_err();

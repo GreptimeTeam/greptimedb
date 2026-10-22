@@ -540,6 +540,8 @@ mod test {
         let mut engine_env = TestEnv::with_prefix("region-alive-keeper-write-lease").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
         engine.require_write_lease();
+        // The clock of the lease checks stands still, so only the lease propagation matters.
+        engine.freeze_lease_clock(std::time::Instant::now());
         region_server.register_engine(Arc::new(engine));
         let alive_keeper =
             RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
