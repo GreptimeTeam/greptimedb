@@ -20,6 +20,11 @@ pub(crate) mod artifact;
 mod bucket;
 mod builder;
 mod catalog;
+#[allow(
+    dead_code,
+    reason = "Opt-in format; query consumer integration is deferred."
+)]
+pub(crate) mod columnar;
 pub(crate) mod format;
 #[cfg(test)]
 mod format_tests;
@@ -70,7 +75,9 @@ pub(crate) const ROW_COUNT_COLUMN: &str = "__series_row_count";
 pub(crate) const METRIC_SERIES_ID_BATCH_SIZE: usize = 500;
 
 /// Identifies one series in a physical metric region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct MetricSeriesId {
     /// Logical table ID inside the physical metric region.
     pub table_id: u32,

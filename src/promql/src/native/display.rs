@@ -104,9 +104,7 @@ fn describe(node: &NativeNode) -> String {
         }
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} [{}] {}",
-            match op.kind {
-                AggregateKind::Sum => "sum",
-            },
+            aggregate_kind(op.kind),
             match &op.group {
                 Grouping::By(_) => "by",
                 Grouping::Without(_) => "without",
@@ -149,6 +147,21 @@ fn fill(values: FillValues) -> String {
         side("fill_left", values.lhs),
         side("fill_right", values.rhs)
     )
+}
+
+/// The PromQL name of an aggregate, with the constant argument it was bound to.
+fn aggregate_kind(kind: AggregateKind) -> String {
+    match kind {
+        AggregateKind::Sum => "sum".to_string(),
+        AggregateKind::Avg => "avg".to_string(),
+        AggregateKind::Count => "count".to_string(),
+        AggregateKind::Min => "min".to_string(),
+        AggregateKind::Max => "max".to_string(),
+        AggregateKind::Group => "group".to_string(),
+        AggregateKind::Stddev => "stddev".to_string(),
+        AggregateKind::Stdvar => "stdvar".to_string(),
+        AggregateKind::Quantile { quantile } => format!("quantile {quantile}"),
+    }
 }
 
 /// A window: what it runs, over which range, and where it lands.

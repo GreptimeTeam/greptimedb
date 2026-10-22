@@ -720,7 +720,10 @@ fn binary_field(
         Cardinality::ManyToOne(include) => (lhs, rhs, &include[..], false),
         Cardinality::OneToMany(include) => (rhs, lhs, &include[..], true),
     };
-    let points = grid.timestamps().len();
+    let points = grid.spec().len as usize;
+    let timestamp_at = |point: usize| {
+        (grid.spec().start_ms as i128 + point as i128 * grid.spec().step_ms as i128) as i64
+    };
     let errors_before = errors.len();
     // The pairing phase is entered once, before the field allocates anything: its presence flags,
     // its match groups, the widest label set a pairing builds and the histogram payload one row of
@@ -948,7 +951,7 @@ fn binary_field(
                  operation at {} ms; many-to-many matching not allowed: matching labels must be \
                  unique on one side",
                 render(key),
-                grid.timestamps()[point]
+                timestamp_at(point)
             ),
         ));
     }
@@ -961,7 +964,7 @@ fn binary_field(
                 "multiple matches for labels {} at {} ms: many-to-one matching must be explicit \
                  (group_left/group_right)",
                 render(key),
-                grid.timestamps()[point]
+                timestamp_at(point)
             ),
         ));
     }
@@ -975,14 +978,14 @@ fn binary_field(
                     "multiple matches for labels {} at {} ms: grouping labels must ensure \
                      unique matches",
                     render(&duplicate.key),
-                    grid.timestamps()[duplicate.point]
+                    timestamp_at(duplicate.point)
                 ),
             )
         } else {
             (
                 duplicate.point,
                 2,
-                same_labelset(&duplicate.key, grid.timestamps()[duplicate.point]),
+                same_labelset(&duplicate.key, timestamp_at(duplicate.point)),
             )
         });
     }
@@ -1151,7 +1154,9 @@ pub fn set_vectors(
         let rhs = Operand::try_new(rhs_schema, rhs, field)?;
         let mut results = set_field(op, labels, &lhs, &rhs)?;
         if let Some(duplicate) = results.sort_rows() {
-            let timestamp = grid.timestamps()[duplicate.point];
+            let timestamp = (grid.spec().start_ms as i128
+                + duplicate.point as i128 * grid.spec().step_ms as i128)
+                as i64;
             errors.push((duplicate.point, 0, same_labelset(&duplicate.key, timestamp)));
         }
         fields.push(results);
