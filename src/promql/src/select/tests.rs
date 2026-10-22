@@ -269,6 +269,31 @@ fn limit_operators_keep_histogram_samples() {
     assert_eq!(kinds(&kept[0], 0), [(1, "histogram")]);
 }
 
+/// `topk` ranks floats only: a histogram sample is skipped, as Prometheus ignores it, and the
+/// float below it is kept in its place.
+#[test]
+fn topk_skips_histogram_samples() {
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let schema = schema(1, 1);
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+    builder
+        .push_samples(
+            0,
+            &[Some(GridSample::Histogram(Box::new(
+                FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+            )))],
+        )
+        .unwrap();
+    let series = vec![
+        builder.finish(metric("__name__=a")).unwrap().unwrap(),
+        build(&schema, metric("__name__=b"), &vec![vec![Some(1.0)]]).unwrap(),
+    ];
+    let kept = topk(1.0, true, &Grouping::By(Vec::new()), &schema, &series).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].metric.name(), Some("b"));
+}
+
 /// A selection hands back the sample it selected, start timestamp included.
 ///
 /// `limitk` and `limit_ratio` choose samples rather than compute them, so a histogram that arrives

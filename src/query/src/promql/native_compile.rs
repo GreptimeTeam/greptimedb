@@ -123,6 +123,7 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
+use promql::map_time::DateFunction;
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -1156,6 +1157,18 @@ fn math_signature(name: &str) -> Option<MathSignature> {
         "deg" => Some(MathSignature::Unary(MathOp::Deg)),
         "rad" => Some(MathSignature::Unary(MathOp::Rad)),
         "sgn" => Some(MathSignature::Unary(MathOp::Sgn)),
+        // A date function takes the vector its values are read from; without one it reads the
+        // evaluation time, which has no input to map and is refused by `math_op`.
+        "day_of_month" => Some(MathSignature::Unary(MathOp::Date(DateFunction::DayOfMonth))),
+        "day_of_week" => Some(MathSignature::Unary(MathOp::Date(DateFunction::DayOfWeek))),
+        "day_of_year" => Some(MathSignature::Unary(MathOp::Date(DateFunction::DayOfYear))),
+        "days_in_month" => Some(MathSignature::Unary(MathOp::Date(
+            DateFunction::DaysInMonth,
+        ))),
+        "hour" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Hour))),
+        "minute" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Minute))),
+        "month" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Month))),
+        "year" => Some(MathSignature::Unary(MathOp::Date(DateFunction::Year))),
         // `round`'s nearest defaults to one, so `round(x)` is `round(x, 1)` and its variant always
         // carries the number it rounds to.
         "round" => Some(MathSignature::DefaultedConstant {
@@ -1193,6 +1206,12 @@ fn math_op<'a>(
     // The vector is the function's first argument, so a call that wrote no argument at all is
     // refused by the same arity check as one that wrote too few constants.
     let Some((vector, parameters)) = arguments.split_first() else {
+        if let MathSignature::Unary(MathOp::Date(_)) = signature {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` without an argument, which reads the evaluation time and has \
+                 no native kernel"
+            )));
+        }
         return Err(arity_error(name, signature, 0));
     };
     let given = parameters.len() + 1;
