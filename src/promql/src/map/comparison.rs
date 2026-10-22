@@ -119,7 +119,13 @@ impl Comparison {
 }
 
 impl ComparisonOp {
-    fn apply(self, left: f64, right: f64) -> bool {
+    /// Whether `left op right` holds, by the same IEEE rules the kernels use.
+    ///
+    /// Public because a compiler that folds a constant comparison has to fold it with the same
+    /// answer the kernel would compute: NaN satisfies only `NotEqual`, and signed zeros compare
+    /// equal. Defining the six rules a second time is how the folded number and the evaluated one
+    /// would start to disagree.
+    pub fn apply(self, left: f64, right: f64) -> bool {
         match self {
             Self::Equal => left == right,
             Self::NotEqual => left != right,

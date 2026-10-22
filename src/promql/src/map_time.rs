@@ -170,7 +170,12 @@ fn eval_time_series(schema: &SeriesSchema, value: impl Fn(i64) -> f64) -> Result
     let grid = schema.eval_grid.clone().ok_or_else(|| {
         DataFusionError::Execution("time functions require an evaluation grid".into())
     })?;
-    let values: Float64Array = grid.timestamps().iter().map(|&ms| value(ms)).collect();
+    let values: Float64Array = grid
+        .timestamps()
+        .map_err(external)?
+        .iter()
+        .map(|&ms| value(ms))
+        .collect();
     let range = GridRange::try_new(grid.clone(), 0, values.len()).map_err(external)?;
     let fields = vec![Samples::from_float(values); schema.fields.len()];
     Series::try_new(
