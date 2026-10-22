@@ -1,18 +1,18 @@
 # Mito columnar samples format
 
-**Status: proposed, not implemented. Review the format before implementing it.**
+**Status: implemented as an opt-in internal backend.**
 This document specifies a standalone samples writer and reader. Query-consumer
 integration, caches, and enabling samples by default are separate work.
 
-The proposal is stacked on [#9841](https://github.com/GreptimeTeam/greptimedb/pull/9841),
-at commit `333e15ad9b2e02c77afeede03b9e6a02aec305e5`, and follows the presentation
+The port is stacked on [#9841](https://github.com/GreptimeTeam/greptimedb/pull/9841),
+at commit `6b44040c0ad96fb06d592c7bba5a1744e2274718`, and follows the presentation
 and artifact conventions in [Mito columnar series](mito-series.md). Its sample
 encodings and single-series blocks derive from the benchmark's
 [columnar samples v2 specification][bench-spec] and [implementation][bench-code]
 at revision `8650c3003a861c8cf2c9f5037bfc81fde6a3bdc4`.
 The benchmark variant name does not determine the Mito wire version.
 
-The principal review choices are nullable Float64 fields, preservation of source
+The principal format choices are nullable Float64 fields, preservation of source
 rows and operation types, blocks bounded by rows and bytes without hourly splits,
 and Mito framing with sample-specific time bounds. This is an independent format;
 it does not read or write benchmark files.
@@ -525,7 +525,7 @@ for manifest validation. Return a `SamplesFormatReader` exposing `schema()` and
 `read(SamplesReadRequest)` as an independent stream of projected Arrow batches.
 Do not reuse the series-only read request: it has no time semantics.
 
-The proposed internal request has these fields:
+The internal request has these fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -574,8 +574,7 @@ row counts when producing output.
 
 ## Compatibility, validation, and deferred work
 
-This proposal changes no code or persisted data. After approval, the backend is
-opt-in through internal format selection, like #9841. Existing catalogs, Parquet
+The backend is opt-in through internal format selection, like #9841. Existing catalogs, Parquet
 artifacts, and series artifacts retain their meaning. An older binary is not
 promised to understand the new catalog identifier or sample bytes; do not claim
 downgrade compatibility merely because the samples are rebuildable. The new
@@ -625,10 +624,10 @@ no performance equivalence is asserted.
 
 Additional field types, value statistics/predicates, exact primary keys,
 dedicated job/instance identifier components, label reconstruction, cache
-integration, deeper trees, and query integration are deferred. Format review
-should confirm the proposed byte assignments and these
-boundaries before code is added. The next step is local review of this document,
-not publication or implementation.
+integration, deeper trees, and query integration are deferred. The byte assignments
+above define the version-1 contract. The
+[frozen sample fixture](../../tests/compatibility/wire/mito_columnar_samples/README.md)
+checks those bytes independently of writer/reader round trips.
 
 [bench-spec]: https://github.com/GreptimeTeam/series-format-bench/blob/8650c3003a861c8cf2c9f5037bfc81fde6a3bdc4/docs/formats/columnar-samples-v2.md
 [bench-code]: https://github.com/GreptimeTeam/series-format-bench/blob/8650c3003a861c8cf2c9f5037bfc81fde6a3bdc4/src/sample_columnar.rs

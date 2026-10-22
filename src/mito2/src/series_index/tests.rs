@@ -68,10 +68,24 @@ pub(crate) async fn prepare_region_with_config(
     timestamps: &[i64],
     config: MitoConfig,
 ) -> (MitoEngine, MitoRegionRef) {
+    prepare_region_with_metadata(
+        env,
+        timestamps,
+        config,
+        Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        )),
+    )
+    .await
+}
+
+pub(crate) async fn prepare_region_with_metadata(
+    env: &mut TestEnv,
+    timestamps: &[i64],
+    config: MitoConfig,
+    metadata: store_api::metadata::RegionMetadataRef,
+) -> (MitoEngine, MitoRegionRef) {
     let engine = env.create_engine(config).await;
-    let metadata = Arc::new(sst_region_metadata_with_encoding(
-        PrimaryKeyEncoding::Sparse,
-    ));
     let region_id = RegionId::new(1, 1);
     let mut request = CreateRequestBuilder::new().build();
     request.column_metadatas = metadata.column_metadatas.clone();
@@ -129,7 +143,18 @@ pub(crate) async fn prepare_region_with_config(
                                 0,
                             )),
                             ValueData::TimestampMillisecondValue(ts),
-                            ValueData::U64Value(1),
+                            if metadata
+                                .field_columns()
+                                .next()
+                                .unwrap()
+                                .column_schema
+                                .data_type
+                                == datatypes::prelude::ConcreteDataType::float64_datatype()
+                            {
+                                ValueData::F64Value(1.0)
+                            } else {
+                                ValueData::U64Value(1)
+                            },
                         ])],
                     },
                     hint: Some(WriteHint {

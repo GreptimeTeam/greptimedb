@@ -314,6 +314,7 @@ mod tests {
         for (format, name) in [
             (ArtifactFormat::Parquet, "parquet"),
             (ArtifactFormat::ColumnarSeries, "columnar-series"),
+            (ArtifactFormat::ColumnarSamples, "columnar-samples"),
             (ArtifactFormat::FakeSamples, "fake-samples"),
             (ArtifactFormat::FakeIndex, "fake-index"),
         ] {
