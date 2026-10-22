@@ -33,7 +33,8 @@ use datafusion_expr::{
     Expr, ExprSchemable, GetFieldAccess, Operator, ScalarUDF, WindowFunctionDefinition,
 };
 use datatypes::extension::json::{
-    Json2ExtensionType, is_json2_extension_type, parse_legacy_json2_settings,
+    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
+    parse_legacy_json2_settings,
 };
 use datatypes::types::json_type::JsonNativeType;
 use jsonb::jsonpath::Path;
@@ -138,7 +139,13 @@ impl ExprPlanner for JsonExprPlanner {
         qualifier: Option<&TableReference>,
         nested_names: &[String],
     ) -> Result<PlannerResult<Vec<Expr>>> {
-        if !is_json2_extension_type(field) {
+        if !is_any_json_extension_type(field)
+            // SQL-created JSONB columns use Binary with greptime:type=Json, without an Arrow extension.
+            && field
+                .metadata()
+                .get(datatypes::schema::TYPE_KEY)
+                .is_none_or(|value| value != "Json")
+        {
             return Ok(PlannerResult::Original(Vec::new()));
         }
 
@@ -514,9 +521,10 @@ mod tests {
     use datafusion_expr::WindowFrame;
     use datafusion_functions::core::coalesce;
     use datafusion_functions::math::{abs, power};
-    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType, JsonMetadata};
     use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::prelude::ConcreteDataType;
+    use std::collections::HashMap;
 
     use super::*;
 
@@ -654,78 +662,85 @@ mod tests {
         let qualifier = TableReference::bare("events");
         let nested_names = vec!["payload".to_string(), "cpu".to_string()];
 
-        let planned = planner.plan_compound_identifier(
-            &Field::new("labels", DataType::Struct(Fields::empty()), true)
+        for field in [
+            Field::new("labels", DataType::Struct(Fields::empty()), true)
                 .with_extension_type(Json2ExtensionType::default()),
-            Some(&qualifier),
-            &nested_names,
-        )?;
+            Field::new("labels", DataType::Binary, true).with_extension_type(JsonExtensionType),
+            Field::new("labels", DataType::Binary, true).with_metadata(HashMap::from([(
+                datatypes::schema::TYPE_KEY.to_string(),
+                "Json".to_string(),
+            )])),
+        ] {
+            let planned =
+                planner.plan_compound_identifier(&field, Some(&qualifier), &nested_names)?;
 
-        match planned {
-            PlannerResult::Planned(Expr::ScalarFunction(func)) => {
-                assert_eq!(func.func.name(), JsonGetWithType::NAME);
-                assert_eq!(func.args.len(), 2);
-                assert_eq!(
-                    func.args[0],
-                    Expr::Column(Column::new(Some(qualifier.clone()), "labels"))
-                );
+            match planned {
+                PlannerResult::Planned(Expr::ScalarFunction(func)) => {
+                    assert_eq!(func.func.name(), JsonGetWithType::NAME);
+                    assert_eq!(func.args.len(), 2);
+                    assert_eq!(
+                        func.args[0],
+                        Expr::Column(Column::new(Some(qualifier.clone()), "labels"))
+                    );
+                    assert_eq!(
+                        func.args[1],
+                        Expr::Literal(ScalarValue::Utf8(Some("$.payload.cpu".to_string())), None)
+                    );
+                }
+                other => panic!("expected json_get scalar function, got {other:?}"),
+            }
+
+            for (key, path) in [
+                ("http.status_code", r#"$."http.status_code""#),
+                ("a\"b", r#"$."a\"b""#),
+                ("a\\b", r#"$."a\\b""#),
+            ] {
+                let planned = planner.plan_compound_identifier(
+                    &field,
+                    Some(&qualifier),
+                    &[key.to_string()],
+                )?;
+                let PlannerResult::Planned(Expr::ScalarFunction(func)) = planned else {
+                    unreachable!()
+                };
                 assert_eq!(
                     func.args[1],
-                    Expr::Literal(ScalarValue::Utf8(Some("$.payload.cpu".to_string())), None)
+                    Expr::Literal(ScalarValue::Utf8(Some(path.to_string())), None)
                 );
             }
-            other => panic!("expected json_get scalar function, got {other:?}"),
-        }
 
-        for (key, path) in [
-            ("http.status_code", r#"$."http.status_code""#),
-            ("a\"b", r#"$."a\"b""#),
-            ("a\\b", r#"$."a\\b""#),
-        ] {
-            let planned = planner.plan_compound_identifier(
-                &Field::new("labels", DataType::Struct(Fields::empty()), true)
-                    .with_extension_type(Json2ExtensionType::default()),
-                Some(&qualifier),
-                &[key.to_string()],
-            )?;
-            let PlannerResult::Planned(Expr::ScalarFunction(func)) = planned else {
+            let PlannerResult::Planned(Expr::ScalarFunction(func)) = planner
+                .plan_compound_identifier(
+                    &field,
+                    Some(&qualifier),
+                    &["resource".to_string(), "http.status_code".to_string()],
+                )?
+            else {
                 unreachable!()
             };
             assert_eq!(
                 func.args[1],
-                Expr::Literal(ScalarValue::Utf8(Some(path.to_string())), None)
+                Expr::Literal(
+                    ScalarValue::Utf8(Some(r#"$.resource."http.status_code""#.to_string())),
+                    None
+                )
             );
         }
 
-        let PlannerResult::Planned(Expr::ScalarFunction(func)) = planner.plan_compound_identifier(
-            &Field::new("labels", DataType::Struct(Fields::empty()), true)
-                .with_extension_type(Json2ExtensionType::default()),
-            Some(&qualifier),
-            &["resource".to_string(), "http.status_code".to_string()],
-        )?
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            func.args[1],
-            Expr::Literal(
-                ScalarValue::Utf8(Some(r#"$.resource."http.status_code""#.to_string())),
-                None
-            )
-        );
+        for data_type in [DataType::Utf8, DataType::Binary] {
+            let original = planner.plan_compound_identifier(
+                &Field::new("plain", data_type, true),
+                Some(&qualifier),
+                &nested_names,
+            )?;
 
-        let original = planner.plan_compound_identifier(
-            &Field::new("plain", DataType::Utf8, true),
-            Some(&qualifier),
-            &nested_names,
-        )?;
-
-        match original {
-            PlannerResult::Original(exprs) => assert!(exprs.is_empty()),
-            other => panic!(
-                "expected original empty result for non-json field, got {:?}",
-                other,
-            ),
+            match original {
+                PlannerResult::Original(exprs) => assert!(exprs.is_empty()),
+                other => panic!(
+                    "expected original empty result for non-json field, got {:?}",
+                    other,
+                ),
+            }
         }
 
         Ok(())
