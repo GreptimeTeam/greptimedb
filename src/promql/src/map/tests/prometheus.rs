@@ -174,7 +174,7 @@ fn evaluate(case: &Case) -> Vec<Series> {
 }
 
 fn grid_len(case: &Case) -> usize {
-    case.schema.eval_grid.as_ref().unwrap().timestamps().len()
+    case.schema.eval_grid.as_ref().unwrap().spec().len as usize
 }
 
 #[test]

@@ -40,9 +40,10 @@ use datatypes::series::time::{TimeAxis, union_positions};
 pub(crate) use aggregate::sum_or_avg;
 pub use aggregate::{HistogramAggregate, aggregate_histograms};
 
+use crate::go_format::format_open_metrics_float;
 use crate::go_sort;
 use crate::grid_series::{
-    GridSeriesBuilder, LabelSet, METADATA_LABELS, label_set, merge_same_labelset,
+    GridSeriesBuilder, LabelSet, METADATA_LABELS, external, label_set, merge_same_labelset,
 };
 
 const BUCKET_LABEL: &str = "le";
@@ -54,6 +55,33 @@ pub enum HistogramFunction {
     Quantile(f64),
     /// `histogram_fraction(lower, upper, v)`.
     Fraction { lower: f64, upper: f64 },
+}
+
+/// `histogram_quantiles(v, label, q...)`: [`evaluate_histograms`] with `Quantile(q)` for each
+/// `q`, each result labelled with `label` set to `q` as Prometheus' `FormatOpenMetricsFloat`
+/// writes it. Results that then share a label set merge as [`merge_same_labelset`] does, so a
+/// repeated `q`, or a `label` that overwrites the label telling two histograms apart, fails at a
+/// point both hold.
+///
+/// Each `q` is a constant. Prometheus evaluates the quantile arguments at every step, so a
+/// quantile that varies over time is not this kernel's to evaluate.
+pub fn histogram_quantiles(
+    label: &str,
+    quantiles: &[f64],
+    schema: &Arc<SeriesSchema>,
+    series: &[Series],
+) -> Result<Vec<Series>> {
+    let mut output = Vec::new();
+    for &quantile in quantiles {
+        let value: Arc<str> = Arc::from(format_open_metrics_float(quantile));
+        for mut result in
+            evaluate_histograms(HistogramFunction::Quantile(quantile), schema, series)?
+        {
+            result.metric.set(label, value.clone()).map_err(external)?;
+            output.push(result);
+        }
+    }
+    merge_same_labelset(schema, output)
 }
 
 /// Evaluates `function` over the classic and native histograms in `series`.
@@ -235,6 +263,12 @@ fn has_histograms(series: &Series) -> bool {
             .iter()
             .any(|segment| !matches!(segment.dense(), Some(DenseSamplesRef::Float(_))))
     })
+}
+
+/// A native histogram as Go's `FloatHistogram.String` writes it, the label value `count_values`
+/// gives a histogram sample.
+pub(crate) fn histogram_string(h: &HistogramView<'_>) -> Result<String> {
+    native::go_string(h)
 }
 
 /// A function of one native histogram.

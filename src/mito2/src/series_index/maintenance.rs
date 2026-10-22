@@ -235,7 +235,7 @@ async fn build_index_version(
         if reusable && let Some(artifact) = &entry.artifact {
             for object in &artifact.objects {
                 reusable &= store
-                    .exists(object)
+                    .exists(&object.path)
                     .await
                     .context(crate::error::OpenDalSnafu)?;
             }
@@ -288,9 +288,9 @@ async fn build_index_version(
             let reusable = if let Some(handle) = samples.get(&id) {
                 let artifact = &handle.entry().artifact;
                 let mut exists = artifact.format == backend.format();
-                for path in &artifact.objects {
+                for object in &artifact.objects {
                     exists &= store
-                        .exists(path)
+                        .exists(&object.path)
                         .await
                         .context(crate::error::OpenDalSnafu)?;
                 }

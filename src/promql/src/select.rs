@@ -646,7 +646,7 @@ fn grid_points(schema: &SeriesSchema, series: &[Series]) -> Result<usize> {
             ));
         }
     }
-    Ok(grid.timestamps().len())
+    Ok(grid.spec().len as usize)
 }
 
 /// The first field's value of `series` at grid `point`, looked up by position.
