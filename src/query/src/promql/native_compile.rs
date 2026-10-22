@@ -23,15 +23,20 @@
 //! <range function>(<selector>[<range>])             e.g. rate(x[5m])
 //! <range function>(<constant>, <selector>[<range>]) e.g. quantile_over_time(0.9, x[5m])
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//! <expression> <operator> <constant>                e.g. x * 100, x > bool 0
+//! <constant> <operator> <expression>                e.g. 1 / x, 0 < x
+//! -<expression>                                     e.g. -x
 //! ```
 //!
 //! which become `Input` (raw samples) → `Instant` (the last sample within the statement's lookback),
-//! `Input` (raw samples) → `Window` (the range function over the statement's grid) and
-//! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to). A
-//! selector may carry `offset` in either selection shape and, in the window shape, an `@` anchor.
-//! Everything else is a [`DataFusionError::NotImplemented`] that names what was found and quotes the
-//! shapes above, because rejecting a query the compiler does not understand is the only honest
-//! alternative to compiling it into something else.
+//! `Input` (raw samples) → `Window` (the range function over the statement's grid),
+//! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to) and, over
+//! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side) and
+//! `Scalar` (that constant). A selector may carry
+//! `offset` in either selection shape and, in the window shape, an `@` anchor. Everything else is a
+//! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
+//! because rejecting a query the compiler does not understand is the only honest alternative to
+//! compiling it into something else.
 //!
 //! Two decisions keep the recursion from growing a branch per query. A constant argument — a
 //! quantile, a rounding step, a clamp bound — is folded out of the statement by [`constant_value`],
@@ -41,6 +46,20 @@
 //! because the compiler knows the query. Arithmetic inside a fold is [`ArithmeticOp::calculate`]'s
 //! alone, so the number this compiler binds and the number the kernel computes cannot disagree
 //! about `%`, `^` or `atan2`.
+//!
+//! Two more are about what a node means rather than about which node to build. A binary operation
+//! keeps its operands in the order they were written, because most operators are not commutative:
+//! `1 / x` is not `x / 1`, and which side the constant is on is the only thing that tells them
+//! apart. `return_bool` is carried as its own field, so `x > 0` (which filters) and `x > bool 0`
+//! (which reports zero or one) are one node with one field changed. A negation then needs no node of
+//! its own: `-x` binds as the multiplication by `-1` that it is, which the multiplication kernel
+//! already computes.
+//!
+//! What a tree cannot yet express is deliberate too. The one input binding carries the ordering it
+//! guarantees and what it produces, but not the selector it reads, so a tree with two selectors
+//! cannot tell its inputs apart and an operation between two vectors is refused. A statement whose
+//! value is a scalar has nothing to read, so it is refused as well: a constant is bound next to a
+//! vector that gives it something to broadcast over.
 //!
 //! The statement's grid, the selector's lookback, window, offset and anchor are the only numbers
 //! derived here; the legality of the tree is not checked here. [`NativeTree::try_new`] is the
@@ -56,16 +75,18 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
-use promql::map::{ArithmeticOp, MathOp};
+use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::native::plan::{
-    BoundInput, BoundInstant, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundInput, BoundInstant, BoundMap, BoundScalar, BoundWindow, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
+use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AtModifier, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral, Offset,
-    VectorSelector, token,
+    AtModifier, BinModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector,
+    NumberLiteral, Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -73,9 +94,11 @@ use crate::promql::label_values::signed_millis_since_epoch;
 /// The shapes this compiler accepts, quoted in every rejection.
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
                          `<range function>(<selector>[<range>])`, with its constants in front of \
-                         the selector as in `quantile_over_time(0.9, x[5m])` — or a math function \
-                         over any of them, as in `abs(rate(x[5m]))`: for example `x`, \
-                         `rate(x[5m])`, `quantile_over_time(0.9, x[5m])` or `abs(rate(x[5m]))`";
+                         the selector as in `quantile_over_time(0.9, x[5m])` — a math function over \
+                         any of them, a binary operation between one of them and a constant, or a \
+                         negation of one of them, as in `x`, `rate(x[5m])`, \
+                         `quantile_over_time(0.9, x[5m])`, `abs(rate(x[5m]))`, `2 / (x + 1)` or \
+                         `-x`";
 
 /// Compiles `stmt` into a tree that reads `input` and evaluates the statement's expression over it.
 ///
@@ -114,6 +137,18 @@ pub fn compile(
              series may not interleave",
         ));
     }
+    // A tree reads a scan and reports evaluated samples, so an expression whose value is not a
+    // vector has nothing to compile into: `1 + 2` is a scalar, and the scalar node is bound as a
+    // constant next to a vector that gives it something to broadcast over rather than on its own.
+    // The check is on the statement's type rather than on the compiled node, so it does not depend on
+    // which kinds of expression happen to compile to a scalar today.
+    if stmt.expr.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "the expression `{}`, which is a {} where a tree reports evaluated samples",
+            stmt.expr,
+            stmt.expr.value_type()
+        )));
+    }
     let context = Context {
         stmt,
         input,
@@ -145,13 +180,197 @@ struct Context<'a> {
 /// its argument, so a query nests as deeply as it was written. A kind this compiler has no node for
 /// is refused with what was found, which is why the rejection is useful without a coverage list.
 fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
+    // A constant is a value rather than a computation, so it binds as the number it folds to, by the
+    // same fold a call's parameters use: `x * (1 + 2)` carries `3` rather than an addition the tree
+    // would have to know how to run. The fold is checked first so that no shape below has to say
+    // what it does with a constant operand.
+    if let Some(value) = constant_value(expr) {
+        return scalar_node(context, value);
+    }
     match expr {
         // Parentheses group, so they change how a statement was typed rather than what it asks for:
         // the expression inside them is the one that compiles.
         PromExpr::Paren(paren) => compile_expr(context, &paren.expr),
         PromExpr::Call(call) => compile_call(context, call),
         PromExpr::VectorSelector(selector) => instant_selection(context, selector),
+        PromExpr::Unary(unary) => negate(context, &unary.expr),
+        PromExpr::Binary(binary) => binary_operation(context, binary),
         found => Err(not_implemented(&format!("the expression `{found}`"))),
+    }
+}
+
+/// Binds `value` as a constant scalar on the statement's grid.
+///
+/// The grid is the statement's rather than the constant's own: a constant has no timestamps, so the
+/// only positions it can be broadcast over are the ones the statement is evaluated at, and
+/// [`NativeTree::validate`] compares a binary operation's two grids by spec rather than by
+/// allocation.
+fn scalar_node(context: &Context, value: f64) -> Result<NativeNode> {
+    Ok(NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(statement_grid(context.stmt)?),
+    })
+}
+
+/// Compiles a negation as the multiplication it is: `-x` is `-1 * x`.
+///
+/// The tree has no negate node and needs none: broadcasting a constant over the expression's value
+/// is the same arithmetic, and the multiplication kernel is the one that already computes it. A
+/// dedicated negate kernel would be an optimization of this node's work rather than a different
+/// meaning, so binding the multiplication does not bind anything the query did not ask for.
+fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
+    // The constant goes on the left, where the minus was: `-x` subtracts nothing, but a reader of
+    // the tree should see the same order the query was written in.
+    Ok(broadcast(
+        scalar_node(context, -1.0)?,
+        compile_expr(context, operand)?,
+        BinaryOp::Mul,
+        false,
+    ))
+}
+
+/// Compiles a binary operation whose operands are not both vectors.
+///
+/// The tree holds one input binding, and that binding carries the ordering it guarantees and what it
+/// produces but not the selector it reads, so two vectors cannot be told apart: `a + b` and `a + a`
+/// would compile to the same tree. That is why a vector–vector operation is refused until an input
+/// names its selector, and why an operation over one vector and one scalar is the shape the tree can
+/// bind: a scalar carries no labels, so broadcasting it is unambiguous.
+fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode> {
+    // A set operator combines two vectors' series rather than their values, and the tree has no node
+    // for it at all. Its name is reported before the operands are looked at, so a set operation
+    // between two vectors is refused as the set operation it is rather than as a binary operation
+    // the compiler has no node for.
+    if binary.op.is_set_operator() {
+        return Err(not_implemented(&format!(
+            "the set operator `{}` in `{binary}`, which has no native node: it combines two \
+             vectors' series, and every binary node here is an arithmetic or comparison operation \
+             over values",
+            binary.op
+        )));
+    }
+    let Some(op) = binary_op(&binary.op) else {
+        return Err(not_implemented(&format!(
+            "the binary operator `{}` in `{binary}`",
+            binary.op
+        )));
+    };
+    // Two vectors are refused before the modifier is looked at, so a vector–vector query with
+    // matching says what is actually missing. The refusal names the missing identity rather than the
+    // query, because that is what whoever adds it has to add.
+    if binary.lhs.value_type() == ValueType::Vector && binary.rhs.value_type() == ValueType::Vector
+    {
+        return Err(not_implemented(&format!(
+            "the binary operation `{binary}` between two vectors, which needs each input to name \
+             the selector it reads: an input binding carries its ordering and what it produces, but \
+             not which selector it was bound to"
+        )));
+    }
+    // What is left has a constant on one side, and a modifier is refused rather than dropped. This
+    // is deliberately narrower than Prometheus, which drops an `on` or `ignoring` written on a
+    // scalar rather than refusing it; refusing is the conservative choice here, because the tree's
+    // matching has no field that could carry the modifier, so binding the operation would compute
+    // something the query did not ask for. A fill value is refused for the same reason: the tree's
+    // matching has no field for one, and dropping it would compute the operation without the fill
+    // the query asked for.
+    if refuses_modifier(binary.modifier.as_ref()) {
+        return Err(not_implemented(&format!(
+            "the vector matching in `{binary}`, which a constant operand has nothing to match: \
+             `on`, `ignoring`, `group_left` and `group_right` name labels of a vector, and a fill \
+             value fills in a match group that could miss"
+        )));
+    }
+    // Two constants are a value rather than an operation over a vector. A `bool` comparison of two
+    // of them folded to its number before this point, so what arrives here is a comparison without
+    // `bool`, which Prometheus refuses to parse at all. Binding it would produce a node that only
+    // fails when it is run, so it is refused here with what was found.
+    if binary.lhs.value_type() == ValueType::Scalar && binary.rhs.value_type() == ValueType::Scalar
+    {
+        return Err(not_implemented(&format!(
+            "the binary operation `{binary}` between two constants, which reports no value: a \
+             comparison of two scalars is written with `bool` to say whether it holds, and one \
+             written that way is folded to the number it means"
+        )));
+    }
+    // Both operands are compiled before the node is built, so `2 / (x + 1)` nests. The constant side
+    // is bound by [`compile_expr`]'s fold, which is what makes it a scalar node rather than an
+    // expression the tree would have to run.
+    Ok(broadcast(
+        compile_expr(context, &binary.lhs)?,
+        compile_expr(context, &binary.rhs)?,
+        op,
+        binary.return_bool(),
+    ))
+}
+
+/// Wraps two compiled operands in the binary node that applies `op` to them.
+///
+/// The output is the vector side's own binding, because a scalar carries no fields: a broadcast keeps
+/// the vector's fields and the grid it is evaluated on, which is the statement's grid on both sides.
+/// Two scalars are possible as a nested operand — a pair that [`constant_value`] refuses to fold, such
+/// as a comparison between two constants — and the node reports the left one's grid, which is the
+/// statement's too. The operands keep the order they were written in, because a non-commutative
+/// operator means what that order says.
+fn broadcast(left: NativeNode, right: NativeNode, op: BinaryOp, return_bool: bool) -> NativeNode {
+    // `compile_expr` binds a constant to a scalar node and a selection or a function to a vector, so
+    // this is where the side the operation reports is decided.
+    let output = if matches!(left.output, NativeType::Scalar(_)) {
+        right.output.clone()
+    } else {
+        left.output.clone()
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: scalar_matching(op, return_bool),
+        },
+        output,
+    }
+}
+
+/// The matching a vector-and-constant operation records.
+///
+/// Nothing is matched: a scalar carries no labels, so [`NativeTree::validate`] broadcasts it and
+/// reads neither `labels` nor `cardinality`. They carry the default a vector–vector operation of the
+/// same operator would have, which is also the only matching PromQL allows here — it rejects
+/// `on`, `ignoring`, `group_left` and `group_right` on a scalar–vector operation. `return_bool` is
+/// the one modifier that changes what this operation computes: `x > 0` filters the vector and
+/// `x > bool 0` reports zero or one for each of its values.
+fn scalar_matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
+    BinaryMatching {
+        op,
+        return_bool,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+        // A fill value fills in a match group that could miss, which a broadcast over a constant never
+        // does: the constant exists at every grid point, so there is no missing side to fill.
+        fill: FillValues::default(),
+    }
+}
+
+/// The binary operator a PromQL token denotes, or `None` when there is no node for it.
+///
+/// A comparison is bound like an arithmetic operator, because the node carries `return_bool`
+/// separately: `x > 0` and `x > bool 0` are one operator with one field changed. [`arithmetic_op`]
+/// is not reused because it decides what a *fold* may do at compile time and a comparison folds
+/// nothing, while this map decides what a *node* computes once the query runs.
+fn binary_op(op: &TokenType) -> Option<BinaryOp> {
+    match op.id() {
+        token::T_ADD => Some(BinaryOp::Add),
+        token::T_SUB => Some(BinaryOp::Sub),
+        token::T_MUL => Some(BinaryOp::Mul),
+        token::T_DIV => Some(BinaryOp::Div),
+        token::T_MOD => Some(BinaryOp::Mod),
+        token::T_POW => Some(BinaryOp::Pow),
+        token::T_ATAN2 => Some(BinaryOp::Atan2),
+        token::T_EQLC => Some(BinaryOp::Eq),
+        token::T_NEQ => Some(BinaryOp::Ne),
+        token::T_GTR => Some(BinaryOp::Gt),
+        token::T_LSS => Some(BinaryOp::Lt),
+        token::T_GTE => Some(BinaryOp::Ge),
+        token::T_LTE => Some(BinaryOp::Le),
+        _ => None,
     }
 }
 
@@ -168,9 +387,8 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
         return window_call(context, func.name, signature, &args.args);
     }
     // The name is looked up before the call's arguments are read, so a name this compiler has no
-    // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
-    // vector to map, and the rejection names the name rather than describing a vector they never
-    // wrote.
+    // kernel for is refused as such whichever argument it was given: `absent(x)` is refused as a
+    // name with no kernel, not as a selector this compiler could not compile.
     let Some((op, vector)) = math_op(func.name, &args.args)? else {
         return Err(not_implemented(&format!(
             "a call to `{}`, which has no native kernel",
@@ -673,6 +891,21 @@ fn argument_position(position: usize) -> &'static str {
     POSITIONS[position]
 }
 
+/// Whether a binary operation carries a modifier this compiler refuses to bind.
+///
+/// A scalar carries no labels, so there is nothing to match or name, and the tree's matching has no
+/// field for a fill value: binding the operation would compute it without the modifier the query
+/// asked for. The fold and [`binary_operation`] share this test rather than restating it, because a
+/// fold that computed a constant without reading its modifier would answer a query the dispatch
+/// below refuses.
+fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
+    modifier.is_some_and(|modifier| {
+        modifier.matching.is_some()
+            || modifier.card != VectorMatchCardinality::OneToOne
+            || modifier.fill_values != VectorMatchFillValues::default()
+    })
+}
+
 /// The number `expr` folds to, or `None` when its value is not the statement's to know.
 ///
 /// Only what the statement itself decides is folded: a number literal, a group around one, a negated
@@ -692,10 +925,28 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
         PromExpr::Paren(paren) => constant_value(&paren.expr),
         PromExpr::Unary(unary) => constant_value(&unary.expr).map(|value| -value),
         PromExpr::Binary(binary) => {
-            let op = arithmetic_op(&binary.op)?;
+            // A modifier is read before the operands are folded: `x * (1 + fill(0) 2)` asks for a
+            // fill, and folding the inner addition would answer `x * 3` with the fill gone. The
+            // expression is left unfolded so the dispatch below refuses it with the reason it
+            // writes, which is also why this is a `None` rather than an error here.
+            if refuses_modifier(binary.modifier.as_ref()) {
+                return None;
+            }
             let left = constant_value(&binary.lhs)?;
             let right = constant_value(&binary.rhs)?;
-            Some(op.calculate(left, right))
+            if let Some(op) = arithmetic_op(&binary.op) {
+                return Some(op.calculate(left, right));
+            }
+            // A comparison of two constants is the number it reports when it is written with
+            // `bool`: Prometheus reads `1 > bool 2` as `0`, and [`ComparisonOp::apply`] is the same
+            // answer the kernel gives. Without `bool` there is no number to report -- `1 > 2` is a
+            // parse error in Prometheus -- so it is left unfolded and the dispatch refuses it.
+            if binary.return_bool()
+                && let Some(op) = comparison_op(&binary.op)
+            {
+                return Some(f64::from(op.apply(left, right)));
+            }
+            None
         }
         // Calls (`time()`, `scalar(v)`), selectors, range selectors, aggregates and subqueries all
         // read something this compiler cannot know before the query runs.
@@ -707,8 +958,9 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
 ///
 /// The token is matched by its id, which is stable and is what the rest of the planner matches on,
 /// rather than by the text it displays as: a symbol this compiler does not recognise is not
-/// arithmetic here rather than a wrong operator. A comparison and a set operator are the cases that
-/// reach this and fold nothing, which is this batch's boundary rather than an accident of the map.
+/// arithmetic here rather than a wrong operator. A comparison is `None` here and is folded by
+/// [`comparison_op`] instead, because only a `bool` comparison of two constants has a number to
+/// report; a set operator folds nothing at all.
 fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
     match op.id() {
         token::T_ADD => Some(ArithmeticOp::Add),
@@ -718,6 +970,22 @@ fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
         token::T_MOD => Some(ArithmeticOp::Modulo),
         token::T_POW => Some(ArithmeticOp::Power),
         token::T_ATAN2 => Some(ArithmeticOp::Atan2),
+        _ => None,
+    }
+}
+
+/// The comparison operator a PromQL token denotes, or `None` when the token is not a comparison.
+///
+/// This is the folding half of [`binary_op`], which binds the same tokens to a node: the fold and
+/// the node have to agree on which token is which comparison, so the two maps sit beside each other.
+fn comparison_op(op: &TokenType) -> Option<ComparisonOp> {
+    match op.id() {
+        token::T_EQLC => Some(ComparisonOp::Equal),
+        token::T_NEQ => Some(ComparisonOp::NotEqual),
+        token::T_GTR => Some(ComparisonOp::Greater),
+        token::T_LSS => Some(ComparisonOp::Less),
+        token::T_GTE => Some(ComparisonOp::GreaterEqual),
+        token::T_LTE => Some(ComparisonOp::LessEqual),
         _ => None,
     }
 }
