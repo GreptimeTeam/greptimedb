@@ -35,6 +35,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::basic_test::build_bulk_insert_request;
 use crate::engine::listener::{NotifyRegionChangeResultListener, WriteWalListener};
 use crate::engine::set_role_state_test::create_region_and_start_alter;
 use crate::error::Error;
@@ -285,6 +286,49 @@ async fn test_downgrading_lease_rejects_writes_after_alter() {
         .unwrap()
         .unwrap_err();
     assert_retryable(err, |err| matches!(err, Error::RegionLeaseExpired { .. }));
+}
+
+#[tokio::test]
+async fn test_bulk_insert_needs_leader_lease() {
+    common_telemetry::init_default_ut_logging();
+    let (_env, listener, engine, region_id, _) = create_leased_region("bulk-insert-lease").await;
+    engine
+        .set_region_role_by_lease(region_id, grant(RegionRole::Leader, Instant::now() + LEASE))
+        .unwrap();
+
+    // The lease expires while a bulk insert is in the WAL.
+    listener.pause_next();
+    let write = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::BulkInserts(build_bulk_insert_request(region_id, 3)),
+                )
+                .await
+        })
+    };
+    listener.wait_appended().await;
+    engine
+        .set_region_role_by_lease(region_id, grant(RegionRole::Leader, Instant::now()))
+        .unwrap();
+    listener.resume();
+    let err = write.await.unwrap().unwrap_err();
+    assert_retryable(err, |err| matches!(err, Error::UnacknowledgedWrite { .. }));
+    // The bulk insert is in the WAL, so it is applied.
+    assert_eq!(3, count_rows(&engine, region_id).await);
+
+    // A new bulk insert fails before it reaches the WAL.
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BulkInserts(build_bulk_insert_request(region_id, 5)),
+        )
+        .await
+        .unwrap_err();
+    assert_retryable(err, |err| matches!(err, Error::RegionLeaseExpired { .. }));
+    assert_eq!(3, count_rows(&engine, region_id).await);
 }
 
 #[tokio::test]

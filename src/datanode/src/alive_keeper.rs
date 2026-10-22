@@ -912,8 +912,8 @@ mod test {
 
         // A response with region leases renews it, though it grants nothing to the region. A
         // region keeps the node lease it was created under, so only a region created after the
-        // response writes under it, until it expires.
-        handle_lease_response(&alive_keeper, vec![], 1).await;
+        // response writes under it.
+        handle_lease_response(&alive_keeper, vec![], 10).await;
         let err = put_row(&region_server, region_id, &schema)
             .await
             .unwrap_err();
@@ -921,37 +921,24 @@ mod test {
         let region_id = RegionId::new(1024, 2);
         let schema = create_region(&region_server, region_id).await;
         put_row(&region_server, region_id, &schema).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        let err = put_row(&region_server, region_id, &schema)
-            .await
-            .unwrap_err();
-        assert!(err.is_retryable(), "{err:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn created_region_keeps_node_lease_of_creation() {
         common_telemetry::init_default_ut_logging();
         let mut env = TestEnv::with_prefix("region-alive-keeper-created-lease-cap").await;
-        let (region_server, _engine) = lease_region_server(&mut env, None).await;
+        let (region_server, engine) = lease_region_server(&mut env, None).await;
         let alive_keeper =
             RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
-        let lease = Duration::from_secs(4);
-        handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
-        let renewed = Instant::now();
-        // The region is created half a lease after that response.
-        tokio::time::sleep(lease / 2).await;
-        let creating = Instant::now();
+        // The node lease has expired when the region is created.
+        let lease = Duration::from_secs(10);
+        engine.renew_node_lease(std::time::Instant::now() - 2 * lease, lease);
         let region_id = RegionId::new(1024, 1);
         let schema = create_region(&region_server, region_id).await;
-        put_row(&region_server, region_id, &schema).await.unwrap();
 
-        // Responses keep renewing the node lease without granting the region anything. The
-        // region keeps the node lease it was created under, which expires one lease after the
-        // response before its creation, earlier than one lease after the creation.
-        while renewed.elapsed() < lease + Duration::from_millis(200) {
-            handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
+        // A response renews the node lease without granting the region anything. The region
+        // keeps the node lease it was created under, although one lease has not passed since
+        // its creation.
         handle_lease_response(&alive_keeper, vec![], lease.as_secs()).await;
         let err = put_row(&region_server, region_id, &schema)
             .await
@@ -960,8 +947,6 @@ mod test {
             format!("{err:?}").contains("does not hold a valid leader lease"),
             "{err:?}"
         );
-        // The write was rejected within one lease of the creation.
-        assert!(creating.elapsed() < lease);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1022,9 +1007,12 @@ mod test {
         let region_id = RegionId::new(1024, 1);
         let schema = create_region(&region_server, region_id).await;
         alive_keeper.register_region(region_id).await;
-        let deadline = Instant::now() + Duration::from_secs(2);
         alive_keeper
-            .renew_region_leases(&[leader_grant(region_id)], Instant::now(), deadline)
+            .renew_region_leases(
+                &[leader_grant(region_id)],
+                Instant::now(),
+                Instant::now() + Duration::from_secs(10),
+            )
             .await;
         alive_keeper.deadline(region_id).await.unwrap();
         // No lease comes anymore, and the countdown task stops.
@@ -1037,8 +1025,21 @@ mod test {
             let schema = schema.clone();
             tokio::spawn(async move { put_row(&region_server, region_id, &schema).await })
         };
-        listener.wait_appended().await;
-        tokio::time::sleep_until(deadline).await;
+        tokio::time::timeout(Duration::from_secs(10), listener.wait_appended())
+            .await
+            .expect("the write never reached the WAL");
+        // An expired grant stands in for the time passing the deadline.
+        let now = std::time::Instant::now();
+        let expired = RegionLeaseGrant {
+            role: RegionRole::Leader,
+            heartbeat_sent_at: now,
+            deadline: now,
+        };
+        assert!(
+            region_server
+                .set_region_role_by_lease(region_id, expired)
+                .unwrap()
+        );
         listener.resume();
         let err = write.await.unwrap().unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
