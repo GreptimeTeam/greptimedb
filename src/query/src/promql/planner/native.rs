@@ -23,8 +23,8 @@
 //! What the node needs from here is three things the existing planner already resolves: the raw
 //! series schema the tree's input was compiled against (the selector's selected field columns), the
 //! statement's evaluation grid, and the logical tag names the output carries. The output schema is
-//! built to the shape the existing unary pipeline produces — the series fields, then the tags, then
-//! the time index — so a node planned here can be consumed by the same code that consumes a
+//! built to the shape the existing unary pipeline produces — the time index, then the series
+//! fields, then the tags — so a node planned here can be consumed by the same code that consumes a
 //! `SeriesNormalize` output.
 
 use std::sync::Arc;
@@ -298,6 +298,14 @@ fn fused_output_schema(
     time_index: &str,
 ) -> Result<DFSchemaRef> {
     let mut columns = Vec::with_capacity(fields.len() + tags.len() + 1);
+    columns.push((
+        None,
+        Arc::new(Field::new(
+            time_index,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )),
+    ));
     for name in fields {
         columns.push((
             None,
@@ -307,14 +315,6 @@ fn fused_output_schema(
     for name in tags {
         columns.push((None, Arc::new(Field::new(name, ArrowDataType::Utf8, true))));
     }
-    columns.push((
-        None,
-        Arc::new(Field::new(
-            time_index,
-            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-            false,
-        )),
-    ));
 
     Ok(Arc::new(
         DFSchema::new_with_metadata(columns, Default::default())
