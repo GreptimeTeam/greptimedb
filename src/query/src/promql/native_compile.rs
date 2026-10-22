@@ -85,8 +85,8 @@ use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, Ma
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AtModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector, NumberLiteral,
-    Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
+    AtModifier, BinModifier, BinaryExpr, Call, EvalStmt, Expr as PromExpr, MatrixSelector,
+    NumberLiteral, Offset, VectorMatchCardinality, VectorMatchFillValues, VectorSelector, token,
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
@@ -271,11 +271,7 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
     // rejects these words on a scalar operand for the same reason. A fill value is refused because
     // the tree's matching has no field for one, so binding the operation would compute it without
     // the fill the query asked for.
-    if let Some(modifier) = &binary.modifier
-        && (modifier.matching.is_some()
-            || modifier.card != VectorMatchCardinality::OneToOne
-            || modifier.fill_values != VectorMatchFillValues::default())
-    {
+    if refuses_modifier(binary.modifier.as_ref()) {
         return Err(not_implemented(&format!(
             "the vector matching in `{binary}`, which a constant operand has nothing to match: \
              `on`, `ignoring`, `group_left` and `group_right` name labels of a vector, and a fill \
@@ -881,6 +877,21 @@ fn argument_position(position: usize) -> &'static str {
     POSITIONS[position]
 }
 
+/// Whether a binary operation carries a modifier this compiler refuses to bind.
+///
+/// A scalar carries no labels, so there is nothing to match or name, and the tree's matching has no
+/// field for a fill value: binding the operation would compute it without the modifier the query
+/// asked for. The fold and [`binary_operation`] share this test rather than restating it, because a
+/// fold that computed a constant without reading its modifier would answer a query the dispatch
+/// below refuses.
+fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
+    modifier.is_some_and(|modifier| {
+        modifier.matching.is_some()
+            || modifier.card != VectorMatchCardinality::OneToOne
+            || modifier.fill_values != VectorMatchFillValues::default()
+    })
+}
+
 /// The number `expr` folds to, or `None` when its value is not the statement's to know.
 ///
 /// Only what the statement itself decides is folded: a number literal, a group around one, a negated
@@ -900,6 +911,13 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
         PromExpr::Paren(paren) => constant_value(&paren.expr),
         PromExpr::Unary(unary) => constant_value(&unary.expr).map(|value| -value),
         PromExpr::Binary(binary) => {
+            // A modifier is read before the operands are folded: `x * (1 + fill(0) 2)` asks for a
+            // fill, and folding the inner addition would answer `x * 3` with the fill gone. The
+            // expression is left unfolded so the dispatch below refuses it with the reason it
+            // writes, which is also why this is a `None` rather than an error here.
+            if refuses_modifier(binary.modifier.as_ref()) {
+                return None;
+            }
             let op = arithmetic_op(&binary.op)?;
             let left = constant_value(&binary.lhs)?;
             let right = constant_value(&binary.rhs)?;
