@@ -523,7 +523,8 @@ mod test {
             region_lease: Some(RegionLease {
                 regions,
                 duration_since_epoch: alive_keeper.epoch().elapsed().as_millis() as u64,
-                lease_seconds: 10,
+                // The countdown of a granted region does not expire during the test.
+                lease_seconds: 86400,
                 closeable_region_ids: vec![],
             }),
             ..Default::default()

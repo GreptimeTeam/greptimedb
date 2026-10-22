@@ -801,6 +801,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
+    use futures_util::FutureExt;
     use mito2::config::MitoConfig;
     use mito2::engine::listener::WriteWalListener;
     use mito2::test_util::TestEnv as MitoTestEnv;
@@ -818,7 +819,6 @@ mod tests {
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
-    use tokio::sync::OwnedRwLockReadGuard;
 
     use super::*;
     use crate::engine::MetricEngine;
@@ -2405,23 +2405,22 @@ mod tests {
             engine.handle_request(logical_region_id, request)
         };
         // Holds `request` after its metadata region append while the lease from `grant(n)`
-        // expires. The request does not reach the append while `fill` holds the read lock of
-        // the logical region, as a fill of the cached logical columns does.
-        let expire_after_append = async |request, n, fill: Option<OwnedRwLockReadGuard<()>>| {
+        // expires. With `blocks_fills`, a fill of the cached logical columns, which takes the read
+        // lock of the logical region, cannot start until the request finishes.
+        let expire_after_append = async |request, n, blocks_fills: bool| {
             listener.pause_next();
             let mut task = {
                 let engine = engine.clone();
                 tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
             };
-            if let Some(fill) = fill {
-                let appended =
-                    tokio::time::timeout(Duration::from_millis(100), listener.wait_appended());
-                assert!(appended.await.is_err());
-                drop(fill);
-            }
             tokio::select! {
                 () = listener.wait_appended() => {}
                 result = &mut task => panic!("the request finished before its append: {result:?}"),
+            }
+            if blocks_fills {
+                let metadata_region = &engine.inner.metadata_region;
+                let fill = metadata_region.read_lock_logical_region(logical_region_id);
+                assert!(fill.now_or_never().is_none());
             }
             expire(n);
             listener.resume();
@@ -2450,7 +2449,7 @@ mod tests {
         put(&["job"]).await.unwrap();
 
         // The metadata write of the ALTER is applied, so the cached metadata must not hide it.
-        let err = expire_after_append(alter("tag1"), 1, None)
+        let err = expire_after_append(alter("tag1"), 1, false)
             .await
             .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
@@ -2470,13 +2469,7 @@ mod tests {
         put(&["job", "tag1", "tag2"]).await.unwrap();
 
         // The metadata delete of the DROP is applied, so writes must not use the cached columns.
-        let fill = engine
-            .inner
-            .metadata_region
-            .read_lock_logical_region(logical_region_id)
-            .await
-            .unwrap();
-        let err = expire_after_append(drop_request(), 2, Some(fill))
+        let err = expire_after_append(drop_request(), 2, true)
             .await
             .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
