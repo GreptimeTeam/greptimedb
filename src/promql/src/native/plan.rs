@@ -178,10 +178,43 @@ pub struct BoundMap {
 }
 
 /// Which aggregate a node computes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Every kind here folds a group's values into one value per grid point. The aggregates that
+/// instead select some of the input's series (`topk`, `bottomk`, `limitk`, `limit_ratio`) or write
+/// one output label per distinct value (`count_values`) are a different shape and have no variant,
+/// so a node cannot claim to compute one of them.
+///
+/// A kind may be bound before its kernel exists: whether the tree can run is
+/// [`NativeTree::try_new`]'s and the runtime's question, not this enum's.
+///
+/// `Eq` is missing because [`AggregateKind::Quantile`] carries an `f64`, as
+/// [`RangeFunction::QuantileOverTime`] does.
+///
+/// [`RangeFunction::QuantileOverTime`]: crate::range_eval::RangeFunction::QuantileOverTime
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AggregateKind {
-    /// `sum` over the values of each group at each grid point.
+    /// `sum`: the total of each group's values at each grid point.
     Sum,
+    /// `avg`: the mean of each group's values at each grid point.
+    Avg,
+    /// `count`: how many values each group has at each grid point.
+    Count,
+    /// `min`: the smallest of each group's values at each grid point.
+    Min,
+    /// `max`: the largest of each group's values at each grid point.
+    Max,
+    /// `group`: `1` where a group has any value at a grid point.
+    Group,
+    /// `stddev`: the standard deviation of each group's values at each grid point.
+    Stddev,
+    /// `stdvar`: the variance of each group's values at each grid point.
+    Stdvar,
+    /// `quantile`: the φ-quantile of each group's values at each grid point, as written.
+    Quantile {
+        /// The φ the query wrote, which `0` to `1` does not bound: Prometheus reads a negative φ as
+        /// `-Infinity` and one above `1` as `+Infinity`.
+        quantile: f64,
+    },
 }
 
 /// Where an aggregate sits in the execution, which decides whether its output is a query value.
