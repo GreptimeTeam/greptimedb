@@ -62,6 +62,7 @@ use crate::gc::{DefaultGcSchedulerCtx, GcScheduler};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
+use crate::handler::node_epoch::NodeEpochCache;
 use crate::handler::persist_stats_handler::PersistStatsHandler;
 use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, RegionLeaseHandler};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
@@ -367,6 +368,7 @@ impl MetasrvBuilder {
         let datanode_restart_grace = Arc::new(DatanodeRestartGrace::new(
             default_distributed_time_constants().region_lease,
         ));
+        let node_epoch_cache = Arc::new(NodeEpochCache::new(election.as_ref()));
         let (tx, rx) = RegionSupervisor::channel();
         let (region_failure_detector_controller, region_supervisor_ticker): (
             RegionFailureDetectorControllerRef,
@@ -682,7 +684,7 @@ impl MetasrvBuilder {
             reconciliation_manager,
             topic_stats_registry,
             datanode_restart_grace,
-            node_epoch_cache: Default::default(),
+            node_epoch_cache,
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
             database_operator,

@@ -30,6 +30,7 @@ use std::time::Duration;
 use api::v1::meta::{HeartbeatRequest, Role};
 use common_meta::DatanodeId;
 use common_meta::datanode::{NodeEpochFence, STARTUP_HANDSHAKE_KEY};
+use common_meta::election::{ElectionRef, LeaderChangeMessage};
 use common_meta::key::MetadataValue;
 use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
 use common_meta::kv_backend::KvBackendRef;
@@ -37,6 +38,8 @@ use common_meta::rpc::store::CompareAndPutRequest;
 use common_telemetry::{info, warn};
 use common_time::util::current_time_millis;
 use snafu::ResultExt;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::error::{self, Result};
 use crate::metasrv::Context;
@@ -54,6 +57,9 @@ pub(crate) type NodeEpochCacheRef = Arc<NodeEpochCache>;
 
 /// The highest epoch of each datanode that the leader has read or written in the kv backend
 /// in its current term.
+///
+/// It is cleared on every leader change of the election, which it receives itself rather than
+/// from the metasrv's leader change loop, so a slow leader change callback cannot delay it.
 #[derive(Default)]
 pub(crate) struct NodeEpochCache {
     inner: Mutex<NodeEpochCacheInner>,
@@ -61,29 +67,56 @@ pub(crate) struct NodeEpochCache {
 
 #[derive(Default)]
 struct NodeEpochCacheInner {
-    /// Grows on every reset, so a kv read started before a reset cannot fill the cache after it.
+    /// The leader changes of the election; `None` without an election.
+    leader_changes: Option<broadcast::Receiver<LeaderChangeMessage>>,
+    /// Grows on every leader change, so a kv read started before a change cannot fill the cache
+    /// after it.
     term: u64,
     epochs: HashMap<DatanodeId, u64>,
 }
 
+impl NodeEpochCacheInner {
+    /// Clears the cache if the election has sent a leader change since the last call. The
+    /// election sends a step down before it can report this metasrv as the leader again, so a
+    /// check that has seen this metasrv as the leader of a later term also sees the change.
+    fn observe_leader_changes(&mut self) {
+        let Some(leader_changes) = &mut self.leader_changes else {
+            return;
+        };
+        let mut changed = false;
+        while let Ok(_) | Err(TryRecvError::Lagged(_)) = leader_changes.try_recv() {
+            changed = true;
+        }
+        if changed {
+            self.term += 1;
+            self.epochs.clear();
+        }
+    }
+}
+
 impl NodeEpochCache {
-    /// Clears the cache. Called on every leader change.
-    pub(crate) fn reset(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.term += 1;
-        inner.epochs.clear();
+    /// Creates a cache that is cleared on every leader change of `election`.
+    pub(crate) fn new(election: Option<&ElectionRef>) -> Self {
+        Self {
+            inner: Mutex::new(NodeEpochCacheInner {
+                leader_changes: election.map(|election| election.subscribe_leader_change()),
+                ..Default::default()
+            }),
+        }
     }
 
     /// Returns the current term and the highest epoch of `node_id` in it.
     fn get(&self, node_id: DatanodeId) -> (u64, Option<u64>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        inner.observe_leader_changes();
         (inner.term, inner.epochs.get(&node_id).copied())
     }
 
     /// Records `node_epoch`, read or written in the kv backend in `term`, as the highest epoch
-    /// of `node_id` if it is higher and the cache has not been reset since.
+    /// of `node_id` if it is higher and no leader change has happened since.
     fn fill(&self, term: u64, node_id: DatanodeId, node_epoch: u64) {
         let mut inner = self.inner.lock().unwrap();
+        inner.observe_leader_changes();
         if inner.term == term {
             let highest = inner.epochs.entry(node_id).or_default();
             *highest = (*highest).max(node_epoch);
@@ -264,7 +297,9 @@ pub(crate) mod tests {
         HeartbeatRequest, HeartbeatResponse, MailboxMessage, Peer, RequestHeader, Role,
     };
     use common_meta::datanode::{NodeEpochFence, STARTUP_HANDSHAKE_KEY};
-    use common_meta::election::{Election, ElectionRef, LeaderChangeMessage, LeaderValue};
+    use common_meta::election::{
+        Election, ElectionRef, LeaderChangeMessage, LeaderKey, LeaderValue,
+    };
     use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
     use common_meta::key::{MetadataValue, TableMetadataManager};
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -280,8 +315,9 @@ pub(crate) mod tests {
     };
     use common_meta::sequence::SequenceBuilder;
     use common_time::util::current_time_millis;
-    use tokio::sync::{Notify, mpsc};
+    use tokio::sync::{Notify, broadcast, mpsc};
 
+    use super::NodeEpochCache;
     use crate::discovery::utils::find_datanode_lease_value;
     use crate::handler::failure_handler::RegionFailureHandler;
     use crate::handler::region_lease_handler::RegionLeaseHandler;
@@ -406,12 +442,56 @@ pub(crate) mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TestLeaderKey;
+
+    impl LeaderKey for TestLeaderKey {
+        fn name(&self) -> &[u8] {
+            b"test"
+        }
+
+        fn key(&self) -> &[u8] {
+            b"test"
+        }
+
+        fn revision(&self) -> i64 {
+            0
+        }
+
+        fn lease_id(&self) -> i64 {
+            0
+        }
+    }
+
     /// An election whose leadership the test flips.
-    #[derive(Default)]
     struct TestElection {
         leader: AtomicBool,
-        /// Becomes the leader right after the next leadership check.
+        /// Becomes the leader right after the next leadership check, without a leader change.
         promote_after_check: AtomicBool,
+        leader_changes: broadcast::Sender<LeaderChangeMessage>,
+    }
+
+    impl Default for TestElection {
+        fn default() -> Self {
+            Self {
+                leader: AtomicBool::default(),
+                promote_after_check: AtomicBool::default(),
+                leader_changes: broadcast::channel(16).0,
+            }
+        }
+    }
+
+    impl TestElection {
+        /// Sets the leadership, then sends the leader change, as the elections do.
+        fn set_leader(&self, leader: bool) {
+            self.leader.store(leader, Ordering::Relaxed);
+            let key = Arc::new(TestLeaderKey);
+            let _ = self.leader_changes.send(if leader {
+                LeaderChangeMessage::Elected(key)
+            } else {
+                LeaderChangeMessage::StepDown(key)
+            });
+        }
     }
 
     #[async_trait::async_trait]
@@ -455,8 +535,8 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        fn subscribe_leader_change(&self) -> tokio::sync::broadcast::Receiver<LeaderChangeMessage> {
-            tokio::sync::broadcast::channel(1).1
+        fn subscribe_leader_change(&self) -> broadcast::Receiver<LeaderChangeMessage> {
+            self.leader_changes.subscribe()
         }
     }
 
@@ -479,6 +559,7 @@ pub(crate) mod tests {
     fn new_ctx(kv_backend: KvBackendRef, election: Option<ElectionRef>) -> Context {
         let mut ctx = TestEnv::new().ctx();
         ctx.kv_backend = kv_backend;
+        ctx.node_epoch_cache = Arc::new(NodeEpochCache::new(election.as_ref()));
         ctx.election = election;
         ctx
     }
@@ -700,7 +781,9 @@ pub(crate) mod tests {
         let (e0, e1, e2) = (now - 2000, now - 1000, now);
         let group = new_group();
         let kv_backend = Arc::new(HookedKvBackend::default());
-        let ctx = new_ctx(kv_backend.clone(), None);
+        let election = Arc::new(TestElection::default());
+        let ctx = new_ctx(kv_backend.clone(), Some(election.clone()));
+        election.set_leader(true);
 
         // The first request of the node in the term reads the kv backend, and records the
         // epoch since there is none.
@@ -751,8 +834,10 @@ pub(crate) mod tests {
         assert_eq!(fence(&res), Some("accepted"));
         assert_eq!(kv_backend.ops(), (2, 2));
 
-        // A leader change clears the memory, so the next request reads the kv backend again.
-        ctx.node_epoch_cache.reset();
+        // Stepping down and being elected again clears the memory, so the next request reads
+        // the kv backend again.
+        election.set_leader(false);
+        election.set_leader(true);
         let res = group
             .handle(heartbeat(e1, "a1"), ctx.clone())
             .await
@@ -769,20 +854,20 @@ pub(crate) mod tests {
         let (e1, e2) = (now - 1000, now);
         let (m1_group, m2_group) = (new_group(), new_group());
 
-        // M1 accepts A1, steps down while M2 accepts A2, and is elected again. Each leader
-        // change clears the leader's memory, as the leader change loop of the metasrv does.
+        // M1 accepts A1, steps down while M2 accepts A2, and is elected again. No leader change
+        // callback of the metasrv runs here: M1's memory is cleared by the leader changes it
+        // receives from the election itself.
         let kv_backend = Arc::new(HookedKvBackend::default());
         let election = Arc::new(TestElection::default());
-        election.leader.store(true, Ordering::Relaxed);
         let m1 = new_ctx(kv_backend.clone(), Some(election.clone()));
         let m2 = new_ctx(kv_backend.clone(), None);
+        election.set_leader(true);
         let res = m1_group
             .handle(heartbeat(e1, "a1"), m1.clone())
             .await
             .unwrap();
         assert_eq!(fence(&res), Some("accepted"));
-        election.leader.store(false, Ordering::Relaxed);
-        m1.node_epoch_cache.reset();
+        election.set_leader(false);
         let res = m1_group
             .handle(heartbeat(e1, "a1"), m1.clone())
             .await
@@ -790,8 +875,7 @@ pub(crate) mod tests {
         assert!(res.is_not_leader());
         let res = m2_group.handle(heartbeat(e2, "a2"), m2).await.unwrap();
         assert_eq!(fence(&res), Some("accepted"));
-        election.leader.store(true, Ordering::Relaxed);
-        m1.node_epoch_cache.reset();
+        election.set_leader(true);
         let res = m1_group.handle(heartbeat(e1, "a1"), m1).await.unwrap();
         assert_eq!(fence(&res), Some("stale"));
         assert!(res.region_lease.is_none());
@@ -805,11 +889,13 @@ pub(crate) mod tests {
         let (e1, e2) = (now - 1000, now);
         let group = Arc::new(new_group());
         let kv_backend = Arc::new(HookedKvBackend::default());
-        let ctx = new_ctx(kv_backend.clone(), None);
+        let election = Arc::new(TestElection::default());
+        let ctx = new_ctx(kv_backend.clone(), Some(election.clone()));
+        election.set_leader(true);
         kv_backend.record(e1).await;
 
-        // A1's check reads e1, then waits while the leader changes and another leader
-        // accepts A2.
+        // A1's check reads e1, then waits while this metasrv steps down, another leader
+        // accepts A2, and this metasrv is elected again.
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         *kv_backend.hold_next_read.lock().unwrap() = Some((entered.clone(), release.clone()));
@@ -819,8 +905,9 @@ pub(crate) mod tests {
             async move { group.handle(heartbeat(e1, "a1"), ctx).await.unwrap() }
         });
         entered.notified().await;
-        ctx.node_epoch_cache.reset();
+        election.set_leader(false);
         kv_backend.record(e2).await;
+        election.set_leader(true);
         release.notify_one();
         a1.await.unwrap();
 
@@ -1026,16 +1113,19 @@ pub(crate) mod tests {
         m1_kv.delete(&key, false).await.unwrap();
         let (m1_group, m2_group) = (new_group(), new_group());
         let m1 = new_ctx(m1_kv.clone(), None);
-        let m2 = new_ctx(m2_kv, None);
+        let m2_election = Arc::new(TestElection::default());
+        let m2 = new_ctx(m2_kv, Some(m2_election.clone()));
+        m2_election.set_leader(true);
         let now = current_time_millis() as u64;
         let (e1, e2) = (now - 1000, now);
 
-        // M2 accepts A1 before A2's startup handshake is accepted on M1.
+        // M2 accepts A1, then steps down before A2's startup handshake is accepted on M1.
         let res = m2_group
             .handle(heartbeat(e1, "a1"), m2.clone())
             .await
             .unwrap();
         assert_eq!(fence(&res), Some("accepted"));
+        m2_election.set_leader(false);
         let res = m1_group
             .handle(startup_handshake(e2), m1.with_handshake(true))
             .await
@@ -1043,8 +1133,8 @@ pub(crate) mod tests {
         assert_eq!(fence(&res), Some("accepted"));
         assert_eq!(recorded_epoch(&m1_kv).await, Some(e2));
 
-        // M2 is elected again, which clears its memory.
-        m2.node_epoch_cache.reset();
+        // M2 is elected again.
+        m2_election.set_leader(true);
         let res = m2_group
             .handle(heartbeat(e1, "a1"), m2.clone())
             .await

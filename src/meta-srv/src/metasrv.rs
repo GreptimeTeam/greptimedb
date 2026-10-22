@@ -666,7 +666,6 @@ impl Metasrv {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();
-            let node_epoch_cache = self.node_epoch_cache.clone();
             let subscribe_manager = self.subscription_manager();
             let mut rx = election.subscribe_leader_change();
             let greptimedb_telemetry_task = self.greptimedb_telemetry_task.clone();
@@ -712,7 +711,6 @@ impl Metasrv {
                         Ok(msg) => {
                             in_memory.reset();
                             leader_cached_kv_backend.reset();
-                            node_epoch_cache.reset();
                             info!("Leader's cache has bean cleared on leader change: {msg}");
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
