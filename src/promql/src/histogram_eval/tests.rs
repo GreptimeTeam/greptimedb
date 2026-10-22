@@ -25,7 +25,7 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
     HistogramAggregate, HistogramFunction, NativeHistogramFunction, aggregate_histograms,
-    evaluate_histograms, map_native_histogram,
+    evaluate_histograms, histogram_quantiles, histogram_string, map_native_histogram,
 };
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
@@ -128,6 +128,30 @@ fn classic_histograms_match_prometheus() {
         failed += usize::from(assert_outcome(case, actual, &case.outcome));
     }
     assert!(failed > 20, "{failed} failed");
+}
+
+/// `histogram_quantiles` over classic histograms, evaluated by the Prometheus v3.15.0 engine with
+/// experimental functions enabled (promql-compat `narthex-golden-histogram -quantiles`).
+#[test]
+fn histogram_quantiles_match_prometheus() {
+    let cases = golden_cases(include_str!("quantiles_cases.txt"));
+    assert_eq!(cases.len(), 30);
+    let mut failed = 0;
+    for case in &cases {
+        let schema = schema(case);
+        let input: Vec<_> = case
+            .inputs
+            .iter()
+            .filter_map(|(labels, points)| mixed_series(&schema, labels, points, &BTreeMap::new()))
+            .collect();
+        let quantiles: Vec<f64> = case.spec[2]
+            .split(',')
+            .map(|bits| f64::from_bits(u64::from_str_radix(bits, 16).unwrap()))
+            .collect();
+        let actual = histogram_quantiles(&case.spec[1], &quantiles, &schema, &input);
+        failed += usize::from(assert_outcome(case, actual, &case.outcome));
+    }
+    assert_eq!(failed, 13, "{failed} failed");
 }
 
 #[test]
@@ -835,6 +859,21 @@ fn native_histogram_functions_keep_the_runs_of_a_sparse_series() {
         assert!(
             values.iter().all(|value| value.is_finite()),
             "{function:?} produced {values:?}"
+        );
+    }
+}
+
+/// Go `FloatHistogram.String` over fixed and random histograms (`narthex-golden-histstring`):
+/// bucket order, inclusiveness, empty buckets skipped, the zero bucket, custom bounds and `%g`.
+#[test]
+fn histogram_string_matches_prometheus() {
+    for line in include_str!("string_cases.txt").lines() {
+        let (encoded, expected) = line.split_once('\t').expect("tab-separated case");
+        let histogram = OwnedHistogram::parse(encoded);
+        assert_eq!(
+            histogram_string(&histogram.view()).unwrap(),
+            expected,
+            "{encoded}"
         );
     }
 }

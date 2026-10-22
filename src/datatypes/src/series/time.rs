@@ -16,6 +16,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::buffer::ScalarBuffer;
+use once_cell::sync::OnceCell;
 use snafu::OptionExt;
 
 use crate::error::{InvalidSeriesSnafu, Result};
@@ -77,31 +78,27 @@ impl GridSpec {
     }
 }
 
-/// A materialized, shareable timestamp grid.
+/// A lazily materialized, shareable timestamp grid.
 #[derive(Debug)]
 pub struct EvalGrid {
     spec: GridSpec,
-    timestamps: ScalarBuffer<i64>,
+    timestamps: OnceCell<ScalarBuffer<i64>>,
 }
 
 impl EvalGrid {
     /// Allocates the grid timestamps once for sharing across result series.
     pub fn try_new(spec: GridSpec) -> Result<Self> {
-        GridSpec::try_new(spec.start_ms, spec.step_ms, spec.len)?;
-        let len =
-            usize::try_from(spec.len).map_err(|_| invalid_series("grid length overflows usize"))?;
-        let mut values = Vec::new();
-        values
-            .try_reserve_exact(len)
-            .map_err(|_| invalid_series("grid timestamp allocation failed"))?;
-        for index in 0..len {
-            // The validated endpoint bounds every point in this positive-step grid.
-            let timestamp = (spec.start_ms as i128) + (index as i128) * (spec.step_ms as i128);
-            values.push(timestamp as i64);
-        }
+        let grid = Self::try_deferred(spec)?;
+        grid.timestamps()?;
+        Ok(grid)
+    }
+
+    /// Creates a validated grid without allocating its timestamp array.
+    pub fn try_deferred(spec: GridSpec) -> Result<Self> {
+        let spec = GridSpec::try_new(spec.start_ms, spec.step_ms, spec.len)?;
         Ok(Self {
             spec,
-            timestamps: values.into(),
+            timestamps: OnceCell::new(),
         })
     }
 
@@ -110,9 +107,32 @@ impl EvalGrid {
         self.spec
     }
 
-    /// Returns the shared timestamp buffer.
-    pub fn timestamps(&self) -> &ScalarBuffer<i64> {
-        &self.timestamps
+    /// Returns the shared timestamp buffer, materializing it on first access.
+    pub fn timestamps(&self) -> Result<&ScalarBuffer<i64>> {
+        self.timestamps.get_or_try_init(|| {
+            let len = usize::try_from(self.spec.len)
+                .map_err(|_| invalid_series("grid length overflows usize"))?;
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(len)
+                .map_err(|_| invalid_series("grid timestamp allocation failed"))?;
+            for index in 0..len {
+                let timestamp =
+                    (self.spec.start_ms as i128) + (index as i128) * (self.spec.step_ms as i128);
+                values.push(timestamp as i64);
+            }
+            Ok(values.into())
+        })
+    }
+
+    fn timestamp_at(&self, position: usize) -> Option<i64> {
+        if position as u64 >= self.spec.len {
+            return None;
+        }
+        let timestamp =
+            (self.spec.start_ms as i128) + (position as i128) * (self.spec.step_ms as i128);
+        // GridSpec validation bounds every position, and i128 holds usize * i64.
+        Some(timestamp as i64)
     }
 }
 
@@ -130,7 +150,10 @@ impl GridRange {
         let end = start.checked_add(len).context(InvalidSeriesSnafu {
             reason: "grid range overflow".to_string(),
         })?;
-        if end > grid.timestamps.len() {
+        if end
+            > usize::try_from(grid.spec.len)
+                .map_err(|_| invalid_series("grid length overflows usize"))?
+        {
             return invalid("grid range exceeds its grid");
         }
         Ok(Self { grid, start, len })
@@ -153,8 +176,8 @@ impl GridRange {
         self.len == 0
     }
     /// Returns this range as a zero-copy Arrow buffer slice.
-    pub fn timestamps(&self) -> ScalarBuffer<i64> {
-        self.grid.timestamps.slice(self.start, self.len)
+    pub fn timestamps(&self) -> Result<ScalarBuffer<i64>> {
+        Ok(self.grid.timestamps()?.slice(self.start, self.len))
     }
 }
 
@@ -230,7 +253,8 @@ impl GridRanges {
     /// path expects, so callers outside this crate build axes through
     /// [`TimeAxis::from_grid_spans`], which keeps [`TimeAxis::Grid`] for a single span.
     pub(crate) fn try_new(grid: Arc<EvalGrid>, spans: Vec<GridSpan>) -> Result<Self> {
-        let grid_len = grid.timestamps().len();
+        let grid_len = usize::try_from(grid.spec.len)
+            .map_err(|_| invalid_series("grid length overflows usize"))?;
         let mut rows = Vec::new();
         rows.try_reserve_exact(spans.len())
             .map_err(|_| invalid_series("grid span allocation failed"))?;
@@ -584,11 +608,11 @@ impl TimeAxis {
     pub fn timestamp(&self, index: usize) -> Option<i64> {
         match self {
             Self::Grid(range) => (index < range.len)
-                .then(|| range.grid.timestamps.get(range.start + index).copied())
+                .then(|| range.grid.timestamp_at(range.start.checked_add(index)?))
                 .flatten(),
             Self::GridRanges(ranges) => {
                 let (span, offset) = ranges.span_of(index)?;
-                ranges.grid.timestamps.get(span.start + offset).copied()
+                ranges.grid.timestamp_at(span.start.checked_add(offset)?)
             }
             Self::Explicit(values) => values.get(index).copied(),
             Self::ExplicitChunks(chunks) => {
@@ -751,28 +775,29 @@ impl TimeAxis {
     ///
     /// A single-run grid axis lends its buffer without copying; an axis of several runs, and a
     /// chunked explicit axis, allocate one array of the carried rows.
-    pub fn timestamps(&self) -> Cow<'_, [i64]> {
+    pub fn timestamps(&self) -> Result<Cow<'_, [i64]>> {
         match self {
-            Self::Grid(range) => {
-                Cow::Borrowed(&range.grid.timestamps()[range.start()..range.start() + range.len()])
-            }
+            Self::Grid(range) => Ok(Cow::Borrowed(
+                &range.grid.timestamps()?[range.start()..range.start() + range.len()],
+            )),
             Self::GridRanges(ranges) => {
                 let mut timestamps = Vec::with_capacity(ranges.len());
                 for (position, _) in self.positions() {
-                    match ranges.grid.timestamps.get(position) {
-                        Some(timestamp) => timestamps.push(*timestamp),
-                        // Unreachable: the constructor checks every span against the grid.
-                        None => break,
-                    }
+                    timestamps.push(
+                        ranges
+                            .grid
+                            .timestamp_at(position)
+                            .ok_or_else(|| invalid_series("grid span timestamp is out of range"))?,
+                    );
                 }
-                Cow::Owned(timestamps)
+                Ok(Cow::Owned(timestamps))
             }
-            Self::Explicit(values) => Cow::Borrowed(values),
-            Self::ExplicitChunks(_) => Cow::Owned(
+            Self::Explicit(values) => Ok(Cow::Borrowed(values)),
+            Self::ExplicitChunks(_) => Ok(Cow::Owned(
                 (0..self.len())
                     .filter_map(|row| self.timestamp(row))
                     .collect(),
-            ),
+            )),
         }
     }
 

@@ -32,16 +32,97 @@ fn grid_specs_validate_and_ranges_are_inclusive_without_rounding_up() {
     assert!(GridSpec::try_new(0, -1, 1).is_err());
     assert!(GridSpec::try_new(0, 1, 0).is_err());
     assert!(GridSpec::try_new(i64::MAX, 1, 2).is_err());
+    let extreme =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap()).unwrap());
     assert_eq!(
-        &EvalGrid::try_new(GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap())
-            .unwrap()
-            .timestamps()[..],
+        &extreme.timestamps().unwrap()[..],
         &[i64::MIN, -1, i64::MAX - 1]
     );
+    let axis = TimeAxis::Grid(GridRange::try_new(extreme, 0, 3).unwrap());
+    assert_eq!(axis.timestamp(0), Some(i64::MIN));
+    assert_eq!(axis.timestamp(1), Some(-1));
+    assert_eq!(axis.timestamp(2), Some(i64::MAX - 1));
+    assert_eq!(axis.timestamp(3), None);
+    let deferred_extreme = Arc::new(
+        EvalGrid::try_deferred(GridSpec::try_new(i64::MIN, i64::MAX, 3).unwrap()).unwrap(),
+    );
+    let axis = TimeAxis::Grid(GridRange::try_new(deferred_extreme.clone(), 0, 3).unwrap());
+    assert_eq!(axis.timestamp(0), Some(i64::MIN));
+    assert_eq!(axis.timestamp(1), Some(-1));
+    assert_eq!(axis.timestamp(2), Some(i64::MAX - 1));
+    assert_eq!(axis.timestamp(3), None);
+    assert!(deferred_extreme.timestamps.get().is_none());
     assert!(GridSpec::try_new(i64::MIN, i64::MAX, 4).is_err());
     assert!(GridSpec::try_new(0, i64::MAX, u64::MAX).is_err());
     assert!(GridSpec::try_new(i64::MIN, 1, 2).is_ok());
     assert!(GridSpec::try_new(i64::MAX - 1, 1, 2).is_ok());
+}
+
+#[test]
+fn deferred_grid_keeps_large_grid_unmaterialized_until_requested() {
+    let len = (isize::MAX as u64 / std::mem::size_of::<i64>() as u64) + 1;
+    let spec = GridSpec::try_new(i64::MIN, 1, len).unwrap();
+    let grid = Arc::new(EvalGrid::try_deferred(spec).unwrap());
+    assert!(grid.timestamps.get().is_none());
+    let range = GridRange::try_new(grid.clone(), 0, len as usize).unwrap();
+    let ranges = GridRanges::try_new(grid.clone(), vec![GridSpan::new(1, 2)]).unwrap();
+    assert_eq!(ranges.len(), 2);
+    let range_axis = TimeAxis::Grid(range);
+    assert_eq!(range_axis.timestamp(1), Some(i64::MIN + 1));
+    assert_eq!(
+        range_axis.timestamp(len as usize - 1),
+        Some(i64::MIN + (len as i64 - 1))
+    );
+    assert_eq!(range_axis.timestamp(len as usize), None);
+    let axis = TimeAxis::GridRanges(ranges);
+    assert_eq!(axis.timestamp(1), Some(i64::MIN + 2));
+    assert_eq!(axis.timestamp(2), None);
+    assert_eq!(axis.timestamp(len as usize - 1), None);
+    assert!(grid.timestamps.get().is_none());
+}
+
+#[test]
+fn deferred_grid_materialization_is_shared_across_concurrent_accesses() {
+    let grid = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(-10, 2, 4).unwrap()).unwrap());
+    let eager = EvalGrid::try_new(GridSpec::try_new(-10, 2, 4).unwrap()).unwrap();
+    assert!(eager.timestamps.get().is_some());
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let grid = grid.clone();
+            std::thread::spawn(move || grid.timestamps().unwrap().as_ptr() as usize)
+        })
+        .collect();
+    let pointers: Vec<usize> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert!(pointers.iter().all(|pointer| *pointer == pointers[0]));
+    assert_eq!(&grid.timestamps().unwrap()[..], &[-10, -8, -6, -4]);
+    assert!(grid.timestamps.get().is_some());
+}
+
+#[test]
+fn deferred_sparse_gather_materializes_only_requested_timestamps() {
+    let grid = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(10, 10, 6).unwrap()).unwrap());
+    let axis = TimeAxis::GridRanges(
+        GridRanges::try_new(grid.clone(), vec![GridSpan::new(1, 2), GridSpan::new(5, 1)]).unwrap(),
+    );
+    assert_eq!(axis.timestamps().unwrap().as_ref(), &[20, 30, 60]);
+    assert!(grid.timestamps.get().is_none());
+}
+
+#[test]
+fn deferred_grid_allocation_failure_is_reported_and_not_cached() {
+    let len = (isize::MAX as u64 / std::mem::size_of::<i64>() as u64) + 1;
+    let grid =
+        Arc::new(EvalGrid::try_deferred(GridSpec::try_new(i64::MIN, 1, len).unwrap()).unwrap());
+    assert!(grid.timestamps().is_err());
+    assert!(grid.timestamps.get().is_none());
+    let range = GridRange::try_new(grid.clone(), 0, 1).unwrap();
+    assert!(range.timestamps().is_err());
+    assert!(TimeAxis::Grid(range).timestamps().is_err());
+    assert!(grid.timestamps().is_err());
+    assert!(grid.timestamps.get().is_none());
 }
 
 #[test]
@@ -70,14 +151,26 @@ fn grid_materialization_revalidates_public_specs_and_shares_ranges_by_value() {
         })
         .is_err()
     );
+    assert!(
+        EvalGrid::try_deferred(GridSpec {
+            start_ms: 0,
+            step_ms: 0,
+            len: 1
+        })
+        .is_err()
+    );
 
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(-5, 3, 5).unwrap()).unwrap());
-    assert_eq!(&grid.timestamps()[..], &[-5, -2, 1, 4, 7]);
+    assert!(grid.timestamps.get().is_some());
+    assert_eq!(&grid.timestamps().unwrap()[..], &[-5, -2, 1, 4, 7]);
     let a = GridRange::try_new(grid.clone(), 1, 3).unwrap();
     let b = GridRange::try_new(Arc::new(EvalGrid::try_new(grid.spec()).unwrap()), 1, 3).unwrap();
     assert_eq!(a, b);
-    let values = a.timestamps();
-    assert_eq!(values.as_ptr(), grid.timestamps().as_ptr().wrapping_add(1));
+    let values = a.timestamps().unwrap();
+    assert_eq!(
+        values.as_ptr(),
+        grid.timestamps().unwrap().as_ptr().wrapping_add(1)
+    );
     assert_eq!(&values[..], &[-2, 1, 4]);
     assert!(GridRange::try_new(grid.clone(), 5, 0).unwrap().is_empty());
     assert!(GridRange::try_new(grid.clone(), 4, 2).is_err());

@@ -83,8 +83,14 @@ impl Drop for SeriesIndexFileHandleInner {
     fn drop(&mut self) {
         if self.deleted.load(Ordering::Acquire) {
             if let Some(artifact) = &self.entry.artifact {
-                self.purger
-                    .purge_objects(self.file_id, artifact.objects.clone());
+                self.purger.purge_objects(
+                    self.file_id,
+                    artifact
+                        .objects
+                        .iter()
+                        .map(|object| object.path.clone())
+                        .collect(),
+                );
             } else {
                 self.purger.purge(PurgeRequest {
                     file_id: self.file_id,
