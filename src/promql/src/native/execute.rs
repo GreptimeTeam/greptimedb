@@ -1923,9 +1923,10 @@ fn vector_series(
 /// - A sort: the value each series is keyed by, and the floats `sort` and `sort_desc` rebuild a
 ///   series into when it holds histograms; the label sorts move the series they were given.
 /// - `absent`: a presence flag and a result value per grid point and field.
-/// - `count_values`, per row, since a gauge with distinct values makes about one group per sample:
-///   the group's label set twice (its metric and its key) with the value written into it, its
-///   count per field, and the result series it becomes.
+/// - `count_values`, per field sample, since every field's distinct values make groups of their
+///   own and a gauge with distinct values makes about one group per sample: the group's label set
+///   twice (its metric and its key) with the value written into it, its count per field, and the
+///   result series it becomes.
 /// - `histogram_quantile` and `histogram_fraction`: the merge of label-set pieces before the kernel
 ///   ([`merge_workspace_bytes`]); per series, its group entry and label pairs and a cursor per
 ///   field; per row, the bucket it contributes and a result value per field.
@@ -1984,7 +1985,8 @@ fn vector_workspace_bytes(op: &BoundVectorOp, schema: &SeriesSchema, series: &[S
                 + fields * std::mem::size_of::<Samples>();
             return series.iter().fold(0usize, |total, item| {
                 let labels = 2 * (item.metric.tags().len() + 2) * label + value;
-                total.saturating_add(item.time.len().saturating_mul(group + labels))
+                let samples = item.time.len().saturating_mul(fields);
+                total.saturating_add(samples.saturating_mul(group + labels))
             });
         }
         BoundVectorOp::TopK { .. }
