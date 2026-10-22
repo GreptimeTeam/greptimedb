@@ -157,6 +157,12 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
         physical_region_id: RegionId,
     ) -> Result<AffectedRows> {
+        // A fill of the cached logical columns holds the read lock until it publishes them, so
+        // none publishes columns read before the delete after the invalidation below.
+        let _write_guard = self
+            .metadata_region
+            .write_lock_logical_region(logical_region_id)
+            .await?;
         // Update metadata
         let result = self
             .metadata_region
