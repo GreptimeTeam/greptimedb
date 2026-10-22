@@ -5410,9 +5410,10 @@ mod tests {
         let object_store = memory_store();
         let objects = 3 * RECOVERY_CONCURRENCY;
         populate(&object_store, objects, 1).await;
-        // The listing fails at its last entry while the first wave of footer
-        // reads waits, so most objects it listed are not read yet.
-        let (_pages, listed_pages) = watch::channel(usize::MAX);
+        // The listing serves the objects of the first wave of footer reads,
+        // then, while that wave waits, the rest and fails at its last entry,
+        // so most objects it listed are not read yet.
+        let (pages, listed_pages) = watch::channel(RECOVERY_CONCURRENCY / LISTING_PAGE + 1);
         let (store, dropped) = paged_listing(
             &object_store,
             listed_pages,
@@ -5429,6 +5430,7 @@ mod tests {
         for _ in 0..RECOVERY_CONCURRENCY {
             wave.push(timeout(WAIT, parked.recv()).await.unwrap().unwrap());
         }
+        pages.send(usize::MAX).unwrap();
         timeout(WAIT, async {
             while !dropped.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
