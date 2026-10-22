@@ -417,7 +417,7 @@ fn fields_are_aggregated_independently() {
             })
             .collect()
     };
-    let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
+    let grid_len = multi.eval_grid.as_ref().unwrap().spec().len as usize;
     let q_values: Vec<Option<f64>> = (0..grid_len)
         .map(|i| Some([0.0, 0.25, 0.5, 0.9, 1.0][i % 5]))
         .collect();
@@ -571,8 +571,12 @@ fn incremental_retained_bytes_match_full_recount_for_many_groups() {
     }
 }
 
+/// The unbudgeted entry point is the budgeted one with a no-op budget, so this compares one path
+/// with itself: it is a smoke check that the wrapper still runs, not evidence that the kernels are
+/// right. The numbers are checked against Prometheus in `aggregates_match_prometheus` and
+/// `stat_aggregates_match_prometheus`.
 #[test]
-fn budgeted_and_unbudgeted_float_aggregation_match_for_all_supported_kinds() {
+fn every_supported_kind_runs_through_the_unbudgeted_entry_point() {
     let schema = schema(&["value"]);
     let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0), Some(3.0)]]);
     for op in [
@@ -642,21 +646,38 @@ fn adjacent_blocks_are_admitted_and_accounted_separately() {
 fn a_rejected_block_allocation_does_not_insert_a_block() {
     let schema = schema(&["value"]);
     let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0)]]);
+    // The figure a new block's admission adds: the block's states and its pending buffer, on
+    // top of whatever the fold already holds. Located by the value, not by which call reaches it,
+    // so reordering the earlier admissions cannot make this test pass without testing anything.
+    let block_states = BLOCK_POINTS
+        .saturating_mul(schema.fields.len())
+        .saturating_mul(std::mem::size_of::<FloatState>());
+    let pending = BLOCK_POINTS * std::mem::size_of::<(usize, f64)>();
     let mut aggregator =
         FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
-    let mut calls = 0;
-    let result = aggregator.update_budgeted(&series, |_| {
-        calls += 1;
-        if calls == 6 {
-            Err(DataFusionError::Execution("block allocation budget".into()))
-        } else {
-            Ok(())
+    let mut refused = None;
+    let result = aggregator.update_budgeted(&series, |bytes| {
+        // Everything up to the block's own admission is admitted; only the block is refused.
+        if bytes >= block_states.saturating_add(pending) {
+            refused = Some(bytes);
+            return Err(DataFusionError::Execution("block allocation budget".into()));
         }
+        Ok(())
     });
-    assert!(result.is_err());
-    assert_eq!(calls, 6);
+    assert!(
+        result.is_err(),
+        "the block was admitted with no budget left"
+    );
+    let refused = refused.expect("the refusal did not come from a block admission");
+    assert!(
+        refused >= block_states.saturating_add(pending),
+        "the refusal came from an admission smaller than a block"
+    );
     assert_eq!(aggregator.groups(), 1);
-    assert!(aggregator.groups[0].blocks.is_empty());
+    assert!(
+        aggregator.groups[0].blocks.is_empty(),
+        "a refused block was inserted anyway"
+    );
 }
 
 #[test]
@@ -681,6 +702,13 @@ fn a_map_growth_rejection_does_not_insert_the_new_group() {
     let group_count = aggregator.groups();
     let old_state = aggregator.state_bytes();
     assert_eq!(aggregator.group_index.capacity(), group_count);
+
+    // A resize keeps the old table while it fills the new one, so the figure the growth has to
+    // admit is the whole new table on top of the old state -- not the difference between them.
+    // That is the property asserted here: the refusal threshold is the state plus a whole new
+    // table, so the test fails if the admission ever drops to the delta.
+    let new_table = hash_map_backing_bytes(next_hash_capacity(group_count));
+    let threshold = old_state.saturating_add(new_table);
     let label = index.to_string();
     let series = input(
         &schema,
@@ -688,23 +716,25 @@ fn a_map_growth_rejection_does_not_insert_the_new_group() {
         0,
         &[vec![Some(1.0)]],
     );
-    let mut calls = 0;
     let mut peak = 0;
     let result = aggregator.update_budgeted(&series, |bytes| {
-        calls += 1;
         peak = peak.max(bytes);
-        if calls == 4 {
+        if bytes >= threshold {
             Err(DataFusionError::Execution("old+new map budget".into()))
         } else {
             Ok(())
         }
     });
-    assert!(result.is_err());
-    assert_eq!(calls, 4);
-    assert!(peak > old_state);
+    assert!(
+        result.is_err(),
+        "the map grew with no budget for both tables"
+    );
+    assert!(
+        peak >= threshold,
+        "the growth admitted {peak}, less than the old state plus a new table ({threshold})"
+    );
     assert_eq!(aggregator.group_index.capacity(), group_count);
     assert_eq!(aggregator.groups(), group_count);
-    assert_eq!(aggregator.group_index.capacity(), group_count);
     assert_eq!(
         aggregator
             .groups
@@ -1436,7 +1466,7 @@ fn partials_merge_to_the_serial_result() {
             .collect();
         let names: Vec<&str> = fields.iter().map(String::as_str).collect();
         let schema = schema_with_grid_len(&names, rng.random_range(1..80));
-        let points = schema.eval_grid.as_ref().unwrap().timestamps().len();
+        let points = schema.eval_grid.as_ref().unwrap().spec().len as usize;
         let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
         let mut series = Vec::new();
         for index in 0..rng.random_range(1..12) {
@@ -1677,4 +1707,49 @@ fn count_values_keeps_neighbours_of_a_power_of_two_apart() {
             ),
         ]
     );
+}
+
+/// Prometheus counts a histogram sample under the text `FloatHistogram.String` writes it as, so
+/// equal histograms share a group and a float beside them has its own.
+#[test]
+fn count_values_counts_histograms_by_their_text() {
+    use crate::grid_series::reference::OwnedHistogram;
+    use crate::grid_series::{GridSample, GridSeriesBuilder};
+    use crate::histogram_eval::float_histogram::FloatHistogram;
+    use crate::histogram_eval::histogram_string;
+
+    let schema = schema_with_grid_len(&["value"], 1);
+    let histogram =
+        OwnedHistogram::parse("0/0/0/4000000000000000/3ff0000000000000/0/1_1/4000000000000000///");
+    let text = histogram_string(&histogram.view()).unwrap();
+    let series = |job: &str, sample: GridSample| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.push_samples(0, &[Some(sample)]).unwrap();
+        builder
+            .finish(metric("m", &[("job", job)]))
+            .unwrap()
+            .unwrap()
+    };
+    let sample = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+        ))
+    };
+    let input = [
+        series("a", sample()),
+        series("b", sample()),
+        series("c", GridSample::Float(2.0)),
+    ];
+    let mut counts: Vec<(String, f64)> = count_values(&schema, &input, "v", Grouping::By(&[]))
+        .unwrap()
+        .iter()
+        .map(|series| {
+            let SampleRef::Float(count) = series.fields.as_slice()[0].sample(0) else {
+                panic!("a count is a float");
+            };
+            (series.metric.get("v").unwrap().to_string(), count)
+        })
+        .collect();
+    counts.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(counts, [("2".to_string(), 1.0), (text, 2.0)]);
 }

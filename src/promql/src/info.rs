@@ -75,7 +75,7 @@ pub fn info(
         .eval_grid
         .as_ref()
         .ok_or_else(|| DataFusionError::Execution("info requires an evaluated grid".into()))?;
-    let points = grid.timestamps().len();
+    let points = grid.spec().len as usize;
     for series in base {
         if series.time.grid().map(|grid| grid.spec()) != Some(grid.spec())
             || series.fields.len() != schema.fields.len()

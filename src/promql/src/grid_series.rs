@@ -61,36 +61,38 @@ pub(crate) fn series_bytes(series: &Series) -> usize {
         )
 }
 
-fn fields_bytes(fields: &SeriesFields) -> usize {
+pub(crate) fn fields_bytes(fields: &SeriesFields) -> usize {
     fields
         .iter()
         .map(|field| {
             field.segments().iter().fold(0usize, |total, segment| {
-                let bytes = match segment.dense() {
-                    Some(DenseSamplesRef::Float(values)) => values.get_array_memory_size(),
-                    Some(DenseSamplesRef::Histogram(histograms)) => histograms
-                        .indices()
-                        .get_array_memory_size()
-                        .saturating_add(histograms.batch().as_arrow().get_array_memory_size())
-                        .saturating_add(std::mem::size_of::<HistogramBatch>()),
-                    Some(DenseSamplesRef::Mixed(mixed)) => mixed
-                        .floats()
-                        .get_array_memory_size()
-                        .saturating_add(mixed.histograms().indices().get_array_memory_size())
-                        .saturating_add(
-                            mixed
-                                .histograms()
-                                .batch()
-                                .as_arrow()
-                                .get_array_memory_size(),
-                        )
-                        .saturating_add(std::mem::size_of::<HistogramBatch>()),
-                    None => 0,
-                };
-                total.saturating_add(bytes)
+                total.saturating_add(segment_bytes(segment))
             })
         })
         .fold(0usize, usize::saturating_add)
+}
+
+/// The bytes one dense segment of samples holds.
+pub(crate) fn segment_bytes(segment: &Samples) -> usize {
+    match segment.dense() {
+        Some(DenseSamplesRef::Float(values)) => values.get_array_memory_size(),
+        Some(DenseSamplesRef::Histogram(histograms)) => histograms
+            .indices()
+            .get_array_memory_size()
+            .saturating_add(table_bytes(histograms.batch())),
+        Some(DenseSamplesRef::Mixed(mixed)) => mixed
+            .floats()
+            .get_array_memory_size()
+            .saturating_add(mixed.histograms().indices().get_array_memory_size())
+            .saturating_add(table_bytes(mixed.histograms().batch())),
+        // `segments` hands out dense segments only, so a nested chunk never reaches here.
+        None => 0,
+    }
+}
+
+/// The bytes one histogram table holds: the batch struct and the arrays its columns view.
+pub(crate) fn table_bytes(table: &Arc<HistogramBatch>) -> usize {
+    std::mem::size_of::<HistogramBatch>().saturating_add(table.as_arrow().get_array_memory_size())
 }
 
 pub(crate) fn field_builder_bytes(width: usize) -> usize {
@@ -255,10 +257,10 @@ impl GridSeriesBuilder {
                 self.schema.fields.len()
             )));
         }
-        if index < self.next || index >= self.grid.timestamps().len() {
+        if index < self.next || index >= self.grid.spec().len as usize {
             return Err(DataFusionError::Execution(format!(
                 "grid series index {index} is not increasing or exceeds grid length {}",
-                self.grid.timestamps().len()
+                self.grid.spec().len as usize
             )));
         }
         self.next = index + 1;

@@ -14,11 +14,15 @@
 
 //! Storage-format boundaries. Encodings stay outside reconciliation and source scheduling.
 
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_recordbatch::filter::SimpleFilterEvaluator;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
+use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
@@ -26,6 +30,7 @@ use store_api::storage::FileId;
 use crate::error::Result;
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata};
 use crate::series_index::catalog::SeriesIndexEntry;
+use crate::series_index::{MetricSeriesId, SeriesIndexFileHandle};
 
 /// Writers own partial outputs until finish succeeds; abort removes every partial object.
 /// A failed finish must clean up its output before returning; implementations also own
@@ -37,10 +42,43 @@ pub(crate) trait FormatWriter: Send {
     async fn abort(self: Box<Self>) -> Result<()>;
 }
 
-/// Builds series-index artifacts; read interfaces are deferred.
+/// A read has independent traversal state and pins its immutable artifact.
+#[allow(
+    dead_code,
+    reason = "Query adapter will consume the format reader separately."
+)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SeriesReadRequest {
+    pub(crate) projection: Vec<String>,
+    pub(crate) table_id: Option<u32>,
+    pub(crate) ids: Option<BTreeSet<MetricSeriesId>>,
+    pub(crate) filters: Vec<SimpleFilterEvaluator>,
+}
+
+#[allow(
+    dead_code,
+    reason = "Query adapter will consume the format reader separately."
+)]
+pub(crate) trait FormatReader: Send + Sync {
+    fn schema(&self) -> SchemaRef;
+    fn read(&self, request: SeriesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>>;
+}
+
+/// Builds and opens immutable series-index artifacts.
 #[async_trait]
 pub(crate) trait SeriesIndexFormat: Debug + Send + Sync {
     fn format(&self) -> ArtifactFormat;
+    #[allow(dead_code, reason = "Query adapter is deferred.")]
+    async fn reader(
+        &self,
+        _store: ObjectStore,
+        _handle: SeriesIndexFileHandle,
+    ) -> Result<Box<dyn FormatReader>> {
+        crate::error::UnsupportedOperationSnafu {
+            err_msg: "This series format has no reader",
+        }
+        .fail()
+    }
     async fn writer(
         &self,
         metadata: RegionMetadataRef,

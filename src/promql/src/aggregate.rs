@@ -38,7 +38,8 @@ use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::go_format::format_float_f;
 use crate::grid_series::{GridSeriesBuilder, external};
-use crate::map::{drop_empty_labels, validate_float_series, validate_scalar};
+use crate::histogram_eval::histogram_string;
+use crate::map::{drop_empty_labels, validate_float_series, validate_grid_series, validate_scalar};
 use crate::range_eval::quantile;
 
 /// Float aggregations without a parameter.
@@ -152,6 +153,12 @@ impl FloatAggregator {
     }
 
     /// Folds `series` into its group. A series that fails validation leaves the state unchanged.
+    ///
+    /// A budget refusal is not a validation failure: the fold may have opened a group or filled
+    /// blocks before the allocation it could not admit, so a failed [`Self::update_budgeted`]
+    /// leaves the state half folded and its retained figure stale. The runtime stops the execution
+    /// and drops the aggregator on that error, which is why no rollback is kept; a caller holding
+    /// one must drop it rather than fold into it again.
     pub fn update(&mut self, series: &Series) -> Result<()> {
         self.update_budgeted(series, |_| Ok(()))
     }
@@ -203,15 +210,20 @@ impl FloatAggregator {
             } else {
                 group_capacity
             };
+            let group_realloc_bytes = if next_group_capacity > group_capacity {
+                next_group_capacity.saturating_mul(size_of::<Group>())
+            } else {
+                0
+            };
             budget(
                 existing_bytes
                     .saturating_add(metric_bytes(&metric))
                     .saturating_add(key_bytes)
-                    .saturating_add(
-                        next_group_capacity
-                            .saturating_sub(group_capacity)
-                            .saturating_mul(size_of::<Group>()),
-                    )
+                    // A realloc that cannot grow in place keeps both buffers alive while it
+                    // copies, so a growing step admits the old buffer beside the new one --
+                    // the same reason the map below admits both tables. The old buffer alone
+                    // is already in `existing_bytes`; what is added here is the new one.
+                    .saturating_add(group_realloc_bytes)
                     .saturating_add(if self.group_index.len() == map_capacity {
                         hash_map_backing_bytes(next_hash_capacity(map_capacity))
                     } else {
@@ -572,7 +584,8 @@ pub fn aggregate_quantile(
 
 /// `count_values(label, v)`: at each grid point, the number of samples in each group of series
 /// that share a value, with the value written to `label` in Prometheus' `FormatFloat(v, 'f', -1)`
-/// form. With `by`, `label` is part of the grouping; with `without`, it is dropped if listed.
+/// form, or for a native histogram as its `FloatHistogram.String`. With `by`, `label` is part of
+/// the grouping; with `without`, it is dropped if listed.
 pub fn count_values(
     schema: &Arc<SeriesSchema>,
     input: &[Series],
@@ -593,7 +606,11 @@ pub fn count_values(
         }
         without => without,
     };
-    validate_input(schema, input, checked)?;
+    // Unlike the other aggregations, this one reads histogram samples too.
+    validate_grouping(schema, checked)?;
+    for series in input {
+        validate_grid_series(schema, series)?;
+    }
     if label.is_empty() {
         return Err(DataFusionError::Execution(format!(
             "invalid label name {label:?}"
@@ -614,20 +631,26 @@ pub fn count_values(
     let mut groups: Counts = Vec::new();
     for series in input {
         // Equal bits format to the same label value, so each distinct value of a series
-        // resolves its group once.
-        let mut group_of_value: HashMap<u64, usize> = HashMap::new();
+        // resolves its group once. A histogram is keyed by the text it is written as.
+        let mut group_of_value: HashMap<Value, usize> = HashMap::new();
         for (field_index, field) in series.fields.iter().enumerate() {
             for ((point, _), sample) in series.time.positions().zip(field.iter()) {
-                let SampleRef::Float(value) = sample else {
-                    continue;
+                let key = match sample {
+                    SampleRef::Missing => continue,
+                    SampleRef::Float(value) => Value::Float(value.to_bits()),
+                    SampleRef::Histogram(h) => Value::Histogram(histogram_string(&h)?),
                 };
-                let group = match group_of_value.entry(value.to_bits()) {
+                let group = match group_of_value.entry(key) {
                     Entry::Occupied(entry) => *entry.get(),
                     Entry::Vacant(entry) => {
+                        // Prometheus writes a float in Go's `'f'` form and a histogram as
+                        // `FloatHistogram.String` does.
+                        let text = match entry.key() {
+                            Value::Float(bits) => format_float_f(f64::from_bits(*bits)),
+                            Value::Histogram(text) => text.clone(),
+                        };
                         let mut metric = series.metric.clone();
-                        metric
-                            .set(label, Arc::from(format_float_f(value)))
-                            .map_err(external)?;
+                        metric.set(label, Arc::from(text)).map_err(external)?;
                         let metric = grouping.apply(&metric)?;
                         let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
                             groups.push((metric, BTreeMap::new()));
@@ -665,18 +688,29 @@ fn count_series(schema: &Arc<SeriesSchema>, groups: Counts) -> Result<Vec<Series
     Ok(output)
 }
 
+/// The value of a `count_values` sample, as it is grouped.
+#[derive(PartialEq, Eq, Hash)]
+enum Value {
+    Float(u64),
+    Histogram(String),
+}
+
 /// Schema validation is repeated because Series exposes its fields publicly.
 fn validate_input(schema: &SeriesSchema, input: &[Series], grouping: Grouping<'_>) -> Result<()> {
+    validate_grouping(schema, grouping)?;
+    for series in input {
+        validate_float_series(schema, series)?;
+    }
+    Ok(())
+}
+
+fn validate_grouping(schema: &SeriesSchema, grouping: Grouping<'_>) -> Result<()> {
     if schema.eval_grid.is_none() {
         return Err(DataFusionError::Execution(
             "Aggregate requires an evaluated grid".into(),
         ));
     }
-    grouping.validate(schema)?;
-    for series in input {
-        validate_float_series(schema, series)?;
-    }
-    Ok(())
+    grouping.validate(schema)
 }
 
 impl Grouping<'_> {
@@ -818,7 +852,7 @@ fn btree_backing_bytes(entries: usize) -> usize {
     else {
         return usize::MAX;
     };
-    nodes.checked_mul(internal).unwrap_or(usize::MAX)
+    nodes.saturating_mul(internal)
 }
 
 fn align_up(bytes: usize, alignment: usize) -> Option<usize> {
@@ -879,6 +913,18 @@ struct Group {
     blocks: BTreeMap<usize, Box<[FloatState]>>,
 }
 
+/// Which field of which layout a fold is writing, and how it folds it.
+///
+/// One value carried through the per-block work instead of three separate arguments: the three
+/// never vary independently within one series, and the block loop is the only place that reads
+/// them.
+#[derive(Clone, Copy)]
+struct FieldFold {
+    width: usize,
+    field_index: usize,
+    op: AggregateOp,
+}
+
 impl Group {
     fn accumulate(
         &mut self,
@@ -901,9 +947,11 @@ impl Group {
                 if index / BLOCK_POINTS != block {
                     retained = self.update_block(
                         block,
-                        width,
-                        field_index,
-                        op,
+                        FieldFold {
+                            width,
+                            field_index,
+                            op,
+                        },
                         &mut pending,
                         budget,
                         retained,
@@ -916,9 +964,11 @@ impl Group {
             }
             retained = self.update_block(
                 block,
-                width,
-                field_index,
-                op,
+                FieldFold {
+                    width,
+                    field_index,
+                    op,
+                },
                 &mut pending,
                 budget,
                 retained,
@@ -931,9 +981,7 @@ impl Group {
     fn update_block(
         &mut self,
         block: usize,
-        width: usize,
-        field_index: usize,
-        op: AggregateOp,
+        fold: FieldFold,
         pending: &mut Vec<(usize, f64)>,
         budget: &mut impl FnMut(usize) -> Result<()>,
         retained: usize,
@@ -944,7 +992,7 @@ impl Group {
         let new_block = !self.blocks.contains_key(&block);
         let block_bytes = if new_block {
             BLOCK_POINTS
-                .saturating_mul(width)
+                .saturating_mul(fold.width)
                 .saturating_mul(std::mem::size_of::<FloatState>())
         } else {
             0
@@ -964,10 +1012,10 @@ impl Group {
             )?;
         }
         let states = self.blocks.entry(block).or_insert_with(|| {
-            vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice()
+            vec![FloatState::default(); BLOCK_POINTS * fold.width].into_boxed_slice()
         });
         for (offset, sample) in pending.drain(..) {
-            states[offset * width + field_index].update(op, sample);
+            states[offset * fold.width + fold.field_index].update(fold.op, sample);
         }
         Ok(retained
             .saturating_add(backing_delta)

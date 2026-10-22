@@ -20,11 +20,12 @@ use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, MetricName};
+use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
-use promql::native::batch::EvaluatedChunk;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
@@ -33,7 +34,8 @@ use promql::native::plan::{
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp};
 use promql_parser::parser::{
-    BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, VectorMatchFillValues,
+    AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, Offset,
+    VectorMatchFillValues,
 };
 
 use super::compile;
@@ -58,9 +60,17 @@ fn eval_stmt(query: &str) -> EvalStmt {
 /// The end is a parameter because a grid stops before an end it does not land on, which is the only
 /// way `end()` and the last grid point can be told apart.
 fn eval_stmt_over(query: &str, end: Duration) -> EvalStmt {
+    eval_stmt_between(query, Duration::ZERO, end)
+}
+
+/// The statement `query` over `UNIX_EPOCH + start..=UNIX_EPOCH + end`, on a 5s grid.
+///
+/// The start is a parameter because a grid that begins off the epoch is the only way to tell a
+/// child grid built from absolute step boundaries from one built from the statement's start.
+fn eval_stmt_between(query: &str, start: Duration, end: Duration) -> EvalStmt {
     EvalStmt {
         expr: promql_parser::parser::parse(query).unwrap(),
-        start: UNIX_EPOCH,
+        start: UNIX_EPOCH + start,
         end: UNIX_EPOCH + end,
         interval: Duration::from_secs(5),
         lookback_delta: Duration::from_secs(5),
@@ -105,6 +115,15 @@ fn with_call_arguments(query: &str, edit: impl FnOnce(&mut Vec<Box<PromExpr>>)) 
     };
     edit(&mut call.args.args);
     stmt
+}
+
+/// The bare selector `x`, as the parser builds it.
+///
+/// The parser type-checks function arguments, so a vector selector where a matrix belongs can only be
+/// handed to the compiler by editing a tree the parser accepted: this supplies one.
+fn a_bare_selector() -> PromExpr {
+    let stmt = eval_stmt("x");
+    stmt.expr
 }
 
 /// The range selector out of `rate(x[5m])`.
@@ -206,6 +225,21 @@ fn aggregate_parts(node: &NativeNode) -> (&NativeNode, &BoundAggregate) {
 fn grid_of(node: &NativeNode) -> (i64, i64, u64) {
     let spec = evaluated(node).eval_grid.as_ref().unwrap().spec();
     (spec.start_ms, spec.step_ms, spec.len)
+}
+
+/// A long valid statement exposes its checked grid without allocating query-sized timestamps.
+#[test]
+fn a_long_statement_grid_is_deferred() {
+    let stmt = EvalStmt {
+        expr: promql_parser::parser::parse("x").unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH + Duration::from_secs(86_400),
+        interval: Duration::from_millis(1),
+        lookback_delta: Duration::from_secs(5),
+    };
+    let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+
+    assert_eq!(grid_of(tree.root()), (0, 1, 86_400_001));
 }
 
 /// `rate(x[5m])` becomes a window over the raw input, on the statement's grid.
@@ -887,24 +921,30 @@ fn an_interleaved_scan_is_refused_whatever_the_shape() {
 #[test]
 fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
     let cases = [
-        ("x[5m:]", "the expression `x[5m:]`"),
-        // Nested shapes are refused by the argument check, not skipped over. A subquery is the
-        // reachable case of an argument that is not a range selector: the parser type-checks
-        // function arguments, so `rate(x)` never gets past parsing.
+        // A bare subquery is a matrix, and a tree reports evaluated samples: only a range function
+        // can fold a matrix, so a subquery on its own has no node.
+        (eval_stmt("x[5m:]"), "x[5m:]", "the expression `x[5m:]`"),
+        // A matrix position that is neither a range selector nor a subquery: a bare vector selector
+        // where a matrix belongs. The parser type-checks function arguments, so this can only reach
+        // the compiler as an edited tree.
         (
-            "rate(x[5m:])",
-            "a call to `rate` whose range selector is `x[5m:]`",
+            with_call_arguments("rate(x[5m])", |args| {
+                *args[0] = a_bare_selector();
+            }),
+            "rate(x)",
+            "whose matrix is `x`",
         ),
         // A function with no kernel. `predict_linear` used to stand here as the parameterised case
         // and is now bound, so what is left is a name this compiler has no kernel for at all.
         (
+            eval_stmt("absent(x)"),
             "absent(x)",
             "a call to `absent`, which has no native kernel",
         ),
     ];
 
-    for (query, named) in cases {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+    for (stmt, query, named) in cases {
+        let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
             .expect_err(&format!("`{query}` compiled, and it should not have"));
         assert!(
             matches!(error, DataFusionError::NotImplemented(_)),
@@ -2322,6 +2362,425 @@ fn the_batch_acceptance_queries_compile() {
     }
 }
 
+/// One raw chunk of the metric `x`, as the caller binds it from a table.
+///
+/// `values` is one sample per timestamp, and a `None` is a position whose sample is missing rather
+/// than a value: the two are not the same thing, and a broadcast has to keep the difference.
+fn raw_x(timestamps: &[i64], values: Vec<Option<f64>>, is_last: bool) -> RawSeriesChunk {
+    let metric = MetricName::try_new(Some("x".into()), vec![]).expect("a metric name");
+    RawSeriesChunk::try_new(
+        &raw_schema(),
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).expect("timestamps"),
+        SeriesFields::one(Samples::from_float(Float64Array::from(values))),
+        is_last,
+    )
+    .expect("a raw chunk")
+}
+
+/// `x`'s samples at every grid point of [`eval_stmt`]'s grid, holding `1..=21`.
+fn samples_at_every_grid_point() -> (Vec<i64>, Vec<Option<f64>>) {
+    let timestamps = (0..21).map(|index| index * 5_000).collect();
+    let values = (1..=21).map(|value| Some(f64::from(value))).collect();
+    (timestamps, values)
+}
+
+/// Compiles `query`, runs it over one raw series pushed as `chunks`, and returns every chunk the
+/// root handed over.
+///
+/// This is the real path: the tree comes from the compiler rather than being built by hand here, so
+/// a binding the compiler got wrong cannot be hidden by a test that restates it.
+fn execute_compiled(query: &str, chunks: Vec<RawSeriesChunk>) -> Vec<EvaluatedChunk> {
+    let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut execution = NativeExecutor::new(
+        NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0)
+            .unwrap_or_else(|error| panic!("`{query}` was not executable: {error}")),
+    );
+    for chunk in chunks {
+        execution
+            .push_raw(chunk)
+            .unwrap_or_else(|error| panic!("`{query}` refused its input: {error}"));
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = execution
+        .next_chunk()
+        .unwrap_or_else(|error| panic!("`{query}` failed while running: {error}"))
+    {
+        out.push(chunk);
+    }
+    out.extend(
+        execution
+            .finish()
+            .unwrap_or_else(|error| panic!("`{query}` failed while closing: {error}")),
+    );
+    out
+}
+
+/// The `(grid position, value)` rows `chunks` hold, concatenated in the order they arrived.
+///
+/// A position a chunk holds no value at is not a row at all, so what the function reports is the
+/// positions that carry something: an operation that turned a value into a hole would show up as a
+/// missing entry here rather than as a `None`.
+fn rows(chunks: &[EvaluatedChunk]) -> Vec<(usize, f64)> {
+    let mut rows = Vec::new();
+    for chunk in chunks {
+        let mut field = chunk.series.fields.as_slice()[0].iter();
+        for (position, _) in chunk.series.time.positions() {
+            match field.next().expect("one sample per row") {
+                SampleRef::Float(value) => rows.push((position, value)),
+                SampleRef::Missing => {}
+                SampleRef::Histogram(_) => panic!("a scalar broadcast produced a histogram"),
+            }
+        }
+    }
+    rows
+}
+
+/// The label set the executed chunks carry, or `None` when they carry the empty one.
+fn executed_name(chunks: &[EvaluatedChunk]) -> Option<String> {
+    chunks
+        .first()
+        .and_then(|chunk| chunk.series.metric.name().map(|name| name.to_string()))
+}
+
+/// A constant on the right of a multiplication reaches the executor and multiplies every value.
+///
+/// The tree is `Binary(Mul, Instant, Scalar(100))`, which the compiler binds and the runtime runs as
+/// a broadcast: the chunk `x` produces is transformed as it arrives, and the answer keeps `x`'s
+/// positions.
+#[test]
+fn a_compiled_constant_multiplies_the_vector_it_is_paired_with() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let out = execute_compiled("x * 100", vec![raw_x(&timestamps, values, true)]);
+
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| (index, (index as f64 + 1.0) * 100.0))
+        .collect();
+    assert_eq!(
+        rows(&out),
+        expected,
+        "`x * 100` did not multiply every value"
+    );
+    // Arithmetic drops the metric name, as Prometheus does.
+    assert_eq!(executed_name(&out), None, "`x * 100` kept the metric name");
+}
+
+/// A constant on the left keeps the operand order: `100 / x` is not `x / 100`.
+#[test]
+fn a_compiled_constant_on_the_left_keeps_the_operand_order() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let divided = rows(&execute_compiled(
+        "100 / x",
+        vec![raw_x(&timestamps, values.clone(), true)],
+    ));
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| (index, 100.0 / (index as f64 + 1.0)))
+        .collect();
+    assert_eq!(divided, expected, "`100 / x` did not divide by the vector");
+
+    // The other order is a different query, and it produces different numbers: a runtime that
+    // swapped the operands would answer this one with the first one's values.
+    let other = rows(&execute_compiled(
+        "x / 100",
+        vec![raw_x(&timestamps, values, true)],
+    ));
+    assert_ne!(divided, other, "`100 / x` and `x / 100` agree");
+}
+
+/// `x > bool 0` reports one per value that passes, rather than filtering the vector.
+#[test]
+fn a_compiled_bool_comparison_reports_one_and_zero() {
+    let (timestamps, _) = samples_at_every_grid_point();
+    // Half the values are negative, so the comparison decides both ways.
+    let values = (1..=21)
+        .map(|value| Some(f64::from(value) - 10.0))
+        .collect();
+    let out = execute_compiled("x > bool 0", vec![raw_x(&timestamps, values, true)]);
+
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| {
+            let value = index as f64 + 1.0 - 10.0;
+            (index, f64::from(u8::from(value > 0.0)))
+        })
+        .collect();
+    assert_eq!(rows(&out), expected, "`x > bool 0` did not report 0/1");
+    assert_eq!(
+        executed_name(&out),
+        None,
+        "`x > bool 0` kept the metric name"
+    );
+}
+
+/// Comparisons with constant operands are folded before the executor runs the vector operation.
+/// These queries exercise the compiled tree through the native executor, including scalar broadcast,
+/// unary negation, comparison results, label dropping, and the one closing output chunk.
+#[test]
+fn a_compiled_bool_constant_comparison_runs_with_vector_arithmetic() {
+    let (timestamps, _) = samples_at_every_grid_point();
+    let values: Vec<Option<f64>> = [-2.0, 0.0, 2.0]
+        .into_iter()
+        .cycle()
+        .take(timestamps.len())
+        .map(Some)
+        .collect();
+    let cases = [
+        ("x * (1 < bool 2)", [-2.0, 0.0, 2.0]),
+        ("x * (1 > bool 2)", [0.0, 0.0, 0.0]),
+        ("-(1 < bool 2) + x", [-3.0, -1.0, 1.0]),
+        ("x > bool (1 == bool 1)", [0.0, 0.0, 1.0]),
+    ];
+
+    for (query, pattern) in cases {
+        let out = execute_compiled(query, vec![raw_x(&timestamps, values.clone(), true)]);
+        let expected: Vec<(usize, f64)> = pattern
+            .into_iter()
+            .cycle()
+            .take(timestamps.len())
+            .enumerate()
+            .collect();
+        assert_eq!(rows(&out), expected, "`{query}` returned wrong rows");
+        assert_eq!(executed_name(&out), None, "`{query}` kept the metric name");
+        assert_eq!(out.len(), 1, "`{query}` did not produce one output chunk");
+        assert!(out[0].is_last, "`{query}`'s output did not close");
+    }
+}
+
+/// `x > 0` filters, so it keeps the labels it read and drops the positions that failed.
+#[test]
+fn a_compiled_filtering_comparison_keeps_the_values_that_passed() {
+    let (timestamps, _) = samples_at_every_grid_point();
+    let values = (1..=21)
+        .map(|value| Some(f64::from(value) - 10.0))
+        .collect();
+    let out = execute_compiled("x > 0", vec![raw_x(&timestamps, values, true)]);
+
+    let expected: Vec<(usize, f64)> = (0..21)
+        .filter_map(|index| {
+            let value = index as f64 + 1.0 - 10.0;
+            (value > 0.0).then_some((index, value))
+        })
+        .collect();
+    assert_eq!(rows(&out), expected, "`x > 0` did not filter the vector");
+    assert_eq!(
+        executed_name(&out),
+        Some("x".to_string()),
+        "a filtering comparison keeps the labels it read"
+    );
+}
+
+/// The negation the compiler binds is the multiplication it means, and it runs that way.
+#[test]
+fn a_compiled_negation_negates_every_value() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let out = execute_compiled("-x", vec![raw_x(&timestamps, values, true)]);
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| (index, -(index as f64 + 1.0)))
+        .collect();
+    assert_eq!(rows(&out), expected, "`-x` did not negate every value");
+}
+
+/// A negation over a window negates the window result and drops its metric name.
+#[test]
+fn a_compiled_negation_of_a_window_negates_the_window_result() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let input = || vec![raw_x(&timestamps, values.clone(), true)];
+
+    let baseline = rows(&execute_compiled("rate(x[5m])", input()));
+    assert!(
+        !baseline.is_empty(),
+        "the window answered nothing, so this case would prove nothing"
+    );
+
+    let out_chunks = execute_compiled("-rate(x[5m])", input());
+    let out = rows(&out_chunks);
+    let expected: Vec<(usize, f64)> = baseline
+        .iter()
+        .map(|(position, value)| (*position, -*value))
+        .collect();
+    assert_eq!(
+        out, expected,
+        "`-rate(x[5m])` did not negate the window's answer"
+    );
+    // `rate(x[5m]) * 100` anchors the first result at 0.5, so the rate alone is 0.005 -- the same
+    // window `(5 + 2.5 + 0) / 5 / 300s` -- and negation flips only its sign.
+    assert_eq!(
+        out.first(),
+        Some(&(1, -0.005)),
+        "the first negated rate was not the sign-flipped anchor"
+    );
+    assert_eq!(
+        executed_name(&out_chunks),
+        None,
+        "arithmetic drops the metric name"
+    );
+}
+
+/// A filtering comparison with a constant on the left keeps the written operand order.
+#[test]
+fn a_compiled_constant_on_the_left_of_a_comparison_keeps_the_operand_order() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    // This compiles ScalarOperand::Left through the real compiler, not a hand-built tree.
+    let left = execute_compiled("10 < x", vec![raw_x(&timestamps, values.clone(), true)]);
+    let left_rows = rows(&left);
+    let expected: Vec<(usize, f64)> = (0..21)
+        .filter_map(|index| {
+            let value = index as f64 + 1.0;
+            (value > 10.0).then_some((index, value))
+        })
+        .collect();
+    assert_eq!(
+        left_rows, expected,
+        "`10 < x` did not keep values greater than 10"
+    );
+    assert_eq!(
+        executed_name(&left),
+        Some("x".to_string()),
+        "a filtering comparison keeps the labels it read"
+    );
+
+    let right = rows(&execute_compiled(
+        "x < 10",
+        vec![raw_x(&timestamps, values, true)],
+    ));
+    let complementary: Vec<(usize, f64)> = (0..21)
+        .filter_map(|index| {
+            let value = index as f64 + 1.0;
+            (value < 10.0).then_some((index, value))
+        })
+        .collect();
+    assert_eq!(
+        right, complementary,
+        "`x < 10` did not keep values below 10"
+    );
+    assert_ne!(
+        left_rows, right,
+        "the two operand orders produced the same rows"
+    );
+    assert!(!left_rows.is_empty(), "`10 < x` produced no rows");
+    assert!(!right.is_empty(), "`x < 10` produced no rows");
+}
+
+/// The broadcast composes with a window: `rate(x[5m]) * 100` runs the evaluator and multiplies its
+/// answer, rather than replacing it or multiplying the input.
+///
+/// The rate itself is not re-derived here. `rate` extrapolates a counter's slope to the whole
+/// window, so hand-computing its value would be this test restating a kernel it does not own; the
+/// baseline is instead what the same executor answers for the very same input without the
+/// multiplication, which is an oracle the broadcast cannot influence.
+#[test]
+fn a_compiled_broadcast_over_a_window_multiplies_the_window_result() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let input = || vec![raw_x(&timestamps, values.clone(), true)];
+
+    let baseline = rows(&execute_compiled("rate(x[5m])", input()));
+    assert!(
+        !baseline.is_empty(),
+        "the window answered nothing, so this case would prove nothing"
+    );
+
+    let out = rows(&execute_compiled("rate(x[5m]) * 100", input()));
+    let expected: Vec<(usize, f64)> = baseline
+        .iter()
+        .map(|(position, value)| (*position, value * 100.0))
+        .collect();
+    assert_eq!(
+        out, expected,
+        "`rate(x[5m]) * 100` is not the window's answer multiplied by 100"
+    );
+
+    // One absolute anchor, so agreement with a baseline that itself regressed cannot pass. A
+    // counter rising by one every five seconds, over the window `(-295s, 5s]` that holds two
+    // samples: the second is the evaluation point, so nothing is extrapolated at the end, while the
+    // 295s of window before the first sample is far past the 5.5s threshold and is replaced by half
+    // the 5s average interval. `(5 + 2.5 + 0) / 5 / 300s = 0.005`, and `* 100` is 0.5.
+    assert_eq!(
+        out.first(),
+        Some(&(1, 0.5)),
+        "the first rate was not the extrapolated one the kernel computes"
+    );
+}
+
+/// A missing sample and a skipped position stay absent through the broadcast: it pairs values with
+/// a constant and never makes one up.
+#[test]
+fn a_compiled_broadcast_preserves_missing_values_and_skipped_positions() {
+    // Everything but the sample at 10s and the position at 20s: the first is a position that holds
+    // a missing sample, the second a position with no sample at all.
+    let mut timestamps = Vec::new();
+    let mut values = Vec::new();
+    for index in 0..21 {
+        if index == 4 {
+            continue;
+        }
+        timestamps.push(index * 5_000);
+        values.push((index != 2).then_some(index as f64 + 1.0));
+    }
+
+    let out = execute_compiled("x * 100", vec![raw_x(&timestamps, values, true)]);
+    let expected: Vec<(usize, f64)> = (0..21)
+        .filter(|index| *index != 2 && *index != 4)
+        .map(|index| (index, (index as f64 + 1.0) * 100.0))
+        .collect();
+    assert_eq!(
+        rows(&out),
+        expected,
+        "the broadcast changed which positions hold a value"
+    );
+    // And the two holes are holes, not zeros: a neighbour is present at both sides of each one.
+    let positions: Vec<usize> = rows(&out)
+        .into_iter()
+        .map(|(position, _)| position)
+        .collect();
+    assert!(!positions.contains(&2), "a missing sample became a value");
+    assert!(!positions.contains(&4), "a skipped position became a value");
+}
+
+/// A series delivered in two raw chunks is answered as one series: the rows are right, and the
+/// answer closes exactly once.
+///
+/// This is not a streaming proof, and cannot be one: the compiler puts an [`NativeExpr::Instant`]
+/// under the binary, and a selection reads a whole axis before it decides anything, so it buffers
+/// both chunks and answers the series once. What the one output chunk demonstrates is therefore
+/// finality rather than incrementality. The executor-level proof of a broadcast's streaming is
+/// `src/promql/src/native/execute/tests.rs::a_broadcast_does_not_retain_the_vector_it_reads`, which
+/// drives an evaluated source directly: a chunk is answered per chunk read and the reservation
+/// stays bounded however long the series is.
+#[test]
+fn a_compiled_broadcast_answers_a_series_delivered_in_two_chunks() {
+    let timestamps: Vec<i64> = (0..4).map(|index| index * 5_000).collect();
+    let first = raw_x(&timestamps[..2], vec![Some(1.0), Some(2.0)], false);
+    let last = raw_x(&timestamps[2..], vec![Some(3.0), Some(4.0)], true);
+
+    let out = execute_compiled("x * 100", vec![first, last]);
+    let expected: Vec<(usize, f64)> = (0..4)
+        .map(|index| (index, (index as f64 + 1.0) * 100.0))
+        .collect();
+    assert_eq!(
+        rows(&out),
+        expected,
+        "`x * 100` did not transform every chunk"
+    );
+    // One output chunk, because the selection below it answers a whole series at once: the two raw
+    // chunks are one series to the selection, so the broadcast is handed one chunk and hands one up.
+    assert_eq!(
+        out.len(),
+        1,
+        "the selection answers a whole series at once, so the broadcast saw one chunk"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the series closed more or less than once"
+    );
+    assert!(
+        out.last().expect("an answer").is_last,
+        "the closing chunk of the input did not close the output"
+    );
+}
+
 /// `predict_linear` reads its horizon after its range selector, so the number the query wrote after
 /// the selector is the horizon the kernel extrapolates to. The value is asserted apart from the
 /// window, because a compiler that bound the horizon on the wrong side of the call would still
@@ -2490,6 +2949,725 @@ fn a_parameterised_window_nests_under_a_comparison_and_an_aggregate() {
         );
     };
     assert_eq!(op.function, RangeFunction::PredictLinear(300.0));
+}
+
+/// The grid a subquery evaluates its inner expression on, as `(start_ms, step_ms, len)`.
+fn child_grid(window: &BoundWindow) -> (i64, i64, u64) {
+    let grid = window
+        .input_grid
+        .as_ref()
+        .expect("a subquery's window declares the grid its input was evaluated on");
+    let spec = grid.spec();
+    (spec.start_ms, spec.step_ms, spec.len)
+}
+
+/// `rate(x[5m:1m])` folds a subquery rather than a range selector: the inner selector is evaluated on
+/// the subquery's own grid, and the window declares that grid as its input's. The two grids are
+/// asserted apart, because a compiler that bound the child onto the statement's grid would still
+/// produce a window.
+#[test]
+fn a_subquery_feeds_a_window_evaluated_on_its_own_grid() {
+    let tree = compile(
+        &eval_stmt("rate(x[5m:1m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`rate(x[5m:1m])` was refused: {error}"));
+
+    let (input, op) = root_window(&tree);
+    assert_eq!(op.function, RangeFunction::Rate);
+    assert_eq!(op.window.range_ms, 300_000, "the subquery range was lost");
+    assert_eq!(op.window.offset_ms, 0);
+    assert_eq!(op.window.anchor_ms, None);
+
+    // The output lands on the statement's grid: 0, 5s, ..., 100s.
+    let spec = op.output_grid.spec();
+    assert_eq!((spec.start_ms, spec.step_ms, spec.len), (0, 5_000, 21));
+
+    // The inner selector is evaluated at one-minute steps, and the earliest read window opens at
+    // `0 - 300000`, so the first step boundary strictly after it is `-240000`.
+    assert_eq!(
+        child_grid(op),
+        (-240_000, 60_000, 6),
+        "the subquery's own grid is wrong"
+    );
+    // The input is that evaluation, not raw samples: this is the field that tells a subquery's window
+    // from one over a range selector.
+    let inner = evaluated(input);
+    assert_eq!(
+        inner.eval_grid.as_ref().unwrap().spec().start_ms,
+        -240_000,
+        "the inner expression was not evaluated on the subquery's grid"
+    );
+
+    // Below the window's input sits the one raw scan, so the tree still reads the scan exactly once.
+    let NativeExpr::Instant { input: scan, .. } = &input.expr else {
+        panic!(
+            "the subquery's input is not an instant selection: {:?}",
+            input.expr
+        );
+    };
+    let NativeExpr::Input(bound) = &scan.expr else {
+        panic!("the innermost node is not an input: {:?}", scan.expr);
+    };
+    assert!(
+        matches!(&bound.output, NativeType::Samples(schema) if schema.eval_grid.is_none()),
+        "the subquery's innermost input is not raw samples: {:?}",
+        bound.output
+    );
+}
+
+/// The child grid is derived from the statement's grid, the range, the offset and the step, and each
+/// of those changes it. The cases are asserted as whole specs, because a formula that dropped one
+/// term would still produce a plausible grid.
+#[test]
+fn a_subquery_grid_follows_its_range_step_and_offset() {
+    let cases = [
+        // (query, start_ms, step_ms, len)
+        // The plain case: one minute steps, five minute windows, no offset.
+        ("rate(x[5m:1m])", -240_000, 60_000, 6),
+        // The statement's own step is not the subquery's step.
+        ("rate(x[5m:5s])", -295_000, 5_000, 80),
+        // A step that does not divide the range, so the first boundary is not `-range`, and the last
+        // point is the last multiple of the step rather than the statement's end.
+        ("rate(x[5m:7s])", -294_000, 7_000, 57),
+        // A positive offset reads earlier samples, so the whole child grid moves back.
+        ("rate(x[5m:1m] offset 1m)", -300_000, 60_000, 6),
+        // A negative offset reads later ones, so it moves forward.
+        ("rate(x[5m:1m] offset -1m)", -180_000, 60_000, 6),
+    ];
+
+    for (query, start_ms, step_ms, len) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = root_window(&tree);
+        assert_eq!(
+            child_grid(op),
+            (start_ms, step_ms, len),
+            "`{query}` bound the wrong child grid"
+        );
+        // Whatever the child grid is, the window still reports the statement's.
+        let spec = op.output_grid.spec();
+        assert_eq!(
+            (spec.start_ms, spec.step_ms, spec.len),
+            (0, 5_000, 21),
+            "`{query}` moved the output off the statement's grid"
+        );
+    }
+}
+
+/// A subquery whose child interval contains no step boundary is refused as unsupported.
+#[test]
+fn a_subquery_with_an_empty_child_grid_is_refused() {
+    let error = compile(
+        &eval_stmt("rate(x[1ms:1m] @ 0.001)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("an empty subquery child grid compiled");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "an empty child grid is an unsupported subquery shape: {error}"
+    );
+    assert!(
+        error.to_string().contains("names no evaluation point"),
+        "the refusal did not identify the empty child grid: {error}"
+    );
+}
+
+/// Large subquery child grids compile as deferred grids without allocating one timestamp per point.
+#[test]
+fn large_subquery_child_grids_compile_deferred() {
+    const DAY_STEP_GRID: (i64, i64, u64) = (-86_399_999, 1, 86_400_000);
+    let cases = [
+        ("rate(x[1d:1ms] @ 0)", false),
+        ("rate(rate(x[1d:1ms] @ 0)[1d:1ms] @ 0)", true),
+    ];
+
+    for (query, nested) in cases {
+        let mut stmt = eval_stmt(query);
+        stmt.end = UNIX_EPOCH;
+        stmt.interval = Duration::from_millis(1);
+        let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (input, outer) = root_window(&tree);
+        assert_eq!(child_grid(outer), DAY_STEP_GRID, "`{query}` outer grid");
+        if nested {
+            let NativeExpr::Window { op: inner, .. } = &input.expr else {
+                panic!(
+                    "`{query}` inner expression is not a window: {:?}",
+                    input.expr
+                );
+            };
+            assert_eq!(child_grid(inner), DAY_STEP_GRID, "`{query}` inner grid");
+        }
+    }
+
+    // This range makes the eager timestamp vector's capacity exceed isize::MAX bytes, while its
+    // child GridSpec remains valid and the deferred compiler path should require no such allocation.
+    let range_ms = (isize::MAX / 8 + 1) as u64;
+    let mut stmt = eval_stmt("rate(x[1ms:1ms] @ 0)");
+    stmt.end = UNIX_EPOCH;
+    stmt.interval = Duration::from_millis(1);
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("query parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("call argument parses to a subquery");
+    };
+    subquery.range = Duration::from_millis(range_ms);
+
+    let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect("a huge but valid deferred child grid should compile");
+    let (_, window) = root_window(&tree);
+    let grid = child_grid(window);
+    assert_eq!(grid.0, -(range_ms as i64) + 1);
+    assert_eq!(grid.1, 1);
+    assert_eq!(grid.2, range_ms);
+}
+
+/// A sampled child endpoint can fit even when the unrounded read-window endpoint does not.
+#[test]
+fn a_subquery_accepts_an_in_range_sampled_endpoint() {
+    let mut stmt = eval_stmt("rate(x[1s:1s] offset -1ms)");
+    let endpoint = UNIX_EPOCH + Duration::from_millis(i64::MAX as u64);
+    stmt.start = endpoint;
+    stmt.end = endpoint;
+    stmt.interval = Duration::from_millis(1);
+
+    let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect("the in-range sampled endpoint should compile");
+    let (_, op) = root_window(&tree);
+    let spec = op.input_grid.as_ref().unwrap().spec();
+    assert_eq!(
+        (spec.start_ms, spec.step_ms, spec.len),
+        (9_223_372_036_854_775_000, 1_000, 1),
+        "the child grid should contain the last in-range 1-second sample"
+    );
+}
+
+/// An anchored fold offset that cannot be represented as i64 is a plan error.
+#[test]
+fn a_subquery_with_an_overflowing_fold_offset_is_refused() {
+    let mut stmt = eval_stmt("rate(x[5m:1m] @ 0)");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("query parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("call argument parses to a subquery");
+    };
+    subquery.at = Some(AtModifier::At(
+        UNIX_EPOCH + Duration::from_millis(i64::MAX as u64),
+    ));
+    subquery.offset = Some(Offset::Neg(Duration::from_millis(1)));
+
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("an overflowing subquery fold offset compiled");
+    assert!(
+        matches!(error, DataFusionError::Plan(_)),
+        "an overflowing folded offset is a plan error: {error}"
+    );
+    assert!(
+        error.to_string().contains("out of range"),
+        "the rejection did not identify the offset overflow: {error}"
+    );
+}
+
+/// A subquery step that names no point is refused: `x[5m:]` falls back to Prometheus's default
+/// evaluation interval of one minute, and a step of zero has no point at all. The rejection names the
+/// number rather than reporting an empty grid.
+#[test]
+fn a_subquery_step_must_be_positive() {
+    // The parser refuses `x[5m:0s]`, so a zero step can only be handed to the compiler as an edited
+    // tree — the same way the range and arity tests reach their shapes.
+    let mut stmt = eval_stmt("rate(x[5m:1m])");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("`rate(x[5m:1m])` parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("`x[5m:1m]` parses to a subquery");
+    };
+    subquery.step = Some(Duration::ZERO);
+
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("a zero subquery step compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::Plan(_)),
+        "a zero step is a plan error, not a shape this compiler lacks: {error}"
+    );
+    assert!(
+        error.to_string().contains("has to be longer than zero"),
+        "the rejection did not say what a step has to be: {error}"
+    );
+}
+
+/// A subquery with no step falls back to Prometheus's default evaluation interval of one minute,
+/// which is not the statement's step: the statement here steps in five seconds, so a compiler that
+/// reused it would produce a grid five times longer.
+#[test]
+fn a_subquery_without_a_step_uses_the_default_interval() {
+    let tree = compile(
+        &eval_stmt("rate(x[5m:])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`rate(x[5m:])` was refused: {error}"));
+
+    let (_, op) = root_window(&tree);
+    assert_eq!(op.window.range_ms, 300_000);
+    assert_eq!(
+        child_grid(op).1,
+        60_000,
+        "a subquery without a step did not use the default interval"
+    );
+}
+
+/// The child grid an anchored subquery must declare, derived from its read interval rather than from
+/// the compiler's formula: the samples of `(anchor - offset - range, anchor - offset]` at `step`.
+///
+/// The multiples are found by walking a two-step-wide margin around the interval and keeping the ones
+/// the interval itself contains, so no division and no rounding convention appears here: a wrong
+/// formula in the compiler cannot be reproduced by this helper, which is the whole point of it.
+fn anchored_child_grid(
+    anchor_ms: i64,
+    range_ms: i64,
+    step_ms: i64,
+    offset_ms: i64,
+) -> (i64, i64, u64) {
+    let end = anchor_ms - offset_ms;
+    let start = end - range_ms;
+    let mut first = None;
+    let mut len = 0_u64;
+    for k in (start / step_ms - 2)..=(end / step_ms + 2) {
+        let sample = k * step_ms;
+        if sample <= start || sample > end {
+            continue;
+        }
+        first.get_or_insert(sample);
+        len += 1;
+    }
+    (
+        first.expect("the read interval names no sample at all"),
+        step_ms,
+        len,
+    )
+}
+
+/// An anchored subquery reads one fixed interval instead of one interval per output point, and the
+/// interval is the anchor's: `(anchor - offset - range, anchor - offset]` at the subquery's step.
+///
+/// The expected grid comes from the interval, not from the compiler, and the anchor itself is stated
+/// in the case table even where the query writes `start()` or `end()`, so the two have to agree.
+#[test]
+fn an_anchored_subquery_reads_one_fixed_interval() {
+    // (query, anchor_ms, range_ms, step_ms, offset_ms, statement start_ms, statement end_ms)
+    let cases = [
+        (
+            "rate(x[5m:1m] @ 1234)",
+            1_234_000,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        // `start()` and `end()` are the statement's own bounds, not points of its grid.
+        (
+            "rate(x[5m:1m] @ start())",
+            0,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        (
+            "rate(x[5m:1m] @ end())",
+            100_000,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        // A pre-epoch anchor, which a `duration_since(UNIX_EPOCH).unwrap_or_default()` would make 0.
+        (
+            "rate(x[5m:1m] @ -1.5)",
+            -1_500,
+            300_000,
+            60_000,
+            0,
+            0,
+            100_000,
+        ),
+        // The subquery's own offset moves the anchored interval, as it moves an unanchored one, in
+        // either order: the parser allows `@` and `offset` to be written both ways round.
+        (
+            "rate(x[5m:1m] offset 1m @ 1234)",
+            1_234_000,
+            300_000,
+            60_000,
+            60_000,
+            0,
+            100_000,
+        ),
+        (
+            "rate(x[5m:1m] @ 1234 offset 1m)",
+            1_234_000,
+            300_000,
+            60_000,
+            60_000,
+            0,
+            100_000,
+        ),
+        // A step that divides neither the range nor the anchor, so a grid rounded to either would
+        // name different samples.
+        (
+            "rate(x[5m:7s] @ 1234)",
+            1_234_000,
+            300_000,
+            7_000,
+            0,
+            0,
+            100_000,
+        ),
+        // A statement whose end is not a grid point and whose start is off the child step, so neither
+        // `end()` nor the statement's start can stand in for the anchor or for the child grid.
+        (
+            "rate(x[5m:1m] @ end())",
+            103_000,
+            300_000,
+            60_000,
+            0,
+            3_000,
+            103_000,
+        ),
+    ];
+
+    for (query, anchor_ms, range_ms, step_ms, offset_ms, start_ms, end_ms) in cases {
+        let stmt = eval_stmt_between(
+            query,
+            Duration::from_millis(start_ms as u64),
+            Duration::from_millis(end_ms as u64),
+        );
+        let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (input, op) = root_window(&tree);
+
+        assert_eq!(
+            op.window.anchor_ms,
+            Some(anchor_ms),
+            "`{query}` bound the wrong anchor"
+        );
+        assert_eq!(op.window.range_ms, range_ms, "`{query}`: wrong range");
+        assert_eq!(op.window.offset_ms, offset_ms, "`{query}`: wrong offset");
+
+        let expected = anchored_child_grid(anchor_ms, range_ms, step_ms, offset_ms);
+        assert_eq!(
+            child_grid(op),
+            expected,
+            "`{query}` bound the wrong child grid: the interval \
+             ({}, {}] at {step_ms}ms per step holds {expected:?}",
+            anchor_ms - offset_ms - range_ms,
+            anchor_ms - offset_ms
+        );
+        // The inner expression lands on that grid, so the window reads the points it declares.
+        let inner = evaluated(input);
+        assert_eq!(
+            inner.eval_grid.as_ref().unwrap().spec().start_ms,
+            expected.0,
+            "`{query}` evaluated its expression off the declared child grid"
+        );
+        // The statement's grid is untouched: an anchor changes what is read, not what is reported.
+        let out = op.output_grid.spec();
+        assert_eq!(
+            (out.start_ms, out.step_ms),
+            (start_ms, 5_000),
+            "`{query}` moved the output off the statement's grid"
+        );
+        assert_eq!(
+            out.len as i64,
+            (end_ms - start_ms) / 5_000 + 1,
+            "`{query}` changed the statement's grid length"
+        );
+    }
+}
+
+/// An anchored child grid does not depend on the statement at all: the same anchored subquery in two
+/// statements of different spans reads the same interval, while the two report on their own grids.
+#[test]
+fn an_anchored_subquery_grid_ignores_the_statement() {
+    let short = eval_stmt_between(
+        "rate(x[5m:1m] @ 1234)",
+        Duration::ZERO,
+        Duration::from_secs(100),
+    );
+    let long = eval_stmt_between(
+        "rate(x[5m:1m] @ 1234)",
+        Duration::from_secs(10),
+        Duration::from_secs(600),
+    );
+
+    let mut grids = Vec::new();
+    for stmt in [&short, &long] {
+        let tree = compile(stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("an anchored subquery was refused: {error}"));
+        let (_, op) = root_window(&tree);
+        grids.push((child_grid(op), grid_of(tree.root())));
+    }
+
+    let expected_child = anchored_child_grid(1_234_000, 300_000, 60_000, 0);
+    assert_eq!(
+        grids[0].0, expected_child,
+        "the short statement's child grid is wrong"
+    );
+    assert_eq!(
+        grids[1].0, expected_child,
+        "the child grid moved with the statement, so the anchor is not what it reads"
+    );
+    assert_ne!(
+        grids[0].1, grids[1].1,
+        "the two statements have the same output grid, so this case proves nothing"
+    );
+}
+
+/// A window folds one value per grid point, so the expression inside a subquery has to produce a
+/// vector. A scalar has no fields to fold and no points at all, so it is refused by type.
+#[test]
+fn a_subquery_over_a_scalar_is_refused() {
+    let mut stmt = eval_stmt("rate(x[5m:1m])");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("`rate(x[5m:1m])` parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("`x[5m:1m]` parses to a subquery");
+    };
+    *subquery.expr = PromExpr::NumberLiteral(NumberLiteral::new(1.0));
+
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("a subquery over a scalar compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the refusal is not NotImplemented: {error}"
+    );
+    assert!(
+        error.to_string().contains("has to evaluate a vector"),
+        "the refusal did not say what a subquery evaluates: {error}"
+    );
+}
+
+/// A subquery nests like any other matrix: a window over a subquery can itself sit inside a subquery,
+/// and the whole chain still reads the scan once. The grids are asserted level by level, because a
+/// compiler that passed the outer grid down would produce a tree that validates but reads the wrong
+/// points.
+#[test]
+fn a_subquery_nests_and_each_level_has_its_own_grid() {
+    let tree = compile(
+        &eval_stmt("rate(rate(x[5m:1m])[10m:30s])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`rate(rate(x[5m:1m])[10m:30s])` was refused: {error}"));
+
+    let (outer_input, outer) = root_window(&tree);
+    assert_eq!(outer.window.range_ms, 600_000);
+    // The outer subquery reads ten minutes back at thirty-second steps, so its first boundary after
+    // `-600000` is `-570000` and its last multiple of 30000 below the statement's end is `90000`.
+    assert_eq!(
+        child_grid(outer),
+        (-570_000, 30_000, 23),
+        "the outer subquery's grid is wrong"
+    );
+
+    let NativeExpr::Window {
+        input: inner_input,
+        op: inner,
+    } = &outer_input.expr
+    else {
+        panic!(
+            "the outer subquery's input is not a window: {:?}",
+            outer_input.expr
+        );
+    };
+    assert_eq!(inner.function, RangeFunction::Rate);
+    assert_eq!(inner.window.range_ms, 300_000);
+    // The inner subquery is evaluated on the outer one's grid, not on the statement's: its earliest
+    // read window opens at `-570000 - 300000`, whose first one-minute boundary is `-840000`.
+    assert_eq!(
+        child_grid(inner),
+        (-840_000, 60_000, 16),
+        "the inner subquery's grid is wrong, so the outer grid was not passed down"
+    );
+
+    // The innermost node is still the one raw scan.
+    let NativeExpr::Instant { input: scan, .. } = &inner_input.expr else {
+        panic!(
+            "the inner window's input is not an instant selection: {:?}",
+            inner_input.expr
+        );
+    };
+    assert!(
+        matches!(scan.expr, NativeExpr::Input(_)),
+        "the innermost node is not the scan: {:?}",
+        scan.expr
+    );
+}
+
+/// A subquery composes with the rest of the compiler: a sum over a rate over a subquery is a tree,
+/// not a shape the compiler knows by name.
+#[test]
+fn a_subquery_composes_with_an_aggregate_and_a_comparison() {
+    let tree = compile(
+        &eval_stmt("sum by(job)(rate(x[5m:1m]) > 0)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`sum by(job)(rate(x[5m:1m]) > 0)` was refused: {error}"));
+
+    let (input, aggregate) = aggregate_parts(tree.root());
+    assert_eq!(aggregate.kind, AggregateKind::Sum);
+    let (left, _, matching) = binary_parts(input);
+    assert_eq!(matching.op, BinaryOp::Gt);
+    let NativeExpr::Window { op, .. } = &left.expr else {
+        panic!(
+            "the comparison's left operand is not a window: {:?}",
+            left.expr
+        );
+    };
+    assert_eq!(op.window.range_ms, 300_000);
+    assert!(
+        op.input_grid.is_some(),
+        "the window over a subquery forgot its input grid"
+    );
+}
+
+/// The grid a subquery declares has to hold every sample its windows read — and no sample none of
+/// them can read. Both halves are checked here, against an oracle that is the query's own numbers
+/// rather than the compiler's.
+///
+/// Nothing but the grid itself is read from the produced window: the range, the step and the offset
+/// come from the query text (stated again in the case table, so the two can disagree), the read
+/// windows come from the statement's output grid as `p - offset - range < t <= p - offset`, and the
+/// samples are every multiple of the step in such a window. The membership test is the modulo one,
+/// because a grid whose step or phase is wrong still spans the right two bounds: interval
+/// containment is what let a wrong step pass before.
+#[test]
+fn a_subquery_grid_holds_every_sample_its_windows_read() {
+    // The statement's end: the start is a column, because a grid that begins off the epoch is the
+    // only way to see a child grid built from the statement's start rather than from the epoch.
+    let end = Duration::from_secs(100);
+
+    // (query, statement start, range_ms, step_ms, offset_ms, some point reads no sample)
+    //
+    // The last flag is asserted rather than assumed: the narrow case below passes trivially if the
+    // compiler refused to bind a window at all, so the test would not notice losing it.
+    let cases = [
+        // A whole-minute step over a five-minute window.
+        ("rate(x[5m:1m])", 0, 300_000, 60_000, 0, false),
+        // A step that divides neither the range nor the statement's 5s step.
+        ("rate(x[5m:7s])", 0, 300_000, 7_000, 0, false),
+        // A step the statement's own step does divide, so the two cannot be confused either.
+        ("rate(x[5m:5s])", 0, 300_000, 5_000, 0, false),
+        // A step that divides neither the range nor the offset.
+        (
+            "rate(x[90s:40s] offset 30s)",
+            0,
+            90_000,
+            40_000,
+            30_000,
+            false,
+        ),
+        // Offsets in both directions move every read window.
+        (
+            "rate(x[5m:1m] offset 1m)",
+            0,
+            300_000,
+            60_000,
+            60_000,
+            false,
+        ),
+        (
+            "rate(x[5m:1m] offset -1m)",
+            0,
+            300_000,
+            60_000,
+            -60_000,
+            false,
+        ),
+        // A window narrower than the child step: some output points read no sample at all, so a
+        // grid that dropped the samples the other points read would still look plausible.
+        ("rate(x[30s:1m])", 0, 30_000, 60_000, 0, true),
+        // A statement whose start is three seconds off the child step, so a grid stepped from the
+        // statement's start would be phase-shifted by exactly that much.
+        ("rate(x[5m:1m])", 3_000, 300_000, 60_000, 0, false),
+        ("rate(x[30s:1m])", 3_000, 30_000, 60_000, 0, true),
+    ];
+
+    for (query, start, range_ms, step_ms, offset_ms, some_points_read_nothing) in cases {
+        let stmt = eval_stmt_between(query, Duration::from_millis(start as u64), end);
+        let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, op) = root_window(&tree);
+
+        // The grid under test, and the statement's own grid, which is not the subquery's.
+        let (child_start, child_step, child_len) = child_grid(op);
+        let child_last = child_start + (child_len as i64 - 1) * child_step;
+        let out = op.output_grid.spec();
+        let out_last = out.start_ms + (out.len as i64 - 1) * out.step_ms;
+
+        // Every sample a window can read lies in the union of the read windows: strictly after the
+        // earliest window's left end, and no later than the latest window's right one. A grid that
+        // reached before the earliest read would evaluate a sample no window folds.
+        let earliest = out.start_ms - offset_ms - range_ms;
+        let latest = out_last - offset_ms;
+        for index in 0..child_len as i64 {
+            let point = child_start + index * child_step;
+            assert!(
+                point > earliest && point <= latest,
+                "`{query}`: the child grid point {point}ms lies outside the read windows \
+                 {earliest}ms..={latest}ms, where no window can read it"
+            );
+        }
+
+        let mut every_point_reads = true;
+        let mut samples_checked = 0_usize;
+        for index in 0..out.len as i64 {
+            let point = out.start_ms + index * out.step_ms;
+            let read_start = point - offset_ms - range_ms;
+            let read_end = point - offset_ms;
+            // Every multiple of the step in this window, enumerated two steps wider on each side
+            // and filtered by the window itself: the slack absorbs the difference between
+            // truncating and floor division, so this enumeration assumes no rounding convention.
+            let mut read_anything = false;
+            for k in (read_start / step_ms - 2)..=(read_end / step_ms + 2) {
+                let sample = k * step_ms;
+                if sample <= read_start || sample > read_end {
+                    continue;
+                }
+                read_anything = true;
+                samples_checked += 1;
+                assert!(
+                    sample >= child_start
+                        && sample <= child_last
+                        && (sample - child_start) % child_step == 0,
+                    "`{query}`: the window at {point}ms reads {sample}ms, which is not a point of \
+                     the declared child grid {child_start}ms..={child_last}ms at {child_step}ms per \
+                     step"
+                );
+            }
+            every_point_reads &= read_anything;
+        }
+
+        assert!(
+            samples_checked > 0,
+            "`{query}`: no point of the statement's grid reads a sample, so this case checks nothing"
+        );
+        assert_eq!(
+            every_point_reads, !some_points_read_nothing,
+            "`{query}`: the case table says some point reads no sample, so every point reading one \
+             (or vice versa) means the window is not the one the query wrote"
+        );
+    }
 }
 
 /// One raw chunk of `metric`, keyed by `key`, closing the series.
@@ -2765,7 +3943,7 @@ fn a_compiled_sum_by_groups_its_members_and_sums_each_group() {
             &[2_500],
             &[2.0],
         ),
-        // Five samples between grid points, covering grid points 1 to 4.
+        // Four samples between grid points, covering grid points 1 to 4.
         agg_raw_chunk(
             &schema,
             b"e",

@@ -226,7 +226,7 @@ pub fn timestamp_of_evaluated(
             "timestamp input does not match its schema".into(),
         ));
     }
-    let timestamps = grid.timestamps();
+    let timestamps = grid.timestamps().map_err(crate::grid_series::external)?;
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut cursors: Vec<_> = series.fields.iter().map(|field| field.cursor()).collect();
     let mut row = Vec::with_capacity(cursors.len());

@@ -171,17 +171,16 @@ impl AggregateRuntime {
         buffer.resize(accumulator.state_bytes())
     }
 
-    /// Finishes the fold and returns one series per group, or `None` if the fold already ran.
-    ///
     /// The number of retained groups, for budgeting the output queue backing storage.
-    ///
-    /// `None` is what a node reports after it has queued its series: the caller reads them from the
-    /// queue, exactly as it reads the chunks a binary node queued, so a second pull does not finish
-    /// a fold whose states are gone.
     pub(crate) fn groups(&self) -> usize {
         self.accumulator.as_ref().map_or(0, FloatAggregator::groups)
     }
 
+    /// Finishes the fold and returns one series per group, or `None` if the fold already ran.
+    ///
+    /// `None` is what a node reports after it has queued its series: the caller reads them from the
+    /// queue, exactly as it reads the chunks a binary node queued, so a second pull does not finish
+    /// a fold whose states are gone.
     pub(crate) fn compute(
         &mut self,
         path: &NodePath,
@@ -220,11 +219,20 @@ impl AggregateRuntime {
 /// The fold indexes its states by absolute grid position and by field, so a chunk of another field
 /// count or another grid would be folded into states that mean something else. `error` is what the
 /// series check reported, which says which of the two disagreed.
+/// Wraps the error of a chunk this node cannot fold.
+///
+/// Only a chunk that does not fit the schema is the node's own refusal; anything else is the
+/// kernel saying it does not compute this shape at all -- a native histogram in a float aggregate,
+/// for instance -- and a caller that falls back to another planner on `NotImplemented` still can.
+/// Wrapping that one in an `Execution` would deny it.
 fn folded_chunk(path: &NodePath, aggregate: &str, error: DataFusionError) -> DataFusionError {
-    DataFusionError::Execution(format!(
-        "the `{aggregate}` aggregate at {path} folds chunks bound to its own schema, and this one \
-         is not: {error}"
-    ))
+    match error {
+        DataFusionError::NotImplemented(_) => error,
+        error => DataFusionError::Execution(format!(
+            "the `{aggregate}` aggregate at {path} folds chunks bound to its own schema, and this \
+             one is not: {error}"
+        )),
+    }
 }
 
 /// The error for a fold that has already been finished.

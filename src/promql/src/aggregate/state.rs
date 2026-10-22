@@ -161,8 +161,8 @@ impl FloatMerger {
             .eval_grid
             .as_ref()
             .expect("checked at construction")
-            .timestamps()
-            .len();
+            .spec()
+            .len as usize;
         if partial.op != self.op {
             return Err(DataFusionError::Execution(format!(
                 "cannot merge {:?} state into {:?}",
