@@ -85,6 +85,16 @@ async fn count_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
     batches.iter().map(|batch| batch.num_rows()).sum()
 }
 
+/// Returns the committed sequence and the last entry id of the region.
+fn watermarks(engine: &MitoEngine, region_id: RegionId) -> (u64, u64) {
+    let data = engine
+        .get_region(region_id)
+        .unwrap()
+        .version_control
+        .current();
+    (data.committed_sequence, data.last_entry_id)
+}
+
 fn assert_retryable(err: BoxedError, expected: impl Fn(&Error) -> bool) {
     assert!(err.retry_hint().is_retryable(), "{err:?}");
     let err = err.into_inner();
@@ -316,8 +326,9 @@ async fn test_bulk_insert_needs_leader_lease() {
     listener.resume();
     let err = write.await.unwrap().unwrap_err();
     assert_retryable(err, |err| matches!(err, Error::UnacknowledgedWrite { .. }));
-    // The bulk insert is in the WAL, so it is applied.
+    // The bulk insert is in the WAL, so it is applied and publishes its sequence.
     assert_eq!(3, count_rows(&engine, region_id).await);
+    assert_eq!((3, 1), watermarks(&engine, region_id));
 
     // A new bulk insert fails before it reaches the WAL.
     let err = engine
@@ -329,6 +340,7 @@ async fn test_bulk_insert_needs_leader_lease() {
         .unwrap_err();
     assert_retryable(err, |err| matches!(err, Error::RegionLeaseExpired { .. }));
     assert_eq!(3, count_rows(&engine, region_id).await);
+    assert_eq!((3, 1), watermarks(&engine, region_id));
 }
 
 #[tokio::test]
