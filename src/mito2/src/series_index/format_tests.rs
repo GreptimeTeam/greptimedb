@@ -84,6 +84,7 @@ impl SamplesFormat for FakeSamples {
         _metadata: RegionMetadataRef,
         store: ObjectStore,
         prefix: &str,
+        _source_file_id: FileId,
         generation: FileId,
     ) -> Result<Box<dyn FormatWriter>> {
         let objects = vec![format!("{prefix}data"), format!("{prefix}directory")];

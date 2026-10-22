@@ -24,12 +24,13 @@ use datatypes::series::samples::{
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 
-use super::{DateFunction, QueryContextFunction, date_of_eval_time, map_date, time};
+use super::{DateFunction, QueryContextFunction, date_of_eval_time, time};
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
     Labels, Points, canonical_bits, golden_cases, labels_of, metric_of, points_by_labels,
     points_of, run_ranges, series_of, sparse_series,
 };
+use crate::map::{MathOp, map_math};
 
 fn schema(grid: Arc<EvalGrid>) -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
@@ -71,7 +72,8 @@ fn time_functions_match_prometheus() {
                     .iter()
                     .filter_map(|(labels, points)| series_of(&schema, labels, points))
                 {
-                    actual.extend(map_date(function(name), &schema, &series).unwrap());
+                    actual
+                        .extend(map_math(&schema, &series, MathOp::Date(function(name))).unwrap());
                 }
                 actual
             }
@@ -107,7 +109,7 @@ fn time_functions_match_prometheus() {
 /// Histogram samples are dropped and the series trimmed to the remaining floats; chunked floats
 /// are mapped chunk by chunk.
 #[test]
-fn map_date_drops_histograms_and_maps_chunks() {
+fn date_functions_drop_histograms_and_map_chunks() {
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1000, 4).unwrap()).unwrap());
     let schema = schema(grid.clone());
     let range = GridRange::try_new(grid, 1, 3).unwrap();
@@ -155,7 +157,7 @@ fn map_date_drops_histograms_and_maps_chunks() {
         Samples::try_from_histogram(UInt32Array::from(vec![0]), histograms.finish().unwrap())
             .unwrap();
     let mixed = Samples::try_from_chunks(vec![histogram, floats(&[3600.0, 7200.0])]).unwrap();
-    let hours = map_date(DateFunction::Hour, &schema, &series(mixed))
+    let hours = map_math(&schema, &series(mixed), MathOp::Date(DateFunction::Hour))
         .unwrap()
         .expect("a mixed series with one float");
     assert_eq!(
@@ -168,9 +170,13 @@ fn map_date_drops_histograms_and_maps_chunks() {
     );
 
     let chunked = Samples::try_from_chunks(vec![floats(&[60.0]), floats(&[120.0, 180.0])]).unwrap();
-    let minutes = map_date(DateFunction::Minute, &schema, &series(chunked))
-        .unwrap()
-        .expect("a chunked float series");
+    let minutes = map_math(
+        &schema,
+        &series(chunked),
+        MathOp::Date(DateFunction::Minute),
+    )
+    .unwrap()
+    .expect("a chunked float series");
     assert_eq!(
         points_of(&minutes),
         BTreeMap::from([
@@ -181,13 +187,13 @@ fn map_date_drops_histograms_and_maps_chunks() {
     );
 }
 
-/// `map_date` reads a series of several runs by the positions its axis carries.
+/// A date function reads a series of several runs by the positions its axis carries.
 ///
 /// A sparse input cannot be mapped through the in-place fast path when a field holds a hole, so
 /// the piece-cutting path runs: the result must report the right positions, not an offset from
 /// the first one.
 #[test]
-fn map_date_reads_a_sparse_axis_by_its_positions() {
+fn date_functions_read_a_sparse_axis_by_its_positions() {
     let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1000, 8).unwrap()).unwrap());
     let schema = schema(grid.clone());
     // Positions 1, 2 and 6 hold seconds; the axis skips 3, 4 and 5.
@@ -205,7 +211,7 @@ fn map_date_reads_a_sparse_axis_by_its_positions() {
     assert_eq!(input.time.first_position(), Some(1));
     assert_eq!(input.time.last_position(), Some(6));
 
-    let output = map_date(DateFunction::Minute, &schema, &input)
+    let output = map_math(&schema, &input, MathOp::Date(DateFunction::Minute))
         .unwrap()
         .expect("three rows");
     // No field holds a hole, so the fast path keeps the axis as it is: one series, three rows.
@@ -227,8 +233,8 @@ fn map_date_reads_a_sparse_axis_by_its_positions() {
     // `minute()` of Unix seconds 1000, 2000 and 6000.
     assert_eq!(read, vec![(1, 16.0), (2, 33.0), (6, 40.0)]);
 
-    // A hole in the field keeps the fast path from applying, so the axis is rebuilt from the rows
-    // that survive: still one series, now over the runs of consecutive valued positions.
+    // A hole in a float field stays a missing row on the input's axis, as with every map, and the
+    // positions around it are mapped.
     let mut holed = Points::new();
     for (position, seconds) in [(2, 120), (3, 180), (4, 240), (6, 360), (7, 420)] {
         holed.insert(position, f64::to_bits(seconds as f64));
@@ -239,10 +245,10 @@ fn map_date_reads_a_sparse_axis_by_its_positions() {
         &holed,
     )
     .unwrap();
-    let output = map_date(DateFunction::Minute, &schema, &input)
+    let output = map_math(&schema, &input, MathOp::Date(DateFunction::Minute))
         .unwrap()
         .expect("five rows");
-    assert_eq!(run_ranges(&output), vec![(2, 3), (6, 2)]);
+    assert_eq!(run_ranges(&output), run_ranges(&input));
     assert_eq!(
         points_of(&output),
         BTreeMap::from([
@@ -254,10 +260,10 @@ fn map_date_reads_a_sparse_axis_by_its_positions() {
         ])
     );
 
-    // A sparse axis *and* a hole in the field, with the samples split over two chunks: the fast
-    // path cannot apply, so the piece-cutting path must walk the axis' positions and rebuild the
-    // axis from the rows that survive. Positions 0, 1, 3, 4 and 5 hold rows and position 3 is the
-    // hole, so a walk that counted rows from the first position would map the wrong seconds.
+    // A sparse axis *and* a hole in the field, with the samples split over two chunks: each chunk
+    // is mapped on the input's axis, the hole stays a missing row, and the values land on the
+    // positions the axis names. Positions 0, 1, 3, 4 and 5 hold rows and position 3 is the hole,
+    // so a walk that counted rows from the first position would map the wrong seconds.
     let time =
         TimeAxis::from_grid_spans(grid, vec![GridSpan::new(0, 2), GridSpan::new(3, 3)]).unwrap();
     let chunked = Samples::try_from_chunks(vec![
@@ -273,11 +279,10 @@ fn map_date_reads_a_sparse_axis_by_its_positions() {
     )
     .unwrap();
     assert_eq!(input.time.len(), 5);
-    let output = map_date(DateFunction::Minute, &schema, &input)
+    let output = map_math(&schema, &input, MathOp::Date(DateFunction::Minute))
         .unwrap()
-        .expect("four rows");
-    assert_eq!(output.time.len(), 4);
-    assert_eq!(run_ranges(&output), vec![(0, 2), (4, 2)]);
+        .expect("five rows");
+    assert_eq!(run_ranges(&output), run_ranges(&input));
     // `minute()` of Unix seconds 60, 120, 240 and 300.
     assert_eq!(
         points_of(&output),

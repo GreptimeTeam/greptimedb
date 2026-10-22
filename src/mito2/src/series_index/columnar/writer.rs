@@ -15,17 +15,17 @@
 //! Streaming aggregation and owned OpenDAL outputs.
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use datatypes::arrow::array::{Array, BinaryArray, DictionaryArray};
 use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::row_converter::SparseOffsetsCache;
-use object_store::{ObjectStore, Writer};
-use snafu::{IntoError, ResultExt};
+use object_store::ObjectStore;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
-use crate::error::{JoinSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
+use crate::error::{Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
+use crate::series_index::artifact_writer::Outputs;
 use crate::series_index::catalog::SeriesIndexEntry;
 use crate::series_index::columnar::codec::{self, encode_dictionary, encode_integers};
 use crate::series_index::columnar::metadata::{
@@ -37,131 +37,9 @@ use crate::series_index::columnar::{
 use crate::series_index::format::FormatWriter;
 use crate::series_index::writer::{decode_series_identity, tag_columns, validate_metadata};
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TSID_COLUMN};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// Maximum owned row bytes per block; a single larger row is flushed on its own.
 const BLOCK_BYTE_BUDGET: usize = 8 * 1024 * 1024;
-
-/// Drop owns the live OpenDAL writer, including its private atomic-write temporary file.
-struct LiveFile {
-    writer: Option<Writer>,
-    store: ObjectStore,
-    path: String,
-}
-impl Drop for LiveFile {
-    fn drop(&mut self) {
-        if let Some(mut writer) = self.writer.take() {
-            let store = self.store.clone();
-            let path = self.path.clone();
-            common_runtime::spawn_compact(async move {
-                if let Err(error) = writer.abort().await {
-                    common_telemetry::warn!(error; "Aborting series output {path}");
-                }
-                if let Err(error) = store.delete(&path).await {
-                    common_telemetry::warn!(error; "Deleting series output {path}");
-                }
-            });
-        }
-    }
-}
-
-struct Outputs {
-    store: ObjectStore,
-    active: Option<LiveFile>,
-    paths: Vec<String>,
-    committed: bool,
-}
-impl Outputs {
-    async fn open(&mut self, path: String) -> Result<()> {
-        require(self.active.is_none(), "series output already open")?;
-        self.paths.push(path.clone());
-        let store = self.store.clone();
-        // The task owns opening: cancellation drops the returned LiveFile and aborts it.
-        self.active = Some(
-            common_runtime::spawn_compact(async move {
-                let writer = store
-                    .writer_with(&path)
-                    .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-                    .concurrent(DEFAULT_WRITE_CONCURRENCY)
-                    .await
-                    .context(OpenDalSnafu)?;
-                Ok::<_, crate::error::Error>(LiveFile {
-                    writer: Some(writer),
-                    store,
-                    path,
-                })
-            })
-            .await
-            .context(JoinSnafu)??,
-        );
-        Ok(())
-    }
-    async fn write(&mut self, bytes: Vec<u8>) -> Result<()> {
-        self.active
-            .as_mut()
-            .and_then(|f| f.writer.as_mut())
-            .ok_or_else(|| invalid("series output is not open"))?
-            .write(Bytes::from(bytes))
-            .await
-            .context(OpenDalSnafu)?;
-        Ok(())
-    }
-    async fn close(&mut self) -> Result<()> {
-        let file = self
-            .active
-            .as_mut()
-            .ok_or_else(|| invalid("series output is not open"))?;
-        file.writer
-            .as_mut()
-            .ok_or_else(|| invalid("series output is closed"))?
-            .close()
-            .await
-            .context(OpenDalSnafu)?;
-        file.writer = None;
-        self.active = None;
-        Ok(())
-    }
-    async fn cleanup(&mut self) -> Result<()> {
-        let mut first_error = None;
-        if let Some(file) = self.active.as_mut()
-            && let Some(writer) = file.writer.as_mut()
-        {
-            match writer.abort().await {
-                Ok(()) => file.writer = None,
-                Err(error) => first_error = Some(OpenDalSnafu.into_error(error)),
-            }
-        }
-        self.active = None;
-        for path in &self.paths {
-            if let Err(error) = self.store.delete(path).await {
-                first_error.get_or_insert_with(|| OpenDalSnafu.into_error(error));
-            }
-        }
-        if let Some(error) = first_error {
-            Err(error)
-        } else {
-            self.committed = true;
-            Ok(())
-        }
-    }
-}
-impl Drop for Outputs {
-    fn drop(&mut self) {
-        if !self.committed {
-            let mut owned = Self {
-                store: self.store.clone(),
-                active: self.active.take(),
-                paths: std::mem::take(&mut self.paths),
-                committed: true,
-            };
-            common_runtime::spawn_compact(async move {
-                if let Err(error) = owned.cleanup().await {
-                    common_telemetry::warn!(error; "Cleaning unpublished series artifact");
-                }
-            });
-        }
-    }
-}
 
 #[derive(Debug)]
 struct Row {

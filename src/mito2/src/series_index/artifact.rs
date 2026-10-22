@@ -30,6 +30,8 @@ pub(crate) enum ArtifactFormat {
     Parquet,
     #[serde(rename = "columnar-series")]
     ColumnarSeries,
+    #[serde(rename = "columnar-samples")]
+    ColumnarSamples,
     #[cfg(test)]
     #[serde(rename = "fake-samples")]
     FakeSamples,
@@ -81,6 +83,10 @@ impl SamplesFileHandle {
             retired: AtomicBool::new(false),
             purger,
         }))
+    }
+
+    pub(crate) fn file_id(&self) -> RegionFileId {
+        self.0.file_id
     }
 
     pub(crate) fn entry(&self) -> &SamplesEntry {
