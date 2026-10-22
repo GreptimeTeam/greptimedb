@@ -74,6 +74,32 @@ fn analyzer() -> DistPlannerAnalyzer {
     DistPlannerAnalyzer::default()
 }
 
+#[test]
+fn ordinary_encodable_plan_keeps_in_process_encodability_gate() {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert!(
+        DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .is_ok()
+    );
+
+    let in_process_rewriter = PlanRewriter::new(&plan, true);
+    assert!(in_process_rewriter.whole_plan_encodable);
+    assert!(!in_process_rewriter.skip_encodability_gate);
+
+    let wire_rewriter = PlanRewriter::new(&plan, false);
+    assert!(wire_rewriter.whole_plan_encodable);
+    assert!(!wire_rewriter.skip_encodability_gate);
+}
+
 struct MergeScanRemoteDynFilterProducerIdCollector<'a> {
     producer_ids: &'a mut Vec<RemoteDynFilterProducerId>,
 }
@@ -401,22 +427,29 @@ fn frontend_only_histogram_folds_stay_above_merge_scan() {
             "{name}"
         );
 
-        let result = analyzer().analyze(plan, &ConfigOptions::default()).unwrap();
-        let result_text = result.to_string();
-        assert!(
-            result_text.contains("HistogramFold:"),
-            "{name}\n{result_text}"
-        );
+        for analyzer in [
+            DistPlannerAnalyzer::default(),
+            DistPlannerAnalyzer::new(true),
+        ] {
+            let result = analyzer
+                .analyze(plan.clone(), &ConfigOptions::default())
+                .unwrap();
+            let result_text = result.to_string();
+            assert!(
+                result_text.contains("HistogramFold:"),
+                "{name}\n{result_text}"
+            );
 
-        let remote_input = find_merge_scan(&result).unwrap().input();
-        let remote_text = remote_input.to_string();
-        assert!(
-            !remote_text.contains("HistogramFold:"),
-            "{name}\n{remote_text}"
-        );
-        DFLogicalSubstraitConvertor
-            .encode(remote_input, DefaultSerializer)
-            .unwrap();
+            let remote_input = find_merge_scan(&result).unwrap().input();
+            let remote_text = remote_input.to_string();
+            assert!(
+                !remote_text.contains("HistogramFold:"),
+                "{name}\n{remote_text}"
+            );
+            DFLogicalSubstraitConvertor
+                .encode(remote_input, DefaultSerializer)
+                .unwrap();
+        }
     }
 }
 
@@ -446,17 +479,24 @@ fn unencodable_unnest_stays_above_merge_scan() {
             .is_err()
     );
 
-    let result = analyzer().analyze(plan, &ConfigOptions::default()).unwrap();
-    let result_text = result.to_string();
-    assert!(result_text.contains("Unnest:"), "{result_text}");
+    for analyzer in [
+        DistPlannerAnalyzer::default(),
+        DistPlannerAnalyzer::new(true),
+    ] {
+        let result = analyzer
+            .analyze(plan.clone(), &ConfigOptions::default())
+            .unwrap();
+        let result_text = result.to_string();
+        assert!(result_text.contains("Unnest:"), "{result_text}");
 
-    let remote_input = find_merge_scan(&result).unwrap().input();
-    let remote_text = remote_input.to_string();
-    assert!(!remote_text.contains("Unnest:"), "{remote_text}");
-    assert!(remote_text.contains("make_array"), "{remote_text}");
-    DFLogicalSubstraitConvertor
-        .encode(remote_input, DefaultSerializer)
-        .unwrap();
+        let remote_input = find_merge_scan(&result).unwrap().input();
+        let remote_text = remote_input.to_string();
+        assert!(!remote_text.contains("Unnest:"), "{remote_text}");
+        assert!(remote_text.contains("make_array"), "{remote_text}");
+        DFLogicalSubstraitConvertor
+            .encode(remote_input, DefaultSerializer)
+            .unwrap();
+    }
 }
 
 #[test]
