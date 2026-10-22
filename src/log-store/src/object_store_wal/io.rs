@@ -33,6 +33,11 @@ use crate::error::{
 /// [`u64::MAX`] so that lexicographic and numeric order agree.
 const OBJECT_SEQ_WIDTH: usize = 20;
 const OBJECT_SUFFIX: &str = ".wal";
+/// Objects a listing may hold ahead of the reads that take them, four LIST
+/// pages of S3: the reads of recovery take about as many in a second or two,
+/// far longer than the next page takes to arrive, and the bound keeps a
+/// listing much faster than the reads from holding the whole prefix.
+const LISTING_AHEAD_OBJECTS: usize = 4096;
 
 /// Outcome of a conditional create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,13 +186,15 @@ impl ObjectStoreIo {
     /// dropping the stream stops the listing.
     pub(crate) fn list_ahead(&self) -> BoxStream<'static, Result<ListedObject>> {
         let io = self.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
         let listing = AbortOnDropHandle::new(common_runtime::spawn_global(async move {
             let mut lister = io.store.lister(&io.object_prefix).await?;
             while let Some(entry) = lister.try_next().await? {
-                if let Some(object) = io.listed_object(&entry) {
-                    // The receiver is gone only once the stream was dropped.
-                    let _ = tx.send(object);
+                // The receiver is gone only once the stream was dropped.
+                if let Some(object) = io.listed_object(&entry)
+                    && tx.send(object).await.is_err()
+                {
+                    break;
                 }
             }
             Ok::<_, object_store::Error>(())
@@ -238,7 +245,7 @@ impl ObjectStoreIo {
 /// is settled before any further object is yielded, so its failure goes
 /// before the objects it listed that the caller has not taken yet.
 fn settle_listing(
-    mut rx: mpsc::UnboundedReceiver<ListedObject>,
+    mut rx: mpsc::Receiver<ListedObject>,
     listing: AbortOnDropHandle<object_store::Result<()>>,
     path: String,
 ) -> BoxStream<'static, Result<ListedObject>> {
@@ -296,6 +303,8 @@ fn normalize_prefix(prefix: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use common_error::ext::{ErrorExt, RetryHint};
     use common_test_util::temp_dir::create_temp_dir;
@@ -603,13 +612,64 @@ mod tests {
         assert_eq!(io.list().await.unwrap(), listed);
     }
 
+    /// A lister that counts the entries it was asked for.
+    struct CountingLister {
+        inner: oio::Lister,
+        listed: Arc<AtomicUsize>,
+    }
+
+    impl oio::List for CountingLister {
+        async fn next(&mut self) -> mock::Result<Option<oio::Entry>> {
+            self.listed.fetch_add(1, Ordering::SeqCst);
+            self.inner.next().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_io_list_ahead_holds_a_bounded_backlog() {
+        let store = memory_store();
+        let objects = LISTING_AHEAD_OBJECTS as u64 + 100;
+        let io = ObjectStoreIo::new(store.clone(), "datanodes/1/epochs/2/").unwrap();
+        for object_seq in 0..objects {
+            io.put_if_absent(object_seq, Bytes::from_static(b"wal"))
+                .await
+                .unwrap();
+        }
+        let listed = Arc::new(AtomicUsize::new(0));
+        let lister_listed = listed.clone();
+        let mock = MockLayerBuilder::default()
+            .lister_factory(Arc::new(move |_, _, inner| {
+                let listed = lister_listed.clone();
+                Box::new(CountingLister { inner, listed })
+            }))
+            .build()
+            .unwrap();
+        let io = ObjectStoreIo::new(store.layer(mock), "datanodes/1/epochs/2/").unwrap();
+
+        // Nothing takes the objects, so the listing stops once the backlog is
+        // full; the directory entry and the object waiting to be sent are on
+        // top.
+        let mut stream = io.list_ahead();
+        while listed.load(Ordering::SeqCst) <= LISTING_AHEAD_OBJECTS {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(listed.load(Ordering::SeqCst) <= LISTING_AHEAD_OBJECTS + 2);
+
+        let mut taken = 0;
+        while stream.try_next().await.unwrap().is_some() {
+            taken += 1;
+        }
+        assert_eq!(objects, taken);
+    }
+
     #[tokio::test]
     async fn test_io_failed_listing_goes_before_the_objects_it_listed() {
         let io = memory_io();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
         for object_seq in 0..1000 {
             let path = io.object_path(object_seq);
-            tx.send(ListedObject {
+            tx.try_send(ListedObject {
                 object_seq,
                 path,
                 size: 0,
