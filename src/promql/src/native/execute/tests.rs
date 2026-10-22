@@ -40,14 +40,16 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
+use crate::histogram_eval::HistogramFunction;
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, reset_visited_pairs,
     visited_pairs,
@@ -480,11 +482,13 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
             pool,
         ),
         queued: VecDeque::new(),
+        queued_tables: 0,
         instant: None,
         window: None,
         map: None,
         binary: None,
         broadcast: None,
+        vector: None,
         source_schema: None,
         emitted: None,
         merge: None,
@@ -497,6 +501,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
     NodeRuntime {
         buffer: NodeBuffer::new(&NodePath::root(), Arc::new(NodeMetrics::default()), pool),
         queued: VecDeque::new(),
+        queued_tables: 0,
         instant: None,
         window: None,
         map: None,
@@ -505,6 +510,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
             [Arc::clone(schema), Arc::clone(schema)],
         )),
         broadcast: None,
+        vector: None,
         source_schema: None,
         emitted: None,
         merge: None,
@@ -6153,7 +6159,8 @@ fn an_operand_chunk_that_rewinds_is_refused_with_or_without_values() {
     let message = error.to_string();
     assert!(
         message.contains("do not continue each other")
-            && message.contains("the left operand of the binary node at root")
+            && message.contains("the binary node at root")
+            && message.contains("by its left operand")
             && message.contains("after the series already reached 2"),
         "{message}"
     );
@@ -7242,4 +7249,456 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
         0,
         "error retained execution bytes: {message}"
     );
+}
+
+fn vector_op(inner: NativeNode, op: BoundVectorOp) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op,
+        },
+        output,
+    }
+}
+
+/// The positions a series decided, with their values.
+type Decided = Vec<(usize, Option<f64>)>;
+
+/// The values a chunk stream decided, by the `job` label of the series that holds them.
+fn decided_by_job(chunks: &[EvaluatedChunk]) -> Vec<(String, Decided)> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            (
+                chunk
+                    .series
+                    .metric
+                    .get("job")
+                    .unwrap_or_default()
+                    .to_string(),
+                decided(std::slice::from_ref(chunk)),
+            )
+        })
+        .collect()
+}
+
+/// `topk` ranks the whole vector at each point, so a series that arrives in several chunks is one
+/// candidate, and the reservation is given back once the kept series are handed over.
+#[test]
+fn topk_ranks_whole_series_at_each_point() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for chunk in [
+        evaluated_chunk_of(
+            &schema,
+            named_metric("m", "a"),
+            0,
+            vec![Some(1.0), Some(5.0)],
+            false,
+        ),
+        evaluated_chunk_of(&schema, named_metric("m", "a"), 2, vec![Some(7.0)], true),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("m", "b"),
+            0,
+            vec![Some(3.0), Some(4.0), Some(6.0)],
+            true,
+        ),
+    ] {
+        execution.push_evaluated(chunk).unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        decided_by_job(&chunks),
+        vec![
+            ("a".to_string(), vec![(1, Some(5.0)), (2, Some(7.0))]),
+            ("b".to_string(), vec![(0, Some(3.0))]),
+        ]
+    );
+    assert!(chunks.iter().all(|chunk| chunk.is_last));
+    assert_eq!(chunks[0].series.metric.name(), Some("m"));
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `limitk` takes series in the order its input hands them over, not in label order, and the two
+/// series a map folds into `{job="z"}` are one series placed where it first arrived: it is kept at
+/// both points although `{job="y"}` sorts first and arrived before the piece that fills point 0.
+#[test]
+fn limitk_takes_series_in_input_order() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for chunk in [
+        evaluated_chunk_of(&schema, named_metric("a", "z"), 1, vec![Some(1.0)], true),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("b", "y"),
+            0,
+            vec![Some(2.0), Some(2.0)],
+            true,
+        ),
+        evaluated_chunk_of(&schema, named_metric("c", "z"), 0, vec![Some(3.0)], true),
+    ] {
+        execution.push_evaluated(chunk).unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        decided_by_job(&chunks),
+        vec![("z".to_string(), vec![(0, Some(3.0)), (1, Some(1.0))])]
+    );
+}
+
+/// A binary node above a vector node reads what `topk` kept, once the vector node has read its
+/// whole input: `topk` keeps `{job="b"}` at point 0 and `{job="a"}` at point 1, so only point 1
+/// matches the right side's `{job="a"}`.
+#[test]
+fn a_binary_node_reads_what_a_vector_node_kept() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(binary_of(
+        vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+        ),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let (left, right) = (NodePath::root().left().input(), NodePath::root().right());
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (path, chunk) in [
+        (
+            &left,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(1.0), Some(5.0)],
+                true,
+            ),
+        ),
+        (
+            &right,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(10.0), Some(10.0)],
+                true,
+            ),
+        ),
+        (
+            &left,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "b"),
+                0,
+                vec![Some(3.0), Some(4.0)],
+                true,
+            ),
+        ),
+    ] {
+        execution.push_evaluated_at(path, chunk).unwrap();
+    }
+    assert_eq!(decided(&run(&mut execution)), vec![(1, Some(15.0))]);
+}
+
+/// `absent` answers where its input holds nothing, under the labels it was bound to, and answers
+/// at every point when no series arrives at all.
+#[test]
+fn absent_answers_where_the_input_holds_nothing() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    // What `absent_labels` derives from `up{job="x"}`: the name is not one of them.
+    let labels = MetricName::try_new(
+        None,
+        vec![Label {
+            name: "job".into(),
+            value: "x".into(),
+        }],
+    )
+    .unwrap();
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Absent {
+            labels: labels.clone(),
+        },
+    ))
+    .unwrap();
+
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("up", "y"),
+            1,
+            vec![Some(0.0)],
+            true,
+        ))
+        .unwrap();
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric, labels);
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0)), (2, Some(1.0))]);
+
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(1.0)), (1, Some(1.0)), (2, Some(1.0))]
+    );
+}
+
+/// A sort orders the series of an instant result, and the node hands them over in that order.
+#[test]
+fn sort_desc_hands_over_series_in_value_order() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::Desc),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (job, value) in [("b", 1.0), ("a", 3.0), ("c", 2.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("m", job),
+                0,
+                vec![Some(value)],
+                true,
+            ))
+            .unwrap();
+    }
+    let jobs: Vec<String> = run(&mut execution)
+        .iter()
+        .map(|chunk| chunk.series.metric.get("job").unwrap().to_string())
+        .collect();
+    assert_eq!(jobs, ["a", "c", "b"]);
+}
+
+/// A sort hands back the assembled input, whose field is one slice per input chunk of one shared
+/// buffer: it is queued at what the slices hold, as the input was retained, not at the buffer once
+/// per chunk, which here would be ten times the input and more than the pool.
+#[test]
+fn a_sorted_series_is_queued_at_what_its_slices_hold() {
+    let points = 1_000;
+    let grid = grid(0, 60_000, points);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::ByLabel(vec!["job".into()])),
+    ))
+    .unwrap();
+    let pool = bounded_pool(48 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let values = Float64Array::from((0..points).map(|v| v as f64).collect::<Vec<_>>());
+    for start in (0..points as usize).step_by(100) {
+        execution
+            .push_evaluated(evaluated_array_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                start,
+                values.slice(start, 100),
+                start + 100 == points as usize,
+            ))
+            .unwrap();
+        // The vector node retains each chunk as it arrives, at what its slice holds.
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(decided(&chunks).len(), points as usize);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Two sorted results share one histogram table, so the table stays charged until the second one
+/// leaves, not only until the first one does.
+#[test]
+fn a_table_shared_by_queued_results_stays_charged_until_the_last_leaves() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::ByLabel(vec!["job".into()])),
+    ))
+    .unwrap();
+    let table = histogram_table(2, 64);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for (job, index) in [("a", 0), ("b", 1)] {
+        execution
+            .push_evaluated(evaluated_histogram_chunk_of(
+                &schema,
+                named_metric("m", job),
+                0,
+                vec![Some(index)],
+                &table,
+                true,
+            ))
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(first.series.metric.get("job"), Some("a"));
+    drop(first);
+    assert!(pool.reserved() >= histogram_table_bytes(&table));
+    let second = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(second.series.metric.get("job"), Some("b"));
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `limitk` takes the order a sort below it decided: `sort_desc` puts `{job="z"}` first, so it is
+/// the one `limitk(1, ...)` keeps, although `{job="a"}` sorts first by label.
+#[test]
+fn limitk_keeps_the_order_a_sort_below_it_decided() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::Sort(SortOrder::Desc),
+        ),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (job, value) in [("a", 1.0), ("z", 2.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("v", job),
+                0,
+                vec![Some(value)],
+                true,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        decided_by_job(&run(&mut execution)),
+        vec![("z".to_string(), vec![(0, Some(2.0))])]
+    );
+}
+
+/// `histogram_quantile` reads a classic histogram from the bucket series that share its labels,
+/// however they arrived, and answers under those labels without `le` and the name.
+#[test]
+fn histogram_quantile_reads_the_buckets_of_the_whole_vector() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let bucket = |le: &str| {
+        MetricName::try_new(
+            Some("m".into()),
+            vec![
+                Label {
+                    name: "job".into(),
+                    value: "a".into(),
+                },
+                Label {
+                    name: "le".into(),
+                    value: le.into(),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (le, count) in [("+Inf", 2.0), ("1", 1.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                bucket(le),
+                0,
+                vec![Some(count)],
+                true,
+            ))
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric.name(), None);
+    assert_eq!(chunks[0].series.metric.get("le"), None);
+    assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0))]);
+}
+
+/// An empty tag and an absent one are one label set, so the two native histogram series below are
+/// one series to `histogram_quantile`, answered at both of their points rather than one of them
+/// dropped.
+#[test]
+fn histogram_quantile_reads_the_pieces_of_one_label_set_as_one_series() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
+    ))
+    .unwrap();
+    let metric = |tags: &[(&str, &str)]| {
+        MetricName::try_new(
+            Some("m".into()),
+            tags.iter()
+                .map(|(name, value)| Label {
+                    name: (*name).into(),
+                    value: (*value).into(),
+                })
+                .collect(),
+        )
+        .unwrap()
+    };
+    let table = histogram_table(2, 4);
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (start, tags, index) in [
+        (0, vec![("job", "a"), ("zone", "")], 0),
+        (1, vec![("job", "a")], 1),
+    ] {
+        execution
+            .push_evaluated(evaluated_histogram_chunk_of(
+                &schema,
+                metric(&tags),
+                start,
+                vec![Some(index)],
+                &table,
+                true,
+            ))
+            .unwrap();
+    }
+    let chunks = run(&mut execution);
+    let positions: Vec<usize> = decided(&chunks)
+        .into_iter()
+        .filter_map(|(position, value)| value.map(|_| position))
+        .collect();
+    assert_eq!(positions, [0, 1]);
 }

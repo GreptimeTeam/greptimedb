@@ -43,6 +43,7 @@ use datatypes::series::time::{GridRange, TimeAxis};
 
 use crate::functions::Round;
 use crate::grid_series::GridSeriesBuilder;
+use crate::map_time::DateFunction;
 
 /// Float math supported by the evaluated-series kernel.
 #[derive(Clone, Copy, Debug)]
@@ -88,6 +89,8 @@ pub enum MathOp {
     ClampMax {
         max: f64,
     },
+    /// A date function of the value read as Unix seconds, such as `hour(v)`.
+    Date(DateFunction),
 }
 
 /// Float arithmetic between a vector and a scalar, as in Prometheus.
@@ -301,6 +304,7 @@ impl MathOp {
             Self::Floor => v.floor(),
             Self::Sqrt => v.sqrt(),
             Self::Round { nearest } => Round::round_to_nearest(v, nearest),
+            Self::Date(function) => function.of_seconds(v),
         }
     }
 

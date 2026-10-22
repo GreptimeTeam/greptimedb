@@ -14,7 +14,7 @@
 
 //! Columnar series format. See `docs/formats/mito-series.md` for the wire contract.
 
-mod codec;
+pub(super) mod codec;
 mod metadata;
 mod reader;
 #[cfg(test)]

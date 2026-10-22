@@ -277,7 +277,13 @@ pub(crate) async fn build_samples(
         file_id.file_id()
     );
     let mut writer = backend
-        .writer(version.metadata.clone(), store.clone(), &prefix, generation)
+        .writer(
+            version.metadata.clone(),
+            store.clone(),
+            &prefix,
+            file_id.file_id(),
+            generation,
+        )
         .await?;
     let result: Result<()> = async {
         while let Some((row_group, selection)) = selection.pop_first() {

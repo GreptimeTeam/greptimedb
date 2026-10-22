@@ -537,6 +537,9 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
             "abs",
             "with 0 argument(s), where it takes its vector",
         ),
+        // A date function written without an argument is valid PromQL that reads the evaluation
+        // time; there is no input to map, so it is left to the ordinary path.
+        (eval_stmt("hour()"), "hour", "reads the evaluation time"),
     ];
 
     for (stmt, name, expected) in cases {
@@ -937,9 +940,9 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
         // A function with no kernel. `predict_linear` used to stand here as the parameterised case
         // and is now bound, so what is left is a name this compiler has no kernel for at all.
         (
-            eval_stmt("absent(x)"),
-            "absent(x)",
-            "a call to `absent`, which has no native kernel",
+            eval_stmt("timestamp(x)"),
+            "timestamp(x)",
+            "a call to `timestamp`, which has no native kernel",
         ),
     ];
 
@@ -1212,6 +1215,15 @@ fn the_supported_math_functions_map_to_their_kernels() {
         ("clamp(x, 0, 1)", "clamp 0 1"),
         ("clamp_min(x, 0)", "clamp_min 0"),
         ("clamp_max(x, 1)", "clamp_max 1"),
+        // Date functions over a vector read its values as Unix seconds.
+        ("day_of_month(x)", "day_of_month"),
+        ("day_of_week(x)", "day_of_week"),
+        ("day_of_year(x)", "day_of_year"),
+        ("days_in_month(x)", "days_in_month"),
+        ("hour(x)", "hour"),
+        ("minute(x)", "minute"),
+        ("month(x)", "month"),
+        ("year(x)", "year"),
     ];
 
     for (query, op) in cases {
@@ -3667,5 +3679,47 @@ fn a_subquery_grid_holds_every_sample_its_windows_read() {
             "`{query}`: the case table says some point reads no sample, so every point reading one \
              (or vice versa) means the window is not the one the query wrote"
         );
+    }
+}
+
+/// The sorts, `absent` and the classic histogram functions bind a vector operation over the vector they
+/// are given, the histogram functions with their constants folded. `absent` derives its
+/// labels from the selector's matchers as Prometheus does: the first equality of a name sets the
+/// label and any other matcher of it removes it, the matchers that accept a missing label read
+/// last; `__name__` and the table-choosing matchers are not labels, and any expression other than
+/// a selector answers without labels.
+#[test]
+fn whole_vector_functions_bind_a_vector_operation() {
+    let cases = [
+        ("sort(x)", "sort"),
+        ("sort_desc(rate(x[5m]))", "sort_desc"),
+        (
+            r#"sort_by_label(x, "job", "le")"#,
+            "sort_by_label [job, le]",
+        ),
+        (
+            r#"sort_by_label_desc(x, "job")"#,
+            "sort_by_label_desc [job]",
+        ),
+        (
+            r#"absent(x{job="a", env=~"p.*", instance!="", __field__="v"})"#,
+            r#"absent {job="a"}"#,
+        ),
+        // `job!="b"` accepts a missing `job`, so it reads after `job="a"` and removes it.
+        (r#"absent(x{job!="b", job="a"})"#, "absent {}"),
+        (r#"absent({__name__="x", job="a"})"#, r#"absent {job="a"}"#),
+        (
+            "histogram_quantile(1 - 0.1, rate(x[5m]))",
+            "histogram_quantile 0.9",
+        ),
+        ("histogram_fraction(0, 0.5, x)", "histogram_fraction 0 0.5"),
+        ("absent(rate(x[5m]))", "absent {}"),
+    ];
+    for (query, op) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let display = tree.to_string();
+        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
     }
 }
