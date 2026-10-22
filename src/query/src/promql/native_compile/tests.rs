@@ -1423,6 +1423,26 @@ fn a_comparison_carries_whether_it_filters_or_reports_bool() {
         );
     }
 
+    // The constant keeps the side it was written on. `0 < x` and `x > 0` keep the same values but
+    // are not the same tree: a compiler that normalised the comparison would answer the other
+    // query's filter, which is why the side is asserted rather than only the operator.
+    let left_constant = compile(
+        &eval_stmt("0 < x"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let (left, right, _) = binary_parts(left_constant.root());
+    assert_eq!(
+        constant(left),
+        Some(0.0),
+        "`0 < x` did not keep its constant on the left"
+    );
+    assert!(
+        constant(right).is_none(),
+        "`0 < x` put the constant on the right, which is `x > 0`"
+    );
+
     // The two modes are one tree otherwise: the query text is what differs, and a tree that recorded
     // the mode somewhere else would fail the assertions above rather than this one.
     let filters = compile(
@@ -1462,6 +1482,35 @@ fn a_negation_binds_as_a_multiplication_by_minus_one() {
             panic!("`{query}`'s operand is not the selector: {:?}", right.expr);
         };
     }
+}
+
+/// A doubled negation is a negation of a negation, not a compile error or a dropped sign.
+///
+/// `--x` binds as `-1 * (-1 * x)`: the outer multiplication is the one the query's first minus asks
+/// for, and the inner one is what the second minus lowered to. Nothing here cancels the two into
+/// `x`, because the tree has no rule for that and the kernel computes the product anyway.
+#[test]
+fn a_doubled_negation_nests_two_multiplications() {
+    let tree = compile(&eval_stmt("--x"), raw_schema(), SeriesOrdering::KeyThenTime)
+        .unwrap_or_else(|error| panic!("`--x` was refused: {error}"));
+    let (left, right, matching) = binary_parts(tree.root());
+    assert_eq!(matching.op, BinaryOp::Mul, "`--x` is not a multiplication");
+    assert_eq!(
+        constant(left),
+        Some(-1.0),
+        "`--x` did not bind its outer `-1` on the left"
+    );
+    let (inner_left, _, inner_matching) = binary_parts(right);
+    assert_eq!(
+        inner_matching.op,
+        BinaryOp::Mul,
+        "the operand of `--x` is not the inner multiplication"
+    );
+    assert_eq!(
+        constant(inner_left),
+        Some(-1.0),
+        "the inner negation did not bind its own `-1`"
+    );
 }
 
 /// The negation applies to whatever its operand compiles to, so a window can be negated: `-rate(x[5m])`
@@ -1644,6 +1693,73 @@ fn a_vector_matching_modifier_over_a_constant_is_refused() {
             "`{query}` blamed the wrong operand: {message}"
         );
     }
+}
+
+/// A modifier inside a constant subexpression is refused rather than folded away.
+///
+/// `x * (1 + fill(0) 2)` asks for a fill, which the tree has no field for. The inner addition is a
+/// constant, so the fold runs before the binary operation is dispatched: a fold that computes the
+/// number without reading the modifier answers `x * 3` and the fill disappears from a query that
+/// wrote one.
+#[test]
+fn a_modifier_inside_a_folded_constant_is_refused() {
+    let error = compile(
+        &eval_stmt("x * (1 + fill(0) 2)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("`x * (1 + fill(0) 2)` compiled, and it should not have");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "`x * (1 + fill(0) 2)` did not report NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("vector matching"),
+        "`x * (1 + fill(0) 2)` did not say what it found: {message}"
+    );
+
+    // An unmodified constant subexpression still folds: the refusal is about the modifier, not
+    // about the fold.
+    compile(
+        &eval_stmt("x * (1 + 2)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect("`x * (1 + 2)` has no modifier to refuse");
+}
+
+/// An empty `by()` groups by no label, which is what a bare aggregate already does.
+///
+/// Prometheus reads `sum by() (x)` as "keep no label", the same grouping as `sum(x)`: the modifier
+/// names which labels survive, and naming none keeps none. The two queries therefore have to bind
+/// the same tree rather than one of them falling back to `without`, which would keep everything the
+/// empty list does not name.
+#[test]
+fn an_empty_by_groups_the_way_a_bare_aggregate_does() {
+    let bare = compile(
+        &eval_stmt("sum(x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`sum(x)` was refused: {error}"));
+    let empty = compile(
+        &eval_stmt("sum by() (x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`sum by() (x)` was refused: {error}"));
+
+    let (_, bare_op) = aggregate_parts(bare.root());
+    let (_, empty_op) = aggregate_parts(empty.root());
+    assert_eq!(
+        empty_op.group, bare_op.group,
+        "`sum by() (x)` grouped differently from `sum(x)`"
+    );
+    assert!(
+        !matches!(empty_op.group, Grouping::Without(_)),
+        "an empty `by()` fell back to `without`, which keeps every label it does not name"
+    );
 }
 
 /// The labels of a `by` or `without` modifier, in the order they were written.
