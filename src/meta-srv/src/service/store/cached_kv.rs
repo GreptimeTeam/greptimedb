@@ -99,6 +99,7 @@ impl LeaderCachedKvBackend {
         for prefix in &CACHE_KEY_PREFIXES[..] {
             let _timer =
                 metrics::METRIC_META_LEADER_CACHED_KV_LOAD_ELAPSED.with_label_values(&[prefix]);
+            let ver = self.get_version();
 
             // TODO(weny): Refactors PaginationStream's output to unary output.
             let stream = PaginationStream::new(
@@ -110,6 +111,7 @@ impl LeaderCachedKvBackend {
             .into_stream();
 
             let kvs = stream.try_collect::<Vec<_>>().await?;
+            let keys = kvs.iter().map(|kv| kv.key.clone()).collect::<Vec<_>>();
 
             self.cache
                 .batch_put(BatchPutRequest {
@@ -117,6 +119,10 @@ impl LeaderCachedKvBackend {
                     prev_kv: false,
                 })
                 .await?;
+            // A write while loading may have changed what was read.
+            if !self.validate_version(ver) {
+                self.invalid_keys(keys).await?;
+            }
         }
 
         Ok(())
@@ -125,6 +131,15 @@ impl LeaderCachedKvBackend {
     #[inline]
     fn is_leader(&self) -> bool {
         self.check_leader.check()
+    }
+
+    /// Writes to the store while the cache is disabled. Creates new versions around the write,
+    /// so a load or a cache fill that read the old value meanwhile drops it.
+    async fn write_uncached<T>(&self, write: impl Future<Output = Result<T>>) -> Result<T> {
+        self.create_new_version();
+        let res = write.await;
+        self.create_new_version();
+        res
     }
 
     #[inline]
@@ -211,7 +226,7 @@ impl KvBackend for LeaderCachedKvBackend {
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
         if !self.is_leader() {
-            return self.store.put(req).await;
+            return self.write_uncached(self.store.put(req)).await;
         }
 
         let ver = self.create_new_version();
@@ -230,7 +245,7 @@ impl KvBackend for LeaderCachedKvBackend {
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         if !self.is_leader() {
-            return self.store.batch_put(req).await;
+            return self.write_uncached(self.store.batch_put(req)).await;
         }
 
         let ver = self.create_new_version();
@@ -306,7 +321,7 @@ impl KvBackend for LeaderCachedKvBackend {
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
         if !self.is_leader() {
-            return self.store.compare_and_put(req).await;
+            return self.write_uncached(self.store.compare_and_put(req)).await;
         }
 
         let _ = self.create_new_version();
@@ -324,7 +339,7 @@ impl KvBackend for LeaderCachedKvBackend {
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         if !self.is_leader() {
-            return self.store.delete_range(req).await;
+            return self.write_uncached(self.store.delete_range(req)).await;
         }
 
         let _ = self.create_new_version();
@@ -337,7 +352,7 @@ impl KvBackend for LeaderCachedKvBackend {
 
     async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
         if !self.is_leader() {
-            return self.store.batch_delete(req).await;
+            return self.write_uncached(self.store.batch_delete(req)).await;
         }
 
         let _ = self.create_new_version();
@@ -355,7 +370,7 @@ impl TxnService for LeaderCachedKvBackend {
 
     async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
         if !self.is_leader() {
-            return self.store.txn(txn).await;
+            return self.write_uncached(self.store.txn(txn)).await;
         }
 
         let _ = self.create_new_version();
@@ -531,7 +546,8 @@ mod tests {
         Write::DeleteRange,
         Write::BatchDelete,
     ];
-    const KEY: &[u8] = b"route";
+    /// Under the first prefix the leader cache loads.
+    const KEY: &[u8] = b"__table_name/1";
 
     impl Write {
         async fn execute(self, store: &LeaderCachedKvBackend, value: &[u8]) {
@@ -730,6 +746,42 @@ mod tests {
                 let durable = backing.inner.get(KEY).await.unwrap();
                 assert_eq!(read(&store, true).await, durable, "{first:?}, {second:?}");
             }
+        }
+    }
+
+    struct EnableCache(std::sync::atomic::AtomicBool);
+
+    impl CheckLeader for EnableCache {
+        fn check(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    /// The load reads the old value, a write commits while the cache is disabled, then the
+    /// load installs what it read.
+    #[tokio::test]
+    async fn test_load_overlaps_write() {
+        for write in WRITES {
+            let backing = Arc::new(ControlledBackend::default());
+            backing
+                .inner
+                .put(PutRequest::new().with_key(KEY).with_value(b"old"))
+                .await
+                .unwrap();
+            let enabled = Arc::new(EnableCache(Default::default()));
+            let store = LeaderCachedKvBackend::new(enabled.clone(), backing.clone());
+
+            let return_read = backing.after_read.arm();
+            let loader = store.load();
+            tokio::pin!(loader);
+            assert!(poll!(loader.as_mut()).is_pending());
+            write.execute(&store, b"new").await;
+            return_read.send(()).unwrap();
+            loader.await.unwrap();
+            enabled.0.store(true, Ordering::Relaxed);
+
+            let durable = backing.inner.get(KEY).await.unwrap();
+            assert_eq!(read(&store, false).await, durable, "{write:?}");
         }
     }
 

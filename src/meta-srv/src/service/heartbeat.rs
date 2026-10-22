@@ -12,16 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cmp::Ordering;
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use api::v1::meta::{
     AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, PROTOCOL_VERSION,
     Peer, RequestHeader, ResponseHeader, Role, heartbeat_server,
 };
 use common_meta::election::LeaderChangeMessage;
+use common_meta::key::MetadataValue;
+use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
+use common_meta::kv_backend::KvBackend;
+use common_meta::rpc::store::CompareAndPutRequest;
 use common_telemetry::{debug, error, info, warn};
+use common_time::util::current_time_millis;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use snafu::{OptionExt, ResultExt};
@@ -32,13 +39,15 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error::{self, Result};
-use crate::handler::node_epoch::check_node_epoch;
 use crate::handler::{HeartbeatHandlerGroup, Pusher, PusherId};
 use crate::metasrv::{Context, ElectionRef, Metasrv};
 use crate::metrics::METRIC_META_HEARTBEAT_RECV;
 use crate::service::{GrpcResult, GrpcStream};
 
 type HeartbeatResponseResult = std::result::Result<HeartbeatResponse, Status>;
+
+/// How far ahead of the leader's clock a datanode epoch can be recorded.
+const MAX_NODE_EPOCH_AHEAD: Duration = Duration::from_secs(5 * 60);
 
 #[async_trait::async_trait]
 trait HeartbeatRequestStream {
@@ -266,28 +275,25 @@ where
         true
     }
 
-    /// Checks the node epoch of a datanode request, and returns the response to send instead
-    /// of running the handlers if the request must not reach them.
+    /// Checks the node epoch of a datanode request. Returns the response to send instead of
+    /// running the handlers, if any.
     async fn check_node_epoch(
         &mut self,
         req: &HeartbeatRequest,
     ) -> Option<Result<HeartbeatResponse>> {
         let node_epoch = req.node_epoch;
-        // Datanodes that do not report their epoch are not checked.
         if self.sender_id.role != Role::Datanode || node_epoch == 0 {
             return None;
         }
-        // Only the leader reads and raises the record.
         let error = if let Some(election) = &self.ctx.election
             && !election.is_leader()
         {
             Some(api::v1::meta::Error::is_not_leader())
         } else {
             let kv_backend = &*self.ctx.leader_cached_kv_backend;
-            match check_node_epoch(kv_backend, self.sender_id.id, node_epoch).await {
+            match accept_node_epoch(kv_backend, self.sender_id.id, node_epoch).await {
                 Ok(true) => {
-                    // Registers the pusher before the handlers run, so the stream receives
-                    // the messages they broadcast.
+                    // Before the handlers run, so the stream receives what they broadcast.
                     if node_epoch > self.pusher_epoch {
                         self.pusher_epoch = node_epoch;
                         let pusher = Pusher::new(self.tx.clone()).with_node_epoch(node_epoch);
@@ -297,8 +303,7 @@ where
                     }
                     return None;
                 }
-                // The response carries no error and the stream stays open: a datanode that is
-                // not told why would only reconnect.
+                // No error, so the datanode does not reconnect.
                 Ok(false) => {
                     self.handler_group
                         .deregister_push(self.sender_id, &self.tx)
@@ -459,6 +464,54 @@ fn get_node_id(header: &RequestHeader) -> u64 {
     match header.role() {
         Role::Frontend => next_id(),
         Role::Datanode | Role::Flownode => header.member_id,
+    }
+}
+
+/// Returns whether `node_epoch` is not lower than the highest epoch recorded for the datanode,
+/// raising the record when it is higher. An epoch too far ahead of this metasrv's clock is
+/// refused, since recording it would fence every later process.
+async fn accept_node_epoch(
+    kv_backend: &dyn KvBackend<Error = common_meta::error::Error>,
+    node_id: u64,
+    node_epoch: u64,
+) -> Result<bool> {
+    let key = DatanodeEpochKey::new(node_id).to_bytes();
+    let mut current = kv_backend.get(&key).await.context(error::KvBackendSnafu)?;
+    let limit = current_time_millis().max(0) as u64 + MAX_NODE_EPOCH_AHEAD.as_millis() as u64;
+    loop {
+        let (expect, highest) = match current {
+            Some(kv) => {
+                let value = DatanodeEpochValue::try_from_raw_value(&kv.value)
+                    .context(error::KvBackendSnafu)?;
+                (kv.value, value.node_epoch)
+            }
+            None => (vec![], 0),
+        };
+        match node_epoch.cmp(&highest) {
+            Ordering::Equal => return Ok(true),
+            Ordering::Greater if node_epoch <= limit => {}
+            _ => {
+                warn!("Fenced datanode {node_id} with epoch {node_epoch}, recorded {highest}");
+                return Ok(false);
+            }
+        }
+        let value = DatanodeEpochValue { node_epoch }
+            .try_as_raw_value()
+            .context(error::KvBackendSnafu)?;
+        let req = CompareAndPutRequest {
+            key: key.clone(),
+            expect,
+            value,
+        };
+        let resp = kv_backend
+            .compare_and_put(req)
+            .await
+            .context(error::KvBackendSnafu)?;
+        if resp.success {
+            info!("Recorded epoch {node_epoch} of datanode {node_id}");
+            return Ok(true);
+        }
+        current = resp.prev_kv;
     }
 }
 
@@ -838,8 +891,8 @@ mod tests {
         use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, Peer, Role};
         use common_meta::key::TableMetadataManager;
         use common_meta::key::datanode_epoch::DatanodeEpochKey;
-        use common_meta::kv_backend::KvBackendRef;
         use common_meta::kv_backend::memory::MemoryKvBackend;
+        use common_meta::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend};
         use common_meta::region_keeper::MemoryRegionKeeper;
         use common_meta::sequence::SequenceBuilder;
         use common_time::util::current_time_millis;
@@ -854,8 +907,11 @@ mod tests {
             PusherId, Pushers,
         };
         use crate::metasrv::Context;
-        use crate::service::heartbeat::{HeartbeatResponseResult, HeartbeatSession};
+        use crate::service::heartbeat::{
+            HeartbeatResponseResult, HeartbeatSession, accept_node_epoch,
+        };
         use crate::service::mailbox::{Channel, MailboxRef};
+        use crate::service::store::cached_kv::LeaderCachedKvBackend;
 
         const NODE_ID: u64 = 1;
 
@@ -1018,6 +1074,84 @@ mod tests {
             a2.session.run().await;
             push(&group).await;
             assert!(a2_again.received_push());
+        }
+
+        #[tokio::test]
+        async fn test_first_epoch_keeps_waiting_messages() {
+            let group = new_group();
+            let mut ctx = TestEnv::new().ctx();
+            ctx.mailbox = mailbox(group.pushers());
+            let (e1, _) = epochs();
+            let mut a1 = Stream::open(&group, &ctx).await;
+            let reply = ctx
+                .mailbox
+                .send(
+                    &Channel::Datanode(NODE_ID),
+                    MailboxMessage::default(),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap();
+            let id = a1
+                .rx
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .mailbox_message
+                .unwrap()
+                .id;
+            tokio::pin!(reply);
+
+            // The stream's pusher takes the epoch of its first heartbeat without cancelling
+            // the message, which a later heartbeat answers.
+            a1.send(heartbeat(e1, "a1")).await;
+            assert!(futures::poll!(reply.as_mut()).is_pending());
+            let mut req = heartbeat(e1, "a1");
+            req.mailbox_message = Some(MailboxMessage {
+                id,
+                ..Default::default()
+            });
+            a1.send(req).await;
+            assert!(reply.await.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_record_is_reloaded_on_leader_change() {
+            let store: KvBackendRef = Arc::new(MemoryKvBackend::new());
+            let cached = LeaderCachedKvBackend::with_always_leader(store.clone());
+            let now = current_time_millis() as u64;
+            let (e1, e2) = (now - 1000, now);
+            assert!(accept_node_epoch(&cached, 1, e1).await.unwrap());
+            assert!(accept_node_epoch(&cached, 1, e2).await.unwrap());
+
+            // The cache is reset and loaded again when this metasrv becomes the leader. The record
+            // is then served from the loaded cache, even without the store.
+            cached.reset();
+            cached.load().await.unwrap();
+            store
+                .delete(&DatanodeEpochKey::new(1).to_bytes(), false)
+                .await
+                .unwrap();
+            assert!(!accept_node_epoch(&cached, 1, e1).await.unwrap());
+            assert!(accept_node_epoch(&cached, 1, e2).await.unwrap());
+        }
+
+        #[tokio::test]
+        async fn test_epoch_far_ahead_is_not_recorded() {
+            let kv_backend = MemoryKvBackend::new();
+            let now = current_time_millis() as u64;
+            let ahead = now + Duration::from_secs(10 * 60).as_millis() as u64;
+            assert!(!accept_node_epoch(&kv_backend, 1, ahead).await.unwrap());
+            let key = DatanodeEpochKey::new(1).to_bytes();
+            assert!(kv_backend.get(&key).await.unwrap().is_none());
+
+            let slightly_ahead = now + Duration::from_secs(60).as_millis() as u64;
+            assert!(
+                accept_node_epoch(&kv_backend, 1, slightly_ahead)
+                    .await
+                    .unwrap()
+            );
         }
 
         #[tokio::test]

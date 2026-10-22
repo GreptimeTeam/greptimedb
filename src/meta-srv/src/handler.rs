@@ -75,7 +75,6 @@ pub mod filter_inactive_region_stats;
 pub mod flow_state_handler;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
-pub(crate) mod node_epoch;
 pub mod on_leader_start_handler;
 pub mod persist_stats_handler;
 pub mod publish_heartbeat_handler;
@@ -337,17 +336,23 @@ impl Pushers {
     }
 
     /// Inserts the pusher unless the slot holds one with a higher node epoch, so an older
-    /// datanode process cannot take over a newer one's pusher. Returns whether it was inserted.
+    /// datanode process cannot take over a newer one's pusher. A pusher of the same stream
+    /// only takes the new epoch, keeping the messages waiting on it. Returns whether the slot
+    /// was empty.
     pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
         let mut pushers = self.0.write().await;
-        if pushers
-            .get(&pusher_id)
-            .is_some_and(|current| current.node_epoch > pusher.node_epoch)
-        {
-            return false;
+        match pushers.get_mut(&pusher_id) {
+            None => {
+                pushers.insert(pusher_id, pusher);
+                return true;
+            }
+            Some(current) if current.node_epoch > pusher.node_epoch => {}
+            Some(current) if current.sender.same_channel(&pusher.sender) => {
+                current.node_epoch = pusher.node_epoch;
+            }
+            Some(current) => *current = pusher,
         }
-        pushers.insert(pusher_id, pusher);
-        true
+        false
     }
 
     /// Removes the pusher if it pushes to `sender`'s channel, keeping one that another stream
@@ -392,9 +397,9 @@ impl HeartbeatHandlerGroup {
     /// Registers the heartbeat response [`Pusher`] with the given key to the group, unless the
     /// group holds one with a higher node epoch.
     pub async fn register_pusher(&self, pusher_id: PusherId, pusher: Pusher) {
+        info!("Pusher register: {}", pusher_id);
         if self.pushers.insert(pusher_id, pusher).await {
             METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
-            info!("Pusher register: {}", pusher_id);
         }
     }
 
@@ -1511,6 +1516,31 @@ mod tests {
         let mut healthy = Box::pin(pushers.push(healthy_id, msg));
         assert!(poll_immediate(healthy.as_mut()).await.is_some());
         assert!(healthy_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pusher_insert_reports_an_empty_slot() {
+        let pushers = Pushers::default();
+        let id = PusherId::new(Role::Datanode, 1);
+        let (tx1, _rx1) = mpsc::channel(1);
+        let (tx2, _rx2) = mpsc::channel(1);
+        assert!(pushers.insert(id, Pusher::new(tx1.clone())).await);
+        // Taking an epoch, being refused and replacing another stream's pusher fill no slot.
+        assert!(
+            !pushers
+                .insert(id, Pusher::new(tx1).with_node_epoch(2))
+                .await
+        );
+        assert!(
+            !pushers
+                .insert(id, Pusher::new(tx2.clone()).with_node_epoch(1))
+                .await
+        );
+        assert!(
+            !pushers
+                .insert(id, Pusher::new(tx2).with_node_epoch(2))
+                .await
+        );
     }
 
     #[tokio::test]
