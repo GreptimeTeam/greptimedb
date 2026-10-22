@@ -191,7 +191,7 @@ impl PromPlanner {
             if anchored.is_some() {
                 self.ctx.end = saved_start;
             }
-            self.build_time_index_filter(anchored.unwrap_or(offset), &input.schema())
+            self.build_time_index_filter(anchored.unwrap_or(offset), input.schema())
         })();
         self.ctx.start = saved_start;
         self.ctx.end = saved_end;
