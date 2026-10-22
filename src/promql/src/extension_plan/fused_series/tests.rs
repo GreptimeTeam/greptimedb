@@ -2591,7 +2591,7 @@ fn a_refused_growth_keeps_shared_label_entry_unchanged() {
         .map(|run| (run.start, run.end))
         .collect::<Vec<_>>();
     let before_reserved = pool.reserved();
-    let mut blocker: MemoryReservation = MemoryConsumer::new("test blocker").register(&erased);
+    let blocker: MemoryReservation = MemoryConsumer::new("test blocker").register(&erased);
     blocker
         .try_grow(limit - before_reserved)
         .expect("the blocker occupies remaining capacity");
