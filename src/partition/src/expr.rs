@@ -379,32 +379,7 @@ impl PartitionExpr {
         &self,
         schema: &arrow::datatypes::SchemaRef,
     ) -> error::Result<Arc<dyn PhysicalExpr>> {
-        let df_schema = schema
-            .clone()
-            .to_dfschema_ref()
-            .context(error::ToDFSchemaSnafu)?;
-        let expr = self.try_as_logical_expr()?;
-        // Persisted partition bounds keep the unit (and type) they were created
-        // with, so after a schema change like widening the time index unit the
-        // expression may mix types with the columns it is evaluated against.
-        // Coerce it against the schema so comparisons share a common type, the
-        // same way `PredicateGroup` does for region partition filters.
-        let simplifier = ExprSimplifier::new(
-            SimplifyContext::builder()
-                .with_schema(df_schema.clone())
-                .build(),
-        );
-        let expr = simplifier
-            .coerce(expr, &df_schema)
-            .context(error::CoercePartitionExprSnafu)?;
-        let execution_props = &ExecutionProps::default();
-        create_physical_expr(
-            &expr,
-            &df_schema,
-            execution_props,
-            &PhysicalPlanningContext::default(),
-        )
-        .context(error::CreatePhysicalExprSnafu)
+        plan_physical_expr(self.try_as_logical_expr()?, schema)
     }
 
     pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {
@@ -462,6 +437,37 @@ impl PartitionExpr {
             Operand::Value(_) => {}
         }
     }
+}
+
+/// Plans a logical partition expression for evaluation against `schema`.
+pub(crate) fn plan_physical_expr(
+    expr: Expr,
+    schema: &arrow::datatypes::SchemaRef,
+) -> error::Result<Arc<dyn PhysicalExpr>> {
+    let df_schema = schema
+        .clone()
+        .to_dfschema_ref()
+        .context(error::ToDFSchemaSnafu)?;
+    // Persisted partition bounds keep the unit (and type) they were created
+    // with, so after a schema change like widening the time index unit the
+    // expression may mix types with the columns it is evaluated against.
+    // Coerce it against the schema so comparisons share a common type, the
+    // same way `PredicateGroup` does for region partition filters.
+    let simplifier = ExprSimplifier::new(
+        SimplifyContext::builder()
+            .with_schema(df_schema.clone())
+            .build(),
+    );
+    let expr = simplifier
+        .coerce(expr, &df_schema)
+        .context(error::CoercePartitionExprSnafu)?;
+    create_physical_expr(
+        &expr,
+        &df_schema,
+        &ExecutionProps::default(),
+        &PhysicalPlanningContext::default(),
+    )
+    .context(error::CreatePhysicalExprSnafu)
 }
 
 impl Display for PartitionExpr {

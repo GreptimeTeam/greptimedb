@@ -18,12 +18,9 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
-use datafusion_common::ToDFSchema;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_expr::execution_props::ExecutionProps;
-use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{ColumnarValue, Expr};
-use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
+use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow;
 use datatypes::arrow::array::{Array, BooleanArray, BooleanBufferBuilder, RecordBatch};
 use datatypes::arrow::buffer::BooleanBuffer;
@@ -39,7 +36,7 @@ use store_api::storage::RegionNumber;
 use crate::PartitionRule;
 use crate::checker::PartitionChecker;
 use crate::error::{self, Result, UndefinedColumnSnafu};
-use crate::expr::{Operand, PartitionExpr, RestrictedOp};
+use crate::expr::{Operand, PartitionExpr, RestrictedOp, plan_physical_expr};
 use crate::function::IcebergHash;
 use crate::partition::RegionMask;
 
@@ -419,10 +416,6 @@ impl MultiDimPartitionRule {
         }
         let eval_schema = Arc::new(Schema::new(fields));
 
-        let df_schema = eval_schema
-            .clone()
-            .to_dfschema_ref()
-            .context(error::ToDFSchemaSnafu)?;
         let exprs = self
             .exprs
             .iter()
@@ -443,13 +436,7 @@ impl MultiDimPartitionRule {
                         .unwrap(),
                     "iceberg_hash should read the precomputed columns: {expr}"
                 );
-                create_physical_expr(
-                    &expr,
-                    &df_schema,
-                    &ExecutionProps::default(),
-                    &PhysicalPlanningContext::default(),
-                )
-                .context(error::CreatePhysicalExprSnafu)
+                plan_physical_expr(expr, &eval_schema)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -1002,6 +989,71 @@ mod test_split_record_batch {
                 "failed on region: {}",
                 region
             );
+        }
+    }
+
+    #[test]
+    fn test_split_record_batch_widened_time_index_unit_with_hash() {
+        // The precomputed-hash path must coerce millisecond bounds against a
+        // nanosecond time index too.
+        let bound = Value::from(Timestamp::new_millisecond(1_000));
+        let hash = Operand::IcebergHash(IcebergHash::new("host"));
+        let exprs = [
+            (
+                col("ts").lt(bound.clone()),
+                hash.clone().lt(Value::Int32(0)),
+            ),
+            (
+                col("ts").lt(bound.clone()),
+                hash.clone().gt_eq(Value::Int32(0)),
+            ),
+            (
+                col("ts").gt_eq(bound.clone()),
+                hash.clone().lt(Value::Int32(0)),
+            ),
+            (col("ts").gt_eq(bound), hash.gt_eq(Value::Int32(0))),
+        ]
+        .into_iter()
+        .map(|(ts, hash)| ts.and(hash))
+        .collect();
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["ts".to_string(), "host".to_string()],
+            vec![1, 2, 3, 4],
+            exprs,
+            true,
+        )
+        .unwrap();
+
+        let hosts = ["a", "b", "c", "server42"];
+        let mut ts = vec![];
+        let mut host = vec![];
+        for nanos in [500_000_000, 2_000_000_000] {
+            for h in hosts {
+                ts.push(nanos);
+                host.push(h);
+            }
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+            Field::new("host", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampNanosecondArray::from(ts)),
+                Arc::new(StringArray::from(host)),
+            ],
+        )
+        .unwrap();
+
+        let expected = rule.split_record_batch_naive(&batch).unwrap();
+        let result = rule.split_record_batch(&batch).unwrap();
+        for (region, expected) in expected {
+            let actual = result
+                .get(&region)
+                .map(|mask| mask.array().clone())
+                .unwrap_or_else(|| BooleanArray::from(vec![false; batch.num_rows()]));
+            assert_eq!(actual, expected, "region {region}");
         }
     }
 
