@@ -34,9 +34,8 @@ use crate::error::{
 const OBJECT_SEQ_WIDTH: usize = 20;
 const OBJECT_SUFFIX: &str = ".wal";
 /// Objects a listing may hold ahead of the reads that take them, four LIST
-/// pages of S3: the reads of recovery take about as many in a second or two,
-/// far longer than the next page takes to arrive, and the bound keeps a
-/// listing much faster than the reads from holding the whole prefix.
+/// pages of S3, so the listing stays pages ahead of the reads while what it
+/// holds is bounded.
 const LISTING_AHEAD_OBJECTS: usize = 4096;
 
 /// Outcome of a conditional create.
@@ -185,21 +184,24 @@ impl ObjectStoreIo {
     /// error, before any object it listed that the caller has not taken yet;
     /// dropping the stream stops the listing.
     pub(crate) fn list_ahead(&self) -> BoxStream<'static, Result<ListedObject>> {
-        let io = self.clone();
         let (tx, rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
-        let listing = AbortOnDropHandle::new(common_runtime::spawn_global(async move {
-            let mut lister = io.store.lister(&io.object_prefix).await?;
-            while let Some(entry) = lister.try_next().await? {
-                // The receiver is gone only once the stream was dropped.
-                if let Some(object) = io.listed_object(&entry)
-                    && tx.send(object).await.is_err()
-                {
-                    break;
-                }
-            }
-            Ok::<_, object_store::Error>(())
-        }));
+        let listing = self.clone().send_listing(tx);
+        let listing = AbortOnDropHandle::new(common_runtime::spawn_global(listing));
         settle_listing(rx, listing, self.object_prefix.clone())
+    }
+
+    /// Lists the objects under the prefix into `tx`, waiting while it is full.
+    async fn send_listing(self, tx: mpsc::Sender<ListedObject>) -> object_store::Result<()> {
+        let mut lister = self.store.lister(&self.object_prefix).await?;
+        while let Some(entry) = lister.try_next().await? {
+            // The receiver is gone only once the stream was dropped.
+            if let Some(object) = self.listed_object(&entry)
+                && tx.send(object).await.is_err()
+            {
+                break;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn object_path(&self, object_seq: u64) -> String {
@@ -302,12 +304,13 @@ fn normalize_prefix(prefix: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     use common_error::ext::{ErrorExt, RetryHint};
     use common_test_util::temp_dir::create_temp_dir;
+    use futures::poll;
     use object_store::layers::mock::{self, MockLayerBuilder, oio};
     use object_store::secure_fs::SecureFsRoot;
     use object_store::services::Memory;
@@ -612,7 +615,6 @@ mod tests {
         assert_eq!(io.list().await.unwrap(), listed);
     }
 
-    /// A lister that counts the entries it was asked for.
     struct CountingLister {
         inner: oio::Lister,
         listed: Arc<AtomicUsize>,
@@ -626,11 +628,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_io_list_ahead_holds_a_bounded_backlog() {
+    async fn test_io_listing_waits_while_the_backlog_is_full() {
         let store = memory_store();
-        let objects = LISTING_AHEAD_OBJECTS as u64 + 100;
+        let objects = LISTING_AHEAD_OBJECTS + 100;
         let io = ObjectStoreIo::new(store.clone(), "datanodes/1/epochs/2/").unwrap();
-        for object_seq in 0..objects {
+        for object_seq in 0..objects as u64 {
             io.put_if_absent(object_seq, Bytes::from_static(b"wal"))
                 .await
                 .unwrap();
@@ -645,21 +647,31 @@ mod tests {
             .build()
             .unwrap();
         let io = ObjectStoreIo::new(store.layer(mock), "datanodes/1/epochs/2/").unwrap();
+        let (tx, mut rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
+        // Out of the cooperative budget, so it waits only on a full channel.
+        let mut listing = pin!(tokio::task::unconstrained(io.send_listing(tx)));
 
-        // Nothing takes the objects, so the listing stops once the backlog is
-        // full; the directory entry and the object waiting to be sent are on
-        // top.
-        let mut stream = io.list_ahead();
-        while listed.load(Ordering::SeqCst) <= LISTING_AHEAD_OBJECTS {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        // Nothing takes the objects, so the listing waits once the backlog is
+        // full, with the directory entry and the object waiting to be sent
+        // listed on top of it.
+        for _ in 0..100 {
+            assert!(poll!(listing.as_mut()).is_pending());
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(listed.load(Ordering::SeqCst) <= LISTING_AHEAD_OBJECTS + 2);
+        let ahead = listed.load(Ordering::SeqCst);
+        assert!(
+            (LISTING_AHEAD_OBJECTS + 1..=LISTING_AHEAD_OBJECTS + 2).contains(&ahead),
+            "{ahead} entries listed"
+        );
 
-        let mut taken = 0;
-        while stream.try_next().await.unwrap().is_some() {
-            taken += 1;
-        }
+        let taken = async {
+            let mut taken = 0;
+            while rx.recv().await.is_some() {
+                taken += 1;
+            }
+            taken
+        };
+        let (listed, taken) = futures::join!(listing, taken);
+        listed.unwrap();
         assert_eq!(objects, taken);
     }
 
