@@ -75,6 +75,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let sweep_older_than = self.config.gc.unknown_file_lingering_time;
         #[cfg(feature = "hdfs-object-store")]
         let sweep_limiter = self.sweep_limiter.clone();
+        let node_lease = self.node_lease.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -84,6 +85,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match task.run().await {
                 Ok(_) => {
                     if request.set_writable {
+                        // The region takes writes under the node lease until its next Leader
+                        // grant.
+                        node_lease.seed(&region.leader_deadline);
                         region.set_role(RegionRole::Leader);
                         // Finalize leadership: persist backfilled metadata.
                         match region

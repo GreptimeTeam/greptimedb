@@ -289,6 +289,15 @@ impl RegionEngine for MockRegionEngine {
         Ok(())
     }
 
+    fn set_region_role_with_lease(
+        &self,
+        _region_id: RegionId,
+        _role: RegionRole,
+        _deadline: std::time::Instant,
+    ) -> Result<(), BoxedError> {
+        Ok(())
+    }
+
     async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,

@@ -785,6 +785,8 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema};
@@ -799,6 +801,9 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
+    use mito2::config::MitoConfig;
+    use mito2::engine::listener::WriteWalListener;
+    use mito2::test_util::TestEnv as MitoTestEnv;
     use partition::expr::col;
     use store_api::metadata::ColumnMetadata;
     use store_api::metric_engine_consts::{
@@ -806,7 +811,7 @@ mod tests {
         PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING,
     };
     use store_api::path_utils::table_dir;
-    use store_api::region_engine::RegionEngine;
+    use store_api::region_engine::{RegionEngine, RegionRole};
     use store_api::region_request::{
         EnterStagingRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
         StagingPartitionDirective,
@@ -2349,5 +2354,90 @@ mod tests {
             err.to_string().contains("impure default value"),
             "expected impure-default rejection, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_logical_region_ddl_needs_leader_lease() {
+        common_telemetry::init_default_ut_logging();
+        let mut mito_env = MitoTestEnv::with_prefix("logical-region-lease").await;
+        let listener = Arc::new(WriteWalListener::default());
+        let mito = mito_env
+            .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+            .await;
+        mito.require_write_lease();
+        let env = TestEnv::with_mito_engine(mito_env, mito);
+        let engine = env.metric();
+        // Created before the node has a lease, the physical region has none.
+        let physical_region_id = env.default_physical_region_id();
+        env.create_physical_region(physical_region_id, &TestEnv::default_table_dir(), vec![])
+            .await;
+        let grant = |deadline| {
+            engine
+                .set_region_role_with_lease(physical_region_id, RegionRole::Leader, deadline)
+                .unwrap()
+        };
+        let logical_region_id = env.default_logical_region_id();
+        let alter = |tag| RegionRequest::Alter(test_util::alter_logical_region_request(&[tag]));
+        let put = |tags: &[&str]| {
+            let request = RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema: test_util::row_schema_with_tags(tags),
+                    rows: test_util::build_rows(tags.len(), 5),
+                },
+                hint: None,
+                partition_expr_version: None,
+                skip_wal: false,
+            });
+            engine.handle_request(logical_region_id, request)
+        };
+
+        // Each DDL below gives the data region a new column before the metadata region rejects
+        // its write; the retry must not add the column again.
+        let create = || {
+            RegionRequest::Create(test_util::create_logical_region_request(
+                &["job"],
+                physical_region_id,
+                &table_dir("test", logical_region_id.table_id()),
+            ))
+        };
+        let err = engine
+            .handle_request(logical_region_id, create())
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        grant(deadline);
+        engine
+            .handle_request(logical_region_id, create())
+            .await
+            .unwrap();
+        put(&["job"]).await.unwrap();
+
+        // The lease expires while an ALTER writes the metadata region, after the WAL append.
+        listener.pause_next();
+        let task = {
+            let engine = engine.clone();
+            let request = alter("tag1");
+            tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
+        };
+        listener.wait_appended().await;
+        tokio::time::sleep_until(deadline.into()).await;
+        listener.resume();
+        assert!(task.await.unwrap().unwrap_err().is_retryable());
+        // The write is applied, so the cached metadata must not hide it.
+        let metadata = engine.get_metadata(logical_region_id).await.unwrap();
+        assert!(metadata.column_by_name("tag1").is_some());
+
+        let err = engine
+            .handle_request(logical_region_id, alter("tag2"))
+            .await
+            .unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+        grant(Instant::now() + Duration::from_secs(10));
+        engine
+            .handle_request(logical_region_id, alter("tag2"))
+            .await
+            .unwrap();
+        put(&["job", "tag1", "tag2"]).await.unwrap();
     }
 }
