@@ -43,7 +43,7 @@ pub(crate) fn expand(series: &Series) -> Dense {
         panic!("expected a grid series, got {:?}", series.time);
     };
     let fields = series.fields.as_slice();
-    let mut dense = vec![vec![None; fields.len()]; grid.timestamps().len()];
+    let mut dense = vec![vec![None; fields.len()]; grid.spec().len as usize];
     let mut cursors = fields
         .iter()
         .map(|field| field.cursor())
@@ -124,7 +124,7 @@ fn assert_series_matches(
         last + 1 - first,
         "{context}: the result carries a row for a position that holds no value"
     );
-    assert_eq!(grid.timestamps().len(), expected.len());
+    assert_eq!(grid.spec().len as usize, expected.len());
     assert_eq!(&actual.metric, metric);
     let bits = |dense: &Dense| -> Vec<Vec<Option<u64>>> {
         dense
@@ -148,7 +148,7 @@ pub(crate) fn stitch(pieces: &[Series]) -> Dense {
             panic!("expected a grid series, got {:?}", piece.time);
         };
         let dense = dense
-            .get_or_insert_with(|| vec![vec![None; piece.fields.len()]; grid.timestamps().len()]);
+            .get_or_insert_with(|| vec![vec![None; piece.fields.len()]; grid.spec().len as usize]);
         let mut cursors = piece
             .fields
             .iter()

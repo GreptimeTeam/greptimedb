@@ -4559,6 +4559,7 @@ dependencies = [
  "jsonb",
  "num",
  "num-traits",
+ "once_cell",
  "ordered-float 4.6.0",
  "parquet-variant",
  "parquet-variant-compute",

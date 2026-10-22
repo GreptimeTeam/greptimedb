@@ -376,8 +376,8 @@ fn a_vector_scalar_operation_of_sparse_operands_keeps_the_shared_positions() {
         .eval_grid
         .as_ref()
         .expect("the fixture schema has a grid")
-        .timestamps()
-        .len();
+        .spec()
+        .len as usize;
     let mut expected: Dense = vec![vec![None]; points_on_grid];
     expected[5] = vec![Some(52.0)];
     expected[9] = vec![Some(93.0)];

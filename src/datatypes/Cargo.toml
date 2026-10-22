@@ -26,6 +26,7 @@ enum_dispatch = "0.3"
 jsonb.workspace = true
 num = "0.4"
 num-traits = "0.2"
+once_cell.workspace = true
 ordered-float.workspace = true
 parquet-variant.workspace = true
 parquet-variant-compute.workspace = true

@@ -388,11 +388,11 @@ impl NativeNode {
                 }
                 ensure_not_interleaved(input)?;
                 // What is checked here and just below is that the declared input grid equals the
-                // input's grid, and that the output grid matches the declared one. The grid is
-                // not checked to cover the window's read range
-                // `(out.start - offset - range, out.end - offset]`: only a subquery feeds an
-                // evaluated input to a window, and this compiler does not accept subqueries yet,
-                // so that coverage check waits for it.
+                // input's grid, and that the output grid matches the declared one. That the grid
+                // covers the window's read range
+                // `(out.start - offset - range, out.end - offset]` is not checked here: only a
+                // subquery feeds an evaluated input to a window, and deriving that coverage is the
+                // compiler's, which builds the subquery's child grid to span it.
                 match (op.input_grid.as_ref(), schema.eval_grid.as_ref()) {
                     (None, None) => {}
                     (Some(bound), Some(actual)) if bound.spec() == actual.spec() => {}
