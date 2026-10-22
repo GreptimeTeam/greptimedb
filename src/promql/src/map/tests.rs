@@ -31,7 +31,7 @@ use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatch, HistogramBatchBuilder, HistogramView,
 };
 use datatypes::series::samples::{FieldSpec, HistogramSamples, SampleRef};
-use datatypes::series::time::{EvalGrid, GridRange, GridSpec};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec};
 use datatypes::series::{Label, MetricName};
 
 use super::*;
@@ -383,31 +383,50 @@ fn histogram_batch() -> Arc<HistogramBatch> {
 }
 
 #[test]
-fn histogram_and_mixed_fields_are_rejected_without_partial_success() {
+fn histogram_samples_are_skipped_and_float_samples_mapped() {
     let batch = histogram_batch();
     let histogram = Samples::try_from_histogram(UInt32Array::from(vec![0]), batch.clone()).unwrap();
     let mixed = Samples::try_from_mixed(
-        Float64Array::from(vec![Some(1.0), None]),
+        Float64Array::from(vec![Some(-1.0), None]),
         HistogramSamples::try_new(UInt32Array::from(vec![None, Some(0)]), batch.clone()).unwrap(),
     )
     .unwrap();
     let null_histogram = Samples::try_from_histogram(UInt32Array::from(vec![None]), batch).unwrap();
     let chunks = Samples::try_from_chunks(vec![floats(&[Some(-1.0)]), histogram.clone()]).unwrap();
-    let schema = schema(&["float", "unsupported"]);
-    for unsupported in [histogram, mixed, null_histogram, chunks] {
-        let prefix = floats(&vec![Some(-2.0); unsupported.len()]);
-        let input = series(&schema, 2, vec![prefix, unsupported]);
-        for op in [MathOp::Abs, MathOp::Clamp { min: 2.0, max: 1.0 }] {
-            assert!(matches!(
-                map_math(&schema, &input, op),
-                Err(DataFusionError::NotImplemented(_))
-            ));
-        }
-        assert_floats(
-            input.fields.get(0).unwrap(),
-            &vec![Some(-2.0); input.time.len()],
+    let two_fields = schema(&["float", "histograms"]);
+    // Prometheus' math functions process only float samples: each histogram is a point without a
+    // result, and the floats beside it, in its field or the other, are mapped as usual.
+    for (samples, expected) in [
+        (histogram.clone(), vec![None]),
+        (mixed, vec![Some(1.0), None]),
+        (null_histogram, vec![None]),
+        (chunks, vec![Some(1.0), None]),
+    ] {
+        let len = samples.len();
+        let input = series(
+            &two_fields,
+            2,
+            vec![floats(&vec![Some(-2.0); len]), samples],
+        );
+        let output = map_math(&two_fields, &input, MathOp::Abs).unwrap().unwrap();
+        assert_eq!(
+            run_floats(&output, 0),
+            vec![((2, len), vec![Some(2.0); len])]
+        );
+        assert_eq!(run_floats(&output, 1), vec![((2, len), expected)]);
+        assert!(
+            map_math(&two_fields, &input, MathOp::Clamp { min: 2.0, max: 1.0 })
+                .unwrap()
+                .is_none()
         );
     }
+    let only_histograms = schema(&["h"]);
+    let input = series(&only_histograms, 2, vec![histogram]);
+    assert!(
+        map_math(&only_histograms, &input, MathOp::Abs)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
