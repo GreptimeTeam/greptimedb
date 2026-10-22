@@ -21,8 +21,9 @@
 //! ```text
 //! <selector>                                        e.g. x
 //! <range function>(<selector>[<range>])             e.g. rate(x[5m])
-//! <range function>(<constant>[, <constant>], <selector>[<range>])
-//!                                                   e.g. quantile_over_time(0.9, x[5m]),
+//! <range function>(<constant>, <selector>[<range>])   e.g. quantile_over_time(0.9, x[5m])
+//! <range function>(<selector>[<range>], <constant>[, <constant>])
+//!                                                   e.g. predict_linear(x[5m], 1),
 //!                                                        double_exponential_smoothing(x[5m], 0.5, 0.5)
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
 //! <expression> <operator> <constant>                e.g. x * 100, x > bool 0
@@ -113,8 +114,10 @@ use crate::promql::label_values::signed_millis_since_epoch;
 
 /// The shapes this compiler accepts, quoted in every rejection.
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
-                         `<range function>(<selector>[<range>])`, with its constants in front of \
-                         the selector as in `quantile_over_time(0.9, x[5m])` — a math function over \
+                         `<range function>(<selector>[<range>])`, with constants before the selector \
+                         as in `quantile_over_time(0.9, x[5m])` or after it as in \
+                         `predict_linear(x[5m], 1)` and \
+                         `double_exponential_smoothing(x[5m], 0.5, 0.5)` — a math function over \
                          any of them, a binary operation between one of them and a constant, a \
                          negation of one of them, or one of the aggregators that folds a group's \
                          values into one value per grid point — `sum`, `avg`, `count`, `min`, `max`, \
@@ -571,16 +574,7 @@ fn window_call(
              selector like `x[5m]`"
         )));
     };
-    // A constant keeps the position it was written at, because the selector is one of the call's
-    // arguments: a rejection names the argument the query wrote rather than the constant's offset
-    // among the arguments left once the selector is dropped.
-    let constants: Vec<(usize, Box<PromExpr>)> = args
-        .iter()
-        .enumerate()
-        .filter(|(position, _)| *position != selector_index)
-        .map(|(position, argument)| (position, argument.clone()))
-        .collect();
-    let function = signature.bind(name, &constants)?;
+    let function = signature.bind(name, args)?;
     window_selection(context, function, vs, range)
 }
 
@@ -873,27 +867,15 @@ impl RangeSignature {
         }
     }
 
-    /// Binds the function over the `constants` its call wrote, in the order they were written.
-    ///
-    /// Each constant is the position it holds among the call's arguments, the selector included, and
-    /// the expression written there, so a rejection names the argument's place in the call.
-    ///
-    /// The count is the signature's, so a caller that reached here has already checked it: reading
-    /// `constants[0]` and `constants[1]` cannot panic on a call this signature accepted.
-    fn bind(self, name: &str, constants: &[(usize, Box<PromExpr>)]) -> Result<RangeFunction> {
-        // Each constant is folded by [`constant_argument`], which names the argument it found if the
-        // query wrote something only known at run time.
-        let mut folded = constants
-            .iter()
-            .map(|(position, argument)| constant_argument(name, argument, *position));
+    /// Binds the function from the call's arguments, which have already passed the arity check.
+    fn bind(self, name: &str, args: &[Box<PromExpr>]) -> Result<RangeFunction> {
         Ok(match self {
             Self::Selector(function) => function,
-            Self::ConstantBeforeSelector(bind) | Self::ConstantAfterSelector(bind) => {
-                bind(folded.next().expect("one constant")?)
-            }
+            Self::ConstantBeforeSelector(bind) => bind(constant_argument(name, &args[0], 0)?),
+            Self::ConstantAfterSelector(bind) => bind(constant_argument(name, &args[1], 1)?),
             Self::TwoConstantsAfterSelector(bind) => bind(
-                folded.next().expect("first constant")?,
-                folded.next().expect("second constant")?,
+                constant_argument(name, &args[1], 1)?,
+                constant_argument(name, &args[2], 2)?,
             ),
         })
     }
@@ -1229,10 +1211,7 @@ fn range_function(name: &str) -> Option<RangeFunction> {
         "resets" => Some(RangeFunction::Resets),
         "changes" => Some(RangeFunction::Changes),
         "deriv" => Some(RangeFunction::Deriv),
-        // Prometheus marks these six as experimental, and this crate implements every one of them
-        // unconditionally: `RangeFunction` names them without a gate and the kernels answer them.
-        // Binding them here is therefore the same decision as binding `rate`, not a new policy —
-        // if a gate is ever wanted it belongs where a query is admitted, not scattered here.
+        // These functions are supported unconditionally by this native compiler.
         "first_over_time" => Some(RangeFunction::FirstOverTime),
         "mad_over_time" => Some(RangeFunction::MadOverTime),
         "ts_of_first_over_time" => Some(RangeFunction::TsOfFirstOverTime),

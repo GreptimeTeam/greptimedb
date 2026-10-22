@@ -262,9 +262,8 @@ fn the_supported_range_functions_map_to_their_kernels() {
         ("resets", RangeFunction::Resets),
         ("changes", RangeFunction::Changes),
         ("deriv", RangeFunction::Deriv),
-        // The six Prometheus marks experimental. `RangeFunction` names all of them and the kernels
-        // answer all of them, so the compiler binds them like any other name; a test per name is
-        // what keeps a rename or a drop from passing as a typo.
+        // Every named range function is supported unconditionally by this compiler; a test per
+        // name keeps a rename or a drop from passing as a typo.
         ("first_over_time", RangeFunction::FirstOverTime),
         ("mad_over_time", RangeFunction::MadOverTime),
         ("ts_of_first_over_time", RangeFunction::TsOfFirstOverTime),
@@ -1697,24 +1696,36 @@ fn a_vector_matching_modifier_over_a_constant_is_refused() {
 /// A modifier inside a constant argument is refused, not folded into the value it computes.
 #[test]
 fn a_modifier_inside_a_folded_call_argument_is_refused() {
-    let query = "quantile_over_time(0.5 + fill(0) 0.1, x[5m])";
-    let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-        .expect_err(&format!("`{query}` compiled, and it should not have"));
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "`{query}` did not report NotImplemented: {error}"
-    );
-    // The argument is read as a constant expression, so the refusal names the position it was read
-    // from and quotes the expression -- which is where the fill the query wrote is still visible.
-    let message = error.to_string();
-    assert!(
-        message.contains("first argument"),
-        "`{query}` blamed the wrong argument: {message}"
-    );
-    assert!(
-        message.contains("fill"),
-        "`{query}` did not name the fill it found: {message}"
-    );
+    let cases = [
+        (
+            "quantile_over_time(0.5 + fill(0) 0.1, x[5m])",
+            "first argument",
+        ),
+        ("predict_linear(x[5m], 1 + fill(0) 2)", "second argument"),
+        (
+            "double_exponential_smoothing(x[5m], 0.5, 1 + fill(0) 2)",
+            "third argument",
+        ),
+    ];
+    for (query, position) in cases {
+        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        // The argument is read as a constant expression, so the refusal names its position and
+        // quotes the expression -- where the fill the query wrote is still visible.
+        let message = error.to_string();
+        assert!(
+            message.contains(position),
+            "`{query}` blamed the wrong argument: {message}"
+        );
+        assert!(
+            message.contains("fill"),
+            "`{query}` did not name the fill it found: {message}"
+        );
+    }
 }
 
 /// A `bool` comparison of two constants folds to the number it reports, so the query runs.
@@ -2027,9 +2038,9 @@ fn a_grouping_composes_with_a_math_function() {
 
 /// Every aggregate that folds a group's values into one value per grid point binds, and binds to its
 /// own kind: a name table that mapped two names to one kind would compile `avg(x)` into a sum, which
-/// is why the kind is asserted exactly rather than merely checked to exist. `stddev`, `stdvar` and
-/// `quantile` have no kernel yet and still bind, because a shape this compiler can describe is not
-/// the runtime's to refuse first.
+/// is why the kind is asserted exactly rather than merely checked to exist. Binding `stddev`,
+/// `stdvar` and `quantile` is separate from native execution support: the tree can describe them
+/// independently of the executor's kernels.
 #[test]
 fn the_supported_aggregates_map_to_their_kinds() {
     let cases = [
