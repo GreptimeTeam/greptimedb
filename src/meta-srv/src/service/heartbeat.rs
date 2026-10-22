@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use api::v1::meta::{
-    AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse, PROTOCOL_VERSION,
-    Peer, RequestHeader, ResponseHeader, Role, heartbeat_server,
+    AskLeaderRequest, AskLeaderResponse, Error, HeartbeatRequest, HeartbeatResponse,
+    PROTOCOL_VERSION, Peer, RequestHeader, ResponseHeader, Role, heartbeat_server,
 };
 use common_meta::election::LeaderChangeMessage;
 use common_meta::key::MetadataValue;
@@ -119,8 +119,8 @@ struct HeartbeatSession<R, L> {
     handler_group: Arc<HeartbeatHandlerGroup>,
     ctx: Context,
     sender_id: PusherId,
-    /// The node epoch the stream's pusher was registered with.
-    pusher_epoch: u64,
+    /// The node epoch the stream's pusher was registered with, if any.
+    pusher_epoch: Option<u64>,
 }
 
 impl<R, L> HeartbeatSession<R, L>
@@ -156,7 +156,12 @@ where
             return None;
         };
 
-        let sender_id = register_pusher(&handler_group, header, tx.clone()).await;
+        let sender_id = PusherId::new(header.role(), get_node_id(header));
+        // A datanode stream registers its pusher on its first request that passes the check.
+        if sender_id.role != Role::Datanode {
+            let pusher = Pusher::new(tx.clone());
+            handler_group.register_pusher(sender_id, pusher).await;
+        }
         let mut session = Self {
             requests,
             tx,
@@ -164,7 +169,7 @@ where
             handler_group,
             ctx,
             sender_id,
-            pusher_epoch: 0,
+            pusher_epoch: None,
         };
 
         if session.handle_request(req, true).await {
@@ -232,7 +237,7 @@ where
             .with_label_values(&[sender_id.as_str()])
             .inc();
 
-        let res = match self.check_node_epoch(&req).await {
+        let res = match self.check_node_epoch(&req, is_handshake).await {
             Some(res) => res,
             None => {
                 self.handler_group
@@ -275,51 +280,46 @@ where
         true
     }
 
-    /// Checks the node epoch of a datanode request. Returns the response to send instead of
-    /// running the handlers, if any.
+    /// Checks the node epoch of a datanode request, and registers the stream's pusher once
+    /// the request passes. Returns the response to send instead of running the handlers, if any.
     async fn check_node_epoch(
         &mut self,
         req: &HeartbeatRequest,
+        is_handshake: bool,
     ) -> Option<Result<HeartbeatResponse>> {
         let node_epoch = req.node_epoch;
-        if self.sender_id.role != Role::Datanode || node_epoch == 0 {
+        if self.sender_id.role != Role::Datanode || (node_epoch == 0 && is_handshake) {
             return None;
         }
-        let error = if let Some(election) = &self.ctx.election
-            && !election.is_leader()
-        {
-            Some(api::v1::meta::Error::is_not_leader())
-        } else {
+        // Datanodes that do not report their epoch are not checked.
+        if node_epoch != 0 {
+            if let Some(election) = &self.ctx.election
+                && !election.is_leader()
+            {
+                return Some(Ok(header_only(Some(Error::is_not_leader()))));
+            }
             let kv_backend = &*self.ctx.leader_cached_kv_backend;
             match accept_node_epoch(kv_backend, self.sender_id.id, node_epoch).await {
-                Ok(true) => {
-                    // Before the handlers run, so the stream receives what they broadcast.
-                    if node_epoch > self.pusher_epoch {
-                        self.pusher_epoch = node_epoch;
-                        let pusher = Pusher::new(self.tx.clone()).with_node_epoch(node_epoch);
-                        self.handler_group
-                            .register_pusher(self.sender_id, pusher)
-                            .await;
-                    }
-                    return None;
-                }
+                Ok(true) => {}
                 // No error, so the datanode does not reconnect.
                 Ok(false) => {
                     self.handler_group
                         .deregister_push(self.sender_id, &self.tx)
                         .await;
-                    None
+                    return Some(Ok(header_only(None)));
                 }
                 Err(e) => return Some(Err(e)),
             }
-        };
-        Some(Ok(HeartbeatResponse {
-            header: Some(ResponseHeader {
-                protocol_version: PROTOCOL_VERSION,
-                error,
-            }),
-            ..Default::default()
-        }))
+        }
+        // Before the handlers run, so the stream receives what they broadcast.
+        if self.pusher_epoch.is_none_or(|epoch| node_epoch > epoch) {
+            self.pusher_epoch = Some(node_epoch);
+            let pusher = Pusher::new(self.tx.clone()).with_node_epoch(node_epoch);
+            self.handler_group
+                .register_pusher(self.sender_id, pusher)
+                .await;
+        }
+        None
     }
 
     async fn send_not_leader_error(&mut self) {
@@ -515,17 +515,14 @@ async fn accept_node_epoch(
     }
 }
 
-async fn register_pusher(
-    handler_group: &HeartbeatHandlerGroup,
-    header: &RequestHeader,
-    sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
-) -> PusherId {
-    let role = header.role();
-    let id = get_node_id(header);
-    let pusher_id = PusherId::new(role, id);
-    let pusher = Pusher::new(sender);
-    handler_group.register_pusher(pusher_id, pusher).await;
-    pusher_id
+fn header_only(error: Option<Error>) -> HeartbeatResponse {
+    HeartbeatResponse {
+        header: Some(ResponseHeader {
+            protocol_version: PROTOCOL_VERSION,
+            error,
+        }),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -711,9 +708,9 @@ mod tests {
     async fn test_heartbeat_session_init_registers_sender() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests =
-            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
+            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Flownode, 42))]);
 
         let session = init_session(
             requests,
@@ -734,9 +731,9 @@ mod tests {
     async fn test_heartbeat_session_run_deregisters_sender_on_stream_close() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests =
-            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Datanode, 42))]);
+            MockHeartbeatRequestStream::new(vec![Ok(heartbeat_request(Role::Flownode, 42))]);
         let session = init_session(
             requests,
             tx,
@@ -756,9 +753,9 @@ mod tests {
     async fn test_heartbeat_session_run_forwards_stream_error_after_init() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests = MockHeartbeatRequestStream::new(vec![
-            Ok(heartbeat_request(Role::Datanode, 42)),
+            Ok(heartbeat_request(Role::Flownode, 42)),
             Err(Status::unavailable("temporary")),
         ]);
         let session = init_session(
@@ -783,9 +780,9 @@ mod tests {
     async fn test_heartbeat_session_leader_step_down_sends_aborted_and_deregisters() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests = MockHeartbeatRequestStream::pending_after(vec![Ok(heartbeat_request(
-            Role::Datanode,
+            Role::Flownode,
             42,
         ))]);
         let session = init_session(
@@ -809,9 +806,9 @@ mod tests {
     async fn test_heartbeat_session_leader_watcher_closed_sends_unavailable_and_deregisters() {
         let (tx, mut rx) = mpsc::channel(8);
         let handler_group = test_handler_group();
-        let sender_id = sender_id(Role::Datanode, 42);
+        let sender_id = sender_id(Role::Flownode, 42);
         let requests = MockHeartbeatRequestStream::pending_after(vec![Ok(heartbeat_request(
-            Role::Datanode,
+            Role::Flownode,
             42,
         ))]);
         let session = init_session(
@@ -889,12 +886,14 @@ mod tests {
         use std::time::Duration;
 
         use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, Peer, Role};
+        use common_meta::error::UnexpectedSnafu;
         use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
         use common_meta::key::{MetadataValue, TableMetadataManager};
         use common_meta::kv_backend::memory::MemoryKvBackend;
+        use common_meta::kv_backend::test_util::MockKvBackendBuilder;
         use common_meta::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend};
         use common_meta::region_keeper::MemoryRegionKeeper;
-        use common_meta::rpc::store::PutRequest;
+        use common_meta::rpc::store::{PutRequest, RangeResponse};
         use common_meta::sequence::SequenceBuilder;
         use common_time::util::current_time_millis;
         use tokio::sync::mpsc;
@@ -1023,6 +1022,16 @@ mod tests {
                 .map(|lease| lease.node_addr)
         }
 
+        /// Records `node_epoch` as the highest epoch of the node, through the leader cache.
+        async fn record(ctx: &Context, node_epoch: u64) {
+            let key = DatanodeEpochKey::new(NODE_ID).to_bytes();
+            let value = DatanodeEpochValue { node_epoch }
+                .try_as_raw_value()
+                .unwrap();
+            let req = PutRequest::new().with_key(key).with_value(value);
+            ctx.leader_cached_kv_backend.put(req).await.unwrap();
+        }
+
         fn epochs() -> (u64, u64) {
             let now = current_time_millis() as u64;
             (now - 1000, now)
@@ -1101,8 +1110,7 @@ mod tests {
             push(&group).await;
             assert!(a2.received_push());
 
-            // A1's next request and its new stream do not take the pusher back.
-            a1.send(heartbeat(e1, "a1")).await;
+            // A1's new stream does not take the pusher back.
             let mut a1_again = Stream::open(&group, &ctx).await;
             a1_again.send(heartbeat(e1, "a1")).await;
             push(&group).await;
@@ -1120,6 +1128,46 @@ mod tests {
             a2.session.run().await;
             push(&group).await;
             assert!(a2_again.received_push());
+
+            // A fenced stream removes its own pusher, and a handshake does not take the slot.
+            record(&ctx, e2 + 1).await;
+            a2_again.send(heartbeat(e2, "a2")).await;
+            let pusher_id = PusherId::new(Role::Datanode, NODE_ID);
+            assert!(!group.contains_pusher(&pusher_id).await);
+            let _a1_reconnected = Stream::open(&group, &ctx).await;
+            assert!(!group.contains_pusher(&pusher_id).await);
+        }
+
+        #[tokio::test]
+        async fn test_kv_error_fails_the_request() {
+            let group = new_group();
+            let mut ctx = TestEnv::new().ctx();
+            let kv_backend = MockKvBackendBuilder::default()
+                .range_fn(Arc::new(|_| {
+                    Ok(RangeResponse {
+                        kvs: vec![],
+                        more: false,
+                    })
+                }))
+                .txn(Arc::new(|_| {
+                    UnexpectedSnafu {
+                        err_msg: "injected",
+                    }
+                    .fail()
+                }))
+                .build()
+                .unwrap();
+            let cached = LeaderCachedKvBackend::with_always_leader(Arc::new(kv_backend));
+            ctx.leader_cached_kv_backend = Arc::new(cached);
+            let (e1, _) = epochs();
+            let mut a1 = Stream::open(&group, &ctx).await;
+
+            let req = HeartbeatRequest {
+                node_epoch: e1,
+                ..heartbeat_request(Role::Datanode, NODE_ID)
+            };
+            assert!(a1.session.handle_request(req, false).await);
+            assert!(a1.rx.recv().await.unwrap().is_err());
         }
 
         #[tokio::test]
@@ -1129,6 +1177,8 @@ mod tests {
             ctx.mailbox = mailbox(group.pushers());
             let (e1, _) = epochs();
             let mut a1 = Stream::open(&group, &ctx).await;
+            // A request without an epoch registers the pusher first.
+            a1.send(heartbeat(0, "a1")).await;
             let reply = ctx
                 .mailbox
                 .send(
@@ -1206,25 +1256,11 @@ mod tests {
             let ctx = TestEnv::new().ctx();
             // Even after another process of the node has recorded its epoch.
             let (_, e2) = epochs();
-            let key = DatanodeEpochKey::new(NODE_ID).to_bytes();
-            let value = DatanodeEpochValue { node_epoch: e2 };
-            ctx.kv_backend
-                .put(
-                    PutRequest::new()
-                        .with_key(key.clone())
-                        .with_value(value.try_as_raw_value().unwrap()),
-                )
-                .await
-                .unwrap();
+            record(&ctx, e2).await;
             let mut a1 = Stream::open(&group, &ctx).await;
 
             let res = a1.send(heartbeat(0, "a1")).await;
             assert!(res.region_lease.is_some());
-            let record = ctx.kv_backend.get(&key).await.unwrap().unwrap();
-            assert_eq!(
-                DatanodeEpochValue::try_from_raw_value(&record.value).unwrap(),
-                value
-            );
             push(&group).await;
             assert!(a1.received_push());
         }

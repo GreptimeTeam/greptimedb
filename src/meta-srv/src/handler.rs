@@ -337,22 +337,22 @@ impl Pushers {
 
     /// Inserts the pusher unless the slot holds one with a higher node epoch, so an older
     /// datanode process cannot take over a newer one's pusher. A pusher of the same stream
-    /// only takes the new epoch, keeping the messages waiting on it. Returns whether the slot
-    /// was empty.
-    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
+    /// only takes the new epoch, keeping the messages waiting on it. Returns `None` if refused,
+    /// otherwise whether the slot was empty.
+    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> Option<bool> {
         let mut pushers = self.0.write().await;
         match pushers.get_mut(&pusher_id) {
             None => {
                 pushers.insert(pusher_id, pusher);
-                return true;
+                return Some(true);
             }
-            Some(current) if current.node_epoch > pusher.node_epoch => {}
+            Some(current) if current.node_epoch > pusher.node_epoch => return None,
             Some(current) if current.sender.same_channel(&pusher.sender) => {
                 current.node_epoch = pusher.node_epoch;
             }
             Some(current) => *current = pusher,
         }
-        false
+        Some(false)
     }
 
     /// Removes the pusher if it pushes to `sender`'s channel, keeping one that another stream
@@ -397,8 +397,11 @@ impl HeartbeatHandlerGroup {
     /// Registers the heartbeat response [`Pusher`] with the given key to the group, unless the
     /// group holds one with a higher node epoch.
     pub async fn register_pusher(&self, pusher_id: PusherId, pusher: Pusher) {
+        let Some(vacant) = self.pushers.insert(pusher_id, pusher).await else {
+            return;
+        };
         info!("Pusher register: {}", pusher_id);
-        if self.pushers.insert(pusher_id, pusher).await {
+        if vacant {
             METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
         }
     }
@@ -1524,23 +1527,17 @@ mod tests {
         let id = PusherId::new(Role::Datanode, 1);
         let (tx1, _rx1) = mpsc::channel(1);
         let (tx2, _rx2) = mpsc::channel(1);
-        assert!(pushers.insert(id, Pusher::new(tx1.clone())).await);
-        // Taking an epoch, being refused and replacing another stream's pusher fill no slot.
-        assert!(
-            !pushers
-                .insert(id, Pusher::new(tx1).with_node_epoch(2))
-                .await
+        assert_eq!(
+            pushers.insert(id, Pusher::new(tx1.clone())).await,
+            Some(true)
         );
-        assert!(
-            !pushers
-                .insert(id, Pusher::new(tx2.clone()).with_node_epoch(1))
-                .await
-        );
-        assert!(
-            !pushers
-                .insert(id, Pusher::new(tx2).with_node_epoch(2))
-                .await
-        );
+        // Taking an epoch and replacing another stream's pusher fill no slot.
+        let in_place = Pusher::new(tx1).with_node_epoch(2);
+        assert_eq!(pushers.insert(id, in_place).await, Some(false));
+        let lower = Pusher::new(tx2.clone()).with_node_epoch(1);
+        assert_eq!(pushers.insert(id, lower).await, None);
+        let other = Pusher::new(tx2).with_node_epoch(2);
+        assert_eq!(pushers.insert(id, other).await, Some(false));
     }
 
     #[tokio::test]

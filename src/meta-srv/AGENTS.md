@@ -47,8 +47,9 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   session checks a datanode request's non-zero `node_epoch` against the highest
   one recorded under `__datanode_epoch`, read and raised through the leader
   cache. A lower epoch gets a reply without running the chain; epoch 0
-  (handshakes, older datanodes) is not checked. Datanode pushers carry the
-  epoch; a lower one cannot replace a higher one.
+  (handshakes, older datanodes) is not checked. A datanode stream registers
+  its pusher on its first request that passes, not on the handshake; pushers
+  carry the epoch, and a lower one cannot replace a higher one.
 - **DDL**: `service/procedure.rs` (`ddl`) is leader-only and hands off to
   `common-meta`'s `DdlManager`, executed via `common-procedure`.
 - **Region migration**: `procedure/region_migration/manager.rs` plus per-step
