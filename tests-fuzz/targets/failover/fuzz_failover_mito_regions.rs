@@ -158,7 +158,7 @@ async fn execute_create_exprs(
             let _permit = semaphore.acquire().await.unwrap();
             let translator = CreateTableExprTranslator;
             let sql = translator.translate(expr).unwrap();
-            sqlx::query(&sql)
+            sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
                 .execute(&greptime)
                 .await
                 .context(error::ExecuteQuerySnafu { sql: &sql })
@@ -225,7 +225,7 @@ async fn execute_insert_exprs<R: Rng + 'static>(
                 let sql = translator.translate(&insert_expr)?;
                 let result = greptime
                     // unprepared query, see <https://github.com/GreptimeTeam/greptimedb/issues/3500>
-                    .execute(sql.as_str())
+                    .execute(sqlx::AssertSqlSafe(sql.as_str()))
                     .await
                     .context(error::ExecuteQuerySnafu { sql: &sql })?;
                 ensure!(
@@ -337,7 +337,7 @@ async fn execute_failover(ctx: FuzzContext, input: FuzzInput) -> Result<()> {
 
     for table_ctx in table_ctxs {
         let sql = format!("DROP TABLE {}", table_ctx.name);
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&ctx.greptime)
             .await
             .context(error::ExecuteQuerySnafu { sql })?;
