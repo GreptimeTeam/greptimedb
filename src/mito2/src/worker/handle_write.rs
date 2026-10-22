@@ -33,7 +33,7 @@ use crate::metrics;
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
-use crate::region::{RegionLeaderState, RegionRoleState, lease_now};
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
 use crate::request::{
     SenderBulkRequest, SenderWriteRequest, WriteRequest, check_bulk_insert_batch,
@@ -298,7 +298,7 @@ impl<S> RegionWorkerLoop<S> {
         // Initialize region write context map.
         let mut region_ctxs = HashMap::new();
         // One reading serves the batch, as preparing it does not wait.
-        let lease_now = self.node_lease.is_enabled().then(lease_now);
+        let lease_now = self.node_lease.is_enabled().then(|| self.node_lease.now());
         self.process_write_requests(&mut region_ctxs, write_requests, lease_now);
         self.process_bulk_requests(&mut region_ctxs, bulk_requests, lease_now);
         region_ctxs
@@ -602,7 +602,7 @@ impl<S> RegionWorkerLoop<S> {
         if !self.node_lease.is_enabled() {
             return;
         }
-        let now = lease_now();
+        let now = self.node_lease.now();
         for (region_id, region_ctx) in region_ctxs.iter_mut() {
             if region_ctx.is_failed() || now < region_ctx.leader_deadline {
                 continue;

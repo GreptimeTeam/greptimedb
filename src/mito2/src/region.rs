@@ -226,11 +226,6 @@ fn lease_nanos(instant: Instant) -> u64 {
     instant.saturating_duration_since(*LEASE_EPOCH).as_nanos() as u64
 }
 
-/// Returns the current time in the unit of [Deadline].
-pub(crate) fn lease_now() -> u64 {
-    lease_nanos(Instant::now())
-}
-
 /// A lease deadline in nanoseconds since [LEASE_EPOCH]. It only moves forward; 0 means none.
 #[derive(Debug, Default)]
 pub(crate) struct Deadline(AtomicU64);
@@ -251,6 +246,9 @@ pub(crate) struct NodeLease {
     /// Whether writes need a lease. Only a datanode the metasrv controls sets it.
     enabled: AtomicBool,
     deadline: Deadline,
+    /// How far tests moved the clock of the lease checks forward, in nanoseconds.
+    #[cfg(any(test, feature = "test"))]
+    clock_skew: AtomicU64,
 }
 
 impl NodeLease {
@@ -264,6 +262,21 @@ impl NodeLease {
 
     pub(crate) fn renew(&self, deadline: Instant) {
         self.deadline.extend(deadline);
+    }
+
+    /// Returns the current time in the unit of [Deadline].
+    pub(crate) fn now(&self) -> u64 {
+        #[cfg(any(test, feature = "test"))]
+        let skew = self.clock_skew.load(Ordering::Relaxed);
+        #[cfg(not(any(test, feature = "test")))]
+        let skew = 0;
+        lease_nanos(Instant::now()) + skew
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    pub(crate) fn advance_clock(&self, duration: std::time::Duration) {
+        self.clock_skew
+            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
     }
 
     /// Lets a region created or upgraded on this node write until the node's deadline. The

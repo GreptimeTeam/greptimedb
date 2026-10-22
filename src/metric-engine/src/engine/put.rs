@@ -813,8 +813,8 @@ mod tests {
     use store_api::path_utils::table_dir;
     use store_api::region_engine::{RegionEngine, RegionRole};
     use store_api::region_request::{
-        EnterStagingRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
-        StagingPartitionDirective,
+        EnterStagingRequest, PathType, RegionCloseRequest, RegionDropRequest, RegionOpenRequest,
+        RegionRequest, StagingPartitionDirective,
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -2365,19 +2365,34 @@ mod tests {
             .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
             .await;
         mito.require_write_lease();
-        let env = TestEnv::with_mito_engine(mito_env, mito);
+        let env = TestEnv::with_mito_engine(mito_env, mito.clone());
         let engine = env.metric();
         // Created before the node has a lease, the physical region has none.
         let physical_region_id = env.default_physical_region_id();
         env.create_physical_region(physical_region_id, &TestEnv::default_table_dir(), vec![])
             .await;
-        let grant = |deadline| {
+        const LEASE: Duration = Duration::from_secs(10);
+        // Grants a lease until `n` leases from now; `expire` moves the clock of the lease checks
+        // forward by one lease.
+        let grant = |n| {
             engine
-                .set_region_role_with_lease(physical_region_id, RegionRole::Leader, deadline)
+                .set_region_role_with_lease(
+                    physical_region_id,
+                    RegionRole::Leader,
+                    Instant::now() + n * LEASE,
+                )
                 .unwrap()
         };
+        let expire = || mito.advance_lease_clock(LEASE);
         let logical_region_id = env.default_logical_region_id();
         let alter = |tag| RegionRequest::Alter(test_util::alter_logical_region_request(&[tag]));
+        let drop_request = || {
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            })
+        };
         let put = |tags: &[&str]| {
             let request = RegionRequest::Put(RegionPutRequest {
                 rows: Rows {
@@ -2389,6 +2404,18 @@ mod tests {
                 skip_wal: false,
             });
             engine.handle_request(logical_region_id, request)
+        };
+        // Holds `request` after its metadata region append while the lease expires.
+        let expire_after_append = async |request| {
+            listener.pause_next();
+            let task = {
+                let engine = engine.clone();
+                tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
+            };
+            listener.wait_appended().await;
+            expire();
+            listener.resume();
+            task.await.unwrap()
         };
 
         // Each DDL below gives the data region a new column before the metadata region rejects
@@ -2405,26 +2432,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
-        let deadline = Instant::now() + Duration::from_secs(1);
-        grant(deadline);
+        grant(1);
         engine
             .handle_request(logical_region_id, create())
             .await
             .unwrap();
         put(&["job"]).await.unwrap();
 
-        // The lease expires while an ALTER writes the metadata region, after the WAL append.
-        listener.pause_next();
-        let task = {
-            let engine = engine.clone();
-            let request = alter("tag1");
-            tokio::spawn(async move { engine.handle_request(logical_region_id, request).await })
-        };
-        listener.wait_appended().await;
-        tokio::time::sleep_until(deadline.into()).await;
-        listener.resume();
-        assert!(task.await.unwrap().unwrap_err().is_retryable());
-        // The write is applied, so the cached metadata must not hide it.
+        // The metadata write of the ALTER is applied, so the cached metadata must not hide it.
+        let err = expire_after_append(alter("tag1")).await.unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
         let metadata = engine.get_metadata(logical_region_id).await.unwrap();
         assert!(metadata.column_by_name("tag1").is_some());
 
@@ -2433,11 +2450,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_retryable(), "{err:?}");
-        grant(Instant::now() + Duration::from_secs(10));
+        grant(2);
         engine
             .handle_request(logical_region_id, alter("tag2"))
             .await
             .unwrap();
         put(&["job", "tag1", "tag2"]).await.unwrap();
+
+        // The metadata delete of the DROP is applied, so writes must not use the cached columns.
+        let err = expire_after_append(drop_request()).await.unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+        grant(4);
+        put(&["job"]).await.unwrap_err();
+        engine
+            .handle_request(logical_region_id, drop_request())
+            .await
+            .unwrap();
     }
 }
