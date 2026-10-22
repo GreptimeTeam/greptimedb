@@ -73,14 +73,9 @@
 //! because rejecting a query the compiler does not understand is the only honest alternative to
 //! compiling it into something else.
 //!
-//! What is bound and what is read are two different things. `RangeWindow::anchor_ms` is bound
-//! faithfully, on a range selector and on a subquery alike, so that a tree describes the query it
-//! came from; but nothing executes a tree yet. There is no executor in this repository: `NativeTree`
-//! is named by this module, by `promql::native` and by their tests, and the only readers of
-//! `anchor_ms` are the display and `RangeEvaluator`'s own window arithmetic, which no caller drives
-//! from a tree. So `rate(x[5m] @ 1234)` and `rate(x[5m:1m] @ 1234)` compile to the tree that says
-//! what they mean and neither evaluates to anything yet: making an anchor run is a separate job from
-//! describing it, and binding one here claims only the description.
+//! The compiler binds a subquery's child grid and `RangeWindow` independently of runtime execution:
+//! compilation describes the anchored interval, while runtime support determines how that bound
+//! plan is consumed.
 //!
 //! Two decisions keep the recursion from growing a branch per query. A constant argument — a
 //! quantile, a rounding step, a clamp bound — is folded out of the statement by [`constant_value`],
@@ -132,7 +127,7 @@ use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
-use promql::range_eval::{RangeFunction, RangeWindow};
+use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
@@ -750,12 +745,10 @@ const DEFAULT_SUBQUERY_STEP_MS: i64 = 60_000;
 /// compiled against the subquery's grid for the same reason — a selector inside it has to land where
 /// the window will read it.
 ///
-/// An `@` anchor makes the subquery step-invariant the way it makes a range selector one: every
-/// output point reads the same interval, `(anchor - offset - range, anchor - offset]`, rather than
-/// one interval of its own. So an anchored subquery's child grid is built for that one interval,
-/// while its output grid is the statement's as before, and the anchor is bound on the window's
-/// `RangeWindow` beside the range and the offset. Nothing reads `anchor_ms` yet — the module
-/// documentation says what that means — so binding it describes the query without running it.
+/// An `@` anchor makes the subquery step-invariant: every output point reads the same interval,
+/// `(anchor - offset - range, anchor - offset]`. The child grid is built for that interval, while
+/// the output grid remains the statement's grid; the anchor, range and offset are bound together in
+/// the window.
 fn subquery_window(
     context: &Context,
     name: &str,
@@ -799,12 +792,18 @@ fn subquery_window(
         )));
     }
     let offset_ms = selector_offset_ms(offset)?;
-    // Which interval the inner expression has to cover depends on the anchor: without one it is the
-    // union of every output point's read window, with one it is that single window.
-    let child_grid = match anchor_ms {
-        None => subquery_grid(&context.grid, range_ms, offset_ms, step_ms)?,
-        Some(anchor_ms) => anchored_subquery_grid(anchor_ms, range_ms, offset_ms, step_ms)?,
+    let window = RangeWindow {
+        range_ms,
+        offset_ms,
+        anchor_ms,
     };
+    let child_spec = subquery_grid(context.grid.spec(), window, step_ms)?.ok_or_else(|| {
+        not_implemented(&format!(
+            "the subquery over {range_ms}ms at {step_ms}ms per step, which names no evaluation point \
+             in its anchored interval or the statement's range"
+        ))
+    })?;
+    let child_grid = Arc::new(EvalGrid::try_new(child_spec).map_err(grid_error)?);
     let inner = compile_expr(
         &Context {
             stmt: context.stmt,
@@ -827,12 +826,7 @@ fn subquery_window(
             input: Box::new(inner),
             op: BoundWindow {
                 function,
-                window: RangeWindow {
-                    range_ms,
-                    offset_ms,
-                    // Bound, not read: no runtime consumes a tree yet.
-                    anchor_ms,
-                },
+                window,
                 // The one field that tells this window from a raw one: its input was evaluated on the
                 // subquery's grid rather than read from the scan.
                 input_grid: Some(child_grid),
@@ -841,97 +835,6 @@ fn subquery_window(
         },
         output,
     })
-}
-
-/// The grid a subquery's inner expression is evaluated on when it has no anchor.
-///
-/// The subquery, evaluated at every point of `output_grid`, reads `(point - offset - range,
-/// point - offset]` sampled at `step`. One grid serves the whole statement, so it spans the union of
-/// those read ranges: from the first step boundary strictly after the earliest one, to the last
-/// statement point shifted by the offset. The bounds are the existing planner's subquery child window
-/// to the millisecond, because the two have to name the same samples for a query to mean one thing.
-fn subquery_grid(
-    output_grid: &Arc<EvalGrid>,
-    range_ms: i64,
-    offset_ms: i64,
-    step_ms: i64,
-) -> Result<Arc<EvalGrid>> {
-    let spec = output_grid.spec();
-    let start = i128::from(spec.start_ms);
-    let last = start + i128::from(spec.len - 1) * i128::from(spec.step_ms);
-    let offset = i128::from(offset_ms);
-    // Every read window ends at its point minus the offset, so no sample lies after this bound, and
-    // none lies at or before the earliest window's start.
-    subquery_read_grid(
-        start - offset - i128::from(range_ms),
-        last - offset,
-        step_ms,
-        format!(
-            "the subquery over {range_ms}ms at {step_ms}ms per step, which names no evaluation point \
-             in the statement's range"
-        ),
-    )
-}
-
-/// The grid an `@`-anchored subquery's inner expression is evaluated on.
-///
-/// An anchor makes the subquery step-invariant: every output point reads the same interval,
-/// `(anchor - offset - range, anchor - offset]`, sampled at `step`. The child grid therefore holds
-/// exactly the samples of that one interval — from the first step boundary strictly after its left end
-/// to the anchor shifted by the offset — and the statement's own grid does not enter into it. The two
-/// bounds are rounded by [`subquery_read_grid`], which an unanchored subquery uses too, so the two
-/// shapes cannot disagree about where a step boundary lies.
-fn anchored_subquery_grid(
-    anchor_ms: i64,
-    range_ms: i64,
-    offset_ms: i64,
-    step_ms: i64,
-) -> Result<Arc<EvalGrid>> {
-    let end = i128::from(anchor_ms) - i128::from(offset_ms);
-    subquery_read_grid(
-        end - i128::from(range_ms),
-        end,
-        step_ms,
-        format!(
-            "the subquery anchored at {anchor_ms}ms over {range_ms}ms at {step_ms}ms per step, which \
-             names no evaluation point in its anchored interval"
-        ),
-    )
-}
-
-/// The samples of the read interval `(earliest, latest]` at `step`, as a grid.
-///
-/// The interval is left-open and right-closed, so its first sample is the step boundary strictly after
-/// `earliest` and its last is the greatest step boundary at or before `latest`. Both are multiples of
-/// `step`, which is what makes them points of one grid. `refusal` says what was refused when the
-/// interval holds no such sample at all.
-fn subquery_read_grid(
-    earliest: i128,
-    latest: i128,
-    step_ms: i64,
-    refusal: String,
-) -> Result<Arc<EvalGrid>> {
-    let step = i128::from(step_ms);
-    let grid_start = (earliest.div_euclid(step) + 1) * step;
-    // An empty grid cannot be built, and it would not mean the same thing anyway: an interval that
-    // ends before its own first step boundary names no sample at all.
-    if grid_start > latest {
-        return Err(not_implemented(&refusal));
-    }
-    let bound = |what: &str, value: i128| {
-        i64::try_from(value).map_err(|_| {
-            DataFusionError::Plan(format!(
-                "the subquery's {what} of {value}ms is out of range"
-            ))
-        })
-    };
-    let child = GridSpec::try_from_range(
-        bound("first evaluation", grid_start)?,
-        bound("last evaluation", latest)?,
-        step_ms,
-    )
-    .map_err(|error| DataFusionError::Plan(format!("the subquery's grid is invalid: {error}")))?;
-    Ok(Arc::new(EvalGrid::try_new(child).map_err(grid_error)?))
 }
 
 /// Compiles a bare selector into an instant selection over the raw input.

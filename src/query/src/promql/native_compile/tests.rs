@@ -25,8 +25,9 @@ use promql::native::plan::{
 };
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp};
+use promql_parser::parser::value::Offset;
 use promql_parser::parser::{
-    BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, VectorMatchFillValues,
+    AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, VectorMatchFillValues,
 };
 
 use super::compile;
@@ -2611,6 +2612,52 @@ fn a_subquery_grid_follows_its_range_step_and_offset() {
             "`{query}` moved the output off the statement's grid"
         );
     }
+}
+
+/// A subquery whose child interval contains no step boundary is refused as unsupported.
+#[test]
+fn a_subquery_with_an_empty_child_grid_is_refused() {
+    let error = compile(
+        &eval_stmt("rate(x[1ms:1m] @ 0.001)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("an empty subquery child grid compiled");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "an empty child grid is an unsupported subquery shape: {error}"
+    );
+    assert!(
+        error.to_string().contains("names no evaluation point"),
+        "the refusal did not identify the empty child grid: {error}"
+    );
+}
+
+/// An anchored fold offset that cannot be represented as i64 is a plan error.
+#[test]
+fn a_subquery_with_an_overflowing_fold_offset_is_refused() {
+    let mut stmt = eval_stmt("rate(x[5m:1m] @ 0)");
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("query parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("call argument parses to a subquery");
+    };
+    subquery.at = Some(AtModifier::At(
+        UNIX_EPOCH + Duration::from_millis(i64::MAX as u64),
+    ));
+    subquery.offset = Some(Offset::Neg(Duration::from_millis(1)));
+
+    let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err("an overflowing subquery fold offset compiled");
+    assert!(
+        matches!(error, DataFusionError::Plan(_)),
+        "an overflowing folded offset is a plan error: {error}"
+    );
+    assert!(
+        error.to_string().contains("out of range"),
+        "the rejection did not identify the offset overflow: {error}"
+    );
 }
 
 /// A subquery step that names no point is refused: `x[5m:]` falls back to Prometheus's default
