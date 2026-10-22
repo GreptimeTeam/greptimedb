@@ -889,11 +889,12 @@ mod tests {
         use std::time::Duration;
 
         use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, Peer, Role};
-        use common_meta::key::TableMetadataManager;
-        use common_meta::key::datanode_epoch::DatanodeEpochKey;
+        use common_meta::key::datanode_epoch::{DatanodeEpochKey, DatanodeEpochValue};
+        use common_meta::key::{MetadataValue, TableMetadataManager};
         use common_meta::kv_backend::memory::MemoryKvBackend;
         use common_meta::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend};
         use common_meta::region_keeper::MemoryRegionKeeper;
+        use common_meta::rpc::store::PutRequest;
         use common_meta::sequence::SequenceBuilder;
         use common_time::util::current_time_millis;
         use tokio::sync::mpsc;
@@ -903,14 +904,14 @@ mod tests {
         use crate::handler::region_lease_handler::RegionLeaseHandler;
         use crate::handler::test_utils::TestEnv;
         use crate::handler::{
-            HeartbeatHandlerGroup, HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pusher,
-            PusherId, Pushers,
+            HandleControl, HeartbeatAccumulator, HeartbeatHandler, HeartbeatHandlerGroup,
+            HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pusher, PusherId, Pushers,
         };
         use crate::metasrv::Context;
         use crate::service::heartbeat::{
             HeartbeatResponseResult, HeartbeatSession, accept_node_epoch,
         };
-        use crate::service::mailbox::{Channel, MailboxRef};
+        use crate::service::mailbox::{BroadcastChannel, Channel, MailboxRef};
         use crate::service::store::cached_kv::LeaderCachedKvBackend;
 
         const NODE_ID: u64 = 1;
@@ -956,9 +957,42 @@ mod tests {
                 Arc::new(MemoryRegionKeeper::default()),
                 None,
             );
-            let builder = HeartbeatHandlerGroupBuilder::new(Pushers::default())
-                .with_region_lease_handler(Some(lease_handler));
-            Arc::new(builder.add_default_handlers().build().unwrap())
+            let mut builder = HeartbeatHandlerGroupBuilder::new(Pushers::default())
+                .with_region_lease_handler(Some(lease_handler))
+                .add_default_handlers();
+            builder
+                .add_handler_after("ResponseHeaderHandler", BroadcastHandler)
+                .unwrap();
+            Arc::new(builder.build().unwrap())
+        }
+
+        /// Broadcasts to datanodes while handling a request from the address "broadcast".
+        struct BroadcastHandler;
+
+        #[async_trait::async_trait]
+        impl HeartbeatHandler for BroadcastHandler {
+            fn is_acceptable(&self, role: Role) -> bool {
+                role == Role::Datanode
+            }
+
+            async fn handle(
+                &self,
+                req: &HeartbeatRequest,
+                ctx: &mut Context,
+                _: &mut HeartbeatAccumulator,
+            ) -> crate::error::Result<HandleControl> {
+                if req
+                    .peer
+                    .as_ref()
+                    .is_some_and(|peer| peer.addr == "broadcast")
+                {
+                    let msg = MailboxMessage::default();
+                    ctx.mailbox
+                        .broadcast(&BroadcastChannel::Datanode, &msg)
+                        .await?;
+                }
+                Ok(HandleControl::Continue)
+            }
         }
 
         fn heartbeat(node_epoch: u64, addr: &str) -> HeartbeatRequest {
@@ -1046,12 +1080,24 @@ mod tests {
         #[tokio::test]
         async fn test_pusher_follows_the_newer_process() {
             let group = new_group();
-            let ctx = TestEnv::new().ctx();
+            let mut ctx = TestEnv::new().ctx();
+            ctx.mailbox = mailbox(group.pushers());
             let (e1, e2) = epochs();
             let mut a1 = Stream::open(&group, &ctx).await;
             a1.send(heartbeat(e1, "a1")).await;
+            // A2 takes over before the handlers of its first heartbeat run, so it receives
+            // what they broadcast ahead of the response.
             let mut a2 = Stream::open(&group, &ctx).await;
-            a2.send(heartbeat(e2, "a2")).await;
+            assert!(
+                a2.session
+                    .handle_request(heartbeat(e2, "broadcast"), false)
+                    .await
+            );
+            let broadcast = a2.rx.recv().await.unwrap().unwrap();
+            assert!(broadcast.mailbox_message.is_some());
+            let res = a2.rx.recv().await.unwrap().unwrap();
+            assert!(res.region_lease.is_some());
+            assert!(!a1.received_push());
             push(&group).await;
             assert!(a2.received_push());
 
@@ -1158,12 +1204,27 @@ mod tests {
         async fn test_datanode_without_epoch_is_not_checked() {
             let group = new_group();
             let ctx = TestEnv::new().ctx();
+            // Even after another process of the node has recorded its epoch.
+            let (_, e2) = epochs();
+            let key = DatanodeEpochKey::new(NODE_ID).to_bytes();
+            let value = DatanodeEpochValue { node_epoch: e2 };
+            ctx.kv_backend
+                .put(
+                    PutRequest::new()
+                        .with_key(key.clone())
+                        .with_value(value.try_as_raw_value().unwrap()),
+                )
+                .await
+                .unwrap();
             let mut a1 = Stream::open(&group, &ctx).await;
 
             let res = a1.send(heartbeat(0, "a1")).await;
             assert!(res.region_lease.is_some());
-            let key = DatanodeEpochKey::new(NODE_ID).to_bytes();
-            assert!(ctx.kv_backend.get(&key).await.unwrap().is_none());
+            let record = ctx.kv_backend.get(&key).await.unwrap().unwrap();
+            assert_eq!(
+                DatanodeEpochValue::try_from_raw_value(&record.value).unwrap(),
+                value
+            );
             push(&group).await;
             assert!(a1.received_push());
         }

@@ -95,7 +95,8 @@ impl LeaderCachedKvBackend {
         Self::new(Arc::new(AlwaysLeader), store)
     }
 
-    /// The caller MUST ensure during the loading, there are no mutation requests reaching the `LeaderCachedKvStore`.
+    /// Loads the cached prefixes. Writes may run meanwhile: a prefix whose load overlapped a
+    /// write is dropped from the cache again, and read through later.
     pub async fn load(&self) -> Result<()> {
         for prefix in &CACHE_KEY_PREFIXES[..] {
             let _timer =
