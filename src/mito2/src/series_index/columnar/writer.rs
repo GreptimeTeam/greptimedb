@@ -39,6 +39,9 @@ use crate::series_index::writer::{decode_series_identity, tag_columns, validate_
 use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN, TSID_COLUMN};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
+/// Maximum owned row bytes per block; a single larger row is flushed on its own.
+const BLOCK_BYTE_BUDGET: usize = 8 * 1024 * 1024;
+
 /// Drop owns the live OpenDAL writer, including its private atomic-write temporary file.
 struct LiveFile {
     writer: Option<Writer>,
@@ -177,6 +180,7 @@ pub(crate) struct ColumnarWriter {
     last_key: Vec<u8>,
     current: Option<Row>,
     rows: Vec<Row>,
+    row_bytes: usize,
     leaves: Vec<Vec<Block>>,
     leaf_bytes: usize,
     descriptor_bytes: usize,
@@ -234,6 +238,7 @@ impl ColumnarWriter {
             last_key: Vec::new(),
             current: None,
             rows: Vec::new(),
+            row_bytes: 0,
             leaves: Vec::new(),
             leaf_bytes: 12,
             descriptor_bytes: 0,
@@ -245,15 +250,25 @@ impl ColumnarWriter {
 
     async fn push_current(&mut self) -> Result<()> {
         if let Some(row) = self.current.take() {
-            if self
-                .rows
-                .first()
-                .is_some_and(|first| first.id.table_id != row.id.table_id)
+            let row_bytes = std::mem::size_of::<Row>()
+                + row.tags.capacity() * std::mem::size_of::<Option<String>>()
+                + row
+                    .tags
+                    .iter()
+                    .flatten()
+                    .map(String::capacity)
+                    .sum::<usize>();
+            if self.row_bytes.saturating_add(row_bytes) > BLOCK_BYTE_BUDGET
+                || self
+                    .rows
+                    .first()
+                    .is_some_and(|first| first.id.table_id != row.id.table_id)
             {
                 self.flush_block().await?;
             }
+            self.row_bytes += row_bytes;
             self.rows.push(row);
-            if self.rows.len() >= self.options.block_rows {
+            if self.rows.len() >= self.options.block_rows || self.row_bytes >= BLOCK_BYTE_BUDGET {
                 self.flush_block().await?;
             }
         }
@@ -328,6 +343,7 @@ impl ColumnarWriter {
             return Ok(());
         }
         let rows = std::mem::take(&mut self.rows);
+        self.row_bytes = 0;
         // TODO: benchmark inline versus offloaded codecs for latency, throughput,
         // and async-worker responsiveness before adding scheduling overhead.
         let (mut block, chunks) = encode_block(rows, &self.tags, &self.options)?;
@@ -561,7 +577,7 @@ fn encode_block(
         chunks.push(bytes);
     }
     for (index, (_, name)) in tags.iter().enumerate() {
-        let values: Vec<_> = rows.iter().map(|row| row.tags[index].clone()).collect();
+        let values: Vec<_> = rows.iter().map(|row| row.tags[index].as_deref()).collect();
         let null_count = values.iter().filter(|v| v.is_none()).count() as u32;
         if null_count == block.rows {
             continue;
@@ -570,13 +586,13 @@ fn encode_block(
             .iter()
             .flatten()
             .min()
-            .cloned()
+            .copied()
             .ok_or_else(|| invalid("missing tag minimum"))?;
         let max = values
             .iter()
             .flatten()
             .max()
-            .cloned()
+            .copied()
             .ok_or_else(|| invalid("missing tag maximum"))?;
         let (payload, bytes) = pack(
             &encode_dictionary(&values)?,
@@ -590,7 +606,7 @@ fn encode_block(
             name: name.clone(),
             payload,
             null_count,
-            bounds: Some((min, max)),
+            bounds: Some((min.to_owned(), max.to_owned())),
         });
         chunks.push(bytes);
     }

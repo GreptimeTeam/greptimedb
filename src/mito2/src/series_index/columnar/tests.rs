@@ -148,13 +148,7 @@ fn integer_and_dictionary_wire() {
     assert!(codec::decode_integers(&[255; 10], 1).is_err());
     assert!(codec::decode_integers(&[0], 2).is_err());
     assert!(codec::decode_integers(&[0, 0], 1).is_err());
-    let values = vec![
-        None,
-        Some(String::new()),
-        Some("a".into()),
-        None,
-        Some("a".into()),
-    ];
+    let values = vec![None, Some(""), Some("a"), None, Some("a")];
     let decoded = codec::decode_dictionary(&codec::encode_dictionary(&values).unwrap(), 5).unwrap();
     assert_eq!(decoded.codes, [0, 1, 2, 0, 2]);
     assert_eq!(
@@ -1315,4 +1309,68 @@ async fn dictionary_expansion_is_batched_and_empty_string_filter_is_exact() {
             .sum::<usize>(),
         16384
     );
+}
+
+#[tokio::test]
+async fn large_repeated_tags_across_small_batches() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSeriesFormat::default();
+    let label = "x".repeat(1024 * 1024);
+    let mut entry = entry();
+    let mut writer = format
+        .writer(meta.clone(), store.clone(), &entry)
+        .await
+        .unwrap();
+    for tsid in 0..20 {
+        let key = new_sparse_primary_key(&[&label, "x"], &meta, 1, tsid);
+        // Duplicate series cross batch boundaries and must still aggregate correctly.
+        for _ in 0..2 {
+            writer
+                .write(&batch(std::slice::from_ref(&key), false, 0))
+                .await
+                .unwrap();
+        }
+    }
+    let artifact = writer.finish().await.unwrap();
+    entry.file_size = artifact.file_size;
+    entry.artifact = Some(artifact);
+    let (purger, _) = series_index_channel(store.clone());
+    let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+    let batches = format
+        .reader(store.clone(), handle)
+        .await
+        .unwrap()
+        .read(request(&[TSID_COLUMN, ROW_COUNT_COLUMN, "tag_0"]))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(batches.len() >= 3);
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 20);
+    let mut expected_tsid = 0;
+    for batch in batches {
+        assert!(batch.num_rows() <= 7);
+        let labels = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(labels.iter().all(|value| value == Some(label.as_str())));
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let counts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        for (id, count) in ids.values().iter().zip(counts.values()) {
+            assert_eq!(*id, expected_tsid);
+            assert_eq!(*count, 2);
+            expected_tsid += 1;
+        }
+    }
 }

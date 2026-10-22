@@ -180,7 +180,7 @@ pub(crate) struct Dictionary {
     pub(crate) codes: Vec<u32>,
 }
 
-pub(crate) fn encode_dictionary(values: &[Option<String>]) -> Result<Vec<u8>> {
+pub(crate) fn encode_dictionary(values: &[Option<&str>]) -> Result<Vec<u8>> {
     let mut lookup: HashMap<&str, u32> = HashMap::new();
     let mut dictionary = Vec::new();
     put_u64(&mut dictionary, 0); // patched with the entry count below
@@ -190,7 +190,7 @@ pub(crate) fn encode_dictionary(values: &[Option<String>]) -> Result<Vec<u8>> {
         let code = match value {
             None => 0,
             Some(value) => {
-                if let Some(code) = lookup.get(value.as_str()) {
+                if let Some(code) = lookup.get(value) {
                     *code
                 } else {
                     let code = u32::try_from(lookup.len() + 1)
