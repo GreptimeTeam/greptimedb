@@ -128,6 +128,11 @@ lazy_static! {
         "Acknowledged Prometheus remote write exemplars",
         &[METRIC_DB_LABEL, METRIC_VERSION_LABEL]
     ).unwrap();
+    pub static ref EXEMPLARS_DROPPED_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_exemplars_dropped_total",
+        "Exemplars dropped during input validation",
+        &["protocol"]
+    ).unwrap();
     /// The native histograms count of Prometheus remote write per protocol version.
     pub static ref PROM_STORE_REMOTE_WRITE_HISTOGRAMS: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_prometheus_remote_write_histograms",

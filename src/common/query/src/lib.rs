@@ -119,6 +119,7 @@ impl WriteProgress {
 
 impl WriteCompletion {
     /// Wraps the storage result without changing how the write is scheduled.
+    /// Success reports zero affected rows; use [`Self::with_progress`] for counted writes.
     pub fn new(completion: impl Future<Output = Result<(), BoxedError>> + Send + 'static) -> Self {
         Self::with_progress(async move {
             match completion.await {

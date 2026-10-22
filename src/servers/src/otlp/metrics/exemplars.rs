@@ -71,53 +71,61 @@ pub(super) fn append<'a>(
         validate_name,
     )?;
     for exemplar in exemplars {
-        let mut names = HashSet::new();
-        let mut attributes = Vec::new();
-        for attribute in &exemplar.filtered_attributes {
-            ensure!(
-                names.insert(&attribute.key),
-                InvalidOtlpMetricInputSnafu {
-                    reason: format!("duplicate filtered exemplar attribute: {}", attribute.key)
-                }
-            );
-            if let Some(value) = scalar_value_string(attribute.value.as_ref()) {
-                let name = if ctx.is_legacy {
-                    legacy_normalize_otlp_name(&attribute.key)
-                } else {
-                    translate_label_name(&attribute.key, ctx.metric_translation_strategy)
-                };
-                attributes.push((name, value));
-            }
-        }
-        let mut labels = normalized::labels(attributes, true, validate_name)?;
-        for (name, bytes, length) in [
-            ("trace_id", &exemplar.trace_id, 16),
-            ("span_id", &exemplar.span_id, 8),
-        ] {
-            if !bytes.is_empty() {
+        let observation: Result<_> = (|| {
+            let mut names = HashSet::new();
+            let mut attributes = Vec::new();
+            for attribute in &exemplar.filtered_attributes {
                 ensure!(
-                    bytes.len() == length,
+                    names.insert(&attribute.key),
                     InvalidOtlpMetricInputSnafu {
-                        reason: format!("exemplar {name} must contain {length} bytes")
+                        reason: format!("duplicate filtered exemplar attribute: {}", attribute.key)
                     }
                 );
-                labels.insert(name.to_string(), hex::encode(bytes));
+                if let Some(value) = scalar_value_string(attribute.value.as_ref()) {
+                    let name = if ctx.is_legacy {
+                        legacy_normalize_otlp_name(&attribute.key)
+                    } else {
+                        translate_label_name(&attribute.key, ctx.metric_translation_strategy)
+                    };
+                    attributes.push((name, value));
+                }
             }
+            let mut labels = normalized::labels(attributes, true, validate_name)?;
+            for (name, bytes, length) in [
+                ("trace_id", &exemplar.trace_id, 16),
+                ("span_id", &exemplar.span_id, 8),
+            ] {
+                if !bytes.is_empty() {
+                    ensure!(
+                        bytes.len() == length,
+                        InvalidOtlpMetricInputSnafu {
+                            reason: format!("exemplar {name} must contain {length} bytes")
+                        }
+                    );
+                    labels.insert(name.to_string(), hex::encode(bytes));
+                }
+            }
+            let labels = normalized::labels(labels, true, validate_name)?;
+            let timestamp = i64::try_from(exemplar.time_unix_nano).map_err(|_| {
+                InvalidOtlpMetricInputSnafu {
+                    reason: "exemplar timestamp exceeds signed nanosecond range",
+                }
+                .build()
+            })?;
+            Ok(Observation {
+                metric: metric.to_string(),
+                series_labels: series_labels.clone(),
+                timestamp,
+                value: value(exemplar)?,
+                labels,
+            })
+        })();
+        match observation {
+            Ok(observation) => output.push(observation),
+            Err(_) => crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                .with_label_values(&["otlp"])
+                .inc(),
         }
-        let labels = normalized::labels(labels, true, validate_name)?;
-        let timestamp = i64::try_from(exemplar.time_unix_nano).map_err(|_| {
-            InvalidOtlpMetricInputSnafu {
-                reason: "exemplar timestamp exceeds signed nanosecond range",
-            }
-            .build()
-        })?;
-        output.push(Observation {
-            metric: metric.to_string(),
-            series_labels: series_labels.clone(),
-            timestamp,
-            value: value(exemplar)?,
-            labels,
-        });
     }
     Ok(())
 }
@@ -202,7 +210,7 @@ mod tests {
         };
         for is_legacy in [false, true] {
             for mode in 0..3 {
-                let exemplars = [5.0, 1.0, f64::NEG_INFINITY, f64::NAN]
+                let mut exemplars: Vec<_> = [5.0, 1.0, f64::NEG_INFINITY, f64::NAN]
                     .into_iter()
                     .enumerate()
                     .map(|(i, v)| Exemplar {
@@ -211,6 +219,12 @@ mod tests {
                         ..Default::default()
                     })
                     .collect();
+                exemplars.insert(0, Exemplar::default());
+                exemplars.push(Exemplar {
+                    trace_id: vec![1],
+                    value: Some(exemplar::Value::AsDouble(1.0)),
+                    ..Default::default()
+                });
                 let mut point = HistogramDataPoint {
                     time_unix_nano: 100,
                     count: 4,
@@ -343,9 +357,18 @@ mod tests {
                     ..exemplar.clone()
                 },
             ] {
-                assert!(
-                    append(&mut Vec::new(), [&invalid], "latency", &table, &row, &ctx).is_err()
-                );
+                let mut output = Vec::new();
+                append(
+                    &mut output,
+                    [&invalid, &exemplar, &invalid, &exemplar],
+                    "latency",
+                    &table,
+                    &row,
+                    &ctx,
+                )
+                .unwrap();
+                assert_eq!(output.len(), 2);
+                assert_eq!(output[0], output[1]);
             }
         }
     }

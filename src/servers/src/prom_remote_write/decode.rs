@@ -33,7 +33,7 @@ use crate::error::InternalSnafu;
 use crate::http::event::PipelineIngestRequest;
 use crate::pipeline::run_pipeline;
 use crate::prom_remote_write::row_builder::{PromCtx, TablesBuilder};
-use crate::prom_remote_write::types::PromLabel;
+use crate::prom_remote_write::types::{PromLabel, RawBytes};
 use crate::prom_remote_write::validation::{PromValidationMode, validate_label_name};
 #[allow(deprecated)]
 use crate::prom_store::{
@@ -52,7 +52,7 @@ pub(crate) struct PromTimeSeries {
     pub(crate) labels: RepeatedField<PromLabel>,
     pub(crate) samples: RepeatedField<Sample>,
     exemplars: Vec<Exemplar>,
-    label_names: HashSet<Vec<u8>>,
+    label_names: HashSet<RawBytes>,
     duplicate_labels: bool,
 }
 
@@ -104,7 +104,7 @@ impl PromTimeSeries {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
 
-                self.duplicate_labels |= !self.label_names.insert(label.name.to_vec());
+                self.duplicate_labels |= !self.label_names.insert(label.name);
                 #[allow(deprecated)]
                 let is_special_label = match label.name {
                     METRIC_NAME_LABEL_BYTES => {
@@ -187,28 +187,37 @@ impl PromTimeSeries {
             let inherited = crate::exemplar::labels(inherited, false, validate_label_name)
                 .map_err(|error| DecodeError::new(error.to_string()))?;
             for exemplar in self.exemplars.drain(..) {
-                let labels = crate::exemplar::labels(
-                    exemplar
-                        .labels
-                        .into_iter()
-                        .map(|label| (label.name, label.value)),
-                    true,
-                    validate_label_name,
-                )
-                .map_err(|error| DecodeError::new(error.to_string()))?;
-                let timestamp = crate::exemplar::timestamp_from_millis(exemplar.timestamp)
-                    .map_err(|error| DecodeError::new(error.to_string()))?;
+                let observation: crate::error::Result<_> = (|| {
+                    let labels = crate::exemplar::labels(
+                        exemplar
+                            .labels
+                            .into_iter()
+                            .map(|label| (label.name, label.value)),
+                        true,
+                        validate_label_name,
+                    )?;
+                    Ok(crate::exemplar::Exemplar {
+                        metric: self.table_name.clone(),
+                        series_labels: inherited.clone(),
+                        timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
+                        value: exemplar.value,
+                        labels,
+                    })
+                })();
+                let observation = match observation {
+                    Ok(observation) => observation,
+                    Err(_) => {
+                        crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                            .with_label_values(&["prometheus_v1"])
+                            .inc();
+                        continue;
+                    }
+                };
                 table_builders
                     .exemplars
                     .entry(self.schema.clone())
                     .or_default()
-                    .push(crate::exemplar::Exemplar {
-                        metric: self.table_name.clone(),
-                        series_labels: inherited.clone(),
-                        timestamp,
-                        value: exemplar.value,
-                        labels,
-                    });
+                    .push(observation);
             }
         }
         if row_num == 0 {
@@ -562,20 +571,45 @@ mod tests {
                     timeseries: vec![series],
                     ..Default::default()
                 };
-                assert_eq!(
-                    decoder
-                        .decode(
-                            request.encode_to_vec(),
-                            PromValidationMode::Strict,
-                            &mut processor
-                        )
-                        .is_ok(),
-                    accepted
-                );
+                decoder
+                    .decode(
+                        request.encode_to_vec(),
+                        PromValidationMode::Strict,
+                        &mut processor,
+                    )
+                    .unwrap();
                 if accepted {
                     assert_eq!(decoder.table_data.exemplars[&None][0].timestamp, -1_000_000);
                     assert_eq!(decoder.as_row_insert_requests().all_req().count(), 0);
+                } else {
+                    assert!(decoder.table_data.exemplars.is_empty());
                 }
+            }
+            for name in ["__name__", "job"] {
+                let mut invalid = series.clone();
+                invalid.labels.extend([
+                    Label {
+                        name: name.into(),
+                        value: "a".into(),
+                    },
+                    Label {
+                        name: name.into(),
+                        value: "b".into(),
+                    },
+                ]);
+                assert!(
+                    decoder
+                        .decode(
+                            WriteRequest {
+                                timeseries: vec![invalid],
+                                ..Default::default()
+                            }
+                            .encode_to_vec(),
+                            PromValidationMode::Strict,
+                            &mut processor
+                        )
+                        .is_err()
+                );
             }
             // A pooled decoder must not leak rejected exemplars into its next request.
             let request = WriteRequest {
@@ -616,6 +650,69 @@ mod tests {
                 .to_string()
                 .contains("pipelines with exemplars")
         );
+    }
+
+    #[test]
+    fn test_exemplar_decoder_preserves_samples_and_valid_siblings() {
+        let valid = Exemplar {
+            labels: vec![Label {
+                name: "trace_id".into(),
+                value: "abc".into(),
+            }],
+            timestamp: 1,
+            value: 0.5,
+        };
+        for invalid in [
+            Exemplar {
+                labels: vec![valid.labels[0].clone(); 2],
+                ..valid.clone()
+            },
+            Exemplar {
+                labels: vec![Label {
+                    name: "trace_id".into(),
+                    value: "x".repeat(128),
+                }],
+                ..valid.clone()
+            },
+            Exemplar {
+                timestamp: i64::MAX,
+                ..valid.clone()
+            },
+        ] {
+            let request = WriteRequest {
+                timeseries: vec![TimeSeries {
+                    labels: vec![Label {
+                        name: "__name__".into(),
+                        value: "metric".into(),
+                    }],
+                    samples: vec![Sample {
+                        timestamp: 1,
+                        value: 1.0,
+                    }],
+                    exemplars: vec![invalid.clone(), valid.clone(), invalid, valid.clone()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut decoder = PromWriteRequest::default();
+            decoder
+                .decode(
+                    request.encode_to_vec(),
+                    PromValidationMode::Strict,
+                    &mut PromSeriesProcessor::default_processor(),
+                )
+                .unwrap();
+            assert_eq!(decoder.table_data.exemplars[&None].len(), 2);
+            let requests = decoder.as_row_insert_requests();
+            assert_eq!(
+                requests
+                    .ref_all_req()
+                    .flat_map(|r| r.rows.as_ref())
+                    .map(|r| r.rows.len())
+                    .sum::<usize>(),
+                1
+            );
+        }
     }
 
     #[test]

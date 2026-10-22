@@ -796,6 +796,16 @@ pub(crate) fn version_builder_from_manifest(
 
 /// Updates region options by persistent options.
 pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
+    if let Some(encoding) = options.primary_key_encoding
+        && encoding != manifest.metadata.primary_key_encoding
+    {
+        common_telemetry::warn!(
+            "Overriding primary key encoding from {:?} to {:?} for region {}",
+            encoding,
+            manifest.metadata.primary_key_encoding,
+            manifest.metadata.region_id,
+        );
+    }
     options.primary_key_encoding = Some(manifest.metadata.primary_key_encoding);
     if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
         options.sst_format = Some(FormatType::Flat);

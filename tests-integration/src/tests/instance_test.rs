@@ -4468,14 +4468,20 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
                 timestamp: 1720000000123,
                 value: 1.0,
             }],
-            exemplars: vec![Exemplar {
-                timestamp: 1720000000123,
-                value: 0.32,
-                labels: vec![Label {
-                    name: "trace_id".into(),
-                    value: "abc".into(),
-                }],
-            }],
+            exemplars: vec![
+                Exemplar {
+                    timestamp: i64::MAX,
+                    ..Default::default()
+                },
+                Exemplar {
+                    timestamp: 1720000000123,
+                    value: 0.32,
+                    labels: vec![Label {
+                        name: "trace_id".into(),
+                        value: "abc".into(),
+                    }],
+                },
+            ],
             ..Default::default()
         }],
         ..Default::default()
@@ -4506,6 +4512,12 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
     let mut request = v2::request_with_labels_and_samples(
         vec![("__name__", "retained_exemplar"), ("zone", "east")],
         vec![],
+    );
+    request.timeseries[0].exemplars.push(
+        api::greptime_proto::io::prometheus::write::v2::Exemplar {
+            timestamp: i64::MAX,
+            ..Default::default()
+        },
     );
     request.timeseries[0].exemplars.push(
         api::greptime_proto::io::prometheus::write::v2::Exemplar {
@@ -4572,12 +4584,15 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
                         data_points: vec![otlp::NumberDataPoint {
                             time_unix_nano: 1720000000999999999,
                             value: Some(otlp::number_data_point::Value::AsDouble(10.0)),
-                            exemplars: vec![otlp::Exemplar {
-                                time_unix_nano: 1720000000123456789,
-                                value: Some(otlp::exemplar::Value::AsDouble(0.5)),
-                                trace_id: vec![0xab; 16],
-                                ..Default::default()
-                            }],
+                            exemplars: vec![
+                                otlp::Exemplar::default(),
+                                otlp::Exemplar {
+                                    time_unix_nano: 1720000000123456789,
+                                    value: Some(otlp::exemplar::Value::AsDouble(0.5)),
+                                    trace_id: vec![0xab; 16],
+                                    ..Default::default()
+                                },
+                            ],
                             ..Default::default()
                         }],
                     })),
@@ -4703,6 +4718,82 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
             1,
             "{expression}: {value}"
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_query_skips_malformed_rows_with_warning() {
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use servers::http::{HttpOptions, HttpServerBuilder};
+    use tower::ServiceExt;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_malformed_rows")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    execute_sql(frontend, "CREATE TABLE metrics_exemplars (greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, job STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (greptime_metric, job)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')").await;
+    execute_sql(
+        frontend,
+        r#"INSERT INTO metrics_exemplars VALUES
+        (1, 'metric', 'api', 1, '{"trace_id":"good"}'),
+        (2, 'metric', 'api', 2, '{"trace_id":42}'),
+        (3, 'metric', 'api', NULL, '{}'),
+        (4, 'metric', 'api', 4, NULL),
+        (5, NULL, 'api', 5, '{}'),
+        (6, 'bad_only', 'api', NULL, '{}')"#,
+    )
+    .await;
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_prometheus_handler(frontend.clone())
+        .build();
+    let app = server.build(server.make_app()).unwrap();
+    for (query, end, skipped, series) in [
+        ("metric", "1", 3, 1),
+        ("%7Bjob%3D%22api%22%7D", "1", 5, 1),
+        ("metric", "0.000000001", 0, 1),
+        ("missing", "1", 0, 0),
+        ("bad_only", "1", 1, 0),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/prometheus/api/v1/query_exemplars?query={query}&start=0&end={end}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            response["data"].as_array().unwrap().len(),
+            series,
+            "{response}"
+        );
+        if skipped > 0 {
+            assert_eq!(
+                response["warnings"],
+                serde_json::json!([format!("Skipped {skipped} malformed stored exemplars")])
+            );
+        } else {
+            assert!(response.get("warnings").is_none(), "{response}");
+        }
+        if series > 0 {
+            assert_eq!(
+                response["data"][0]["exemplars"].as_array().unwrap().len(),
+                1
+            );
+            assert_eq!(
+                response["data"][0]["exemplars"][0]["labels"]["trace_id"],
+                "good"
+            );
+        }
     }
 }
 

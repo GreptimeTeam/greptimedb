@@ -276,19 +276,30 @@ fn convert_remote_write_v2(request: BorrowedRequest<'_>) -> Result<RemoteWriteV2
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let labels = crate::exemplar::labels(labels, true, validate_label_name)?;
-            exemplars
-                .entry(exemplar_schema.clone())
-                .or_default()
-                .push(crate::exemplar::Exemplar {
+            let observation: Result<_> = (|| {
+                Ok(crate::exemplar::Exemplar {
                     metric: exemplar_metric.clone(),
                     series_labels: inherited.clone(),
                     timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
                     value: exemplar.value,
-                    labels,
-                });
+                    labels: crate::exemplar::labels(labels, true, validate_label_name)?,
+                })
+            })();
+            let observation = match observation {
+                Ok(observation) => observation,
+                Err(_) => {
+                    crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                        .with_label_values(&["prometheus_v2"])
+                        .inc();
+                    continue;
+                }
+            };
+            exemplars
+                .entry(exemplar_schema.clone())
+                .or_default()
+                .push(observation);
+            exemplar_count_total = checked_total(exemplar_count_total, 1, "exemplar")?;
         }
-        exemplar_count_total = checked_total(exemplar_count_total, counts.exemplars, "exemplar")?;
         sample_count_total = checked_total(sample_count_total, counts.samples, "sample")?;
         histogram_count_total =
             checked_total(histogram_count_total, counts.histograms, "histogram")?;
@@ -1200,6 +1211,60 @@ mod tests {
         };
 
         assert!(decode_test_request(request).is_err());
+    }
+
+    #[test]
+    fn test_invalid_exemplars_preserve_samples_and_counts() {
+        let valid = Exemplar {
+            labels_refs: vec![3, 4],
+            timestamp: 1,
+            value: 0.5,
+        };
+        for invalid in [
+            Exemplar {
+                labels_refs: vec![3, 4, 3, 4],
+                ..valid.clone()
+            },
+            Exemplar {
+                labels_refs: vec![3, 5],
+                ..valid.clone()
+            },
+            Exemplar {
+                timestamp: i64::MAX,
+                ..valid.clone()
+            },
+        ] {
+            for retain_valid in [false, true] {
+                let mut observations = vec![invalid.clone()];
+                if retain_valid {
+                    observations.extend([valid.clone(), invalid.clone(), valid.clone()]);
+                }
+                let request = Request {
+                    symbols: vec![
+                        "".into(),
+                        METRIC_NAME_LABEL.into(),
+                        "metric".into(),
+                        "trace_id".into(),
+                        "abc".into(),
+                        "x".repeat(128),
+                    ],
+                    timeseries: vec![TimeSeries {
+                        labels_refs: vec![1, 2],
+                        samples: vec![Sample::default()],
+                        exemplars: observations,
+                        ..Default::default()
+                    }],
+                };
+                let converted = decode_test_request(request).unwrap();
+                assert_eq!(converted.sample_count, 1);
+                let expected = if retain_valid { 2 } else { 0 };
+                assert_eq!(converted.exemplar_count, expected);
+                assert_eq!(
+                    converted.exemplars.values().map(Vec::len).sum::<usize>(),
+                    expected as usize
+                );
+            }
+        }
     }
 
     #[test]

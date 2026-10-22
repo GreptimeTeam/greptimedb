@@ -30,6 +30,7 @@ use datafusion::common::{Column, ScalarValue};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_expr::{BinaryExpr, Expr, Operator, lit};
 use datatypes::arrow::datatypes::DataType;
+use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::{Helper, VectorRef};
@@ -39,7 +40,7 @@ use servers::error::{self, Result};
 use servers::exemplar::query::{ExactTimestamp, Observation, Query, Selector, Series};
 use servers::prometheus_handler::PrometheusHandler;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use table::metadata::TableInfo;
 
 use crate::instance::Instance;
@@ -117,6 +118,7 @@ impl Instance {
             let mut reservation =
                 MemoryConsumer::new("Prometheus exemplar response").register(&pool);
             let mut observations = Observations::new();
+            let mut skipped = 0;
             for (schema, selectors) in groups {
                 let local = ctx.fork();
                 local.set_current_schema(&schema);
@@ -158,7 +160,7 @@ impl Instance {
                 match output.data {
                     OutputData::Stream(mut stream) => {
                         while let Some(batch) = stream.next().await {
-                            collect(
+                            skipped += collect(
                                 batch.context(error::CollectRecordbatchSnafu)?,
                                 &info,
                                 &mut observations,
@@ -169,7 +171,7 @@ impl Instance {
                     }
                     OutputData::RecordBatches(batches) => {
                         for batch in batches.take() {
-                            collect(batch, &info, &mut observations, &mut reservation)?;
+                            skipped += collect(batch, &info, &mut observations, &mut reservation)?;
                             tokio::task::yield_now().await;
                         }
                     }
@@ -180,6 +182,13 @@ impl Instance {
                         .fail();
                     }
                 }
+            }
+            if skipped > 0 {
+                let warning = format!("Skipped {skipped} malformed stored exemplars");
+                ctx.set_warning(match ctx.warning() {
+                    Some(existing) => format!("{existing}; {warning}"),
+                    None => warning,
+                });
             }
             Ok(observations
                 .into_iter()
@@ -296,7 +305,7 @@ fn collect(
     info: &TableInfo,
     observations: &mut Observations,
     reservation: &mut MemoryReservation,
-) -> Result<()> {
+) -> Result<usize> {
     let memory = batch.buffer_memory_size();
     reservation
         .try_grow(memory)
@@ -312,6 +321,22 @@ fn collect(
     let value = Helper::try_into_vector(batch.column(index(greptime_value())?))
         .map_err(BoxedError::new)
         .context(error::ExecuteQuerySnafu)?;
+    let value_type = |vector: &VectorRef| {
+        let mut data_type = vector.data_type();
+        // Storage may dictionary-encode tags; Vector::get returns their decoded values.
+        while let ConcreteDataType::Dictionary(dictionary) = data_type {
+            data_type = dictionary.value_type().clone();
+        }
+        data_type
+    };
+    ensure!(
+        value_type(&metric).is_string()
+            && value_type(&time).is_timestamp()
+            && value_type(&value) == ConcreteDataType::float64_datatype(),
+        error::UnexpectedResultSnafu {
+            reason: "exemplar scan returned incompatible column types",
+        }
+    );
     let label_index = index(EXEMPLAR_LABELS_COLUMN)?;
     let labels = JsonArray::from(batch.column(label_index))
         .project_to_v2(schema.field(label_index), &DataType::Binary)
@@ -321,38 +346,36 @@ fn collect(
     for tag in &info.meta.primary_key_indices {
         let name = info.meta.schema.column_schemas()[*tag].name.as_str();
         if name != EXEMPLAR_METRIC_COLUMN {
-            tags.push((
-                name,
-                Helper::try_into_vector(batch.column(index(name)?))
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu)?,
-            ));
+            let values = Helper::try_into_vector(batch.column(index(name)?))
+                .map_err(BoxedError::new)
+                .context(error::ExecuteQuerySnafu)?;
+            ensure!(
+                value_type(&values).is_string(),
+                error::UnexpectedResultSnafu {
+                    reason: "exemplar scan returned a non-string tag",
+                }
+            );
+            tags.push((name, values));
         }
     }
-    for row in 0..batch.num_rows() {
+    let mut skipped = 0;
+    'rows: for row in 0..batch.num_rows() {
         let Value::String(metric) = metric.get(row) else {
-            return error::UnexpectedResultSnafu {
-                reason: "null or non-string exemplar metric",
-            }
-            .fail();
+            skipped += 1;
+            continue;
         };
         let Value::Timestamp(timestamp) = time.get(row) else {
-            return error::UnexpectedResultSnafu {
-                reason: "null exemplar timestamp",
-            }
-            .fail();
+            skipped += 1;
+            continue;
         };
-        let timestamp = timestamp
-            .convert_to(TimeUnit::Nanosecond)
-            .context(error::UnexpectedResultSnafu {
-                reason: "stored exemplar timestamp overflow",
-            })?
-            .value();
+        let Some(timestamp) = timestamp.convert_to(TimeUnit::Nanosecond) else {
+            skipped += 1;
+            continue;
+        };
+        let timestamp = timestamp.value();
         let Value::Float64(value) = value.get(row) else {
-            return error::UnexpectedResultSnafu {
-                reason: "null exemplar value",
-            }
-            .fail();
+            skipped += 1;
+            continue;
         };
         let mut series = BTreeMap::from([(METRIC_NAME.to_string(), metric.into_string())]);
         for (name, values) in &tags {
@@ -365,23 +388,18 @@ fn collect(
             .map_err(BoxedError::new)
             .context(error::ExecuteQuerySnafu)?;
         let serde_json::Value::Object(labels) = labels else {
-            return error::UnexpectedResultSnafu {
-                reason: "exemplar_labels must be an object",
-            }
-            .fail();
+            skipped += 1;
+            continue;
         };
-        let labels = labels
-            .into_iter()
-            .map(|(name, value)| {
-                let serde_json::Value::String(value) = value else {
-                    return error::UnexpectedResultSnafu {
-                        reason: "exemplar label value must be a string",
-                    }
-                    .fail();
-                };
-                Ok((name, value))
-            })
-            .collect::<Result<Labels>>()?;
+        let mut string_labels = Labels::new();
+        for (name, value) in labels {
+            let serde_json::Value::String(value) = value else {
+                skipped += 1;
+                continue 'rows;
+            };
+            string_labels.insert(name, value);
+        }
+        let labels = string_labels;
         let key = (timestamp, value.0.to_bits(), labels.clone());
         if observations
             .get(&series)
@@ -409,7 +427,7 @@ fn collect(
         );
     }
     reservation.shrink(memory);
-    Ok(())
+    Ok(skipped)
 }
 
 #[cfg(test)]

@@ -1226,7 +1226,15 @@ fn encode_histogram(
         };
         let mut by_bucket = vec![Vec::new(); bucket_values.len()];
         for exemplar in &data_point.exemplars {
-            let value = exemplars::value(exemplar)?;
+            let value = match exemplars::value(exemplar) {
+                Ok(value) => value,
+                Err(_) => {
+                    crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                        .with_label_values(&["otlp"])
+                        .inc();
+                    continue;
+                }
+            };
             let bucket = bucket_values
                 .iter()
                 .position(|(bound, _)| {
@@ -2618,6 +2626,77 @@ mod tests {
                 }],
                 ..Default::default()
             }],
+        }
+    }
+
+    #[test]
+    fn test_invalid_exemplars_preserve_metric_payload() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        let valid = Exemplar {
+            time_unix_nano: 1,
+            value: Some(exemplar::Value::AsDouble(0.5)),
+            ..Default::default()
+        };
+        for invalid in [
+            Exemplar::default(),
+            Exemplar {
+                trace_id: vec![1],
+                ..valid.clone()
+            },
+            Exemplar {
+                span_id: vec![1],
+                ..valid.clone()
+            },
+            Exemplar {
+                time_unix_nano: u64::MAX,
+                ..valid.clone()
+            },
+            Exemplar {
+                filtered_attributes: vec![keyvalue("http.url", &"x".repeat(128))],
+                ..valid.clone()
+            },
+        ] {
+            let exemplars = vec![invalid.clone(), valid.clone(), invalid, valid.clone()];
+            let point = NumberDataPoint {
+                time_unix_nano: 1,
+                value: Some(Value::AsDouble(1.0)),
+                exemplars: exemplars.clone(),
+                ..Default::default()
+            };
+            let metrics = vec![
+                Metric {
+                    name: "gauge".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![point.clone()],
+                    })),
+                    ..Default::default()
+                },
+                Metric {
+                    name: "sum".into(),
+                    data: Some(metric::Data::Sum(Sum {
+                        data_points: vec![point],
+                        aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+                exponential_metric(
+                    "histogram",
+                    vec![ExponentialHistogramDataPoint {
+                        exemplars,
+                        ..exponential_point()
+                    }],
+                    AggregationTemporality::Cumulative,
+                ),
+            ];
+            let conversion =
+                to_grpc_insert_requests(metrics_request(metrics), &mut OtlpMetricCtx::default())
+                    .unwrap();
+            assert_eq!(conversion.rows, 3);
+            assert_eq!(conversion.outcome.accepted_data_points, 3);
+            assert_eq!(conversion.outcome.rejected_data_points, 0);
+            assert_eq!(conversion.exemplar_rows, 6);
         }
     }
 

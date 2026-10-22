@@ -231,6 +231,11 @@ pub struct ExemplarQuery {
     timeout: Option<String>,
 }
 
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "query_exemplars")
+)]
 pub async fn query_exemplars(
     State(handler): State<PrometheusHandlerRef>,
     Query(params): Query<ExemplarQuery>,
@@ -241,6 +246,10 @@ pub async fn query_exemplars(
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
         try_update_catalog_schema(&mut ctx, &catalog, &schema);
     }
+    let ctx = Arc::new(ctx);
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[ctx.get_db_string().as_str(), "query_exemplars"])
+        .start_timer();
     let query = match crate::exemplar::query::Query::parse(
         params.query.or(form.query).unwrap_or_default(),
         &params.start.or(form.start).unwrap_or_default(),
@@ -265,7 +274,7 @@ pub async fn query_exemplars(
     } else {
         ctx.query_timeout()
     };
-    let future = handler.query_exemplars(query, Arc::new(ctx));
+    let future = handler.query_exemplars(query, ctx.clone());
     let result = if let Some(timeout) = timeout.filter(|timeout| !timeout.is_zero()) {
         match tokio::time::timeout(timeout, future).await {
             Ok(result) => result,
@@ -280,7 +289,12 @@ pub async fn query_exemplars(
         future.await
     };
     match result {
-        Ok(series) => PrometheusJsonResponse::success(PrometheusResponse::Exemplars(series)),
+        Ok(series) => {
+            let mut response =
+                PrometheusJsonResponse::success(PrometheusResponse::Exemplars(series));
+            response.warnings = ctx.warning().map(|warning| vec![warning]);
+            response
+        }
         Err(error) => PrometheusJsonResponse::error(error.status_code(), error.output_msg()),
     }
 }
