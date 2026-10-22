@@ -262,6 +262,7 @@ fn math_op(op: &MathOp) -> String {
         MathOp::Clamp { min, max } => format!("clamp {min} {max}"),
         MathOp::ClampMin { min } => format!("clamp_min {min}"),
         MathOp::ClampMax { max } => format!("clamp_max {max}"),
+        MathOp::Date(function) => function.name().to_string(),
     }
 }
 
