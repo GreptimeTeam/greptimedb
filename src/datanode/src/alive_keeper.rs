@@ -969,17 +969,21 @@ mod test {
         common_telemetry::init_default_ut_logging();
         let mut env = TestEnv::with_prefix("region-alive-keeper-reopen-lease").await;
         let (region_server, engine) = lease_region_server(&mut env, None).await;
-        let alive_keeper = Arc::new(RegionAliveKeeper::new(
-            region_server.clone(),
-            None,
-            Duration::from_millis(100),
-        ));
         let region_id = RegionId::new(1024, 1);
         let schema = create_region(&region_server, region_id).await;
-        alive_keeper.register_region(region_id).await;
-        handle_lease_response(&alive_keeper, vec![leader_grant(region_id)], 10).await;
-        // Waits until the countdown task applies the grant.
-        alive_keeper.deadline(region_id).await.unwrap();
+        // A Leader grant without a node lease: the upgrade below seeds nothing from the node
+        // lease, so only the kept record lets the reopened region write.
+        let now = std::time::Instant::now();
+        let grant = RegionLeaseGrant {
+            role: RegionRole::Leader,
+            heartbeat_sent_at: now,
+            deadline: now + Duration::from_secs(10),
+        };
+        assert!(
+            region_server
+                .set_region_role_by_lease(region_id, grant)
+                .unwrap()
+        );
         put_row(&region_server, region_id, &schema).await.unwrap();
 
         // The catchup reopens the region, as its memtable is not empty.

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
-use store_api::region_engine::{RegionRole, SettableRegionRoleState};
+use store_api::region_engine::SettableRegionRoleState;
 use store_api::region_request::RegionCatchupRequest;
 use store_api::storage::RegionId;
 
@@ -69,6 +69,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let catchup_regions = self.catchup_regions.clone();
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
+        let node_lease = self.node_lease.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -78,7 +79,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match task.run().await {
                 Ok(_) => {
                     if request.set_writable {
-                        region.set_role(RegionRole::Leader);
+                        // The upgraded region takes writes before its first Leader grant.
+                        region
+                            .lease
+                            .upgraded(node_lease.deadline(), |role| region.set_role(role));
                         // Finalize leadership: persist backfilled metadata.
                         if let Err(err) = region
                             .set_role_state_gracefully(SettableRegionRoleState::Leader)

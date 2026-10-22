@@ -27,7 +27,9 @@ use rstest_reuse::apply;
 use store_api::region_engine::{
     RegionEngine, RegionLeaseGrant, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
 };
-use store_api::region_request::{RegionFlushRequest, RegionPutRequest, RegionRequest};
+use store_api::region_request::{
+    RegionCatchupRequest, RegionFlushRequest, RegionPutRequest, RegionRequest,
+};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::task::JoinHandle;
 
@@ -283,6 +285,110 @@ async fn test_downgrading_lease_rejects_writes_after_alter() {
         .unwrap()
         .unwrap_err();
     assert_retryable(err, |err| matches!(err, Error::RegionLeaseExpired { .. }));
+}
+
+#[tokio::test]
+async fn test_upgraded_region_writes_before_leader_grant() {
+    common_telemetry::init_default_ut_logging();
+    let (_env, _listener, engine, region_id, column_schemas) =
+        create_leased_region("upgraded-region-writes").await;
+    let rows = || Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    // A migration candidate gets Follower grants until the route moves to it.
+    engine
+        .set_region_role_by_lease(
+            region_id,
+            grant(RegionRole::Follower, Instant::now() + LEASE),
+        )
+        .unwrap();
+    assert!(
+        spawn_put(&engine, region_id, rows())
+            .await
+            .unwrap()
+            .is_err()
+    );
+
+    // The upgrade makes it writable before its first Leader grant.
+    upgrade(&engine, region_id).await;
+    spawn_put(&engine, region_id, rows())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // If the migration rolls back, the next Follower grant rejects writes again.
+    engine
+        .set_region_role_by_lease(
+            region_id,
+            grant(RegionRole::Follower, Instant::now() + LEASE),
+        )
+        .unwrap();
+    assert!(
+        spawn_put(&engine, region_id, rows())
+            .await
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn test_upgraded_region_keeps_node_lease_of_upgrade() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("upgraded-region-node-lease").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    engine.require_write_lease();
+    // The node lease has expired when the region is upgraded.
+    engine.renew_node_lease(Instant::now() - 2 * LEASE, LEASE);
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .set_region_role_by_lease(
+            region_id,
+            grant(RegionRole::Follower, Instant::now() + LEASE),
+        )
+        .unwrap();
+    upgrade(&engine, region_id).await;
+    let rows = || Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+
+    // Responses after the upgrade do not extend the node lease the region was upgraded under.
+    engine.renew_node_lease(Instant::now(), LEASE);
+    let err = spawn_put(&engine, region_id, rows())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_retryable(err, |err| matches!(err, Error::RegionLeaseExpired { .. }));
+
+    // Its next Leader grant takes over.
+    engine
+        .set_region_role_by_lease(region_id, grant(RegionRole::Leader, Instant::now() + LEASE))
+        .unwrap();
+    spawn_put(&engine, region_id, rows())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// Upgrades a follower region to the leader, as region migration does.
+async fn upgrade(engine: &MitoEngine, region_id: RegionId) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
 }
 
 /// Creates a region on an engine whose writes need a lease, under a valid node lease.

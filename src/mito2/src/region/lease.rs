@@ -23,8 +23,8 @@ use store_api::region_engine::{RegionLeaseGrant, RegionRole};
 
 /// Lease of this node, renewed by every heartbeat response that carries region leases.
 ///
-/// A region created on this node writes under the deadline this lease has at the creation,
-/// until the region gets its first Leader grant.
+/// A region created or upgraded on this node writes under the deadline this lease has at that
+/// moment, until the region gets its next Leader grant.
 #[derive(Debug, Default)]
 pub(crate) struct NodeLease {
     /// Whether writes need a valid lease. Only a datanode the metasrv controls sets it.
@@ -113,6 +113,24 @@ impl RegionLeaseRecord {
         }
         set_role(grant.role);
         true
+    }
+
+    /// Makes the region the leader when a catchup upgrades it on this node while the node lease
+    /// has `node_deadline`, and applies the role with `set_role` under the record's lock.
+    ///
+    /// Until its next grant, the region writes within `node_deadline`, which later responses do
+    /// not extend. This is safe for the same reason as for a created region: the metasrv
+    /// recorded the grant of the response behind `node_deadline` before it upgraded the region,
+    /// so a later migration of the region waits past it.
+    pub(crate) fn upgraded(
+        &self,
+        node_deadline: Option<Instant>,
+        set_role: impl FnOnce(RegionRole),
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state.role = Some(RegionRole::Leader);
+        state.leader_deadline = state.leader_deadline.max(node_deadline);
+        set_role(RegionRole::Leader);
     }
 
     /// Records that the metasrv demotes the region at `now`.

@@ -336,7 +336,8 @@ impl MitoEngine {
 
     /// Renews the lease of this node from a heartbeat response that carries region leases.
     ///
-    /// A region created on this node writes under it until the region gets its first grant.
+    /// A region created or upgraded on this node writes under it until the region gets its next
+    /// Leader grant.
     pub fn renew_node_lease(&self, heartbeat_sent_at: Instant, lease: Duration) {
         self.inner
             .workers
