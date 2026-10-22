@@ -60,7 +60,7 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
-use crate::sst::index::IndexBuildType;
+use crate::sst::index::{IndexBuildType, ResultMpscSender};
 use crate::wal::EntryId;
 use crate::wal::entry_distributor::WalEntryReceiver;
 
@@ -909,8 +909,6 @@ pub(crate) enum BackgroundNotify {
     IndexBuildFinished(IndexBuildFinished),
     /// Index build has been stopped (aborted or succeeded).
     IndexBuildStopped(IndexBuildStopped),
-    /// Index build has failed.
-    IndexBuildFailed(IndexBuildFailed),
     /// An index build must be retried against the latest schema generation.
     IndexBuildRetry(BuildIndexRequest),
     /// Compaction has finished.
@@ -994,18 +992,14 @@ impl FlushFailed {
 pub(crate) struct IndexBuildFinished {
     pub(crate) manifest_version: ManifestVersion,
     pub(crate) file_meta: FileMeta,
+    /// Waiters of the build, notified after the worker applies the edit.
+    pub(crate) result_senders: Vec<ResultMpscSender>,
 }
 
 /// Notifies an index build job has been stopped.
 #[derive(Debug)]
 pub(crate) struct IndexBuildStopped {
     pub(crate) file_id: FileId,
-}
-
-/// Notifies an index build job has failed.
-#[derive(Debug)]
-pub(crate) struct IndexBuildFailed {
-    pub(crate) err: Arc<Error>,
 }
 
 /// Notifies a compaction job has finished.
@@ -1219,6 +1213,8 @@ pub(crate) struct BuildIndexRequest {
     pub(crate) build_type: IndexBuildType,
     /// files need to build index, empty means all.
     pub(crate) file_metas: Vec<FileMeta>,
+    /// Waiters carried over from a previous build of the same files.
+    pub(crate) result_senders: Vec<ResultMpscSender>,
 }
 
 #[derive(Debug)]
