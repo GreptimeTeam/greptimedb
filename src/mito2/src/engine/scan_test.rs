@@ -5312,3 +5312,195 @@ async fn test_exact_sequence_range_scan_sequence_binding_request() {
     );
     assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
+
+/// Creates a region with three rows in one flushed SST and returns the engine,
+/// the region id and the committed sequence of that region.
+///
+/// The rows are written in a single put, so sequence `s` is on the row with
+/// timestamp `(s - 1)` seconds and the committed sequence is `3`.
+async fn sequence_bound_fixture(
+    prefix: &str,
+) -> (TestEnv, crate::engine::MitoEngine, RegionId, u64) {
+    let mut env = TestEnv::with_prefix(prefix).await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 3),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let committed = engine
+        .find_region(region_id)
+        .unwrap()
+        .find_committed_sequence();
+
+    (env, engine, region_id, committed)
+}
+
+/// Opens `request` on `region_id` and returns the `__sequence` of every returned
+/// row in ascending order.
+async fn sequence_bound_scan_sequences(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+) -> Result<Vec<u64>, Error> {
+    use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+
+    use crate::read::stream::ScanBatch;
+
+    let scanner = engine.scanner(region_id, request).await?;
+    let mut stream = scanner.scan_batch().unwrap();
+    let mut sequences = Vec::new();
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        let ScanBatch::RecordBatch(batch) = batch else {
+            panic!("expects a flat record batch scan");
+        };
+        let column = batch
+            .column_by_name(SEQUENCE_COLUMN_NAME)
+            .expect("the flat batch keeps __sequence")
+            .as_primitive::<UInt64Type>();
+        sequences.extend((0..batch.num_rows()).map(|row| column.value(row)));
+    }
+    sequences.sort_unstable();
+
+    Ok(sequences)
+}
+
+/// A binding request (`scan_id` set, explicit bounds, exact mode) must not read
+/// past the committed sequence of the read view it was bound to: rows above the
+/// committed sequence do not exist yet, so the bound cannot be honoured.
+#[tokio::test]
+#[allow(clippy::print_stdout)]
+async fn test_sequence_bound_scan_rejects_future_upper_bound() {
+    let (_env, engine, region_id, committed) =
+        sequence_bound_fixture("test_sequence_bound_scan_rejects_future_upper_bound").await;
+    let future = committed + 100;
+    println!("committed sequence of the fixture: {committed}");
+
+    let err = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                scan_id: Some(0),
+                memtable_min_sequence: Some(0),
+                memtable_max_sequence: Some(future),
+                exact_sequence_range: true,
+                sst_min_sequence: None,
+                snapshot_on_scan: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .err()
+        .expect("a bound request must not read past the committed sequence");
+    println!("future upper bound failed with: {err}");
+
+    let Error::FutureSequenceBound {
+        region_id: err_region_id,
+        scan_id,
+        given_seq,
+        committed_seq,
+        ..
+    } = &err
+    else {
+        panic!("unexpected err: {err}");
+    };
+    assert_eq!(region_id, *err_region_id);
+    assert_eq!(0, *scan_id);
+    assert_eq!(future, *given_seq);
+    assert_eq!(committed, *committed_seq);
+    assert_eq!(StatusCode::RequestOutdated, err.status_code());
+
+    // The diagnostic names the region, the requested bound and the read view so a
+    // caller can rebind without another round trip.
+    let message = err.to_string();
+    println!("diagnostic: {message}");
+    assert!(
+        message.contains(&format!("region: {region_id}")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("given_seq: {future}")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("committed_seq: {committed}")),
+        "{message}"
+    );
+}
+
+/// The bound of a binding request may be the committed sequence itself: reading
+/// everything that is committed is inside the read view.
+#[tokio::test]
+#[allow(clippy::print_stdout)]
+async fn test_sequence_bound_scan_accepts_committed_upper_bound() {
+    let (_env, engine, region_id, committed) =
+        sequence_bound_fixture("test_sequence_bound_scan_accepts_committed_upper_bound").await;
+    println!("committed sequence of the fixture: {committed}");
+
+    let sequences = sequence_bound_scan_sequences(
+        &engine,
+        region_id,
+        ScanRequest {
+            scan_id: Some(0),
+            memtable_min_sequence: Some(0),
+            memtable_max_sequence: Some(committed),
+            exact_sequence_range: true,
+            sst_min_sequence: None,
+            snapshot_on_scan: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("(0, {committed}] must be readable, got: {err}"));
+    println!("(0, {committed}] returned sequences: {sequences:?}");
+
+    assert_eq!(vec![1, 2, 3], sequences);
+}
+
+/// A request without a scan id was not bound by the query layer, so it keeps the
+/// behaviour it had before bindings existed: the upper bound is still fenced
+/// against the flushed sequence, but a bound above the committed sequence is not
+/// rejected by the new check.
+#[tokio::test]
+#[allow(clippy::print_stdout)]
+async fn test_unbound_scan_keeps_future_upper_bound_behaviour() {
+    let (_env, engine, region_id, committed) =
+        sequence_bound_fixture("test_unbound_scan_keeps_future_upper_bound_behaviour").await;
+    let future = committed + 100;
+    println!("committed sequence of the fixture: {committed}");
+
+    let sequences = sequence_bound_scan_sequences(
+        &engine,
+        region_id,
+        ScanRequest {
+            scan_id: None,
+            memtable_min_sequence: Some(0),
+            memtable_max_sequence: Some(future),
+            exact_sequence_range: true,
+            sst_min_sequence: None,
+            snapshot_on_scan: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("an unbound request must keep its old behaviour, got: {err}"));
+    println!("(0, {future}] without a scan id returned sequences: {sequences:?}");
+
+    assert_eq!(vec![1, 2, 3], sequences);
+}

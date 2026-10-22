@@ -315,6 +315,14 @@ impl DummyTableProvider {
         request.snapshot_on_scan = false;
     }
 
+    /// Marks this per-scan provider as the scan use-site `scan_id`.
+    ///
+    /// The id travels with the [`ScanRequest`] to the engine, which attributes
+    /// the request to one plan position; unbound requests leave it unset.
+    pub fn with_scan_id(&self, scan_id: u32) {
+        self.scan_request.lock().unwrap().scan_id = Some(scan_id);
+    }
+
     pub(crate) fn with_json_type_hint(&self, hint: HashMap<String, JsonNativeType>) {
         self.scan_request.lock().unwrap().json_type_hint = hint;
     }

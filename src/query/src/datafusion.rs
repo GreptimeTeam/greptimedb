@@ -39,6 +39,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_common::ResolvedTableReference;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_expr::{
     AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
 };
@@ -71,6 +72,7 @@ use crate::options::ScheduledTimeExtension;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
+use crate::scan_sequence_binding::{RegionSeqs, ScanSequenceBinding, lower_sequence_bindings};
 use crate::{QueryEngine, metrics};
 
 /// Query parallelism hint key.
@@ -136,6 +138,52 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     }
 
     counters
+}
+
+/// Lowers the [`ScanSequenceBinding`]s of `plan` into the scans they wrap.
+///
+/// The scan upper bound `H` of every region is the per-region snapshot the query
+/// was planned on, so the lowered request reads exactly the rows the plan
+/// position was bound to.
+///
+/// A plan without a binding is returned unchanged: a query that the query layer
+/// did not sequence-bind keeps its exact current plan and pays nothing but one
+/// plan walk here. A binding that cannot be lowered (no bound, no snapshot, a
+/// non-scan child, a non-region source) fails the query instead of degrading to
+/// a full scan, because a full scan would return rows the caller excluded.
+fn lower_scan_sequence_bindings(
+    plan: LogicalPlan,
+    query_ctx: &QueryContextRef,
+) -> Result<LogicalPlan> {
+    if !contains_scan_sequence_binding(&plan) {
+        return Ok(plan);
+    }
+
+    let snapshot_seqs = query_ctx.snapshots().into_iter().collect::<RegionSeqs>();
+    Ok(lower_sequence_bindings(plan, snapshot_seqs)?)
+}
+
+/// Returns whether `plan` contains a [`ScanSequenceBinding`].
+///
+/// A plan position that is pushed down to a region is hidden in the remote input
+/// of a [`MergeScanLogicalPlan`], which is not a child of the node holding it, so
+/// such a position is not lowered here: it is lowered on the region server when
+/// the decoded fragment is planned there.
+fn contains_scan_sequence_binding(plan: &LogicalPlan) -> bool {
+    let mut has_binding = false;
+    // The visitor always succeeds, so the walk cannot fail either.
+    let _ = plan.apply_with_subqueries(|plan| {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<ScanSequenceBinding>()
+        {
+            has_binding = true;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+
+        Ok(TreeNodeRecursion::Continue)
+    });
+
+    has_binding
 }
 
 pub struct DatafusionQueryEngine {
@@ -391,14 +439,23 @@ impl DatafusionQueryEngine {
         };
 
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
+        let query_ctx = ctx.query_ctx();
         let state = ctx.state();
 
         common_telemetry::debug!("Create physical plan, input plan: {logical_plan}");
 
         // special handle EXPLAIN plan
         if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
+            // `SessionState::create_physical_plan` optimizes the explained plan and
+            // then plans it physically. Both steps run separately here so that the
+            // scan sequence bindings of the explained plan are lowered in between,
+            // at the same point as for a regular plan.
+            let optimized_plan = state.optimize(logical_plan)?;
+            let optimized_plan = lower_scan_sequence_bindings(optimized_plan, &query_ctx)?;
+
             return state
-                .create_physical_plan(logical_plan)
+                .query_planner()
+                .create_physical_plan(&optimized_plan, state)
                 .await
                 .map_err(Into::into);
         }
@@ -427,6 +484,15 @@ impl DatafusionQueryEngine {
         };
 
         expr_depth::validate_plan(&optimized_plan)?;
+
+        // Lower the scan sequence bindings after the optimizer and before physical
+        // planning. The optimizer must not see two positions that read one table
+        // with different sequence bounds as two plain scans of that table, because
+        // it may merge them; physical planning is the first step that turns a scan
+        // into a scan request, so it is the last step that can still take the
+        // binding.
+        let optimized_plan = lower_scan_sequence_bindings(optimized_plan, &query_ctx)?;
+
         common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
         logger.after_optimize = Some(optimized_plan.clone());
 
@@ -730,14 +796,20 @@ mod tests {
     use session::context::{QueryContext, QueryContextBuilder};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
-        PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+        PartitionRange, PrepareRequest, QueryScanContext, RegionEngine, RegionEngineRef,
+        RegionRole, RegionScanner, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
+        RemapManifestsResponse, ScannerProperties, SetRegionRoleStateResponse,
+        SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
     };
-    use store_api::storage::{RegionId, ScanRequest};
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
     use table::table::scan::RegionScanExec;
 
     use super::*;
+    use crate::dummy_catalog::DummyTableProvider;
+    use crate::error::Error;
     use crate::options::QueryOptions;
     use crate::parser::{QueryLanguageParser, QueryStatement};
     use crate::part_sort::PartSortExec;
@@ -1000,6 +1072,375 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine()
+    }
+
+    /// Mock region engine that records the scan requests it is asked to open and
+    /// answers every scan with an empty stream.
+    ///
+    /// Recording the request is the only way to observe what the physical scan of
+    /// a plan position was bound to: the request leaves the provider in
+    /// [`TableProvider::scan`](datafusion::datasource::TableProvider::scan).
+    struct RecordingRegionEngine {
+        metadata: RegionMetadataRef,
+        requests: std::sync::Mutex<Vec<ScanRequest>>,
+    }
+
+    impl RecordingRegionEngine {
+        fn new(metadata: RegionMetadataRef) -> Self {
+            Self {
+                metadata,
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Returns the requests opened so far and forgets them.
+        fn take_requests(&self) -> Vec<ScanRequest> {
+            std::mem::take(&mut *self.requests.lock().unwrap())
+        }
+    }
+
+    #[async_trait]
+    impl RegionEngine for RecordingRegionEngine {
+        fn name(&self) -> &str {
+            "RecordingRegionEngine"
+        }
+
+        async fn handle_request(
+            &self,
+            _region_id: RegionId,
+            _request: RegionRequest,
+        ) -> std::result::Result<api::region::RegionResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        async fn get_committed_sequence(
+            &self,
+            _region_id: RegionId,
+        ) -> std::result::Result<SequenceNumber, BoxedError> {
+            Ok(store_api::storage::SequenceNumber::default())
+        }
+
+        async fn handle_query(
+            &self,
+            _region_id: RegionId,
+            request: ScanRequest,
+        ) -> std::result::Result<RegionScannerRef, BoxedError> {
+            self.requests.lock().unwrap().push(request);
+
+            let scanner = RecordingScanner::new(
+                self.metadata.schema.clone(),
+                self.metadata.clone(),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+            );
+            Ok(Box::new(scanner))
+        }
+
+        async fn get_metadata(
+            &self,
+            _region_id: RegionId,
+        ) -> std::result::Result<RegionMetadataRef, BoxedError> {
+            Ok(self.metadata.clone())
+        }
+
+        fn region_statistic(&self, _region_id: RegionId) -> Option<RegionStatistic> {
+            None
+        }
+
+        async fn stop(&self) -> std::result::Result<(), BoxedError> {
+            Ok(())
+        }
+
+        fn set_region_role(
+            &self,
+            _region_id: RegionId,
+            _role: RegionRole,
+        ) -> std::result::Result<(), BoxedError> {
+            unimplemented!()
+        }
+
+        async fn sync_region(
+            &self,
+            _region_id: RegionId,
+            _request: SyncRegionFromRequest,
+        ) -> std::result::Result<SyncRegionFromResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        async fn remap_manifests(
+            &self,
+            _request: RemapManifestsRequest,
+        ) -> std::result::Result<RemapManifestsResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        async fn set_region_role_state_gracefully(
+            &self,
+            _region_id: RegionId,
+            _region_role_state: SettableRegionRoleState,
+        ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+            unimplemented!()
+        }
+
+        fn role(&self, _region_id: RegionId) -> Option<RegionRole> {
+            None
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Returns the metadata of a test region: `k0: string tag, ts: timestamp
+    /// time index, v0: float64 field`.
+    fn sequence_binding_metadata(region_id: RegionId) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![1]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    /// Creates a region provider over a [`RecordingRegionEngine`].
+    fn sequence_binding_provider(
+        region_id: RegionId,
+    ) -> (Arc<RecordingRegionEngine>, Arc<DummyTableProvider>) {
+        let metadata = sequence_binding_metadata(region_id);
+        let recorder = Arc::new(RecordingRegionEngine::new(metadata.clone()));
+        let engine: RegionEngineRef = recorder.clone();
+        let provider = Arc::new(DummyTableProvider::new(region_id, engine, metadata));
+
+        (recorder, provider)
+    }
+
+    /// Returns a [`TableScan`](datafusion_expr::TableScan) plan node over
+    /// `provider`.
+    fn sequence_binding_scan(
+        provider: Arc<DummyTableProvider>,
+        name: &str,
+    ) -> datafusion_expr::TableScan {
+        let plan = datafusion_expr::LogicalPlanBuilder::scan(
+            name,
+            Arc::new(datafusion::datasource::DefaultTableSource::new(provider)),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let datafusion_expr::LogicalPlan::TableScan(scan) = plan else {
+            panic!("expects a TableScan");
+        };
+
+        scan
+    }
+
+    /// Returns the query context holding `snapshot` as the snapshot sequence of
+    /// `region_id`.
+    fn sequence_binding_query_ctx(region_id: RegionId, snapshot: Option<u64>) -> QueryContextRef {
+        let mut snapshots = std::collections::HashMap::new();
+        if let Some(snapshot) = snapshot {
+            snapshots.insert(region_id.as_u64(), snapshot);
+        }
+
+        Arc::new(
+            QueryContextBuilder::default()
+                .snapshot_seqs(Arc::new(std::sync::RwLock::new(snapshots)))
+                .build(),
+        )
+    }
+
+    /// Runs the plan steps of `create_physical_plan` up to the physical plan and
+    /// returns the analyzed and the optimized plan.
+    fn analyze_and_optimize(
+        engine: &QueryEngineRef,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> (LogicalPlan, LogicalPlan) {
+        let ctx = engine.engine_context(query_ctx).unwrap();
+        let state = ctx.state().clone();
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap();
+        let optimized = state
+            .optimizer()
+            .optimize(analyzed.clone(), &state, |_, _| {})
+            .unwrap();
+
+        (analyzed, optimized)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::print_stdout)]
+    async fn test_lowering_removes_scan_sequence_bindings_after_optimize() {
+        let engine = create_test_engine().await;
+        let region_id = RegionId::new(1024, 1);
+        let (recorder, provider) = sequence_binding_provider(region_id);
+        let snapshot = 42;
+        let query_ctx = sequence_binding_query_ctx(region_id, Some(snapshot));
+
+        // Two plan positions read the same table after different sequences. The
+        // wrapped scans are equal, so nothing but the binding tells them apart.
+        let binding_a = ScanSequenceBinding::new(
+            0,
+            RegionSeqs::from([(region_id.as_u64(), 10)]),
+            sequence_binding_scan(provider.clone(), "seq_lower"),
+        );
+        let binding_b = ScanSequenceBinding::new(
+            1,
+            RegionSeqs::from([(region_id.as_u64(), 20)]),
+            sequence_binding_scan(provider, "seq_lower"),
+        );
+        let plan = datafusion_expr::LogicalPlanBuilder::from(binding_a.into_logical_plan())
+            .union(
+                datafusion_expr::LogicalPlanBuilder::from(binding_b.into_logical_plan())
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // The wrapper survives the analyzer and the optimizer, and disappears in
+        // the lowering step between the optimizer and physical planning. This is
+        // the order `create_physical_plan` runs in.
+        let (analyzed, optimized) = analyze_and_optimize(&engine, plan.clone(), query_ctx.clone());
+        println!("analyzed plan:\n{}", analyzed.display_indent());
+        println!("optimized plan:\n{}", optimized.display_indent());
+        assert!(
+            super::contains_scan_sequence_binding(&optimized),
+            "the wrapper must still be there after the optimizer:\n{}",
+            optimized.display_indent()
+        );
+        let lowered = super::lower_scan_sequence_bindings(optimized.clone(), &query_ctx).unwrap();
+        println!("lowered plan:\n{}", lowered.display_indent());
+        assert!(
+            !super::contains_scan_sequence_binding(&lowered),
+            "lowering must remove the wrapper:\n{}",
+            lowered.display_indent()
+        );
+
+        // The same plan through the real execution path executes at all: a wrapper
+        // reaching physical planning has no extension planner and fails, so a
+        // successful plan proves the lowering ran before the physical planner.
+        let output = engine.execute(plan, query_ctx.clone()).await.unwrap();
+        if let Some(plan) = output.meta.plan.as_ref() {
+            println!(
+                "physical plan:\n{}",
+                datafusion::physical_plan::displayable(plan.as_ref()).indent(true)
+            );
+        }
+
+        // Each position opened its own request, with its own id, lower bound and
+        // the snapshot as upper bound.
+        let mut requests = recorder.take_requests();
+        requests.sort_by_key(|request| request.scan_id);
+        println!("scan requests: {requests:?}");
+        assert_eq!(2, requests.len(), "each position must open its own scan");
+        for (request, after) in requests.iter().zip([10_u64, 20]) {
+            assert_eq!(Some(after), request.memtable_min_sequence);
+            assert_eq!(Some(snapshot), request.memtable_max_sequence);
+            assert!(request.exact_sequence_range);
+            assert_eq!(None, request.sst_min_sequence);
+            assert!(!request.snapshot_on_scan);
+        }
+        assert_eq!(Some(0), requests[0].scan_id);
+        assert_eq!(Some(1), requests[1].scan_id);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::print_stdout)]
+    async fn test_lowering_keeps_unbound_plans_unchanged() {
+        let engine = create_test_engine().await;
+        let region_id = RegionId::new(1024, 1);
+        let (recorder, provider) = sequence_binding_provider(region_id);
+        // No snapshot at all: a plan without a binding must not need one.
+        let query_ctx = sequence_binding_query_ctx(region_id, None);
+
+        let plan = LogicalPlan::TableScan(sequence_binding_scan(provider, "seq_lower"));
+
+        let (_, optimized) = analyze_and_optimize(&engine, plan.clone(), query_ctx.clone());
+        assert!(!super::contains_scan_sequence_binding(&optimized));
+        let unchanged = super::lower_scan_sequence_bindings(optimized.clone(), &query_ctx).unwrap();
+        assert_eq!(optimized, unchanged);
+
+        let output = engine.execute(plan, query_ctx.clone()).await.unwrap();
+        if let Some(plan) = output.meta.plan.as_ref() {
+            println!(
+                "physical plan:\n{}",
+                datafusion::physical_plan::displayable(plan.as_ref()).indent(true)
+            );
+        }
+
+        // The scan keeps the request it had before sequence bindings existed: no
+        // position id, no explicit bounds, no exact range.
+        let requests = recorder.take_requests();
+        println!("scan requests: {requests:?}");
+        assert_eq!(1, requests.len());
+        let request = &requests[0];
+        assert_eq!(None, request.scan_id);
+        assert_eq!(None, request.memtable_min_sequence);
+        assert_eq!(None, request.memtable_max_sequence);
+        assert!(!request.exact_sequence_range);
+        assert!(!request.snapshot_on_scan);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::print_stdout)]
+    async fn test_lowering_fails_instead_of_scanning_everything() {
+        let engine = create_test_engine().await;
+        let region_id = RegionId::new(1024, 1);
+        let (recorder, provider) = sequence_binding_provider(region_id);
+        // The query has no snapshot sequence for the region, so the upper bound
+        // `H` of the position cannot be resolved.
+        let query_ctx = sequence_binding_query_ctx(region_id, None);
+
+        let binding = ScanSequenceBinding::new(
+            0,
+            RegionSeqs::from([(region_id.as_u64(), 10)]),
+            sequence_binding_scan(provider, "seq_lower"),
+        );
+        let plan = binding.into_logical_plan();
+
+        let err = engine
+            .execute(plan, query_ctx)
+            .await
+            .expect_err("a position without an upper bound must fail the query");
+        println!("lowering failed with: {err}");
+        assert!(matches!(err, Error::DataFusion { .. }), "unexpected: {err}");
+        let message = err.to_string();
+        assert!(
+            message.contains("no snapshot sequence for region"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains(&region_id.as_u64().to_string()),
+            "the message must name the region: {message}"
+        );
+
+        // Nothing was scanned: the query failed instead of reading the whole
+        // table.
+        assert!(recorder.take_requests().is_empty());
     }
 
     #[tokio::test]

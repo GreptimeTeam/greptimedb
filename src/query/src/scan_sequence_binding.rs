@@ -448,7 +448,9 @@ impl SequenceBinder {
 /// own [`ScanRequest`](store_api::storage::ScanRequest) mutex, so two positions
 /// that read the same table with different bounds never share a request. The
 /// scan reads memtable rows in `(after, snapshot]`, where `snapshot` comes from
-/// `snapshot_seqs` and is the same for every position of a region.
+/// `snapshot_seqs` and is the same for every position of a region. The lowered
+/// request also carries its [`ScanId`], so the engine can attribute the request
+/// to the plan position it belongs to and hold its bound to that read view.
 ///
 /// Two positions of one region are never merged, not even when their bounds are
 /// equal or when they scan the same table with the same projection and filters:
@@ -549,6 +551,7 @@ impl SequenceLowerer {
 
         let adapter = provider.clone_for_scan();
         adapter.with_sequence_range(after, snapshot);
+        adapter.with_scan_id(scan_id);
         scan.source = Arc::new(DefaultTableSource::new(Arc::new(adapter)));
 
         Ok(Transformed::yes(LogicalPlan::TableScan(scan)))

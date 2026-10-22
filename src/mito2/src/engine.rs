@@ -141,9 +141,9 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
-    IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
-    RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu, SerdeJsonSnafu,
-    SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
+    FutureSequenceBoundSnafu, IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu,
+    MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -1068,6 +1068,27 @@ impl EngineInner {
 
         if request.snapshot_on_scan && request.memtable_max_sequence.is_none() {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
+        }
+
+        // A bound scan reads the exact range of one query-local scan position and
+        // must stay inside the read view it was bound to. Sequences above the
+        // committed sequence are not part of this region's visible history yet, so
+        // an upper bound pointing there cannot be served from this version. The
+        // check runs on the same version snapshot the scan below reads, and only
+        // for requests the query layer bound (`scan_id`), which leaves explicit
+        // snapshot requests unchanged.
+        if let Some(scan_id) = request.scan_id
+            && let Some(given_seq) = request.memtable_max_sequence
+        {
+            ensure!(
+                given_seq <= version_data.committed_sequence,
+                FutureSequenceBoundSnafu {
+                    region_id,
+                    scan_id,
+                    given_seq,
+                    committed_seq: version_data.committed_sequence,
+                }
+            );
         }
 
         // Select the files and decide the exact capability from the same version

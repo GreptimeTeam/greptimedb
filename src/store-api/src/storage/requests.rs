@@ -87,6 +87,14 @@ pub struct ScanRequest {
     ///
     /// Historical `memtable_only` reads must never set this flag.
     pub exact_sequence_range: bool,
+    /// Query-local id of the scan use-site this request belongs to.
+    ///
+    /// The query layer sets it when it binds one plan position to explicit
+    /// sequence bounds, so the engine can attribute the request to that
+    /// position and hold its upper bound to the read view the request actually
+    /// reads. `None` marks a request that was not bound by the query layer,
+    /// which keeps the pre-binding behaviour of explicit snapshot requests.
+    pub scan_id: Option<u32>,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
     /// Optional hint from query-driven JSON type concretization.
