@@ -55,7 +55,8 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
-use datafusion_common::tree_node::TreeNode;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use either::Either;
 use futures_util::stream::FuturesUnordered;
@@ -68,6 +69,7 @@ pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use query::options::should_collect_region_watermark_from_extensions;
+use query::scan_sequence_binding::ScanSequenceBinding;
 use serde_json;
 use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
@@ -338,6 +340,7 @@ impl RegionServer {
 
         let cleanup = self.register_initial_remote_dyn_filter_cleanup(&query_ctx, region_id);
 
+        let bound_scan = plan_has_scan_sequence_binding(&plan);
         let stream = self
             .inner
             .handle_read(
@@ -350,7 +353,11 @@ impl RegionServer {
             )
             .await?;
 
-        let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
+        let stream = if bound_scan {
+            stream
+        } else {
+            wrap_flow_region_watermark_stream(stream, region_id, &query_ctx)
+        };
         let stream = if let Some(cleanup) = cleanup {
             wrap_remote_dyn_filter_guarded_stream(stream, cleanup)
         } else {
@@ -399,12 +406,17 @@ impl RegionServer {
 
         let cleanup = self.register_initial_remote_dyn_filter_cleanup(&query_ctx, region_id);
 
+        let bound_scan = plan_has_scan_sequence_binding(&plan);
         let stream = self
             .inner
             .handle_read(QueryRequest { plan, ..request }, query_ctx.clone())
             .await?;
 
-        let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
+        let stream = if bound_scan {
+            stream
+        } else {
+            wrap_flow_region_watermark_stream(stream, region_id, &query_ctx)
+        };
         let stream = if let Some(cleanup) = cleanup {
             wrap_remote_dyn_filter_guarded_stream(stream, cleanup)
         } else {
@@ -970,6 +982,29 @@ fn wrap_flow_region_watermark_stream(
     } else {
         stream
     }
+}
+
+/// Returns whether `plan` carries scan sequence bindings that this read must not
+/// turn into a legacy per-region watermark.
+///
+/// A bound scan proves completion per plan position, and the query context's
+/// snapshot says nothing about whether this scan drained its range: the stream
+/// can end because a downstream operator stopped reading. Filling the legacy
+/// field from the snapshot would turn an unproven scan into a proved region
+/// watermark, so a binding suppresses that fill and lets the per-scan proof
+/// travel through `scan_region_watermarks` only.
+fn plan_has_scan_sequence_binding(plan: &LogicalPlan) -> bool {
+    let mut has_binding = false;
+    let _ = plan.apply_with_subqueries(|plan| {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<ScanSequenceBinding>()
+        {
+            has_binding = true;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    has_binding
 }
 
 /// Wraps a region read stream so terminal metrics can carry the scan-open watermark.

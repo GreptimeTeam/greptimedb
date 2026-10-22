@@ -55,12 +55,63 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
-use store_api::storage::{ScanRequest, TimeSeriesDistribution};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
 
 /// The name of [`RegionScanExec`] plan node.
 pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
+
+/// Records which output partitions of one [`RegionScanExec`] reached their end.
+///
+/// A partition counts as finished only when its stream ended normally, which for
+/// this plan is the same moment the region scanner reports its own normal
+/// completion: the scanner calls `on_finish(true)` as its stream body returns and
+/// only reaches that point when the read loop drained without an error, while a
+/// dropped stream takes the scanner's `on_finish(false)` path instead.
+///
+/// Callers use this as a conservative "the source read everything it was asked
+/// to read" signal. Anything short of every partition finishing, including a
+/// scan with no partitions at all, reads as unfinished.
+#[derive(Debug)]
+pub struct ScanCompletion {
+    finished: Mutex<Vec<bool>>,
+}
+
+impl ScanCompletion {
+    /// Creates completion state for `total_partitions` output partitions.
+    pub fn new(total_partitions: usize) -> Self {
+        Self {
+            finished: Mutex::new(vec![false; total_partitions]),
+        }
+    }
+
+    /// Returns true only when every output partition finished.
+    ///
+    /// A scan without partitions has not proven anything and reads as unfinished.
+    pub fn all_finished(&self) -> bool {
+        let finished = self.finished.lock().unwrap();
+        !finished.is_empty() && finished.iter().all(|partition| *partition)
+    }
+
+    /// Marks `partition` as finished.
+    ///
+    /// Partitions outside the recorded layout are ignored: a plan is rewritten
+    /// through [`RegionScanExec::with_new_partitions`] before a different layout
+    /// can be executed, and that rebuild replaces this state.
+    fn mark_finished(&self, partition: usize) {
+        let mut finished = self.finished.lock().unwrap();
+        if let Some(finished) = finished.get_mut(partition) {
+            *finished = true;
+        }
+    }
+
+    /// Forgets every recorded completion, so the next execution starts unproven.
+    fn reset(&self) {
+        let mut finished = self.finished.lock().unwrap();
+        finished.fill(false);
+    }
+}
 
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Clone)]
@@ -81,6 +132,14 @@ pub struct RegionScanExec {
     /// Dynamic filters accepted by the scanner and applied to decoded output batches.
     /// The wrappers themselves remain live and are updated by their producers.
     pushed_dyn_filters: Arc<Mutex<Vec<Arc<dyn PhysicalExpr>>>>,
+    /// Query-local id of the plan position this scan reads for, when the query
+    /// layer bound the scan to one.
+    scan_id: Option<u32>,
+    /// Upper sequence bound this scan was bound to, when the query layer bound
+    /// the scan to an exact sequence range.
+    sequence_upper_bound: Option<u64>,
+    /// Which output partitions reached their end.
+    completion: Arc<ScanCompletion>,
 }
 
 impl std::fmt::Debug for RegionScanExec {
@@ -261,6 +320,9 @@ impl RegionScanExec {
             explain_verbose: false,
             query_memory_tracker,
             pushed_dyn_filters: Arc::new(Mutex::new(Vec::new())),
+            scan_id: request.scan_id,
+            sequence_upper_bound: request.memtable_max_sequence,
+            completion: Arc::new(ScanCompletion::new(num_output_partition)),
         })
     }
 
@@ -287,6 +349,32 @@ impl RegionScanExec {
 
     pub fn is_partition_set(&self) -> bool {
         self.is_partition_set
+    }
+
+    /// Returns the query-local id of the plan position this scan reads for.
+    ///
+    /// `None` means the query layer did not bind this scan to a position, so its
+    /// completion cannot be attributed to one.
+    pub fn scan_id(&self) -> Option<u32> {
+        self.scan_id
+    }
+
+    /// Returns the region this scan reads from.
+    pub fn region_id(&self) -> RegionId {
+        self.scanner.lock().unwrap().metadata().region_id
+    }
+
+    /// Returns the upper sequence bound this scan was bound to.
+    ///
+    /// This is the `H` of the exact `(C, H]` range the query layer bound, and is
+    /// the value a completion proves once every partition finished.
+    pub fn sequence_upper_bound(&self) -> Option<u64> {
+        self.sequence_upper_bound
+    }
+
+    /// Returns which output partitions of this scan reached their end.
+    pub fn completion(&self) -> &Arc<ScanCompletion> {
+        &self.completion
     }
 
     pub fn scanner_type(&self) -> String {
@@ -335,6 +423,11 @@ impl RegionScanExec {
             explain_verbose: self.explain_verbose,
             query_memory_tracker: self.query_memory_tracker.clone(),
             pushed_dyn_filters: self.pushed_dyn_filters.clone(),
+            scan_id: self.scan_id,
+            sequence_upper_bound: self.sequence_upper_bound,
+            // The new layout has different partitions, so completions recorded
+            // against the old one say nothing about it.
+            completion: Arc::new(ScanCompletion::new(target_partitions)),
         })
     }
 
@@ -491,12 +584,16 @@ impl ExecutionPlan for RegionScanExec {
             (!guarded_filters.is_empty()).then(|| conjunction(guarded_filters))
         };
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
-        Ok(Box::pin(StreamWithMetricWrapper {
-            stream,
-            metric: stream_metrics,
-            span,
-            await_timer: None,
-            dyn_filter,
+        Ok(Box::pin(CompletionTrackedStream {
+            stream: Box::pin(StreamWithMetricWrapper {
+                stream,
+                metric: stream_metrics,
+                span,
+                await_timer: None,
+                dyn_filter,
+            }),
+            completion: self.completion.clone(),
+            partition,
         }))
     }
 
@@ -507,6 +604,9 @@ impl ExecutionPlan for RegionScanExec {
     fn reset_state(self: Arc<Self>) -> DfResult<Arc<dyn ExecutionPlan>> {
         self.scanner.lock().unwrap().reset_state();
         self.pushed_dyn_filters.lock().unwrap().clear();
+        // A reset plan is planned for execution again, so the completions of the
+        // previous run must not carry over.
+        self.completion.reset();
         Ok(self)
     }
 
@@ -689,6 +789,41 @@ impl Stream for StreamWithMetricWrapper {
 impl DfRecordBatchStream for StreamWithMetricWrapper {
     fn schema(&self) -> ArrowSchemaRef {
         self.stream.schema().arrow_schema().clone()
+    }
+}
+
+/// Marks one [`RegionScanExec`] output partition as finished when its stream ends
+/// normally.
+///
+/// Only `Ready(None)` counts. An error and a dropped stream both leave the
+/// partition unproven, so a caller reading [`ScanCompletion::all_finished`] can
+/// treat the result as a proof that the source drained this partition.
+struct CompletionTrackedStream {
+    stream: DfSendableRecordBatchStream,
+    completion: Arc<ScanCompletion>,
+    partition: usize,
+}
+
+impl Stream for CompletionTrackedStream {
+    type Item = DfResult<DfRecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let poll_result = this.stream.poll_next_unpin(cx);
+        if matches!(poll_result, Poll::Ready(None)) {
+            this.completion.mark_finished(this.partition);
+        }
+        poll_result
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.stream.size_hint()
+    }
+}
+
+impl DfRecordBatchStream for CompletionTrackedStream {
+    fn schema(&self) -> ArrowSchemaRef {
+        self.stream.schema()
     }
 }
 
@@ -1823,5 +1958,132 @@ mod test {
 
         let result = plan.execute(0, ctx.task_ctx());
         assert!(result.is_ok());
+    }
+
+    /// Builds a scan plan reading `partition_count` output partitions.
+    fn completion_test_plan(partition_count: usize, request: ScanRequest) -> Arc<RegionScanExec> {
+        let (schema, batch, metadata) = dynamic_filter_test_data(5683, false);
+        let properties = ScannerProperties::new(vec![Vec::new(); partition_count], false, 0);
+        let scanner = Box::new(RepeatableScanner {
+            batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            properties,
+            metadata,
+            dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            observed_pool: Default::default(),
+        });
+        Arc::new(RegionScanExec::new(scanner, request, None).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_scan_completion_marks_all_partitions_after_a_full_drain() {
+        let ctx = SessionContext::new();
+        let plan = completion_test_plan(2, ScanRequest::default());
+
+        for partition in 0..2 {
+            plan.execute(partition, ctx.task_ctx())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+        }
+
+        assert!(plan.completion().all_finished());
+    }
+
+    #[tokio::test]
+    async fn test_scan_completion_stays_unproven_when_a_partition_is_not_read() {
+        let ctx = SessionContext::new();
+        let plan = completion_test_plan(2, ScanRequest::default());
+
+        plan.execute(0, ctx.task_ctx())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert!(!plan.completion().all_finished());
+    }
+
+    #[tokio::test]
+    async fn test_scan_completion_stays_unproven_when_the_stream_is_dropped() {
+        let ctx = SessionContext::new();
+        let plan = completion_test_plan(1, ScanRequest::default());
+
+        let mut stream = plan.execute(0, ctx.task_ctx()).unwrap();
+        assert!(stream.next().await.is_some());
+        // Dropping before the stream returns `None` must not count as a drain:
+        // the source did not finish the range it was asked to read.
+        drop(stream);
+
+        assert!(!plan.completion().all_finished());
+    }
+
+    #[tokio::test]
+    async fn test_scan_completion_is_rebuilt_by_with_new_partitions() {
+        let ctx = SessionContext::new();
+        let plan = completion_test_plan(2, ScanRequest::default());
+
+        for partition in 0..2 {
+            plan.execute(partition, ctx.task_ctx())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+        }
+        assert!(plan.completion().all_finished());
+
+        // A different layout says nothing about the partitions that were
+        // finished under the previous one.
+        let rebuilt = plan.with_new_partitions(vec![Vec::new(); 4], 4).unwrap();
+        assert!(!rebuilt.completion().all_finished());
+    }
+
+    #[tokio::test]
+    async fn test_scan_completion_is_cleared_by_reset_state() {
+        let ctx = SessionContext::new();
+        let plan = completion_test_plan(1, ScanRequest::default());
+
+        plan.execute(0, ctx.task_ctx())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(plan.completion().all_finished());
+
+        let reset = reset_plan_states(plan.clone()).unwrap();
+        // `reset_state` returns the same node, so the returned plan and `plan`
+        // share one completion state; asserting on both keeps the test honest if
+        // that ever changes.
+        let reset = reset
+            .downcast_ref::<RegionScanExec>()
+            .expect("reset keeps the plan node");
+        assert!(!reset.completion().all_finished());
+        assert!(!plan.completion().all_finished());
+    }
+
+    #[test]
+    fn test_scan_completion_of_a_scan_without_partitions_is_unproven() {
+        assert!(!ScanCompletion::new(0).all_finished());
+    }
+
+    #[test]
+    fn test_region_scan_exec_reads_scan_identity_from_the_request() {
+        let request = ScanRequest {
+            scan_id: Some(7),
+            memtable_max_sequence: Some(42),
+            ..Default::default()
+        };
+        let plan = completion_test_plan(1, request);
+
+        assert_eq!(plan.scan_id(), Some(7));
+        assert_eq!(plan.sequence_upper_bound(), Some(42));
+    }
+
+    #[test]
+    fn test_region_scan_exec_without_a_bound_request_has_no_identity() {
+        let plan = completion_test_plan(1, ScanRequest::default());
+
+        assert_eq!(plan.scan_id(), None);
+        assert_eq!(plan.sequence_upper_bound(), None);
     }
 }

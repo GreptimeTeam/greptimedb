@@ -205,6 +205,25 @@ impl OutputMetrics {
                 .collect::<std::collections::BTreeSet<_>>(),
         )
     }
+
+    /// Returns proved watermarks per scan position and region.
+    ///
+    /// The map is `scan_id -> region_id -> watermark`. A missing region means
+    /// that scan did not prove it finished reading its bound range there; it is
+    /// not the same as another scan of the same region being proved, because
+    /// scans of one region are bound to different sequence ranges.
+    pub fn scan_region_watermark_map(
+        &self,
+    ) -> Option<std::collections::BTreeMap<u32, std::collections::BTreeMap<u64, Option<u64>>>> {
+        let mut by_scan = std::collections::BTreeMap::new();
+        for entry in self.get()?.scan_region_watermarks {
+            by_scan
+                .entry(entry.scan_id)
+                .or_insert_with(std::collections::BTreeMap::new)
+                .insert(entry.region_id, entry.watermark);
+        }
+        Some(by_scan)
+    }
 }
 
 /// Query output together with a handle for its terminal metrics.
@@ -241,6 +260,13 @@ impl OutputWithMetrics {
     /// Returns all regions participating in terminal metric collection.
     pub fn participating_regions(&self) -> Option<std::collections::BTreeSet<u64>> {
         self.metrics.participating_regions()
+    }
+
+    /// Returns proved watermarks per scan position and region.
+    pub fn scan_region_watermark_map(
+        &self,
+    ) -> Option<std::collections::BTreeMap<u32, std::collections::BTreeMap<u64, Option<u64>>>> {
+        self.metrics.scan_region_watermark_map()
     }
 
     /// Drops the terminal metrics handle and returns the original output.

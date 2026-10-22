@@ -676,11 +676,41 @@ pub struct RecordBatchMetrics {
     /// Omitted when empty for backward compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub region_watermarks: Vec<RegionWatermarkEntry>,
+    /// Per-scan, per-region watermark for incremental-read checkpoint
+    /// advancement.
+    ///
+    /// Unlike [`RecordBatchMetrics::region_watermarks`], which collapses every
+    /// scan of a region into one entry, this field keeps the scan position: one
+    /// query may read the same region through several scans bound to different
+    /// sequence ranges, and their proofs are not interchangeable.
+    ///
+    /// An entry is emitted only when the source proved it finished the exact
+    /// range that scan was bound to. A scan whose partitions do not all finish
+    /// emits no entry at all; the reader infers "not proven" from the entry
+    /// being absent, because a stream that stops early never gets its metrics
+    /// delivered.
+    ///
+    /// Omitted when empty for backward compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scan_region_watermarks: Vec<ScanRegionWatermarkEntry>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RegionWatermarkEntry {
     pub region_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<u64>,
+}
+
+/// A watermark proof of one scan position of one region.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScanRegionWatermarkEntry {
+    /// Query-local id of the scan position this proof belongs to.
+    pub scan_id: u32,
+    /// Region the proof was collected from.
+    pub region_id: u64,
+    /// `Some(seq)` when the scan finished reading every row in its bound range
+    /// for this region; never `None`, as unproven scans emit no entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<u64>,
 }
