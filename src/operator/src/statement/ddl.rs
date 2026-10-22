@@ -146,9 +146,12 @@ const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
 ];
 
-fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
+fn build_procedure_id_output(
+    procedure_id: Vec<u8>,
+    query_context: &QueryContextRef,
+) -> Result<Output> {
     let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
-    let vector: VectorRef = Arc::new(StringVector::from(vec![procedure_id]));
+    let vector: VectorRef = Arc::new(StringVector::from(vec![procedure_id.as_str()]));
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
         "Procedure ID",
         vector.data_type(),
@@ -158,6 +161,7 @@ fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
         RecordBatch::new(schema.clone(), vec![vector]).context(error::BuildRecordBatchSnafu)?;
     let batches =
         RecordBatches::try_new(schema, vec![batch]).context(error::BuildRecordBatchSnafu)?;
+    query_context.set_last_procedure_id(procedure_id);
     Ok(Output::new_with_record_batches(batches))
 }
 
@@ -1775,12 +1779,12 @@ impl StatementExecutor {
                 table_id,
                 time_ranges,
                 ddl_options,
-                query_context,
+                query_context.clone(),
             )
             .await?;
 
         if !ddl_options.wait {
-            return build_procedure_id_output(response.key);
+            return build_procedure_id_output(response.key, &query_context);
         }
 
         Ok(Output::new_with_affected_rows(0))
@@ -2062,7 +2066,7 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)?;
 
         if !ddl_options.wait {
-            return build_procedure_id_output(response.key);
+            return build_procedure_id_output(response.key, &query_context);
         }
 
         // Only invalidate cache if wait is true.

@@ -437,6 +437,20 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().read_preference = read_preference;
     }
 
+    /// Returns the last procedure ID successfully returned in this session.
+    pub fn last_procedure_id(&self) -> Option<String> {
+        self.mutable_session_data
+            .read()
+            .unwrap()
+            .last_procedure_id
+            .clone()
+    }
+
+    /// Records a procedure ID successfully returned by a statement.
+    pub fn set_last_procedure_id(&self, procedure_id: String) {
+        self.mutable_session_data.write().unwrap().last_procedure_id = Some(procedure_id);
+    }
+
     pub fn current_user(&self) -> UserInfoRef {
         self.mutable_session_data.read().unwrap().user_info.clone()
     }

@@ -17,15 +17,22 @@ use std::time::Duration;
 
 use client::OutputData;
 use common_error::ext::ErrorExt;
+use common_error::snafu::ResultExt;
 use common_error::status_code::StatusCode;
 use common_meta::lock_key::TableLock;
 use common_procedure::{
     LockKey, Procedure, ProcedureId, ProcedureState, ProcedureWithId, Status, watcher,
 };
+use common_recordbatch::RecordBatches;
 use datatypes::arrow::array::AsArray;
+use frontend::instance::Instance;
+use servers::error::{CollectRecordbatchSnafu, Result as ServerResult};
+use servers::query_handler::sql::SqlQueryHandler;
+use session::Session;
+use session::context::Channel;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
-use tests_integration::test_util::{execute_sql, execute_sql_and_expect, try_execute_sql};
+use tests_integration::test_util::{execute_sql, execute_sql_and_expect};
 use tokio::sync::Notify;
 
 /// Holds the table lock until explicitly released, keeping truncate pending.
@@ -126,37 +133,41 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
         .await
         .unwrap();
 
-    let output = execute_sql(
+    let session = Session::new(None, Channel::Mysql, Default::default(), 0);
+    let query_ctx = session.new_query_context();
+    let output = run_sql(
         &frontend,
         "TRUNCATE TABLE truncate_wait_test WITH (wait=false, timeout='10s')",
+        &session,
     )
-    .await;
-    let OutputData::RecordBatches(batches) = output.data else {
-        panic!("expected Procedure ID result");
-    };
-    let batch = batches.iter().next().unwrap();
-    let id = batch
-        .column_by_name("Procedure ID")
-        .unwrap()
-        .as_string::<i32>()
-        .value(0);
-    let id = ProcedureId::parse_str(id).unwrap();
-    let state = execute_sql(&frontend, &format!("SELECT procedure_state('{id}')"))
-        .await
-        .data
-        .pretty_print()
-        .await;
-    assert!(state.contains(r#""status":"Running""#), "{state}");
+    .await
+    .unwrap();
+    let id = procedure_id_from_output(output).to_string();
+    assert_eq!(query_ctx.last_procedure_id(), Some(id.clone()));
+    for sql in [
+        format!("SELECT procedure_state('{id}')"),
+        "SELECT procedure_state()".to_string(),
+    ] {
+        let state = run_sql(&frontend, &sql, &session)
+            .await
+            .unwrap()
+            .pretty_print()
+            .await;
+        assert!(state.contains(r#""status":"Running""#), "{state}");
+        assert_eq!(query_ctx.last_procedure_id(), Some(id.clone()));
+    }
 
     // The same table lock holds a synchronous truncate past its wait deadline.
     // Give metadata reads and submission a generous budget. Using the same budget
     // also verifies that the async procedure keeps running after it expires.
-    let err = try_execute_sql(
+    let err = run_sql(
         &frontend,
         "TRUNCATE TABLE truncate_wait_test WITH (wait=true, timeout='10s')",
+        &session,
     )
     .await
     .unwrap_err();
+    assert_eq!(query_ctx.last_procedure_id(), Some(id.clone()));
     if distributed {
         assert!(matches!(
             err.status_code(),
@@ -222,4 +233,88 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
             .pretty_print()
             .await
     );
+
+    for (sql, succeeds) in [
+        ("SELECT 1", true),
+        ("TRUNCATE TABLE truncate_wait_test WITH (wait=true)", true),
+        (
+            "TRUNCATE TABLE nonexistent_session_table WITH (wait=false)",
+            false,
+        ),
+        ("SELECT procedure_state(NULL)", false),
+        ("SELECT procedure_state('')", false),
+        ("SELECT procedure_state('invalid-id')", false),
+    ] {
+        let result = run_sql(&frontend, sql, &session).await;
+        assert_eq!(result.is_ok(), succeeds, "{sql}: {result:?}");
+        assert_eq!(query_ctx.last_procedure_id(), Some(id.clone()));
+    }
+
+    let other_session = Session::new(None, Channel::Mysql, Default::default(), 1);
+    let state = run_sql(
+        &frontend,
+        &format!("SELECT procedure_state('{id}')"),
+        &other_session,
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .await;
+    assert!(state.contains(r#""status":"Done""#), "{state}");
+    let err = run_sql(&frontend, "SELECT procedure_state()", &other_session)
+        .await
+        .unwrap_err();
+    assert!(
+        err.output_msg()
+            .contains("No procedure ID has been returned")
+    );
+
+    let output = run_sql(
+        &frontend,
+        "TRUNCATE TABLE truncate_wait_test WITH (wait=false)",
+        &session,
+    )
+    .await
+    .unwrap();
+    let new_id = procedure_id_from_output(output);
+    assert_ne!(new_id.to_string(), id);
+    assert_eq!(query_ctx.last_procedure_id(), Some(new_id.to_string()));
+    let mut watcher = manager.procedure_watcher(new_id).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), watcher::wait(&mut watcher))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+async fn run_sql(
+    frontend: &Arc<Instance>,
+    sql: &str,
+    session: &Session,
+) -> ServerResult<OutputData> {
+    let data = frontend
+        .do_query(sql, session.new_query_context())
+        .await
+        .remove(0)?
+        .data;
+    match data {
+        OutputData::Stream(stream) => Ok(OutputData::RecordBatches(
+            RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?,
+        )),
+        data => Ok(data),
+    }
+}
+
+fn procedure_id_from_output(output: OutputData) -> ProcedureId {
+    let OutputData::RecordBatches(batches) = output else {
+        panic!("expected Procedure ID result");
+    };
+    let batch = batches.iter().next().unwrap();
+    let id = batch
+        .column_by_name("Procedure ID")
+        .unwrap()
+        .as_string::<i32>()
+        .value(0);
+    ProcedureId::parse_str(id).unwrap()
 }
