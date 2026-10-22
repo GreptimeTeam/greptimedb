@@ -23,6 +23,8 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result};
 use table::table::scan::RegionScanExec;
 
+pub use table::table::scan::assign_partition_ranges;
+
 #[derive(Debug)]
 pub struct ParallelizeScan;
 
@@ -69,7 +71,7 @@ impl ParallelizeScan {
 
                     // assign ranges to each partition
                     let mut partition_ranges =
-                        table::table::scan::assign_partition_ranges(ranges, expected_partition_num);
+                        assign_partition_ranges(ranges, expected_partition_num);
                     debug!(
                         "Assign {total_range_num} ranges to {expected_partition_num} partitions"
                     );
@@ -122,6 +124,8 @@ mod test {
     use common_time::timestamp::TimeUnit;
     use store_api::region_engine::PartitionRange;
 
+    use super::assign_partition_ranges;
+
     #[test]
     fn test_assign_unbalance_partition_range() {
         let ranges = vec![
@@ -153,8 +157,7 @@ mod test {
 
         // assign to 2 partitions
         let expected_partition_num = 2;
-        let result =
-            table::table::scan::assign_partition_ranges(ranges.clone(), expected_partition_num);
+        let result = assign_partition_ranges(ranges.clone(), expected_partition_num);
         let expected = vec![
             vec![PartitionRange {
                 start: Timestamp::new(30, TimeUnit::Second),
