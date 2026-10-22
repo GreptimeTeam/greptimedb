@@ -21,7 +21,10 @@
 //! ```text
 //! <selector>                                        e.g. x
 //! <range function>(<selector>[<range>])             e.g. rate(x[5m])
-//! <range function>(<constant>, <selector>[<range>]) e.g. quantile_over_time(0.9, x[5m])
+//! <range function>(<constant>, <selector>[<range>])   e.g. quantile_over_time(0.9, x[5m])
+//! <range function>(<selector>[<range>], <constant>[, <constant>])
+//!                                                   e.g. predict_linear(x[5m], 1),
+//!                                                        double_exponential_smoothing(x[5m], 0.5, 0.5)
 //! <math function>(<expression>[, <constant>]*)      e.g. abs(rate(x[5m])), clamp_min(x, 0)
 //! <expression> <operator> <constant>                e.g. x * 100, x > bool 0
 //! <constant> <operator> <expression>                e.g. 1 / x, 0 < x
@@ -92,7 +95,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
-use promql::map::{ArithmeticOp, MathOp};
+use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -111,8 +114,10 @@ use crate::promql::label_values::signed_millis_since_epoch;
 
 /// The shapes this compiler accepts, quoted in every rejection.
 const SUPPORTED: &str = "a selector, a range function over a range selector — \
-                         `<range function>(<selector>[<range>])`, with its constants in front of \
-                         the selector as in `quantile_over_time(0.9, x[5m])` — a math function over \
+                         `<range function>(<selector>[<range>])`, with constants before the selector \
+                         as in `quantile_over_time(0.9, x[5m])` or after it as in \
+                         `predict_linear(x[5m], 1)` and \
+                         `double_exponential_smoothing(x[5m], 0.5, 0.5)` — a math function over \
                          any of them, a binary operation between one of them and a constant, a \
                          negation of one of them, or one of the aggregators that folds a group's \
                          values into one value per grid point — `sum`, `avg`, `count`, `min`, `max`, \
@@ -288,16 +293,30 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
              not which selector it was bound to"
         )));
     }
-    // What is left has a constant on at least one side, and a modifier is refused rather than
-    // dropped: a scalar carries no labels, so there is nothing to match or name, and Prometheus
-    // rejects these words on a scalar operand for the same reason. A fill value is refused because
-    // the tree's matching has no field for one, so binding the operation would compute it without
-    // the fill the query asked for.
+    // What is left has a constant on one side, and a modifier is refused rather than dropped. This
+    // is deliberately narrower than Prometheus, which drops an `on` or `ignoring` written on a
+    // scalar rather than refusing it; refusing is the conservative choice here, because the tree's
+    // matching has no field that could carry the modifier, so binding the operation would compute
+    // something the query did not ask for. A fill value is refused for the same reason: the tree's
+    // matching has no field for one, and dropping it would compute the operation without the fill
+    // the query asked for.
     if refuses_modifier(binary.modifier.as_ref()) {
         return Err(not_implemented(&format!(
             "the vector matching in `{binary}`, which a constant operand has nothing to match: \
              `on`, `ignoring`, `group_left` and `group_right` name labels of a vector, and a fill \
              value fills in a match group that could miss"
+        )));
+    }
+    // Two constants are a value rather than an operation over a vector. A `bool` comparison of two
+    // of them folded to its number before this point, so what arrives here is a comparison without
+    // `bool`, which Prometheus refuses to parse at all. Binding it would produce a node that only
+    // fails when it is run, so it is refused here with what was found.
+    if binary.lhs.value_type() == ValueType::Scalar && binary.rhs.value_type() == ValueType::Scalar
+    {
+        return Err(not_implemented(&format!(
+            "the binary operation `{binary}` between two constants, which reports no value: a \
+             comparison of two scalars is written with `bool` to say whether it holds, and one \
+             written that way is folded to the number it means"
         )));
     }
     // Both operands are compiled before the node is built, so `2 / (x + 1)` nests. The constant side
@@ -525,8 +544,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
 
 /// Binds a range function over the range selector it is given, and the window that selector opens.
 ///
-/// The parameters come first and the range selector is last, for both signatures: a function without
-/// parameters has no `parameters` to read.
+/// The selector's place is the signature's, so the constants on either side of it are read as the
+/// signature says: `quantile_over_time` writes its parameter in front of the selector, while
+/// `predict_linear` and `double_exponential_smoothing` write theirs behind it.
 fn window_call(
     context: &Context,
     name: &str,
@@ -535,7 +555,7 @@ fn window_call(
 ) -> Result<NativeNode> {
     // The count is the signature's, so the rejection names what this function takes rather than
     // what one argument happens to be.
-    let expected = signature.parameters() + 1;
+    let expected = signature.arity();
     if args.len() != expected {
         return Err(not_implemented(&format!(
             "a call to `{name}` with {} argument(s), where it takes {expected}: {}",
@@ -543,17 +563,18 @@ fn window_call(
             signature.arguments()
         )));
     }
-    let (parameters, selector) = args.split_at(signature.parameters());
-    let function = match signature {
-        RangeSignature::Selector(function) => function,
-        RangeSignature::Scalar(bind) => bind(constant_argument(name, &parameters[0], 0)?),
-    };
-    let argument = &selector[0];
+    // The selector sits where the signature says it does, and everything else is a constant. Reading
+    // it by position rather than by "the last argument" is what lets `predict_linear(x[5m], 300)` and
+    // `quantile_over_time(0.9, x[5m])` share one path.
+    let selector_index = signature.selector_index();
+    let argument = &args[selector_index];
     let PromExpr::MatrixSelector(MatrixSelector { vs, range }) = unparen(argument) else {
         return Err(not_implemented(&format!(
-            "a call to `{name}` whose argument is `{argument}`"
+            "a call to `{name}` whose range selector is `{argument}`, where it has to be a range \
+             selector like `x[5m]`"
         )));
     };
+    let function = signature.bind(name, args)?;
     window_selection(context, function, vs, range)
 }
 
@@ -790,33 +811,73 @@ fn grid_error(error: datatypes::error::Error) -> DataFusionError {
     DataFusionError::Plan(format!("the statement's grid is invalid: {error}"))
 }
 
-/// What a call to a range function has to be: the parameters it reads, and how to bind them.
+/// What a call to a range function has to be: where its range selector sits, how many constants it
+/// reads, and how they bind.
+///
+/// The selector's position is a variant rather than a convention because PromQL does not put it in
+/// one place: `quantile_over_time(0.9, x[5m])` writes its quantile before the selector, while
+/// `predict_linear(x[5m], 300)` and `double_exponential_smoothing(x[5m], 0.5, 0.1)` write theirs
+/// after it. A single "parameters come first" rule would read the selector as a constant in the
+/// second group and reject an ordinary query, so each shape states its own layout.
 #[derive(Clone, Copy)]
 enum RangeSignature {
     /// A function that reads only its range selector, as in `rate(x[5m])`.
     Selector(RangeFunction),
-    /// A function that reads one constant before its range selector, and the function that constant
-    /// binds, as in `quantile_over_time(0.9, x[5m])`.
-    ///
-    /// The constant is kept out of the variant name because only the call site knows it.
-    Scalar(fn(f64) -> RangeFunction),
+    /// One constant, then the range selector, as in `quantile_over_time(0.9, x[5m])`.
+    ConstantBeforeSelector(fn(f64) -> RangeFunction),
+    /// The range selector, then one constant, as in `predict_linear(x[5m], 300)`.
+    ConstantAfterSelector(fn(f64) -> RangeFunction),
+    /// The range selector, then two constants, as in
+    /// `double_exponential_smoothing(x[5m], 0.5, 0.1)`.
+    TwoConstantsAfterSelector(fn(f64, f64) -> RangeFunction),
 }
 
 impl RangeSignature {
-    /// How many scalar parameters the function reads before its range selector.
-    fn parameters(self) -> usize {
+    /// The position of the range selector among the call's arguments.
+    fn selector_index(self) -> usize {
+        match self {
+            Self::Selector(_)
+            | Self::ConstantAfterSelector(_)
+            | Self::TwoConstantsAfterSelector(_) => 0,
+            Self::ConstantBeforeSelector(_) => 1,
+        }
+    }
+
+    /// How many constants the function reads.
+    fn constants(self) -> usize {
         match self {
             Self::Selector(_) => 0,
-            Self::Scalar(_) => 1,
+            Self::ConstantBeforeSelector(_) | Self::ConstantAfterSelector(_) => 1,
+            Self::TwoConstantsAfterSelector(_) => 2,
         }
+    }
+
+    /// How many arguments the call writes, its range selector counted in.
+    fn arity(self) -> usize {
+        self.constants() + 1
     }
 
     /// What the call's arguments are, for the arity rejection to name them.
     fn arguments(self) -> &'static str {
         match self {
             Self::Selector(_) => "its range selector",
-            Self::Scalar(_) => "a number and its range selector",
+            Self::ConstantBeforeSelector(_) => "a number and its range selector",
+            Self::ConstantAfterSelector(_) => "its range selector and a number",
+            Self::TwoConstantsAfterSelector(_) => "its range selector and two numbers",
         }
+    }
+
+    /// Binds the function from the call's arguments, which have already passed the arity check.
+    fn bind(self, name: &str, args: &[Box<PromExpr>]) -> Result<RangeFunction> {
+        Ok(match self {
+            Self::Selector(function) => function,
+            Self::ConstantBeforeSelector(bind) => bind(constant_argument(name, &args[0], 0)?),
+            Self::ConstantAfterSelector(bind) => bind(constant_argument(name, &args[1], 1)?),
+            Self::TwoConstantsAfterSelector(bind) => bind(
+                constant_argument(name, &args[1], 1)?,
+                constant_argument(name, &args[2], 2)?,
+            ),
+        })
     }
 }
 
@@ -828,7 +889,17 @@ impl RangeSignature {
 /// its name alone cannot produce the variant the tree binds.
 fn range_signature(name: &str) -> Option<RangeSignature> {
     match name {
-        "quantile_over_time" => Some(RangeSignature::Scalar(RangeFunction::QuantileOverTime)),
+        "quantile_over_time" => Some(RangeSignature::ConstantBeforeSelector(
+            RangeFunction::QuantileOverTime,
+        )),
+        // These two write their constants after the selector, which is the opposite order to
+        // `quantile_over_time`.
+        "predict_linear" => Some(RangeSignature::ConstantAfterSelector(
+            RangeFunction::PredictLinear,
+        )),
+        "double_exponential_smoothing" => Some(RangeSignature::TwoConstantsAfterSelector(
+            |smoothing, trend| RangeFunction::DoubleExponentialSmoothing { smoothing, trend },
+        )),
         _ => range_function(name).map(RangeSignature::Selector),
     }
 }
@@ -1008,9 +1079,10 @@ fn constant_argument(name: &str, argument: &PromExpr, position: usize) -> Result
 
 /// How a rejection names the argument a parameter was read from.
 ///
-/// The three positions are the ones a signature can read: the vector, and the two constants behind
-/// it. Every caller passes the literal position its signature reads, so there is no fourth position
-/// to name and no default to invent one for.
+/// The three positions are the ones a supported call can write: a math function's vector and the two
+/// constants behind it, or a range function's selector and the constants on either side of it. Every
+/// caller passes the literal position it read, so there is no fourth position to name and no default
+/// to invent one for.
 fn argument_position(position: usize) -> &'static str {
     const POSITIONS: [&str; 3] = ["first argument", "second argument", "third argument"];
     POSITIONS[position]
@@ -1057,10 +1129,21 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
             if refuses_modifier(binary.modifier.as_ref()) {
                 return None;
             }
-            let op = arithmetic_op(&binary.op)?;
             let left = constant_value(&binary.lhs)?;
             let right = constant_value(&binary.rhs)?;
-            Some(op.calculate(left, right))
+            if let Some(op) = arithmetic_op(&binary.op) {
+                return Some(op.calculate(left, right));
+            }
+            // A comparison of two constants is the number it reports when it is written with
+            // `bool`: Prometheus reads `1 > bool 2` as `0`, and [`ComparisonOp::apply`] is the same
+            // answer the kernel gives. Without `bool` there is no number to report -- `1 > 2` is a
+            // parse error in Prometheus -- so it is left unfolded and the dispatch refuses it.
+            if binary.return_bool()
+                && let Some(op) = comparison_op(&binary.op)
+            {
+                return Some(f64::from(op.apply(left, right)));
+            }
+            None
         }
         // Calls (`time()`, `scalar(v)`), selectors, range selectors, aggregates and subqueries all
         // read something this compiler cannot know before the query runs.
@@ -1072,8 +1155,9 @@ fn constant_value(expr: &PromExpr) -> Option<f64> {
 ///
 /// The token is matched by its id, which is stable and is what the rest of the planner matches on,
 /// rather than by the text it displays as: a symbol this compiler does not recognise is not
-/// arithmetic here rather than a wrong operator. A comparison and a set operator are the cases that
-/// reach this and fold nothing, which is this batch's boundary rather than an accident of the map.
+/// arithmetic here rather than a wrong operator. A comparison is `None` here and is folded by
+/// [`comparison_op`] instead, because only a `bool` comparison of two constants has a number to
+/// report; a set operator folds nothing at all.
 fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
     match op.id() {
         token::T_ADD => Some(ArithmeticOp::Add),
@@ -1083,6 +1167,22 @@ fn arithmetic_op(op: &TokenType) -> Option<ArithmeticOp> {
         token::T_MOD => Some(ArithmeticOp::Modulo),
         token::T_POW => Some(ArithmeticOp::Power),
         token::T_ATAN2 => Some(ArithmeticOp::Atan2),
+        _ => None,
+    }
+}
+
+/// The comparison operator a PromQL token denotes, or `None` when the token is not a comparison.
+///
+/// This is the folding half of [`binary_op`], which binds the same tokens to a node: the fold and
+/// the node have to agree on which token is which comparison, so the two maps sit beside each other.
+fn comparison_op(op: &TokenType) -> Option<ComparisonOp> {
+    match op.id() {
+        token::T_EQLC => Some(ComparisonOp::Equal),
+        token::T_NEQ => Some(ComparisonOp::NotEqual),
+        token::T_GTR => Some(ComparisonOp::Greater),
+        token::T_LSS => Some(ComparisonOp::Less),
+        token::T_GTE => Some(ComparisonOp::GreaterEqual),
+        token::T_LTE => Some(ComparisonOp::LessEqual),
         _ => None,
     }
 }
@@ -1111,6 +1211,13 @@ fn range_function(name: &str) -> Option<RangeFunction> {
         "resets" => Some(RangeFunction::Resets),
         "changes" => Some(RangeFunction::Changes),
         "deriv" => Some(RangeFunction::Deriv),
+        // These functions are supported unconditionally by this native compiler.
+        "first_over_time" => Some(RangeFunction::FirstOverTime),
+        "mad_over_time" => Some(RangeFunction::MadOverTime),
+        "ts_of_first_over_time" => Some(RangeFunction::TsOfFirstOverTime),
+        "ts_of_last_over_time" => Some(RangeFunction::TsOfLastOverTime),
+        "ts_of_min_over_time" => Some(RangeFunction::TsOfMinOverTime),
+        "ts_of_max_over_time" => Some(RangeFunction::TsOfMaxOverTime),
         _ => None,
     }
 }
