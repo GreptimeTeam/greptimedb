@@ -29,7 +29,7 @@ use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
 use mito_codec::row_converter::{
-    CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
+    CompositeValues, PrimaryKeyCodec, SortField, SparsePrimaryKeyCodec, build_primary_key_codec,
     build_primary_key_codec_with_fields,
 };
 use snafu::{OptionExt, ResultExt, ensure};
@@ -577,14 +577,19 @@ impl FlatCompatPrimaryKey {
         debug_assert!(!fields.is_empty());
 
         // Create converter to append values.
-        let converter = Some(build_primary_key_codec_with_fields(
-            expect.primary_key_encoding,
-            fields.into_iter(),
-        ));
+        let converter: Arc<dyn PrimaryKeyCodec> = match expect.primary_key_encoding {
+            PrimaryKeyEncoding::Dense => {
+                build_primary_key_codec_with_fields(expect.primary_key_encoding, fields.into_iter())
+            }
+            PrimaryKeyEncoding::Sparse => {
+                // The existing key already contains the reserved prefix.
+                Arc::new(SparsePrimaryKeyCodec::from_columns(to_add.iter().copied()))
+            }
+        };
 
         Ok(Self {
             rewriter,
-            converter,
+            converter: Some(converter),
             values,
         })
     }
@@ -689,17 +694,17 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::JsonNativeType;
     use datatypes::value::ValueRef;
-    use mito_codec::row_converter::{
-        DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
-    };
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
+    use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
 
     /// Creates a new [RegionMetadata].
     fn new_metadata(
@@ -1106,6 +1111,60 @@ mod tests {
         let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
+    }
+
+    #[rstest::rstest]
+    #[case::ordinary(false)]
+    #[case::metric(true)]
+    fn test_compat_sparse_primary_key_with_new_nullable_tag(#[case] metric: bool) {
+        let mut actual = sst_region_metadata_with_encoding(if metric {
+            PrimaryKeyEncoding::Sparse
+        } else {
+            PrimaryKeyEncoding::Dense
+        });
+        actual.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let actual = Arc::new(actual);
+        let mut builder = RegionMetadataBuilder::from_existing((*actual).clone());
+        let mut primary_key = actual.primary_key.clone();
+        primary_key.push(4);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "new_tag",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 4,
+            })
+            .primary_key(primary_key);
+        let expected = Arc::new(builder.build().unwrap());
+        let compat = FlatCompatPrimaryKey::new(&expected, &actual).unwrap();
+
+        let mut values = Vec::new();
+        if metric {
+            values.extend([
+                (ReservedColumnId::table_id(), Value::UInt32(23)),
+                (ReservedColumnId::tsid(), Value::UInt64(42)),
+            ]);
+        }
+        values.extend([(0, Value::from("api")), (1, Value::Null)]);
+        let mut key = Vec::new();
+        build_primary_key_codec(&actual)
+            .encode_values(&values, &mut key)
+            .unwrap();
+
+        // Adding a NULL sparse tag must preserve the existing key, including metric IDs.
+        let dictionary_key = build_flat_test_pk_array(&[&key, &key]);
+        let binary_key: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(key.as_slice()),
+            None,
+            Some(key.as_slice()),
+        ]));
+        for input in [dictionary_key, binary_key] {
+            let result = compat.compat(&input).unwrap();
+            assert_eq!(result.as_ref(), input.as_ref());
+        }
     }
 
     #[test]

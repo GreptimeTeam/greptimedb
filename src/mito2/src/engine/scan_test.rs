@@ -74,6 +74,79 @@ use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_wit
 use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
 
 #[tokio::test]
+async fn test_sparse_upsert_after_adding_nullable_tag() -> WhateverResult<()> {
+    use datatypes::schema::ColumnSchema;
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_request::AddColumn;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new()
+        .tag_num(1)
+        .field_num(1)
+        .insert_option("primary_key_encoding", "sparse")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await?;
+    let mut rows = Rows {
+        schema,
+        rows: vec![row(vec![
+            ValueData::StringValue("api".into()),
+            ValueData::F64Value(1.0),
+            ValueData::TimestampMillisecondValue(1000),
+        ])],
+    };
+    test_util::put_rows(&engine, region_id, rows.clone()).await;
+    test_util::flush_region(&engine, region_id, None).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "zone",
+                                ConcreteDataType::string_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Tag,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await?;
+
+    // The old SST and the new write must still identify the same series before compaction.
+    rows.rows[0].values[1].value_data = Some(ValueData::F64Value(2.0));
+    test_util::put_rows(&engine, region_id, rows).await;
+    for flush in [false, true] {
+        if flush {
+            test_util::flush_region(&engine, region_id, None).await;
+        }
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await?;
+        let batches = RecordBatches::try_collect(stream).await?;
+        let expected = "\
++-------+---------+---------------------+------+
+| tag_0 | field_0 | ts                  | zone |
++-------+---------+---------------------+------+
+| api   | 2.0     | 1970-01-01T00:00:01 |      |
++-------+---------+---------------------+------+";
+        assert_eq!(batches.pretty_print()?, expected);
+    }
+    engine.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::ColumnMetadata;
