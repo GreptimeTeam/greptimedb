@@ -20,10 +20,10 @@ use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
-use datatypes::series::MetricName;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::{Label, MetricName};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
@@ -3722,4 +3722,527 @@ fn whole_vector_functions_bind_a_vector_operation() {
         let root = display.lines().nth(1).expect("a compiled tree has a root");
         assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
     }
+}
+
+/// One raw chunk of `metric`, keyed by `key`, closing the series.
+///
+/// `timestamps` are milliseconds and `values` one per timestamp, which is what a scan of the series
+/// hands the tree.
+fn agg_raw_chunk(
+    schema: &SeriesSchema,
+    key: &[u8],
+    metric: MetricName,
+    timestamps: &[i64],
+    values: &[f64],
+) -> RawSeriesChunk {
+    agg_raw_chunk_with_last(schema, key, metric, timestamps, values, true)
+}
+
+/// One raw chunk of `metric`, keyed by `key`, with an explicit series-ending flag.
+fn agg_raw_chunk_with_last(
+    schema: &SeriesSchema,
+    key: &[u8],
+    metric: MetricName,
+    timestamps: &[i64],
+    values: &[f64],
+    is_last: bool,
+) -> RawSeriesChunk {
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from_slice_ref(key),
+        Some(metric),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
+        SeriesFields::one(Samples::from_float(Float64Array::from(values.to_vec()))),
+        is_last,
+    )
+    .unwrap()
+}
+
+/// `name` with the labels in `tags`, in the order given.
+fn agg_metric(name: &str, tags: &[(&str, &str)]) -> MetricName {
+    MetricName::try_new(
+        Some(name.into()),
+        tags.iter()
+            .map(|(name, value)| Label {
+                name: (*name).into(),
+                value: (*value).into(),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// What one result series of a native execution reports.
+type AggSeries = (
+    Option<String>,
+    Vec<(String, String)>,
+    Vec<(usize, Option<f64>)>,
+);
+
+/// Reads the outputs a native execution produced.
+fn aggregate_results(output: &[EvaluatedChunk]) -> Vec<AggSeries> {
+    let mut results: Vec<AggSeries> = output
+        .iter()
+        .map(|chunk| {
+            let mut tags: Vec<(String, String)> = chunk
+                .series
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| (tag.name.to_string(), tag.value.to_string()))
+                .collect();
+            tags.sort();
+            let points = chunk
+                .series
+                .time
+                .positions()
+                .map(|(position, row)| {
+                    let sample = chunk.series.fields.as_slice()[0]
+                        .iter()
+                        .nth(row)
+                        .expect("the axis and the field are aligned");
+                    (
+                        position,
+                        match sample {
+                            SampleRef::Float(value) => Some(value),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect();
+            (chunk.series.metric.name().map(str::to_string), tags, points)
+        })
+        .collect();
+    results.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    results
+}
+
+/// Runs `tree` over `chunks`, which enter at the tree's only input, and reads the answer.
+///
+/// The answer is read the way a caller reads it: the whole input is pushed, the input is ended, and
+/// what the root reports is collected. Each series is reported by its identity and the value it
+/// decided at each absolute grid position.
+fn run_aggregate_tree(tree: &NativeTree, chunks: Vec<RawSeriesChunk>) -> Vec<AggSeries> {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
+    let state =
+        NativeExecutionState::try_new(tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+    let mut execution = NativeExecutor::new(state);
+    for chunk in chunks {
+        execution
+            .push_raw(chunk)
+            .unwrap_or_else(|error| panic!("a source chunk was refused: {error}"));
+    }
+    let output = execution
+        .finish()
+        .unwrap_or_else(|error| panic!("the tree did not answer: {error}"));
+    aggregate_results(&output)
+}
+
+/// The 21 grid points of a statement over 100 seconds in 5-second steps.
+fn agg_points_0_to_100() -> Vec<usize> {
+    (0..21).collect()
+}
+
+/// The timestamps of the same 21 points, in milliseconds.
+fn agg_timestamps_0_to_100() -> Vec<i64> {
+    (0..21).map(|index| index * 5_000).collect()
+}
+
+/// `sum(x)` over two series: one unlabelled group, and every label of both inputs dropped.
+#[test]
+fn a_compiled_sum_drops_every_label_and_adds_its_group() {
+    let tree = compile(
+        &eval_stmt("sum(x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let schema = raw_schema();
+    let timestamps = agg_timestamps_0_to_100();
+    let chunks = vec![
+        agg_raw_chunk(
+            &schema,
+            b"a",
+            agg_metric("x", &[("job", "api"), ("instance", "a")]),
+            &timestamps,
+            &(1..=21).map(f64::from).collect::<Vec<_>>(),
+        ),
+        agg_raw_chunk(
+            &schema,
+            b"b",
+            agg_metric("x", &[("job", "db"), ("instance", "b")]),
+            &timestamps,
+            &(1..=21).map(|value| (2 * value) as f64).collect::<Vec<_>>(),
+        ),
+    ];
+
+    let output = run_aggregate_tree(&tree, chunks);
+    // `3` at the first point, three more at each of the twenty after it: the two members summed.
+    let values: Vec<(usize, Option<f64>)> = agg_points_0_to_100()
+        .into_iter()
+        .map(|position| (position, Some(3.0 * (position as f64 + 1.0))))
+        .collect();
+    assert_eq!(output, vec![(None, Vec::new(), values)]);
+}
+
+#[test]
+fn a_compiled_sum_aggregates_series_chunks_after_input_ends() {
+    let schema = raw_schema();
+    let timestamps = agg_timestamps_0_to_100();
+    let values: Vec<f64> = (1..=21).map(f64::from).collect();
+    let cases = [
+        ("sum(x)", None, Vec::new()),
+        (
+            "sum by(job)(x)",
+            None,
+            vec![("job".to_string(), "api".to_string())],
+        ),
+        (
+            "sum without(instance)(x)",
+            None,
+            vec![("job".to_string(), "api".to_string())],
+        ),
+    ];
+
+    for (query, name, tags) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+        let metric = agg_metric("x", &[("job", "api"), ("instance", "a")]);
+        let chunks = vec![
+            agg_raw_chunk_with_last(
+                &schema,
+                b"a",
+                metric.clone(),
+                &timestamps[..10],
+                &values[..10],
+                false,
+            ),
+            agg_raw_chunk_with_last(
+                &schema,
+                b"a",
+                metric,
+                &timestamps[10..],
+                &values[10..],
+                true,
+            ),
+        ];
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
+        let state =
+            NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+        let mut execution = NativeExecutor::new(state);
+        for chunk in chunks {
+            execution.push_raw(chunk).unwrap();
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "`{query}` produced output before the whole input ended"
+            );
+        }
+        let output = execution.finish().unwrap();
+        let results = aggregate_results(&output);
+        let expected_points = values
+            .iter()
+            .enumerate()
+            .map(|(position, value)| (position, Some(*value)))
+            .collect();
+        assert_eq!(
+            results,
+            vec![(name.map(str::to_string), tags, expected_points)],
+            "`{query}`"
+        );
+    }
+}
+
+/// Empty source input is not a member of an aggregate's implicit group.
+#[test]
+fn a_compiled_aggregate_over_empty_input_produces_no_groups() {
+    for query in ["sum(x)", "sum by(job)(x)", "sum without(instance)(x)"] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+        assert_eq!(
+            run_aggregate_tree(&tree, Vec::new()),
+            Vec::new(),
+            "`{query}` invented a group for empty input"
+        );
+    }
+}
+
+/// `sum by(job)(x)` over five series: two groups, each the sum of its own members.
+///
+/// The members cover different points, so each group is a sum over a subset that changes from point
+/// to point: one series holds the whole grid, one holds a single sample between two grid points, and
+/// one stops a whole lookback before the grid does. No last sample sits exactly one lookback behind
+/// a grid point, so which points each member covers does not depend on how the boundary is read.
+#[test]
+fn a_compiled_sum_by_groups_its_members_and_sums_each_group() {
+    let tree = compile(
+        &eval_stmt("sum by(job)(x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let schema = raw_schema();
+    let all = agg_timestamps_0_to_100();
+    let chunks = vec![
+        // The whole grid, holding one.
+        agg_raw_chunk(
+            &schema,
+            b"a",
+            agg_metric("x", &[("job", "api"), ("instance", "a")]),
+            &all,
+            &[1.0; 21],
+        ),
+        // One sample halfway between grid points 0 and 1, so only grid point 1 selects it.
+        agg_raw_chunk(
+            &schema,
+            b"b",
+            agg_metric("x", &[("job", "api"), ("instance", "b")]),
+            &[2_500],
+            &[2.0],
+        ),
+        // Four samples between grid points, covering grid points 1 to 4.
+        agg_raw_chunk(
+            &schema,
+            b"e",
+            agg_metric("x", &[("job", "api"), ("instance", "e")]),
+            &[2_400, 7_400, 12_400, 17_400],
+            &[5.0; 4],
+        ),
+        // The whole grid, holding ten.
+        agg_raw_chunk(
+            &schema,
+            b"c",
+            agg_metric("x", &[("job", "db"), ("instance", "c")]),
+            &all,
+            &[10.0; 21],
+        ),
+        // One sample halfway between grid points 0 and 1, holding twenty.
+        agg_raw_chunk(
+            &schema,
+            b"d",
+            agg_metric("x", &[("job", "db"), ("instance", "d")]),
+            &[2_500],
+            &[20.0],
+        ),
+    ];
+
+    let output = run_aggregate_tree(&tree, chunks);
+    // `api` is `a` alone at points 0 and 5 to 20, and every member at the points they cover:
+    // point 1 is `1 + 2 + 5`, points 2 to 4 are `1 + 5`.
+    let api: Vec<(usize, Option<f64>)> = agg_points_0_to_100()
+        .into_iter()
+        .map(|position| {
+            let value = match position {
+                1 => 8.0,
+                2..=4 => 6.0,
+                _ => 1.0,
+            };
+            (position, Some(value))
+        })
+        .collect();
+    // `db` is the same shape over its own members: point 1 is `10 + 20`, the rest is `c` alone.
+    let db: Vec<(usize, Option<f64>)> = agg_points_0_to_100()
+        .into_iter()
+        .map(|position| (position, Some(if position == 1 { 30.0 } else { 10.0 })))
+        .collect();
+    assert_eq!(
+        output,
+        vec![
+            (None, vec![("job".to_string(), "api".to_string())], api),
+            (None, vec![("job".to_string(), "db".to_string())], db),
+        ]
+    );
+}
+
+/// `sum without(instance)(x)`: `instance` goes, `job` and `zone` stay, and so does `__name__` going.
+#[test]
+fn a_compiled_sum_without_drops_the_named_label_and_the_name() {
+    let tree = compile(
+        &eval_stmt("sum without(instance)(x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let schema = raw_schema();
+    let timestamps = agg_timestamps_0_to_100();
+    let chunks = vec![
+        agg_raw_chunk(
+            &schema,
+            b"a",
+            agg_metric("x", &[("job", "api"), ("instance", "a"), ("zone", "west")]),
+            &timestamps,
+            &[1.0; 21],
+        ),
+        agg_raw_chunk(
+            &schema,
+            b"b",
+            agg_metric("x", &[("job", "api"), ("instance", "b"), ("zone", "east")]),
+            &timestamps,
+            &[2.0; 21],
+        ),
+    ];
+
+    let output = run_aggregate_tree(&tree, chunks);
+    let values_of = |value: f64| -> Vec<(usize, Option<f64>)> {
+        agg_points_0_to_100()
+            .into_iter()
+            .map(|position| (position, Some(value)))
+            .collect()
+    };
+    // Two groups, because `zone` is not the dropped label: the two series differ by more than the
+    // label the grouping removes.
+    assert_eq!(
+        output,
+        vec![
+            (
+                None,
+                vec![
+                    ("job".to_string(), "api".to_string()),
+                    ("zone".to_string(), "east".to_string()),
+                ],
+                values_of(2.0),
+            ),
+            (
+                None,
+                vec![
+                    ("job".to_string(), "api".to_string()),
+                    ("zone".to_string(), "west".to_string()),
+                ],
+                values_of(1.0),
+            ),
+        ]
+    );
+}
+
+/// `sum by(job)(rate(x[5m]))`: an aggregate over a window, mid-chain.
+///
+/// Every series is a counter rising by one per five seconds, and every grid point's window ends on a
+/// sample and begins five seconds before one, so the extrapolated rate is the same at every point:
+/// `59 / 295 = 0.2` per second, which the double arithmetic lands on the literals below.
+#[test]
+fn a_compiled_sum_over_a_rate_groups_the_window_it_reads() {
+    let statement = EvalStmt {
+        expr: promql_parser::parser::parse("sum by(job)(rate(x[5m]))").unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(300),
+        end: UNIX_EPOCH + Duration::from_secs(400),
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(5),
+    };
+    let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+    // The window reads 300 seconds, so the samples start a full window before the first grid point.
+    let schema = raw_schema();
+    let timestamps: Vec<i64> = (0..=80).map(|index| index * 5_000).collect();
+    let values: Vec<f64> = (0..=80).map(|index| f64::from(index) + 1.0).collect();
+    let chunks = vec![
+        agg_raw_chunk(
+            &schema,
+            b"a",
+            agg_metric("x", &[("job", "api"), ("instance", "a")]),
+            &timestamps,
+            &values,
+        ),
+        agg_raw_chunk(
+            &schema,
+            b"b",
+            agg_metric("x", &[("job", "api"), ("instance", "b")]),
+            &timestamps,
+            &values,
+        ),
+        agg_raw_chunk(
+            &schema,
+            b"c",
+            agg_metric("x", &[("job", "db"), ("instance", "c")]),
+            &timestamps,
+            &values,
+        ),
+    ];
+
+    let output = run_aggregate_tree(&tree, chunks);
+    let at_every_point = |value: f64| -> Vec<(usize, Option<f64>)> {
+        (0..21).map(|position| (position, Some(value))).collect()
+    };
+    // One `rate` is `0.19999999999999998`, and the pair of them add to `0.39999999999999997`.
+    assert_eq!(
+        output,
+        vec![
+            (
+                None,
+                vec![("job".to_string(), "api".to_string())],
+                at_every_point(0.39999999999999997),
+            ),
+            (
+                None,
+                vec![("job".to_string(), "db".to_string())],
+                at_every_point(0.19999999999999998),
+            ),
+        ]
+    );
+}
+
+/// Splitting one counter's samples does not change the rate aggregate or make it answer early.
+#[test]
+fn a_compiled_sum_over_a_rate_aggregates_series_chunks_after_input_ends() {
+    let statement = EvalStmt {
+        expr: promql_parser::parser::parse("sum by(job)(rate(x[5m]))").unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(300),
+        end: UNIX_EPOCH + Duration::from_secs(400),
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(5),
+    };
+    let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+    let schema = raw_schema();
+    let timestamps: Vec<i64> = (0..=80).map(|index| index * 5_000).collect();
+    let values: Vec<f64> = (0..=80).map(|index| f64::from(index) + 1.0).collect();
+    let metric = agg_metric("x", &[("job", "api"), ("instance", "a")]);
+    let chunks = [
+        agg_raw_chunk_with_last(
+            &schema,
+            b"a",
+            metric.clone(),
+            &timestamps[..41],
+            &values[..41],
+            false,
+        ),
+        agg_raw_chunk_with_last(
+            &schema,
+            b"a",
+            metric,
+            &timestamps[41..],
+            &values[41..],
+            true,
+        ),
+    ];
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
+    let state =
+        NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+    let mut execution = NativeExecutor::new(state);
+    for chunk in chunks {
+        execution.push_raw(chunk).unwrap();
+        assert!(
+            execution.next_chunk().unwrap().is_none(),
+            "the rate aggregate produced output before the whole input ended"
+        );
+    }
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        aggregate_results(&output),
+        vec![(
+            None,
+            vec![("job".to_string(), "api".to_string())],
+            (0..21)
+                .map(|position| (position, Some(0.19999999999999998)))
+                .collect(),
+        )]
+    );
+}
+
+/// Empty source input is not a member of this aggregate's implicit group, with or without a window.
+#[test]
+fn a_compiled_sum_over_a_rate_with_empty_input_produces_no_groups() {
+    let statement = EvalStmt {
+        expr: promql_parser::parser::parse("sum by(job)(rate(x[5m]))").unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(300),
+        end: UNIX_EPOCH + Duration::from_secs(400),
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(5),
+    };
+    let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+    assert_eq!(run_aggregate_tree(&tree, Vec::new()), Vec::new());
 }
