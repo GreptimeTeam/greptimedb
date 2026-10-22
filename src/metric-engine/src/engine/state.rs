@@ -114,6 +114,9 @@ pub(crate) struct MetricEngineState {
     /// The column order is the same with the order in the metadata, which is
     /// alphabetically ordered on column name.
     logical_columns: HashMap<RegionId, Vec<ColumnMetadata>>,
+    /// Logical regions whose drop failed, mapped to their physical regions. They take no writes,
+    /// and a retried drop removes them.
+    dropping_logical_regions: HashMap<RegionId, RegionId>,
 }
 
 impl MetricEngineState {
@@ -284,6 +287,42 @@ impl MetricEngineState {
         self.logical_columns.remove(&logical_region_id);
 
         Ok(())
+    }
+
+    /// Stops writes to a logical region whose drop failed, and keeps its physical region for a
+    /// retried drop.
+    pub fn mark_logical_region_dropping(&mut self, logical_region_id: RegionId) -> Result<()> {
+        let physical_region_id = self
+            .logical_regions
+            .get(&logical_region_id)
+            .copied()
+            .context(PhysicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            })?;
+        self.remove_logical_region(logical_region_id)?;
+        self.dropping_logical_regions
+            .insert(logical_region_id, physical_region_id);
+        Ok(())
+    }
+
+    /// Returns the physical region of a logical region to drop, including one whose drop failed.
+    pub fn physical_region_to_drop(&self, logical_region_id: RegionId) -> Option<RegionId> {
+        self.logical_regions
+            .get(&logical_region_id)
+            .or_else(|| self.dropping_logical_regions.get(&logical_region_id))
+            .copied()
+    }
+
+    /// Removes a dropped logical region, including one whose earlier drop failed.
+    pub fn finish_logical_region_drop(&mut self, logical_region_id: RegionId) -> Result<()> {
+        if self
+            .dropping_logical_regions
+            .remove(&logical_region_id)
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.remove_logical_region(logical_region_id)
     }
 
     pub fn is_logical_region_exist(&self, logical_region_id: RegionId) -> bool {

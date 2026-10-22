@@ -95,9 +95,7 @@ impl MetricEngineInner {
                 .state
                 .read()
                 .unwrap()
-                .logical_regions()
-                .get(&region_id)
-                .copied();
+                .physical_region_to_drop(region_id);
             if let Some(metadata_region_id) = metadata_region_id {
                 self.drop_logical_region(region_id, metadata_region_id)
                     .await
@@ -163,13 +161,12 @@ impl MetricEngineInner {
             .remove_logical_region(physical_region_id, logical_region_id)
             .await
         {
-            // The delete may have been applied although it failed. Drop the cached columns, so
-            // that writes read them again from the metadata region instead of using a deleted
-            // schema. A retried drop removes the logical region.
+            // The delete may have been applied although it failed. The region takes no more
+            // writes, and a retried drop deletes its metadata again and removes it.
             self.state
                 .write()
                 .unwrap()
-                .invalid_logical_regions_cache([logical_region_id]);
+                .mark_logical_region_dropping(logical_region_id)?;
             return Err(err);
         }
 
@@ -177,7 +174,7 @@ impl MetricEngineInner {
         self.state
             .write()
             .unwrap()
-            .remove_logical_region(logical_region_id)?;
+            .finish_logical_region_drop(logical_region_id)?;
 
         Ok(0)
     }

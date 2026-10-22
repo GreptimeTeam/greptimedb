@@ -813,8 +813,8 @@ mod tests {
     use store_api::path_utils::table_dir;
     use store_api::region_engine::{RegionEngine, RegionLeaseGrant, RegionRole};
     use store_api::region_request::{
-        EnterStagingRequest, PathType, RegionCloseRequest, RegionDropRequest, RegionOpenRequest,
-        RegionRequest, StagingPartitionDirective,
+        EnterStagingRequest, PathType, RegionCloseRequest, RegionDeleteRequest, RegionDropRequest,
+        RegionOpenRequest, RegionRequest, StagingPartitionDirective,
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -2529,13 +2529,37 @@ mod tests {
         assert_eq!(5, response.affected_rows);
 
         // The lease expires while dropping that logical region, which writes have used. The
-        // delete is applied, so writes no longer use its cached columns, and a retried drop
-        // removes the region.
+        // region takes no writes until a retried drop removes it.
         let drop_request = || {
             RegionRequest::Drop(RegionDropRequest {
                 fast_path: false,
                 force: false,
                 partial_drop: false,
+            })
+        };
+        let put_request = || {
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
+                rows: Rows {
+                    schema: test_util::row_schema_with_tags(&["job", "tag2"]),
+                    rows: test_util::build_rows(2, 5),
+                },
+                hint: None,
+                partition_expr_version: None,
+            })
+        };
+        // A delete carries only the time index and the tags.
+        let delete_request = || {
+            let mut schema = test_util::row_schema_with_tags(&["job", "tag2"]);
+            schema.remove(1);
+            let mut rows = test_util::build_rows(2, 5);
+            for row in &mut rows {
+                row.values.remove(1);
+            }
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows: Rows { schema, rows },
+                hint: None,
+                partition_expr_version: None,
             })
         };
         listener.pause_next();
@@ -2560,21 +2584,13 @@ mod tests {
                 grant(Instant::now() + Duration::from_secs(10)),
             )
             .unwrap();
-        let put_request = || {
-            RegionRequest::Put(RegionPutRequest {
-                skip_wal: false,
-                rows: Rows {
-                    schema: test_util::row_schema_with_tags(&["job", "tag2"]),
-                    rows: test_util::build_rows(2, 5),
-                },
-                hint: None,
-                partition_expr_version: None,
-            })
-        };
-        engine
-            .handle_request(logical_region_id, put_request())
-            .await
-            .unwrap_err();
+        for request in [put_request(), delete_request()] {
+            let err = engine
+                .handle_request(logical_region_id, request)
+                .await
+                .unwrap_err();
+            assert_eq!(StatusCode::RegionNotFound, err.status_code(), "{err:?}");
+        }
         let metadata_region = &engine.inner.metadata_region;
         assert!(
             metadata_region
@@ -2590,10 +2606,32 @@ mod tests {
                 .has_logical_region_lock(logical_region_id)
                 .await
         );
+
+        // A drop rejected before the WAL append is not applied. The retried drop still deletes
+        // the metadata of the logical region.
+        let logical_region_id = env.default_logical_region_id();
+        engine
+            .set_region_role_by_lease(physical_region_id, grant(Instant::now()))
+            .unwrap();
         let err = engine
-            .handle_request(logical_region_id, put_request())
+            .handle_request(logical_region_id, drop_request())
             .await
             .unwrap_err();
-        assert_eq!(StatusCode::RegionNotFound, err.status_code(), "{err:?}");
+        assert!(err.is_retryable(), "{err:?}");
+        engine
+            .set_region_role_by_lease(
+                physical_region_id,
+                grant(Instant::now() + Duration::from_secs(10)),
+            )
+            .unwrap();
+        engine
+            .handle_request(logical_region_id, drop_request())
+            .await
+            .unwrap();
+        let logical_regions = metadata_region
+            .logical_regions(physical_region_id)
+            .await
+            .unwrap();
+        assert!(!logical_regions.contains(&logical_region_id));
     }
 }
