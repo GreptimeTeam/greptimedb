@@ -166,6 +166,13 @@ pub(crate) struct SeriesIndexVersionControl {
 }
 
 impl SeriesIndexVersionControl {
+    pub(crate) fn with_format(self, format: crate::config::SeriesIndexFormat) -> Self {
+        *self.formats.write().unwrap() = Arc::new(
+            crate::series_index::format::SeriesFormats::from_config(format),
+        );
+        self
+    }
+
     pub(crate) fn current(&self) -> Arc<SeriesIndexVersion> {
         self.current.read().unwrap().clone()
     }

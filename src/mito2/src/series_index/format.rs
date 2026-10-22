@@ -43,10 +43,6 @@ pub(crate) trait FormatWriter: Send {
 }
 
 /// A read has independent traversal state and pins its immutable artifact.
-#[allow(
-    dead_code,
-    reason = "Query adapter will consume the format reader separately."
-)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SeriesReadRequest {
     pub(crate) projection: Vec<String>,
@@ -55,10 +51,6 @@ pub(crate) struct SeriesReadRequest {
     pub(crate) filters: Vec<SimpleFilterEvaluator>,
 }
 
-#[allow(
-    dead_code,
-    reason = "Query adapter will consume the format reader separately."
-)]
 pub(crate) trait FormatReader: Send + Sync {
     fn schema(&self) -> SchemaRef;
     fn read(&self, request: SeriesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>>;
@@ -68,7 +60,6 @@ pub(crate) trait FormatReader: Send + Sync {
 #[async_trait]
 pub(crate) trait SeriesIndexFormat: Debug + Send + Sync {
     fn format(&self) -> ArtifactFormat;
-    #[allow(dead_code, reason = "Query adapter is deferred.")]
     async fn reader(
         &self,
         _store: ObjectStore,
@@ -88,7 +79,6 @@ pub(crate) trait SeriesIndexFormat: Debug + Send + Sync {
 }
 
 /// Selection in the stored timestamp unit. No visibility filtering is implicit.
-#[allow(dead_code, reason = "Query adapter is deferred.")]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SamplesReadRequest {
     pub(crate) projection: Vec<String>,
@@ -98,7 +88,6 @@ pub(crate) struct SamplesReadRequest {
     pub(crate) end: Option<i64>,
 }
 
-#[allow(dead_code, reason = "Query adapter is deferred.")]
 pub(crate) trait SamplesFormatReader: Send + Sync {
     fn schema(&self) -> SchemaRef;
     fn read(&self, request: SamplesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>>;
@@ -108,7 +97,6 @@ pub(crate) trait SamplesFormatReader: Send + Sync {
 #[async_trait]
 pub(crate) trait SamplesFormat: Debug + Send + Sync {
     fn format(&self) -> ArtifactFormat;
-    #[allow(dead_code, reason = "Query adapter is deferred.")]
     async fn reader(
         &self,
         _store: ObjectStore,
@@ -136,4 +124,20 @@ pub(crate) trait SamplesFormat: Debug + Send + Sync {
 pub(crate) struct SeriesFormats {
     pub(crate) index: Option<Arc<dyn SeriesIndexFormat>>,
     pub(crate) samples: Option<Arc<dyn SamplesFormat>>,
+}
+
+impl SeriesFormats {
+    pub(crate) fn from_config(format: crate::config::SeriesIndexFormat) -> Self {
+        match format {
+            crate::config::SeriesIndexFormat::Legacy => Self::default(),
+            crate::config::SeriesIndexFormat::Columnar => Self {
+                index: Some(Arc::new(
+                    crate::series_index::columnar::ColumnarSeriesFormat::default(),
+                )),
+                samples: Some(Arc::new(
+                    crate::series_index::samples::ColumnarSamplesFormat::default(),
+                )),
+            },
+        }
+    }
 }

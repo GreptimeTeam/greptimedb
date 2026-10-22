@@ -14,7 +14,7 @@
 
 //! Event-time bucket planning and source coverage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use common_time::{TimeToLive, Timestamp};
@@ -32,6 +32,8 @@ pub(crate) struct IndexBucket {
     pub(crate) start: Timestamp,
     pub(crate) end: Timestamp,
     pub(crate) index_ids: SmallVec<[FileId; 2]>,
+    /// Exact input set when a manual build contains unknown file sequences.
+    pub(crate) unknown_sequence_sources: HashSet<FileId>,
     /// Zero means that merged indexes use incompatible window widths.
     pub(crate) compaction_window_secs: i64,
     /// Indexed SST summaries keyed by aligned start.
@@ -45,6 +47,11 @@ impl IndexBucket {
             start: entry.bucket_start,
             end: entry.bucket_end,
             index_ids: smallvec![entry.index_uuid],
+            unknown_sequence_sources: if entry.min_file_sequence == 0 {
+                entry.source_file_ids.iter().copied().collect()
+            } else {
+                HashSet::new()
+            },
             compaction_window_secs: entry.compaction_window_secs,
             window_sequences: entry.window_sequences.clone(),
         }
@@ -66,6 +73,8 @@ impl IndexBucket {
                 self.window_sequences.clear();
             }
         }
+        self.unknown_sequence_sources
+            .extend(other.unknown_sequence_sources);
         self.index_ids.append(&mut other.index_ids);
     }
 
@@ -122,21 +131,33 @@ pub(crate) struct SeriesIndexPlan {
 
 /// Plans whole-bucket replacements when source SST summaries change. The returned bucket
 /// map is publishable only after every planned build and the catalog writes succeed.
+#[cfg(test)]
 pub(crate) fn plan_series_indexes(
+    buckets: Vec<SeriesBucket>,
+    index_buckets: BTreeMap<Timestamp, IndexBucket>,
+    ttl: Option<TimeToLive>,
+    now_ms: i64,
+) -> SeriesIndexPlan {
+    plan_series_indexes_with_mode(buckets, index_buckets, ttl, now_ms, false)
+}
+
+pub(crate) fn plan_series_indexes_with_mode(
     buckets: Vec<SeriesBucket>,
     mut index_buckets: BTreeMap<Timestamp, IndexBucket>,
     ttl: Option<TimeToLive>,
     now_ms: i64,
+    manual: bool,
 ) -> SeriesIndexPlan {
     // Reconciliation changes geometry, not established coverage. In particular,
     // a deferred bridge must not change the indexed snapshot.
     let buckets = reconcile_series_buckets(buckets, &index_buckets);
     let computed_buckets = buckets.len();
     let expired = |end| {
-        ttl.is_some_and(|ttl| {
-            ttl.is_expired(&end, &Timestamp::new_millisecond(now_ms))
-                .unwrap_or(false)
-        })
+        !manual
+            && ttl.is_some_and(|ttl| {
+                ttl.is_expired(&end, &Timestamp::new_millisecond(now_ms))
+                    .unwrap_or(false)
+            })
     };
     let mut expired_index_ids = Vec::new();
     index_buckets.retain(|_, bucket| {
@@ -153,17 +174,21 @@ pub(crate) fn plan_series_indexes(
         if expired(bucket.end) {
             continue;
         }
-        if bucket.has_unknown_sequence {
+        if bucket.has_unknown_sequence && !manual {
             continue;
         }
         if index_buckets.get(&bucket.start).is_some_and(|indexed| {
-            indexed.end == bucket.end
+            (!bucket.has_unknown_sequence
+                || (manual
+                    && indexed.unknown_sequence_sources
+                        == bucket.files.iter().map(|f| f.file_id().file_id()).collect()))
+                && indexed.end == bucket.end
                 && indexed.compaction_window_secs == bucket.compaction_window_secs
                 && indexed.window_sequences == bucket.window_sequences
         }) {
             continue;
         }
-        if let Some(entry) = bucket.to_series_entry() {
+        if let Some(entry) = bucket.to_series_entry(manual) {
             index_buckets.retain(|_, indexed| {
                 if indexed.start < bucket.end && bucket.start < indexed.end {
                     superseded_index_ids.extend_from_slice(&indexed.index_ids);
@@ -317,9 +342,12 @@ fn merge_window_sequences(
 
 impl SeriesBucket {
     /// Creates entry metadata with a fresh UUID and sorted source file IDs.
-    /// Returns `None` for unknown sequences or too few files.
-    fn to_series_entry(&self) -> Option<SeriesIndexEntry> {
-        if self.has_unknown_sequence || self.files.len() < SERIES_INDEX_TRIGGER_FILES {
+    /// Automatic builds defer unknown sequences and buckets with too few files.
+    fn to_series_entry(&self, manual: bool) -> Option<SeriesIndexEntry> {
+        if self.files.is_empty()
+            || (!manual
+                && (self.has_unknown_sequence || self.files.len() < SERIES_INDEX_TRIGGER_FILES))
+        {
             return None;
         }
         let mut source_file_ids = self
@@ -332,7 +360,8 @@ impl SeriesBucket {
             .files
             .iter()
             .filter_map(|file| file.meta_ref().sequence.map(|sequence| sequence.get()))
-            .min()?;
+            .min()
+            .unwrap_or(0);
         Some(SeriesIndexEntry {
             artifact: None,
             file_size: 0,
@@ -340,7 +369,11 @@ impl SeriesBucket {
             bucket_start: self.start,
             bucket_end: self.end,
             source_file_ids,
-            min_file_sequence,
+            min_file_sequence: if self.has_unknown_sequence {
+                0
+            } else {
+                min_file_sequence
+            },
             max_file_sequence: self.max_file_sequence,
             compaction_window_secs: self.compaction_window_secs,
             window_sequences: self.window_sequences.clone(),
@@ -431,8 +464,8 @@ mod tests {
         );
         assert_eq!(3, buckets[0].max_file_sequence);
         assert_eq!(4, buckets[1].max_file_sequence);
-        assert!(buckets[0].to_series_entry().is_none());
-        assert!(buckets[1].to_series_entry().is_none());
+        assert!(buckets[0].to_series_entry(false).is_none());
+        assert!(buckets[1].to_series_entry(false).is_none());
         let mut files = files.to_vec();
         files.push(file(
             None,
@@ -442,7 +475,7 @@ mod tests {
         ));
         assert!(
             group_files_into_series_buckets(&files, width, 10)[0]
-                .to_series_entry()
+                .to_series_entry(false)
                 .is_none()
         );
     }
@@ -483,6 +516,7 @@ mod tests {
             (70, 100, 20, ids[2]),
         ] {
             IndexBucket {
+                unknown_sequence_sources: HashSet::new(),
                 start: ts(start),
                 end: ts(end),
                 index_ids: smallvec![id],
@@ -740,6 +774,7 @@ mod tests {
         let mut indexes = BTreeMap::new();
         for (start, seq) in [(0, 10), (20, 30)] {
             IndexBucket {
+                unknown_sequence_sources: HashSet::new(),
                 start: ts(start),
                 end: ts(start + 10),
                 index_ids: smallvec![FileId::random()],
@@ -836,6 +871,7 @@ mod tests {
     fn test_index_map_merge_is_order_independent() {
         let ts = Timestamp::new_second;
         let make_index = |start, end, width, windows: &[(i64, u64)]| IndexBucket {
+            unknown_sequence_sources: HashSet::new(),
             start: ts(start),
             end: ts(end),
             index_ids: smallvec![FileId::random()],
