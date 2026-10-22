@@ -25,9 +25,9 @@ use promql::native::plan::{
 };
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp};
-use promql_parser::parser::value::Offset;
 use promql_parser::parser::{
-    AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, VectorMatchFillValues,
+    AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, Offset,
+    VectorMatchFillValues,
 };
 
 use super::compile;
