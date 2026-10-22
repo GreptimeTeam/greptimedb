@@ -25,6 +25,7 @@ use std::sync::Arc;
 use datatypes::series::time::EvalGrid;
 use datatypes::series::{MetricName, SeriesOrdering};
 
+use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
@@ -120,6 +121,12 @@ fn describe(node: &NativeNode) -> String {
                 }
             },
             BoundVectorOp::Absent { labels } => format!("absent {{{}}}", label_pairs(labels)),
+            BoundVectorOp::Histogram(HistogramFunction::Quantile(quantile)) => {
+                format!("histogram_quantile {quantile}")
+            }
+            BoundVectorOp::Histogram(HistogramFunction::Fraction { lower, upper }) => {
+                format!("histogram_fraction {lower} {upper}")
+            }
         },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} [{}] {}",
