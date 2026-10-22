@@ -14,9 +14,11 @@
 
 //! Explicit sample framing and bounded two-level metadata pages.
 
-use super::codec::{self, Cursor, put_u32, put_u64};
-use super::{Manifest, MetricSeriesId, VERSION, invalid, require, unsupported, valid_rows};
 use crate::error::Result;
+use crate::series_index::samples::codec::{self, Cursor, put_u32, put_u64};
+use crate::series_index::samples::{
+    Manifest, MetricSeriesId, VERSION, invalid, require, unsupported, valid_rows,
+};
 
 pub(super) const MAGIC: &[u8; 8] = b"GTSAMPLE";
 pub(super) const HEADER_SIZE: u64 = 16;

@@ -28,16 +28,18 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, consts};
 
-use super::codec;
-use super::metadata::{self, Block, Column, Page, PageReference, Trailer, pack};
-use super::{
-    ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
-    TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
-};
 use crate::error::{Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::artifact_writer::Outputs;
 use crate::series_index::format::FormatWriter;
+use crate::series_index::samples::codec;
+use crate::series_index::samples::metadata::{
+    self, Block, Column, Page, PageReference, Trailer, pack,
+};
+use crate::series_index::samples::{
+    ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
+    TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
+};
 use crate::series_index::writer::{decode_series_identity, validate_metadata};
 
 struct Row {

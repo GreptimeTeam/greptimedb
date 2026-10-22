@@ -14,11 +14,11 @@
 
 //! Lossless, bounded sample column encodings. Nulls never become NaNs.
 
-use super::{MAX_ROWS, require, unsupported};
 use crate::error::Result;
 pub(super) use crate::series_index::columnar::codec::{
     Cursor, checksum, decompress, put_u32, put_u64, put_varint,
 };
+use crate::series_index::samples::{MAX_ROWS, require, unsupported};
 
 fn zig(x: i64) -> u64 {
     ((x as u64) << 1) ^ ((x >> 63) as u64)

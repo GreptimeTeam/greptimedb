@@ -27,14 +27,16 @@ use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use super::codec;
-use super::metadata::{self, Block, Bounds, Column, Page, PageReference, Trailer};
-use super::{
-    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
-};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormatReader, SamplesReadRequest};
+use crate::series_index::samples::codec;
+use crate::series_index::samples::metadata::{
+    self, Block, Bounds, Column, Page, PageReference, Trailer,
+};
+use crate::series_index::samples::{
+    MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
+};
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
 pub(super) struct SamplesReader {
