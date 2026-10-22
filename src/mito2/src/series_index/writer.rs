@@ -477,7 +477,7 @@ fn time_index_unit(metadata: &RegionMetadataRef) -> Result<TimeUnit> {
         .unit())
 }
 
-fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
+pub(crate) fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
     for column in &metadata.column_metadatas {
         ensure!(
             !matches!(
@@ -540,7 +540,7 @@ fn validate_metadata(metadata: &RegionMetadataRef) -> Result<()> {
     Ok(())
 }
 
-fn tag_columns(metadata: &RegionMetadataRef) -> Vec<(ColumnId, String)> {
+pub(crate) fn tag_columns(metadata: &RegionMetadataRef) -> Vec<(ColumnId, String)> {
     metadata
         .primary_key_columns()
         .filter(|column| !is_reserved_column(column.column_id))
@@ -595,16 +595,9 @@ fn decode_primary_key(
     offsets: &mut SparseOffsetsCache,
     buf: &mut Vec<u8>,
 ) -> Result<SeriesIndexRow> {
-    let mut view = SparsePrimaryKeyView::new(primary_key, offsets).context(DecodeSnafu)?;
-
-    let table_id = view.table_id();
-    let tsid = view.tsid();
-
-    let mut tags = Vec::with_capacity(tag_columns.len());
-    for (column_id, _) in tag_columns {
-        let value = view.label(*column_id, buf).context(DecodeSnafu)?;
-        tags.push(value.map(str::to_owned));
-    }
+    let (id, tags) = decode_series_identity(primary_key, tag_columns, offsets, buf)?;
+    let table_id = id.table_id;
+    let tsid = id.tsid;
 
     Ok(SeriesIndexRow {
         min_ts,
@@ -614,6 +607,29 @@ fn decode_primary_key(
         tsid,
         tags,
     })
+}
+
+/// Shared sparse-key extraction, independent of timestamp aggregation.
+pub(crate) fn decode_series_identity(
+    primary_key: &[u8],
+    tag_columns: &[(ColumnId, String)],
+    offsets: &mut SparseOffsetsCache,
+    buf: &mut Vec<u8>,
+) -> Result<(crate::series_index::MetricSeriesId, Vec<Option<String>>)> {
+    let mut view = SparsePrimaryKeyView::new(primary_key, offsets).context(DecodeSnafu)?;
+    let id = crate::series_index::MetricSeriesId {
+        table_id: view.table_id(),
+        tsid: view.tsid(),
+    };
+    let mut tags = Vec::with_capacity(tag_columns.len());
+    for (column_id, _) in tag_columns {
+        tags.push(
+            view.label(*column_id, buf)
+                .context(DecodeSnafu)?
+                .map(str::to_owned),
+        );
+    }
+    Ok((id, tags))
 }
 
 /// Builds a timestamp array in `unit` from raw i64 values.

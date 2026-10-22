@@ -254,7 +254,7 @@ fn fold_one(pieces: Vec<Series>) -> Series {
         None => panic!("expected a grid series, got {:?}", pieces[0].time),
     };
     let mut rows: Vec<Option<Vec<Option<f64>>>> =
-        (0..grid.timestamps().len()).map(|_| None).collect();
+        (0..grid.spec().len as usize).map(|_| None).collect();
     for piece in &pieces {
         let mut cursors = piece
             .fields
