@@ -28,6 +28,8 @@ use crate::sst::file::RegionFileId;
 pub(crate) enum ArtifactFormat {
     #[serde(rename = "parquet")]
     Parquet,
+    #[serde(rename = "columnar-series")]
+    ColumnarSeries,
     #[cfg(test)]
     #[serde(rename = "fake-samples")]
     FakeSamples,
@@ -36,13 +38,20 @@ pub(crate) enum ArtifactFormat {
     FakeIndex,
 }
 
+/// One immutable object produced by a backend build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ArtifactObject {
+    pub(crate) path: String,
+    pub(crate) file_size: u64,
+}
+
 /// Identifies the exact bytes produced by one backend build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ArtifactMetadata {
     pub(crate) format: ArtifactFormat,
     pub(crate) generation: FileId,
     /// Every object owned by this build, including metadata and auxiliary files.
-    pub(crate) objects: Vec<String>,
+    pub(crate) objects: Vec<ArtifactObject>,
     pub(crate) file_size: u64,
 }
 
@@ -86,8 +95,15 @@ impl SamplesFileHandle {
 impl Drop for SamplesFileInner {
     fn drop(&mut self) {
         if self.retired.load(Ordering::Acquire) {
-            self.purger
-                .purge_objects(self.file_id, self.entry.artifact.objects.clone());
+            self.purger.purge_objects(
+                self.file_id,
+                self.entry
+                    .artifact
+                    .objects
+                    .iter()
+                    .map(|object| object.path.clone())
+                    .collect(),
+            );
         }
     }
 }

@@ -8764,6 +8764,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
+ "twox-hash",
  "uuid",
  "winner_tree",
  "zstd",
