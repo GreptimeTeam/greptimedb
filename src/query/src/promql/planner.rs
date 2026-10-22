@@ -300,9 +300,8 @@ pub struct PromPlanner {
     /// `false` when the query says nothing: with it off, planning takes the existing path unchanged
     /// and nothing below is reached.
     ///
-    /// The engine-wide `QueryOptions::experimental_native_promql` is not the source. It is consumed
-    /// while `QueryEngineState` is built and not kept, so the planner cannot read it; the extension
-    /// is what a client sets for one request.
+    /// The engine-wide `QueryOptions::experimental_native_promql` is applied while `QueryEngineState`
+    /// is built; this planner reads the per-query request extension instead.
     native_fused: bool,
 }
 
