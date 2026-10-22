@@ -313,6 +313,7 @@ impl WriteDispatcher {
                         let request = error.retry_hint().is_retryable().then(|| RoutedWrite {
                             peer: Arc::clone(&peer),
                             request: Arc::new(request),
+                            owners: None,
                         });
                         attempts.push(WriteAttempt::Failed { error, request });
                     }
@@ -328,6 +329,7 @@ impl WriteDispatcher {
                         let request = error.retry_hint().is_retryable().then(|| RoutedWrite {
                             peer: Arc::clone(&peer),
                             request: Arc::new(request),
+                            owners: None,
                         });
                         WriteAttempt::Failed {
                             error: BatchRequestSnafu.into_error(Arc::clone(&error)),
