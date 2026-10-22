@@ -813,9 +813,10 @@ impl RegionScanner for SeriesScan {
     }
 
     fn raw_series_ordering(&self) -> SeriesOrdering {
+        // Two-phase candidates are merged by encoded primary key, and assignments preserve that
+        // order, so series are emitted in ascending key order.
         match self.mode {
-            SeriesScanMode::Legacy => SeriesOrdering::KeyThenTime,
-            SeriesScanMode::TwoPhase => SeriesOrdering::Contiguous,
+            SeriesScanMode::Legacy | SeriesScanMode::TwoPhase => SeriesOrdering::KeyThenTime,
         }
     }
 

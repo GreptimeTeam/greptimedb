@@ -5226,13 +5226,13 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     );
 }
 
-/// A `TwoPhase` scan declares [`SeriesOrdering::Contiguous`] on the scanner, on every partition
+/// A `TwoPhase` scan declares [`SeriesOrdering::KeyThenTime`] on the scanner, on every partition
 /// stream, and therefore in every frame it packs; the frame adapter validates that declaration.
 ///
-/// The ordered merge that rejects a non-`KeyThenTime` input is covered by
+/// The ordered merge's rejection of unsupported ordering is covered by
 /// `promql::source::merge::tests::rejects_unsupported_ordering_and_empty_input_without_polling`.
 #[tokio::test]
-async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
+async fn test_two_phase_native_raw_stream_declares_key_then_time_frames() {
     use common_query::series_frame::{
         pack_raw_series, raw_series_frame_ordering, unpack_raw_series,
     };
@@ -5241,7 +5241,7 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
     use store_api::region_request::RegionPutRequest;
 
-    let mut env = TestEnv::with_prefix("test_two_phase_native_raw_contiguous_frames").await;
+    let mut env = TestEnv::with_prefix("test_two_phase_native_raw_key_then_time_frames").await;
     let engine = env
         .create_engine(MitoConfig {
             experimental_series_scan_v2: true,
@@ -5315,7 +5315,7 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
     };
     assert_eq!("two_phase", series.mode());
     let mut scanner = engine.handle_query(region_id, request).await.unwrap();
-    assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    assert_eq!(SeriesOrdering::KeyThenTime, scanner.raw_series_ordering());
     let metadata = scanner.metadata();
     let source = RawLabelSource::PrimaryKey {
         metric_name: Arc::from("fixture_metric"),
@@ -5355,7 +5355,7 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
             .unwrap();
         // The storage-side contract: every partition stream reports the scanner's declaration.
         assert_eq!(scanner.raw_series_ordering(), stream.ordering());
-        assert_eq!(SeriesOrdering::Contiguous, stream.ordering());
+        assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
         schema.get_or_insert_with(|| Arc::clone(stream.schema()));
         chunks.extend(stream.try_collect::<Vec<_>>().await.unwrap());
     }
@@ -5365,17 +5365,17 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
     );
 
     // The frames the adapter receives carry that declaration, and the adapter validates it
-    // through `pack`/`unpack_raw_series` without ever seeing a sorted key guarantee.
+    // through `pack`/`unpack_raw_series`.
     let schema = schema.expect("the scan must emit at least one partition stream");
     let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
         Arc::clone(&schema),
         source,
-        SeriesOrdering::Contiguous,
+        SeriesOrdering::KeyThenTime,
         chunks,
     )))
     .unwrap();
     let ordering = raw_series_frame_ordering(packed.schema().as_ref()).unwrap();
-    assert_eq!(SeriesOrdering::Contiguous, ordering);
+    assert_eq!(SeriesOrdering::KeyThenTime, ordering);
     let validated = unpack_raw_series(packed, Some(schema))
         .unwrap()
         .try_collect::<Vec<_>>()
@@ -5496,14 +5496,14 @@ async fn test_two_phase_raw_partition_out_of_range_keeps_scanner_usable() {
 }
 
 #[tokio::test]
-async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_assignments() {
+async fn test_two_phase_raw_stream_stays_key_then_time_across_disjoint_partition_assignments() {
     use common_query::series_frame::{pack_raw_series, unpack_raw_series};
     use datatypes::series::SeriesOrdering;
     use datatypes::series::raw::RawSeriesChunk;
     use datatypes::series::samples::{SampleRef, SeriesSchema};
     use store_api::region_engine::QueryScanContext;
 
-    let mut env = TestEnv::with_prefix("test_two_phase_raw_contiguous_assignments").await;
+    let mut env = TestEnv::with_prefix("test_two_phase_raw_key_then_time_assignments").await;
     let engine = env
         .create_engine(MitoConfig {
             experimental_series_scan_v2: true,
@@ -5591,7 +5591,7 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_as
         panic!("sparse PerSeries request must use SeriesScan");
     };
     assert_eq!("two_phase", scanner.mode());
-    assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    assert_eq!(SeriesOrdering::KeyThenTime, scanner.raw_series_ordering());
     // Composition of the pinned scan input: the two flushes pin two SST sources and the third
     // write round stays in one memtable source. Each source reports the rows its write round
     // wrote, so this asserts the layout instead of only asserting that something was read.
@@ -5664,7 +5664,7 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_as
             .scan_series_partition(&ctx, &metrics, partition, &source)
             .unwrap()
             .expect("two-phase raw scan is supported");
-        assert_eq!(SeriesOrdering::Contiguous, stream.ordering());
+        assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
         assert_eq!(
             vec!["field_0"],
             stream
@@ -5699,7 +5699,7 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_as
 
     // The complete raw series stream of the two-partition scan: each partition's one assignment,
     // concatenated in partition order. `test_two_phase_raw_same_partition_multi_round_assignment_
-    // stays_contiguous` covers two assignments handed to the same partition.
+    // stays_key_then_time` covers two assignments handed to the same partition.
     let complete = per_partition
         .into_iter()
         .flatten()
@@ -5720,7 +5720,7 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_as
     let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
         Arc::clone(&schema),
         source,
-        SeriesOrdering::Contiguous,
+        SeriesOrdering::KeyThenTime,
         complete.clone(),
     )))
     .unwrap();
@@ -5805,13 +5805,13 @@ impl Drop for AssignmentThresholdScope {
     }
 }
 
-/// One partition receiving two candidate assignments must still emit one contiguous stream.
+/// One partition receiving two candidate assignments must still emit a key-then-time stream.
 ///
 /// Without the threshold override a second assignment reaches the same partition only when a
 /// single collection round holds `CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD` (1,000,000) candidate
 /// series, so this test lowers the threshold instead of writing a million series.
 #[tokio::test]
-async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguous() {
+async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_key_then_time() {
     use common_query::series_frame::{pack_raw_series, unpack_raw_series};
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::SampleRef;
@@ -5911,7 +5911,7 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguo
         panic!("sparse PerSeries request must use SeriesScan");
     };
     assert_eq!("two_phase", scanner.mode());
-    assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    assert_eq!(SeriesOrdering::KeyThenTime, scanner.raw_series_ordering());
     // The fixture must really be one SST source plus one memtable source, or the two rounds below
     // would be explained by something else.
     {
@@ -5962,7 +5962,7 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguo
         .scan_series_partition(&ctx, &metrics, 0, &source)
         .unwrap()
         .expect("two-phase raw scan is supported");
-    assert_eq!(SeriesOrdering::Contiguous, stream.ordering());
+    assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
     let schema = Arc::clone(stream.schema());
     let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
     // Two collection rounds really happened; the fixture never reaches the production threshold.
@@ -5975,9 +5975,25 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguo
         !chunks.is_empty(),
         "partition 0 must own reader assignments"
     );
+    let emitted_keys = chunks
+        .iter()
+        .map(|chunk| chunk.primary_key.to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        SERIES,
+        emitted_keys
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "partition 0 must emit all distinct fixture series"
+    );
+    assert!(
+        emitted_keys.windows(2).all(|pair| pair[0] <= pair[1]),
+        "series keys in partition 0 must be non-decreasing"
+    );
 
     // Partition 0's single stream carries every series in one contiguous run each. `TwoPhase`
-    // declares only `Contiguous`, so the runs are not contracted to be sorted; the assignment
+    // declares `KeyThenTime`, so the runs must also be sorted; the assignment
     // composition is: the first assignment holds the first 500 candidate series (which includes
     // `keys[0]`) and the trailing assignment holds the last candidate series.
     let mut runs = Vec::<Vec<u8>>::new();
@@ -6058,7 +6074,7 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguo
     let packed = pack_raw_series(Box::pin(ChainedRawSeriesStream::new(
         Arc::clone(&schema),
         source,
-        SeriesOrdering::Contiguous,
+        SeriesOrdering::KeyThenTime,
         chunks.clone(),
     )))
     .unwrap();
