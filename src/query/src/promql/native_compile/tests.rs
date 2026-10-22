@@ -42,10 +42,18 @@ use super::compile;
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
+    raw_schema_with_fields(1)
+}
+
+/// The same layout with `count` fields, for the shapes whose answer depends on how many a scan holds.
+fn raw_schema_with_fields(count: usize) -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
-        fields: Arc::new([FieldSpec {
-            name: "value".into(),
-        }]),
+        fields: (0..count)
+            .map(|index| FieldSpec {
+                name: format!("value_{index}").into(),
+            })
+            .collect::<Vec<_>>()
+            .into(),
         eval_grid: None,
     })
 }
@@ -4246,4 +4254,35 @@ fn a_compiled_sum_over_a_rate_with_empty_input_produces_no_groups() {
     };
     let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
     assert_eq!(run_aggregate_tree(&tree, Vec::new()), Vec::new());
+}
+
+/// `timestamp` reports one value per input field, and the native node reports the time of the sample
+/// each field was selected from. A table with several data fields would need that node to say which
+/// field's sample it means, so the compiler declines the shape instead of answering with one
+/// field's timestamps under every field's name.
+#[test]
+fn timestamp_multi_field_input_is_not_supported_natively() {
+    for query in ["timestamp(x)", "timestamp(abs(x))"] {
+        let error = compile(
+            &eval_stmt(query),
+            raw_schema_with_fields(2),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, DataFusionError::NotImplemented(_)),
+            "`{query}` is a shape this compiler declines: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("timestamp() over a multi-value input"),
+            "`{query}` did not name the field count as the reason: {error}"
+        );
+    }
+    // One field is the shape the node does answer, so the refusal is about the field count.
+    for query in ["timestamp(x)", "timestamp(abs(x))"] {
+        compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` over one field was refused: {error}"));
+    }
 }
