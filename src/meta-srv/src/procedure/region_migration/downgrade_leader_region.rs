@@ -303,11 +303,9 @@ impl DowngradeLeaderRegion {
         let former_leader_expiry = ctx
             .lease_grant_tracker
             .former_leader_lease_expiry(region_lease);
-        let deadline = ctx
-            .volatile_ctx
-            .leader_region_lease_deadline
-            .get_or_insert_with(|| Instant::now() + region_lease);
-        *deadline = (*deadline).max(former_leader_expiry);
+        if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_mut() {
+            *deadline = (*deadline).max(former_leader_expiry);
+        }
     }
 
     /// Downgrades a leader region.

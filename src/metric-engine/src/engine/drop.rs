@@ -158,9 +158,27 @@ impl MetricEngineInner {
         physical_region_id: RegionId,
     ) -> Result<AffectedRows> {
         // Update metadata
-        self.metadata_region
+        if let Err(err) = self
+            .metadata_region
             .remove_logical_region(physical_region_id, logical_region_id)
-            .await?;
+            .await
+        {
+            // The delete may have been applied although it failed. Then the engine must forget
+            // the logical region too, so that writes do not use its stale mapping and columns.
+            // A retried drop finds it missing.
+            if let Ok(logical_regions) = self
+                .metadata_region
+                .logical_regions(physical_region_id)
+                .await
+                && !logical_regions.contains(&logical_region_id)
+            {
+                self.state
+                    .write()
+                    .unwrap()
+                    .remove_logical_region(logical_region_id)?;
+            }
+            return Err(err);
+        }
 
         // Update engine state
         self.state

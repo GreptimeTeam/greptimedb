@@ -609,9 +609,11 @@ impl<S> RegionWorkerLoop<S> {
             if region_ctx.is_failed() {
                 continue;
             }
-            let Some(region) = self.regions.get_region(*region_id) else {
-                continue;
-            };
+            // Only this worker closes or drops its regions, and it is still handling the write.
+            let region = self
+                .regions
+                .get_region(*region_id)
+                .expect("the region of a write is open");
             if !region.lease.allows_ack(&self.node_lease, now) {
                 let num_waiters = region_ctx.fail_waiters(Arc::new(
                     UnacknowledgedWriteSnafu {

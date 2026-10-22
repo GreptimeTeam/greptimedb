@@ -813,8 +813,8 @@ mod tests {
     use store_api::path_utils::table_dir;
     use store_api::region_engine::{RegionEngine, RegionLeaseGrant, RegionRole};
     use store_api::region_request::{
-        EnterStagingRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
-        StagingPartitionDirective,
+        EnterStagingRequest, PathType, RegionCloseRequest, RegionDropRequest, RegionOpenRequest,
+        RegionRequest, StagingPartitionDirective,
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -2527,5 +2527,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(5, response.affected_rows);
+
+        // The lease expires while dropping that logical region, which writes have used. The
+        // delete is applied, so the engine forgets the region: writes to it fail, and a retried
+        // drop finds it missing.
+        let drop_request = || {
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            })
+        };
+        listener.pause_next();
+        let drop = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .handle_request(logical_region_id, drop_request())
+                    .await
+            })
+        };
+        listener.wait_appended().await;
+        engine
+            .set_region_role_by_lease(physical_region_id, grant(Instant::now()))
+            .unwrap();
+        listener.resume();
+        let err = drop.await.unwrap().unwrap_err();
+        assert!(err.is_retryable(), "{err:?}");
+        engine
+            .set_region_role_by_lease(
+                physical_region_id,
+                grant(Instant::now() + Duration::from_secs(10)),
+            )
+            .unwrap();
+        let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
+            rows: Rows {
+                schema: test_util::row_schema_with_tags(&["job", "tag2"]),
+                rows: test_util::build_rows(2, 5),
+            },
+            hint: None,
+            partition_expr_version: None,
+        });
+        let err = engine
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::RegionNotFound, err.status_code(), "{err:?}");
+        let err = engine
+            .handle_request(logical_region_id, drop_request())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::RegionNotFound, err.status_code(), "{err:?}");
     }
 }
