@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::helper::encode_json_value;
 use api::v1::bulk_wal_entry::Body;
 use api::v1::helper::{row, tag_column_schema};
 use api::v1::region::{StrictWindow, compact_request};
@@ -33,10 +34,13 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{col, lit};
 use datatypes::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use datatypes::extension::json::Json2ExtensionType;
+use datatypes::json::value::JsonValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
 };
+use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
@@ -138,6 +142,192 @@ fn add_nullable_field1() -> RegionAlterRequest {
             }],
         },
     }
+}
+
+#[rstest::rstest]
+#[case::implicit_time_series(false, None, false)]
+#[case::explicit_time_series(false, Some("time_series"), false)]
+#[case::explicit_bulk(false, Some("bulk"), true)]
+#[case::default_flat(true, None, true)]
+#[case::flat_overrides_time_series(true, Some("time_series"), true)]
+#[tokio::test]
+async fn test_engine_add_json2_memtable_validation(
+    #[case] default_flat_format: bool,
+    #[case] memtable: Option<&str>,
+    #[case] accepted: bool,
+    #[values(false, true)] write_before_alter: bool,
+) {
+    let mut env = TestEnv::with_prefix("add-json2-memtable-validation").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    if let Some(memtable) = memtable {
+        request
+            .options
+            .insert("memtable.type".into(), memtable.into());
+    }
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    if write_before_alter {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: rows_schema(&request),
+                rows: build_rows(0, 1),
+            },
+        )
+        .await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let old_metadata = region.metadata();
+    let mut column_schema = ColumnSchema::new(
+        "json",
+        ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+        true,
+    );
+    column_schema.with_extension_type(&Json2ExtensionType::default());
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema,
+                            semantic_type: SemanticType::Field,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await;
+    if accepted {
+        result.unwrap();
+        assert!(region.metadata().column_by_name("json").is_some());
+    } else {
+        let err = result.unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(
+            err.output_msg()
+                .contains("JSON2 columns require sst_format=flat")
+        );
+        assert_eq!(old_metadata, region.metadata());
+    }
+    let expected_metadata = region.metadata();
+    assert_eq!(
+        expected_metadata,
+        region.manifest_ctx.manifest().await.metadata
+    );
+    reopen_region(&engine, region_id, request.table_dir, true, request.options).await;
+    assert_eq!(
+        expected_metadata,
+        engine.get_region(region_id).unwrap().metadata()
+    );
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn test_engine_rejects_json2_primary_key_format_change(
+    #[values("bulk", "time_series")] memtable: &str,
+    #[values(false, true)] write_before_alter: bool,
+) {
+    let mut env = TestEnv::with_prefix("alter-json2-format-validation").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+            JsonObjectType::new(),
+        )))
+        .insert_option("memtable.type", memtable)
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    let json_rows = |n: i64| Rows {
+        schema: rows_schema(&request),
+        rows: vec![row(vec![
+            ValueData::StringValue("tag".into()),
+            ValueData::JsonValue(encode_json_value(JsonValue::from([("a", n)]))),
+            ValueData::TimestampMillisecondValue(n * 1000),
+        ])],
+    };
+    if write_before_alter {
+        put_rows(&engine, region_id, json_rows(1)).await;
+    }
+    let region = engine.get_region(region_id).unwrap();
+    let manifest_version = region.manifest_ctx.manifest_version().await;
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::Format("primary_key".into())],
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert!(
+        err.output_msg()
+            .contains("JSON2 columns require sst_format=flat")
+    );
+    assert_eq!(Some(FormatType::Flat), region.version().options.sst_format);
+    assert_eq!(
+        FormatType::Flat,
+        region.manifest_ctx.manifest().await.sst_format
+    );
+    if !write_before_alter {
+        assert_eq!(
+            manifest_version,
+            region.manifest_ctx.manifest_version().await
+        );
+    }
+    put_rows(&engine, region_id, json_rows(2)).await;
+    let batches = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        usize::from(write_before_alter) + 1,
+        batches.iter().map(|b| b.num_rows()).sum::<usize>()
+    );
+    let expected = batches.pretty_print().unwrap();
+    flush_region(&engine, region_id, None).await;
+    reopen_region(&engine, region_id, request.table_dir, true, request.options).await;
+    assert_eq!(
+        Some(FormatType::Flat),
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .sst_format
+    );
+    let batches = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
 fn build_row_with_added_field(

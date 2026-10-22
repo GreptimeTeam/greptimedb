@@ -59,7 +59,7 @@ use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
+use crate::memtable::{MemtableBuilderProvider, ensure_json2_uses_flat_format};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::options::RegionOptions;
@@ -337,9 +337,9 @@ impl RegionOpener {
         let region_id = self.region_id;
         let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
-        // Tries to open the region.
-        match self.maybe_open(config, wal).await {
-            Ok(Some(region)) => {
+        // Only an absent region may be created; an open error must not replace its manifest.
+        match self.maybe_open(config, wal).await? {
+            Some(region) => {
                 let recovered = region.metadata();
                 // Checks the schema of the region.
                 let expect = &metadata;
@@ -354,19 +354,10 @@ impl RegionOpener {
 
                 return Ok(region);
             }
-            Ok(None) => {
+            None => {
                 debug!(
                     "No data under directory {}, region_id: {}",
                     region_dir, self.region_id
-                );
-            }
-            // The region exists but the WAL does not hold its history:
-            // creating it again would replace its manifest.
-            Err(e @ error::Error::CheckWalHistory { .. }) => return Err(e),
-            Err(e) => {
-                warn!(e;
-                    "Failed to open region {} before creating it, region_dir: {}",
-                    self.region_id, region_dir
                 );
             }
         }
@@ -386,7 +377,7 @@ impl RegionOpener {
             options.sst_format = Some(FormatType::PrimaryKey);
             FormatType::PrimaryKey
         };
-        ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        ensure_json2_uses_flat_format(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
         // The region's WAL history starts in this log store, so reopening
         // the region on it passes the history check without any entry. It is
@@ -549,7 +540,7 @@ impl RegionOpener {
         let metadata = maybe_upgrade_json2_layout(metadata)?;
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
-        ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
+        ensure_json2_uses_flat_format(&metadata, &region_options)?;
         region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
@@ -821,6 +812,20 @@ pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut R
         None => {
             options.sst_format = Some(manifest.sst_format);
         }
+    }
+    // Older versions allowed JSON2 with primary-key output; recover without rewriting its history.
+    if options.sst_format != Some(FormatType::Flat)
+        && manifest
+            .metadata
+            .column_metadatas
+            .iter()
+            .any(|column| column.column_schema.data_type.is_json2())
+    {
+        warn!(
+            "Overriding SST format to flat for existing JSON2 region {}",
+            manifest.metadata.region_id,
+        );
+        options.sst_format = Some(FormatType::Flat);
     }
     if let Some(manifest_append_mode) = manifest.append_mode
         && options.append_mode != manifest_append_mode
@@ -1654,6 +1659,32 @@ mod tests {
         };
         sanitize_region_options(&manifest, &mut options);
         assert_eq!(options.sst_format, Some(FormatType::Flat));
+    }
+
+    #[rstest::rstest]
+    #[test]
+    fn test_sanitize_region_options_recovers_json2(
+        #[values(FormatType::PrimaryKey, FormatType::Flat)] persisted: FormatType,
+        #[values(None, Some(FormatType::PrimaryKey), Some(FormatType::Flat))] requested: Option<
+            FormatType,
+        >,
+    ) {
+        let mut manifest = build_test_manifest(persisted);
+        let mut metadata = manifest.metadata.as_ref().clone();
+        metadata.column_metadatas[2].column_schema.data_type =
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        manifest.metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(metadata)
+                .build()
+                .unwrap(),
+        );
+        let mut options = RegionOptions {
+            sst_format: requested,
+            ..Default::default()
+        };
+        sanitize_region_options(&manifest, &mut options);
+        assert_eq!(Some(FormatType::Flat), options.sst_format);
+        assert_eq!(persisted, manifest.sst_format);
     }
 
     fn sst_parquet_bytes(batch: &RecordBatch) -> Vec<u8> {
