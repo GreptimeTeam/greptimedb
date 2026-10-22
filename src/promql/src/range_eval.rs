@@ -714,7 +714,7 @@ impl RangeEvaluator {
         }
         // The input may skip positions: it is ingested by the positions it carries, and the points
         // it skips hold no sample, which is exactly what a hole means.
-        let timestamps = time.timestamps();
+        let timestamps = time.timestamps().map_err(external)?;
         let last_ts = timestamps.last().copied();
         if !last && last_ts.is_none() {
             // An empty delivery inside a series decides nothing: it is indistinguishable from a
@@ -1045,7 +1045,7 @@ impl RangeEvaluator {
         let points_read = self.points_read();
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
-        let grid = self.grid.timestamps();
+        let grid = self.grid.timestamps().map_err(external)?;
         let range = i128::from(self.window.range_ms);
         let mut empty_tail = false;
         while state.cursor < points_read {
@@ -1212,7 +1212,7 @@ impl RangeEvaluator {
     /// only the first.
     fn points_read(&self) -> usize {
         match self.replay {
-            Replay::PerPoint => self.grid.timestamps().len(),
+            Replay::PerPoint => self.grid.spec().len as usize,
             Replay::Once | Replay::EveryPoint => 1,
         }
     }

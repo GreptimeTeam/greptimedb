@@ -19,6 +19,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::histogram::{BucketSideView, HistogramView};
 
 use crate::functions::kahan_inc;
+use crate::go_format::format_float_g;
 use crate::histogram_eval::bounds::EXPONENTIAL_BOUNDS;
 
 pub(super) const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
@@ -28,6 +29,8 @@ pub(super) struct NativeBucket {
     lower: f64,
     upper: f64,
     count: f64,
+    /// The bucket's index on its side; meaningless for the zero bucket.
+    index: i32,
 }
 
 /// The buckets of `h` from the lowest to the highest, or the reverse: negative buckets, the zero
@@ -57,6 +60,7 @@ pub(super) fn all_buckets(
             lower: -h.zero_threshold,
             upper: h.zero_threshold,
             count: h.zero_count,
+            index: 0,
         });
     }
     side(h, high, !reverse, out)?;
@@ -107,14 +111,72 @@ fn bucket(h: &HistogramView<'_>, idx: i32, count: f64, positive: bool) -> Result
             lower: bound(idx - 1)?,
             upper: bound(idx)?,
             count,
+            index: idx,
         }
     } else {
         NativeBucket {
             lower: -bound(idx)?,
             upper: -bound(idx - 1)?,
             count,
+            index: idx,
         }
     })
+}
+
+/// Go `FloatHistogram.String`, the form `count_values` writes a histogram value in: the count and
+/// sum, then the buckets holding observations from the lowest up -- negative, zero, positive --
+/// each as `[lower,upper):count` with its bounds' inclusiveness, every number in Go's `%g`.
+/// Unlike [`all_buckets`], the buckets keep the bounds their index gives, unclipped by the zero
+/// bucket.
+pub(super) fn go_string(h: &HistogramView<'_>) -> Result<String> {
+    let mut text = format!(
+        "{{count:{}, sum:{}",
+        format_float_g(h.count),
+        format_float_g(h.sum)
+    );
+    let custom = h.schema == CUSTOM_BUCKETS_SCHEMA;
+    let mut buckets = Vec::new();
+    side(h, h.negative, false, &mut buckets)?;
+    for bucket in buckets.iter().rev().filter(|bucket| bucket.count != 0.0) {
+        push_bucket(&mut text, bucket, custom);
+    }
+    if h.zero_count != 0.0 {
+        if custom {
+            return Err(DataFusionError::Execution(
+                "histograms with custom buckets have no zero bucket".into(),
+            ));
+        }
+        text.push_str(&format!(
+            ", [{},{}]:{}",
+            format_float_g(-h.zero_threshold),
+            format_float_g(h.zero_threshold),
+            format_float_g(h.zero_count)
+        ));
+    }
+    buckets.clear();
+    side(h, h.positive, true, &mut buckets)?;
+    for bucket in buckets.iter().filter(|bucket| bucket.count != 0.0) {
+        push_bucket(&mut text, bucket, custom);
+    }
+    text.push('}');
+    Ok(text)
+}
+
+/// Go `Bucket.String`, with the inclusiveness `baseBucketIterator.at` gives the bucket.
+fn push_bucket(text: &mut String, bucket: &NativeBucket, custom: bool) {
+    let (lower_inclusive, upper_inclusive) = if custom {
+        (bucket.index == 0, true)
+    } else {
+        (bucket.lower < 0.0, bucket.upper > 0.0)
+    };
+    text.push_str(&format!(
+        ", {}{},{}{}:{}",
+        if lower_inclusive { '[' } else { '(' },
+        format_float_g(bucket.lower),
+        format_float_g(bucket.upper),
+        if upper_inclusive { ']' } else { ')' },
+        format_float_g(bucket.count)
+    ));
 }
 
 /// Go `getBound`.
@@ -203,6 +265,7 @@ pub(super) fn quantile(
         lower: 0.0,
         upper: 0.0,
         count: 0.0,
+        index: 0,
     };
     let mut count = 0.0;
     let mut visited = 0;

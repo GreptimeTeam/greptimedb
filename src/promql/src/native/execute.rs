@@ -36,19 +36,31 @@
 //! as one chunk addressed on its own grid. Nothing is decided for a series before it ends, which is
 //! the price of the kernel taking one axis rather than a chunk of one.
 //!
-//! A vector–vector binary node is the one kind that reads two inputs: it retains the chunks of both
+//! A vector–vector binary node is the only kind that reads two inputs: it retains the chunks of both
 //! operands and runs the matching kernel once the input has ended, because the operation pairs two
 //! whole vectors point by point and nothing is decided for a point until both sides are complete.
 //! The chunks of one logical series are assembled into the single series the kernel matches before it
-//! runs, so a series that arrived in many chunks is one candidate, not one per chunk.
+//! runs, so a series that arrived in many chunks is one candidate, not one per chunk. A vector operation
+//! (`topk`, `limitk`, `limit_ratio`) reads its one input the same way, because which samples it
+//! keeps at a point depends on every series present there.
+//!
+//! A constant scalar is a value node rather than a stream: it has no input and hands over no chunk,
+//! because what it produces is the one value it was bound to and not a series. A binary node with a
+//! scalar operand therefore reads one input — the vector side — and applies the operation to each
+//! chunk it is handed as it arrives: the scalar is read off the node's binding rather than pulled,
+//! and no chunk of the vector is retained, because one vector value pairs with one constant and
+//! nothing is decided by what comes after it. That broadcast is a different mode from the vector
+//! matching above and keeps neither operand: what it hands out is the chunk it transformed.
 //!
 //! A node kind this runtime does not execute yet is rejected when the execution is built, naming
-//! the kind and its position. An unsupported tree therefore never starts, rather than answering
-//! half a query or panicking halfway through one.
+//! the kind and its position. That is an aggregate, and a binary node whose two operands are
+//! neither two evaluated vectors nor one evaluated vector and one constant. An unsupported tree
+//! therefore never starts, rather than answering half a query or panicking halfway through one.
 //!
 //! A node that rewrites labels — a window drops the metric name and the empty-valued labels, a map
-//! drops the name or rewrites a label — can turn two distinct input series into one output label set. That pair is
-//! legal when the two hold values at disjoint positions, which is exactly what
+//! drops the name or rewrites a label, and a binary node drops it for arithmetic and for a `bool` comparison — can turn
+//! two distinct input series into one output label set. That pair is legal when the two hold values
+//! at disjoint positions, which is exactly what
 //! [`crate::grid_series::merge_same_labelset`] merges: `is_last` closes the source series whose
 //! data the chunk carries, not the label set it shares with another series, so a second series may
 //! fill the positions the first one left empty. The node that rewrote the labels keeps which
@@ -93,13 +105,21 @@ use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
 };
 use crate::instant_eval::select_instants;
-use crate::map::{drop_metric_name, map_math};
+use crate::map::{
+    ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, drop_metric_name, map_arithmetic,
+    map_compare, map_math,
+};
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{NodeMetrics, NodePath};
-use crate::native::plan::{BoundInstant, MapOp, NativeExpr, NativeNode, NativeTree};
+use crate::native::plan::{
+    BoundInstant, BoundScalar, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
+    NativeType,
+};
 use crate::range_eval::RangeEvaluator;
+use crate::select;
 use crate::vector_match::{
-    BinaryMatching, binary_vectors_with_reservation, validate_binary_operand,
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels,
+    binary_vectors_with_reservation, validate_binary_operand,
 };
 
 #[cfg(test)]
@@ -371,14 +391,24 @@ fn buffer_bytes(buffer: &Buffer) -> usize {
 enum NodeTag {
     /// Forwards the chunks it is given.
     Input,
+    /// A constant scalar: the value its consumer broadcasts, and no chunk of its own.
+    ///
+    /// It is a value node and not a stream. Its output type is [`NativeType::Scalar`], and the
+    /// runtime produces evaluated chunks only, so the node hands nothing over: what its consumer
+    /// reads is the constant bound to it, which is why it has no input and no run-time state. A
+    /// `pull` of it answers `None` for exactly that reason, and that is not a stall to fix.
+    Scalar,
     /// Buffers one series and selects the last sample at or before each of its grid points.
     Instant,
     /// Feeds its input to its own [`RangeEvaluator`].
     Window,
     /// Applies point-wise operations to its input chunks.
     Map,
-    /// Matches two evaluated vectors and applies one operation to every matched pair of series.
+    /// Matches two evaluated vectors and applies one operation to every matched pair of series, or
+    /// broadcasts one constant over the chunks of one evaluated vector.
     Binary,
+    /// Keeps some samples of its whole input vector at each grid point.
+    Vector,
 }
 
 impl NodeTag {
@@ -386,10 +416,12 @@ impl NodeTag {
     fn describe(self) -> &'static str {
         match self {
             Self::Input => "input",
+            Self::Scalar => "scalar",
             Self::Instant => "instant selection",
             Self::Window => "window",
             Self::Map => "map",
             Self::Binary => "binary",
+            Self::Vector => "vector operation",
         }
     }
 }
@@ -1243,19 +1275,20 @@ impl InstantRuntime {
     }
 }
 
-/// One operand of a binary node, chunk by chunk, until it ends.
+/// An input a node reads whole before it computes -- one operand of a binary node, or the input of a
+/// vector operation -- chunk by chunk, until it ends.
 ///
 /// What is kept is the series each chunk carries, not a concatenation of them: a chunk is retained
 /// as it arrives and nothing is copied on the way in, because the chunks of a series can share an
-/// allocation and the figure the operand charges for is the data it holds rather than a running copy
+/// allocation and the figure the input charges for is the data it holds rather than a running copy
 /// of it.
 ///
-/// The kernel matches whole series by label set, so the chunks are assembled into one series per
-/// logical series once the input has ended: a series that arrived in a thousand chunks is otherwise
-/// a thousand candidates on this side for every candidate of the other, and its own rows would be
-/// paired a chunk at a time.
+/// The kernels read whole series, so the chunks are assembled into one series per logical series
+/// once the input has ended: a series that arrived in a thousand chunks is otherwise a thousand
+/// candidates for a binary match or a ranking, and its own rows would be read a chunk at a time.
+///
 #[derive(Default)]
-struct BinaryOperand {
+struct RetainedInput {
     /// The series whose last chunk did not close it, with the position after its last row.
     ///
     /// `None` when no series is open: nothing has arrived yet, or the last series closed. A label
@@ -1296,7 +1329,7 @@ struct BinaryOperand {
     held: usize,
 }
 
-impl BinaryOperand {
+impl RetainedInput {
     /// The bytes `chunk` would add to what this operand holds, read without retaining it.
     ///
     /// It is what [`Self::enqueue`] adds for the same chunk: what the chunk holds on its own, the
@@ -1317,6 +1350,62 @@ impl BinaryOperand {
         tables
             .saturating_add(operand_chunk_bytes(&chunk.series))
             .saturating_add(end)
+    }
+
+    /// Retains one chunk after checking that it continues what this input handed over.
+    ///
+    /// An input hands over one series at a time, each chunk of it after the rows the series already
+    /// reached; a chunk that starts another series while one is open, or goes back inside the open
+    /// one, is refused before it is retained.
+    fn retain(&mut self, chunk: EvaluatedChunk, reader: Reader<'_>) -> Result<()> {
+        // An empty chunk closes a series without holding a row, so it says nothing about where that
+        // series ended: only a chunk that carries rows can be read as going backwards.
+        let (first, last) = (
+            chunk.series.time.first_position(),
+            chunk.series.time.last_position(),
+        );
+        let metric = chunk.series.metric.clone();
+        // The position a chunk of the open series may start at: the row after the last one that
+        // series handed over. Nothing is open after a series closed, so the next one starts over.
+        let end = self.open.as_ref().map_or(0, |(_, end)| *end);
+        if let Some((open, _)) = &self.open
+            && *open != metric
+        {
+            let (owner, input) = (reader.owner(), reader.input());
+            return Err(DataFusionError::Execution(format!(
+                "{owner} reads whole series, and {input} handed over {metric:?} before {open:?} \
+                 ended"
+            )));
+        }
+        if let Some(first) = first
+            && first < end
+        {
+            let (owner, input) = (reader.owner(), reader.input());
+            return Err(DataFusionError::Execution(format!(
+                "{owner} was handed chunks of {metric:?} by {input} that do not continue each \
+                 other: one starts at position {first}, after the series already reached {end}"
+            )));
+        }
+        self.open = (!chunk.is_last).then(|| (metric, last.map_or(end, |last| last + 1)));
+        self.enqueue(chunk);
+        Ok(())
+    }
+
+    /// Refuses an input that ended inside a series.
+    ///
+    /// An input hands over one series at a time, so the only series that can be open is the last
+    /// one it handed over: a chunk that did not say `is_last` leaves it open, and nothing came after
+    /// it to close it.
+    fn ensure_closed(&self, reader: Reader<'_>) -> Result<()> {
+        match &self.open {
+            Some((metric, _)) => Err(DataFusionError::Execution(format!(
+                "the input of {} ended before the last chunk of a series: {} handed over \
+                 {metric:?} without the chunk that closes it",
+                reader.owner(),
+                reader.input()
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Retains one chunk, folding the estimate it is charged with into what the operand holds.
@@ -1349,7 +1438,7 @@ impl BinaryOperand {
     /// The chunk ranges of the logical series this operand closed, in arrival order.
     ///
     /// Read after the input ended: a series that is still open has no end, and
-    /// [`BinaryRuntime::closed`] refuses such an input before anything is assembled.
+    /// [`Self::ensure_closed`] refuses such an input before anything is assembled.
     fn boundaries(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
         self.ends.iter().scan(0, |start, &end| {
             let range = *start..end;
@@ -1426,24 +1515,25 @@ impl BinaryOperand {
     /// the kernel matches and reads, so it must be on the schema's grid and hold as many rows as its
     /// axis places, which is what [`Series::try_new`] checks. What it allocates is
     /// [`Self::assembly_bytes`], which a caller reserves before this runs.
-    fn assemble(&self, schema: &SeriesSchema, path: &NodePath, side: usize) -> Result<Vec<Series>> {
+    fn assemble(&self, schema: &SeriesSchema, reader: Reader<'_>) -> Result<Vec<Series>> {
         let grid = schema.eval_grid.clone().ok_or_else(|| {
+            let (owner, input) = (reader.owner(), reader.input());
             DataFusionError::Execution(format!(
-                "the binary node at {path} assembles its {} operand on an evaluation grid, and the \
-                 operand's schema names none",
-                side_name(side)
+                "{owner} assembles {input} on an evaluation grid, and its schema names none"
             ))
         })?;
         let mut assembled = Vec::with_capacity(self.ends.len());
         for boundary in self.boundaries() {
             let chunks = &self.series[boundary];
-            let metric = chunks.first().map(|chunk| chunk.metric.clone()).ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "the binary node at {path} closed a logical series of its {} operand without a \
-                     chunk to assemble",
-                    side_name(side)
-                ))
-            })?;
+            let metric = chunks
+                .first()
+                .map(|chunk| chunk.metric.clone())
+                .ok_or_else(|| {
+                    let (owner, input) = (reader.owner(), reader.input());
+                    DataFusionError::Execution(format!(
+                        "{owner} closed a logical series of {input} without a chunk to assemble"
+                    ))
+                })?;
             let runs = chunks
                 .iter()
                 .map(|chunk| chunk.time.runs().count())
@@ -1459,10 +1549,10 @@ impl BinaryOperand {
                 let mut segments = Vec::with_capacity(chunks.len());
                 for chunk in chunks {
                     let field = chunk.fields.get(index).ok_or_else(|| {
+                        let (owner, input) = (reader.owner(), reader.input());
                         DataFusionError::Execution(format!(
-                            "the binary node at {path} cannot assemble its {} operand: a chunk of \
-                             it carries {} fields, not {}",
-                            side_name(side),
+                            "{owner} cannot assemble {input}: a chunk of it carries {} fields, not \
+                             {}",
                             chunk.fields.len(),
                             schema.fields.len()
                         ))
@@ -1507,7 +1597,7 @@ struct BinaryRuntime {
     /// operand and `1` the right one, the order the tree declares them in.
     schemas: [Arc<SeriesSchema>; 2],
     /// The retained chunks of each operand, in the same order.
-    operands: [BinaryOperand; 2],
+    operands: [RetainedInput; 2],
     /// Whether the kernel has run. It runs at most once: the operands it read are gone afterwards.
     computed: bool,
 }
@@ -1520,13 +1610,38 @@ fn side_name(index: usize) -> &'static str {
     }
 }
 
+/// The node a [`RetainedInput`] belongs to, which its messages name; formatted only when one is.
+#[derive(Clone, Copy)]
+enum Reader<'a> {
+    /// The operand at `side` of the binary node at `path`.
+    Operand { path: &'a NodePath, side: usize },
+    /// The input of the vector operation at the path.
+    Vector(&'a NodePath),
+}
+
+impl Reader<'_> {
+    fn owner(self) -> String {
+        match self {
+            Self::Operand { path, .. } => format!("the binary node at {path}"),
+            Self::Vector(path) => format!("the vector operation at {path}"),
+        }
+    }
+
+    fn input(self) -> String {
+        match self {
+            Self::Operand { side, .. } => format!("its {} operand", side_name(side)),
+            Self::Vector(_) => "its input".to_string(),
+        }
+    }
+}
+
 impl BinaryRuntime {
     /// The run-time state of the binary operation `matching` over its two operands.
     fn new(matching: Arc<BinaryMatching>, schemas: [Arc<SeriesSchema>; 2]) -> Self {
         Self {
             matching,
             schemas,
-            operands: [BinaryOperand::default(), BinaryOperand::default()],
+            operands: [RetainedInput::default(), RetainedInput::default()],
             computed: false,
         }
     }
@@ -1552,8 +1667,8 @@ impl BinaryRuntime {
         let [left, right] = &self.operands;
         let [left_schema, right_schema] = &self.schemas;
         Ok([
-            left.assemble(left_schema, path, 0)?,
-            right.assemble(right_schema, path, 1)?,
+            left.assemble(left_schema, Reader::Operand { path, side: 0 })?,
+            right.assemble(right_schema, Reader::Operand { path, side: 1 })?,
         ])
     }
 
@@ -1571,20 +1686,11 @@ impl BinaryRuntime {
 
     /// Reports an operand that ended inside a series.
     ///
-    /// A side hands over one series at a time, so the only series that can be open is the last one
-    /// it handed over: a chunk that did not say `is_last` leaves it open, and nothing came after it
-    /// to close it. The kernel is not run over such an operand: it would answer the pairs of a
-    /// series whose remaining rows were never read.
+    /// The kernel is not run over such an operand: it would answer the pairs of a series whose
+    /// remaining rows were never read.
     fn closed(&self, path: &NodePath) -> Result<()> {
         for (side, operand) in self.operands.iter().enumerate() {
-            let Some((metric, _)) = &operand.open else {
-                continue;
-            };
-            return Err(DataFusionError::Execution(format!(
-                "the input of the binary node at {path} ended before the last chunk of a series: \
-                 its {} operand handed over {metric:?} without the chunk that closes it",
-                side_name(side)
-            )));
+            operand.ensure_closed(Reader::Operand { path, side })?;
         }
         Ok(())
     }
@@ -1607,41 +1713,10 @@ impl BinaryRuntime {
                 ))
             },
         )?;
-        // An empty chunk closes a series without holding a row, so it says nothing about where that
-        // series ended: only a chunk that carries rows can be read as going backwards.
-        let (first, last) = (
-            chunk.series.time.first_position(),
-            chunk.series.time.last_position(),
-        );
-        let metric = chunk.series.metric.clone();
         let Some(operand) = self.operands.get_mut(side) else {
             return Err(no_binary(path));
         };
-        // The position a chunk of the open series may start at: the row after the last one that
-        // series handed over. Nothing is open after a series closed, so the next one starts over.
-        let end = operand.open.as_ref().map_or(0, |(_, end)| *end);
-        if let Some((open, _)) = &operand.open
-            && *open != metric
-        {
-            return Err(DataFusionError::Execution(format!(
-                "the binary node at {path} combines whole series, and its {} operand handed over \
-                 {metric:?} before {open:?} ended",
-                side_name(side)
-            )));
-        }
-        if let Some(first) = first
-            && first < end
-        {
-            return Err(DataFusionError::Execution(format!(
-                "the chunks of {metric:?} handed to the {} operand of the binary node at {path} do \
-                 not continue each other: one starts at position {first}, after the series already \
-                 reached {end}",
-                side_name(side)
-            )));
-        }
-        operand.open = (!chunk.is_last).then(|| (metric, last.map_or(end, |last| last + 1)));
-        operand.enqueue(chunk);
-        Ok(())
+        operand.retain(chunk, Reader::Operand { path, side })
     }
 
     /// Runs the kernel over both operands and returns the series it produced.
@@ -1722,6 +1797,231 @@ impl BinaryRuntime {
         }
         self.computed = true;
         Ok(Some(output))
+    }
+}
+
+/// What a vector node holds: its whole input until it ends.
+///
+/// Which samples `topk` or `limitk` keeps at a point depends on every series present there, so,
+/// like a binary node, this node retains every chunk its input hands over, assembles the chunks of
+/// each logical series, and runs its kernel once, after the input has ended. The results are queued
+/// in the node's own output queue and handed over from there.
+struct VectorRuntime {
+    op: BoundVectorOp,
+    /// The layout of the input, which is also what the node produces.
+    schema: Arc<SeriesSchema>,
+    input: RetainedInput,
+    /// Whether the input's pieces of one label set are merged before the kernel reads them, which
+    /// `limitk` needs when its input can hold them.
+    merge_input: bool,
+    /// Whether the kernel has run. It runs at most once: the input it read is gone afterwards.
+    computed: bool,
+}
+
+impl VectorRuntime {
+    fn new(op: BoundVectorOp, schema: Arc<SeriesSchema>) -> Self {
+        Self {
+            op,
+            schema,
+            input: RetainedInput::default(),
+            merge_input: false,
+            computed: false,
+        }
+    }
+
+    /// Runs the kernel over the whole input and returns the series it kept, or `None` when it
+    /// already ran.
+    ///
+    /// The reservation covers the retained chunks, the assembled series and a rough estimate of the kernel's workspace and of the series it rebuilds
+    /// ([`vector_workspace_bytes`]). The kernels do not report their workspace as they allocate,
+    /// so the estimate is reserved once, before the kernel runs.
+    fn compute(&mut self, path: &NodePath, buffer: &mut NodeBuffer) -> Result<Option<Vec<Series>>> {
+        if self.computed {
+            return Ok(None);
+        }
+        self.input.ensure_closed(Reader::Vector(path))?;
+        let retained = self.input.held;
+        let assembly = self
+            .input
+            .assembly_bytes(&self.schema)
+            .ok_or_else(|| vector_overflow(path))?;
+        buffer.grow(assembly)?;
+        let assembled = match self.input.assemble(&self.schema, Reader::Vector(path)) {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                buffer.resize(retained)?;
+                return Err(error);
+            }
+        };
+        // `limitk` keeps the first series in the order its input hands them over, as Prometheus
+        // takes the order of the vector it is given -- a sort below it decides that order. Pieces
+        // of one label set are one series there, placed where the label set first arrived, so
+        // they are merged first; ranked apart, a later piece would be counted after the series
+        // that arrived between them.
+        let assembled = if self.merge_input {
+            let rows = assembled.iter().map(|series| series.time.len()).sum();
+            buffer.grow(merge_workspace_bytes(
+                rows,
+                assembled.len(),
+                self.schema.fields.len(),
+            ))?;
+            merge_same_labelset(&self.schema, assembled)?
+        } else {
+            assembled
+        };
+        buffer.grow(vector_workspace_bytes(&assembled, self.schema.fields.len()))?;
+        let metrics = Arc::clone(&buffer.metrics);
+        let output = {
+            let _timer = metrics.timer();
+            vector_series(&self.op, &self.schema, &assembled)?
+        };
+        drop(assembled);
+        self.input.release();
+        self.computed = true;
+        Ok(Some(output))
+    }
+}
+
+/// The error for a vector operation whose reservation does not fit an address space.
+fn vector_overflow(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the input of the vector operation at {path} does not fit one address space: the bytes it would \
+         reserve overflow"
+    ))
+}
+
+/// Runs the kernel `op` binds over the whole input.
+fn vector_series(
+    op: &BoundVectorOp,
+    schema: &SeriesSchema,
+    series: &[Series],
+) -> Result<Vec<Series>> {
+    let grouping = |group: &Grouping| match group {
+        Grouping::By(labels) => select::Grouping::By(labels.to_vec()),
+        Grouping::Without(labels) => select::Grouping::Without(labels.to_vec()),
+    };
+    match op {
+        BoundVectorOp::TopK { k, top, group } => {
+            select::topk(*k, *top, &grouping(group), schema, series)
+        }
+        BoundVectorOp::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, series),
+        BoundVectorOp::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, series),
+    }
+}
+
+/// A rough estimate of what a vector kernel allocates over `series`, beside the input it reads.
+///
+/// Per row, the `(point, row)` a kept sample is recorded as, the candidate it is ranked as and the
+/// value each field rebuilds it into; per series, its place in the label order and its group, its
+/// label pairs in the group key, its cursor and the series and field descriptors of its result; and
+/// the histograms `limitk` and `limit_ratio` copy into their results, at the widest histogram of
+/// each field. Like [`merge_workspace_bytes`] it is not an allocation bound: vector slack and the
+/// hash table's own layout are not measured.
+fn vector_workspace_bytes(series: &[Series], fields: usize) -> usize {
+    let row = std::mem::size_of::<(usize, usize)>()
+        + std::mem::size_of::<(usize, usize, f64)>()
+        + fields * std::mem::size_of::<f64>();
+    let per_series = 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<Vec<(usize, usize)>>()
+        + std::mem::size_of::<RowCursor<'_>>()
+        + std::mem::size_of::<Series>()
+        + fields * std::mem::size_of::<Samples>();
+    let label = std::mem::size_of::<(Arc<str>, Arc<str>)>();
+    series.iter().fold(0usize, |total, item| {
+        let rows = item.time.len();
+        let labels = item.metric.tags().len() + 1;
+        let histograms = item
+            .fields
+            .iter()
+            .filter_map(histogram_row_bytes)
+            .fold(0usize, |bytes, widest| {
+                bytes.saturating_add(widest.saturating_mul(rows))
+            });
+        total
+            .saturating_add(rows.saturating_mul(row))
+            .saturating_add(per_series)
+            .saturating_add(labels.saturating_mul(label))
+            .saturating_add(histograms)
+    })
+}
+
+/// The operation a scalar broadcast applies, with the side the constant sits on already resolved.
+#[derive(Clone, Copy, Debug)]
+enum BroadcastOp {
+    /// Float arithmetic between the vector and the constant.
+    Arithmetic(ArithmeticOp),
+    /// A comparison: `Filter` keeps the positions that passed, `Bool` reports `1`/`0` for them.
+    Compare(Comparison),
+}
+
+/// What a binary node holds when one operand is a constant: the operation, its scalar operand and
+/// the layout of the vector side.
+///
+/// A broadcast applies to each chunk as it arrives; unlike [`BinaryRuntime`], it does not retain
+/// both operands for whole-vector matching.
+struct BroadcastRuntime {
+    /// The scalar and its position in the operation.
+    operand: ScalarOperand,
+    /// The operation applied to every value of the vector.
+    op: BroadcastOp,
+    /// The layout of the vector side: the fields a chunk of it carries, on the grid it is addressed
+    /// on. A chunk of the vector side is checked against it by the kernel itself.
+    sample_schema: Arc<SeriesSchema>,
+}
+
+impl BroadcastRuntime {
+    /// Whether the operation rewrites the label set of what it hands out.
+    ///
+    /// Arithmetic and a `bool` comparison drop the metric name, so two input series can become one
+    /// label set under this node and what it hands out is recorded in an [`Emitted`] table. A
+    /// filtering comparison keeps the label set it read, so it keeps none. The answer is read off
+    /// [`Self::op`] rather than stored beside it, so an operation and its label policy cannot
+    /// disagree.
+    fn drops_labels(&self) -> bool {
+        match self.op {
+            BroadcastOp::Arithmetic(_) | BroadcastOp::Compare(Comparison::Bool(_)) => true,
+            BroadcastOp::Compare(Comparison::Filter(_)) => false,
+        }
+    }
+
+    /// The label set a chunk of the vector side's `metric` becomes under this operation.
+    ///
+    /// It is what a series closes under when the operation emptied every position: the labels say
+    /// which series closed, and they are the labels the operation produces, not the ones it read.
+    fn output_metric(&self, metric: &MetricName) -> Result<MetricName> {
+        if self.drops_labels() {
+            drop_metric_name(metric)
+        } else {
+            Ok(metric.clone())
+        }
+    }
+
+    /// Applies the operation to one chunk of the vector side.
+    ///
+    /// `None` means the operation emptied every position and the chunk does not close its series:
+    /// the input may still decide more, so nothing is handed on. A chunk that does close its series
+    /// is answered even then — with a series carrying no row — because a consumer tells "nothing
+    /// more here" from "no more input" by that chunk alone.
+    fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
+        let output = match self.op {
+            BroadcastOp::Arithmetic(op) => Some(map_arithmetic(
+                &self.sample_schema,
+                &chunk.series,
+                op,
+                self.operand,
+            )?),
+            BroadcastOp::Compare(comparison) => {
+                map_compare(&self.sample_schema, &chunk.series, comparison, self.operand)?
+            }
+        };
+        match output {
+            Some(output) => Ok(Some(output)),
+            None if chunk.is_last => {
+                let metric = self.output_metric(&chunk.series.metric)?;
+                no_row_series(&self.sample_schema, &chunk.series, metric).map(Some)
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -1873,7 +2173,8 @@ struct NodeRuntime {
     /// The chunks this node holds for its consumer, each with the estimate it was queued with.
     ///
     /// An input node's queue is filled by the caller, a window's by the chunks it computed while
-    /// flushing its collected input, and a binary node's by the results its kernel produced; no node
+    /// flushing its collected input, and a binary or vector node's by the results its kernel
+    /// produced; no node
     /// uses it for both. A chunk is measured once, as it enters, and the figure it was queued with
     /// is given back as it leaves, so neither the queue nor the handover walks it.
     queued: VecDeque<(NativeChunk, usize)>,
@@ -1885,8 +2186,19 @@ struct NodeRuntime {
     window: Option<RangeEvaluator>,
     /// What a map node applies.
     map: Option<MapRuntime>,
-    /// What a binary node holds.
+    /// What a binary node holds when it matches two vectors: both operands, until the input ends.
+    ///
+    /// `None` for every other node, and for a binary node that broadcasts a constant instead: that
+    /// one holds no operand at all and is described by [`NodeRuntime::broadcast`].
     binary: Option<BinaryRuntime>,
+    /// What a vector node holds.
+    vector: Option<VectorRuntime>,
+    /// What a binary node holds when one operand is a constant: the operation and the layout of the
+    /// vector side.
+    ///
+    /// The two modes are exclusive. A broadcast transforms each chunk of the vector side as it
+    /// arrives and retains none of them, so what it holds is its own configuration and not data.
+    broadcast: Option<BroadcastRuntime>,
     /// The layout the caller's chunks of an input node are checked against.
     ///
     /// A tree with a binary node reads two inputs, and each of them is bound to its own layout, so
@@ -1937,10 +2249,10 @@ impl NodeRuntime {
     /// Hands over the next queued chunk, if there is one, giving back what it was queued with.
     ///
     /// It is the one way a chunk leaves this node's queue: an input node hands over what the caller
-    /// queued, and a binary node hands over what its kernel produced. `values` is how that node
-    /// counts the values it hands over, because the two do not count the same thing: an input's
-    /// figure has always been its positions, while a binary result holds one value per field and a
-    /// field may have none at a position it decided.
+    /// queued, and a binary or vector node hands over what its kernel produced. `values` is how
+    /// that node counts the values it hands over, because the two do not count the same thing: an
+    /// input's figure has always been its positions, while a kernel's result holds one value per
+    /// field and a field may have none at a position it decided.
     fn pop_queued(&mut self, values: fn(&NativeChunk) -> usize) -> Result<Option<NativeChunk>> {
         let Some((chunk, bytes)) = self.queued.pop_front() else {
             return Ok(None);
@@ -2015,6 +2327,64 @@ impl NodeRuntime {
             // already rewritten the output's label set, so the label set of the output is the one
             // two input series can share.
             self.track(path, output)?;
+        }
+        // The chunk is gone and the label sets this node has handed out are what is left.
+        let emitted = self.emitted_bytes();
+        self.buffer.resize(emitted)?;
+        Ok(output)
+    }
+
+    /// Broadcasts one chunk of the vector side with the constant this node was bound to.
+    ///
+    /// `None` means the operation emptied every position and the chunk does not close its series:
+    /// there is nothing to hand on, and the vector side may still decide more. Nothing of the chunk
+    /// is retained — the operation pairs one value with one constant — so what this node holds
+    /// afterwards is the label sets it has handed out and nothing else.
+    fn broadcast(&mut self, path: &NodePath, chunk: NativeChunk) -> Result<Option<EvaluatedChunk>> {
+        let NativeChunk::Evaluated(chunk) = chunk else {
+            return Err(DataFusionError::Execution(format!(
+                "the binary node at {path} broadcasts over an evaluated vector, not raw samples"
+            )));
+        };
+        let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
+        // The chunk is held for as long as this node works on it.
+        self.buffer.grow(evaluated_bytes(&chunk))?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        let outcome = {
+            // The timer covers this node's own work only: it is dropped before the driver polls
+            // the vector side again.
+            let _timer = metrics.timer();
+            match self.broadcast.as_ref() {
+                Some(broadcast) => broadcast.apply(&chunk),
+                None => Err(no_broadcast(path)),
+            }
+        };
+        metrics.record_input(1, positions);
+        if closing {
+            // A series closes exactly once, on the chunk carrying `is_last`: the broadcast kept it
+            // on every chunk it handed up, so the series it read is closed here.
+            metrics.record_completed_series(1);
+        }
+        // An error leaves the reservation to the driver, which releases every node when it stops.
+        let output = outcome?;
+        let output = match output {
+            Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
+            None => None,
+        };
+        if let Some(output) = &output {
+            metrics.record_grid_points(output.series.time.len());
+            metrics.record_output(1, valid_values(output));
+            // Only an operation that rewrites the label set is where two input series can become
+            // one, and only that one keeps the table `track` records into. A filtering comparison
+            // keeps the label set it read, so recording it would refuse two input series that
+            // share it without this node having made them share it.
+            if self
+                .broadcast
+                .as_ref()
+                .is_some_and(BroadcastRuntime::drops_labels)
+            {
+                self.track(path, output)?;
+            }
         }
         // The chunk is gone and the label sets this node has handed out are what is left.
         let emitted = self.emitted_bytes();
@@ -2136,6 +2506,56 @@ impl NodeRuntime {
         let Some(output) = output else {
             return Ok(());
         };
+        self.queue_results(output)
+    }
+
+    /// Retains one chunk of a vector node's input, reserved for before it is retained, as
+    /// [`Self::retain_binary`] retains an operand's.
+    fn retain_vector(&mut self, path: &NodePath, chunk: NativeChunk) -> Result<()> {
+        let NativeChunk::Evaluated(chunk) = chunk else {
+            return Err(DataFusionError::Execution(format!(
+                "the vector operation at {path} consumes evaluated chunks, not raw samples"
+            )));
+        };
+        let vector = self.vector.as_mut().ok_or_else(|| no_vector(path))?;
+        // What a bound tree says the input produces is not proof of what a chunk carries, so the
+        // chunk is checked against the layout before it is retained.
+        validate_binary_operand(vector.schema.as_ref(), std::slice::from_ref(&chunk.series))
+            .map_err(|error| {
+                DataFusionError::Execution(format!(
+                    "the vector operation at {path} rejected its input: {error}"
+                ))
+            })?;
+        let pending = vector.input.pending(&chunk);
+        let positions = chunk.series.time.len();
+        self.buffer.grow(pending)?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        {
+            let _timer = metrics.timer();
+            let vector = self.vector.as_mut().ok_or_else(|| no_vector(path))?;
+            vector.input.retain(chunk, Reader::Vector(path))?;
+            let retained = vector.input.held;
+            self.buffer.resize(retained)?;
+        }
+        metrics.record_input(1, positions);
+        Ok(())
+    }
+
+    /// Runs this node's vector kernel and queues the series it kept.
+    fn compute_vector(&mut self, path: &NodePath) -> Result<()> {
+        let output = {
+            let vector = self.vector.as_mut().ok_or_else(|| no_vector(path))?;
+            vector.compute(path, &mut self.buffer)?
+        };
+        let Some(output) = output else {
+            return Ok(());
+        };
+        self.queue_results(output)
+    }
+
+    /// Queues the series a kernel that reads its whole input produced, and settles the reservation
+    /// on the queue.
+    fn queue_results(&mut self, output: Vec<Series>) -> Result<()> {
         // The results are queued the way a node that produces a chunk per input queues what it
         // hands on: the queue is the one source of chunk order and of the bytes queued chunks hold.
         let mut closed = 0usize;
@@ -2143,19 +2563,19 @@ impl NodeRuntime {
             // The kernel decided every point of a result series at once, so the one chunk it is
             // handed over as closes it.
             let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
-            // The result is already admitted: the kernel kept it inside the workspace its callback
-            // reserved. What the queue keeps is the estimate of the chunk that holds it.
+            // The result is already admitted, within the workspace reserved for the kernel. What the
+            // queue keeps is the estimate of the chunk that holds it.
             let bytes = chunk.bytes();
             self.queued.push_back((chunk, bytes));
             closed += 1;
         }
-        // This node's own accounting of closed series is the results it closed, one per matched
-        // series: an operand chunk that closed its input series is a closure of the node below, and
+        // This node's own accounting of closed series is the results it closed, one per result
+        // series: an input chunk that closed its series is a closure of the node below, and
         // counting it here as well would report the same work twice.
         self.buffer.metrics.record_completed_series(closed);
-        // The operands the reservation covered are gone and the queue holds what the kernel
-        // returned, so the reservation settles on the queue: what a queued result is given back
-        // with as it leaves is exactly the figure it is held for here.
+        // The input the reservation covered is gone and the queue holds what the kernel returned,
+        // so the reservation settles on the queue: what a queued result is given back with as it
+        // leaves is exactly the figure it is held for here.
         let queued = self
             .queued
             .iter()
@@ -2355,6 +2775,8 @@ impl NodeRuntime {
         self.window = None;
         self.instant = None;
         self.binary = None;
+        self.vector = None;
+        self.broadcast = None;
         self.source_schema = None;
         self.emitted = None;
         self.merge = None;
@@ -2440,14 +2862,18 @@ impl NativeExecutionState {
                 NativeExpr::Window { .. } => NodeTag::Window,
                 NativeExpr::Map { .. } => NodeTag::Map,
                 // A binary node is built here and narrowed below: legality is a wider set of operand
-                // types than the kernel takes, so the shape is checked where the operands' layouts
-                // are read.
+                // types than the kernels take, so which of its two modes it is -- a match between
+                // two vectors, or a constant broadcast over one -- is decided where the operands'
+                // layouts are read.
                 NativeExpr::Binary { .. } => NodeTag::Binary,
-                // The kinds below are legal in a bound tree, and `validate` stays the authority on
-                // that; this runtime simply does not execute them yet. Rejected before a single
-                // chunk is read: a tree the runtime cannot execute must not start, because a
-                // partial answer would be one the caller never asked for.
-                NativeExpr::Scalar(_) => return Err(not_implemented("Scalar", &path)),
+                NativeExpr::Vector { .. } => NodeTag::Vector,
+                // A scalar is a value node: it produces the constant it was bound to, hands over no
+                // chunk and holds no state, so it is built like any other node and pulled like none.
+                NativeExpr::Scalar(_) => NodeTag::Scalar,
+                // An aggregate is legal in a bound tree, and `validate` stays the authority on that;
+                // this runtime simply does not execute it yet. Rejected before a single chunk is
+                // read: a tree the runtime cannot execute must not start, because a partial answer
+                // would be one the caller never asked for.
                 NativeExpr::Aggregate { .. } => return Err(not_implemented("Aggregate", &path)),
             };
             let buffer = NodeBuffer::new(&path, handles, &pool);
@@ -2458,6 +2884,8 @@ impl NativeExecutionState {
                 window: None,
                 map: None,
                 binary: None,
+                vector: None,
+                broadcast: None,
                 source_schema: None,
                 emitted: None,
                 merge: None,
@@ -2521,11 +2949,12 @@ impl NativeExecutionState {
                     right,
                     matching,
                 } => {
-                    // The one shape this runtime executes is two evaluated vectors: a scalar side is
-                    // a broadcast the kernel does not take, and a raw side has no positions to be
-                    // matched at. Both are rejected as this node, before the pass reaches the
-                    // operand that produced them, so the position named is the one that asked for
-                    // them.
+                    // A binary node has two modes here, and the operands' layouts are what tell
+                    // them apart. Two evaluated vectors are matched by label set and retain both
+                    // operands; one evaluated vector and a constant is a broadcast, which pairs
+                    // each vector value with the constant as the chunk carrying it arrives. All
+                    // that is left is refused as this node, before the pass reaches the operands
+                    // that produced them, so the position named is the one that asked for them.
                     match (left.output.samples(), right.output.samples()) {
                         (Some(left), Some(right))
                             if left.eval_grid.is_some() && right.eval_grid.is_some() =>
@@ -2537,14 +2966,42 @@ impl NativeExecutionState {
                                 [Arc::clone(left), Arc::clone(right)],
                             ));
                         }
-                        _ => return Err(not_implemented("Binary", &path)),
+                        _ => {
+                            let broadcast = broadcast_runtime(&path, left, right, matching)?;
+                            if broadcast.drops_labels() {
+                                // The operation rewrites the label set it hands out, so this node
+                                // is one where two input series can become one: it keeps the table
+                                // that refuses a second value at a position the first one filled.
+                                runtime.emitted = Some(Emitted::default());
+                            }
+                            runtime.broadcast = Some(broadcast);
+                        }
                     }
-                    // A binary operation matches by label set, so a result label set may be
-                    // produced at points that do not collide; the kernel groups and merges them
-                    // itself, which is why this node keeps no ledger of what it handed out.
+                    // A binary operation over two vectors matches by label set, so a result label
+                    // set may be produced at points that do not collide; the kernel groups and
+                    // merges them itself, which is why that mode keeps no ledger of what it handed
+                    // out. A broadcast that keeps the labels it reads is not where two series
+                    // become one either, so it keeps none; the one that drops them does, above.
+                }
+                NativeExpr::Vector { op, .. } => {
+                    let schema = node.output.samples().cloned().ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "the vector operation at {path} does not produce samples"
+                        ))
+                    })?;
+                    // `topk`, `bottomk` and `limitk` rank one value per sample, so their kernels
+                    // take one field; `limit_ratio` keeps whole series and takes any number.
+                    if !matches!(op, BoundVectorOp::LimitRatio { .. }) && schema.fields.len() != 1 {
+                        return Err(not_implemented("multi-field Vector", &path));
+                    }
+                    runtime.vector = Some(VectorRuntime::new(op.clone(), schema));
+                    // A selection keeps the labels of the series it keeps, so it keeps no ledger of
+                    // what it handed out.
                 }
                 NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => {
-                    // Rejected above, where the pass has the position to name.
+                    // A scalar holds nothing: what its consumer reads is the constant the node was
+                    // bound to, which is on the tree rather than in this state. The aggregate is
+                    // rejected above, where the pass has the position to name.
                 }
             }
             // The inputs this node reads, in the order the tree declares them: a unary node's one
@@ -2557,7 +3014,8 @@ impl NativeExecutionState {
                 }
                 NativeExpr::Instant { input, .. }
                 | NativeExpr::Window { input, .. }
-                | NativeExpr::Map { input, .. } => {
+                | NativeExpr::Map { input, .. }
+                | NativeExpr::Vector { input, .. } => {
                     pending.push((input.as_ref(), path.input()));
                     true
                 }
@@ -2575,6 +3033,16 @@ impl NativeExecutionState {
             paths.push(path.clone());
             runtimes.push(runtime);
         }
+
+        // A caller names a node by the position the metrics give it, and a chunk it queues is bound
+        // to the input that position names, so every position is indexed once the pass has given the
+        // whole tree one. The reverse pass below reads it as well, because an operand is not always
+        // the node the spec's `input` names: a broadcast's vector side may be its right operand.
+        let by_path: HashMap<NodePath, usize> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.clone(), index))
+            .collect();
 
         // One reverse pass sets where a merge has to happen, from the input upwards: the pass above
         // walked the root first, so a node's input is the node after it and has been decided by the
@@ -2616,13 +3084,61 @@ impl NativeExecutionState {
                         holds_shared[index] = input_holds_shared;
                     }
                     NodeTag::Map => holds_shared[index] = true,
-                    NodeTag::Binary => {
-                        // The kernel matches its operands by label set and files one result row per
-                        // label set and point, merging the rows of one set whatever piece they came
-                        // from: what it hands out is one series per label set, so nothing above has
-                        // to join pieces of a series. Its own operands are read whole -- it retains
-                        // them until the input ends -- so its flag is false whatever theirs are.
+                    NodeTag::Scalar => {
+                        // A scalar produces one value and no labels, so it is not a stream of series
+                        // and nothing above it can read two of them under one label set. The flag
+                        // is false rather than inherited: the node has no input at all.
                         holds_shared[index] = false;
+                    }
+                    NodeTag::Binary => {
+                        // A vector match files one result row per label set and point, merging the
+                        // rows of one set whatever piece they came from: what it hands out is one
+                        // series per label set, so nothing above has to join pieces of a series. Its
+                        // own operands are read whole -- it retains them until the input ends -- so
+                        // its flag is false whatever theirs are.
+                        //
+                        // A broadcast hands each input chunk up transformed instead, so it merges
+                        // nothing: what its output can hold under one label set is what its vector
+                        // side held, plus the pair its own label rewrite can create. One that drops
+                        // the metric name -- arithmetic and a `bool` comparison -- is therefore where
+                        // two input series become one label set, and one that keeps the name only
+                        // inherits the pair its input already had. The flag of the *vector* side is
+                        // the one that matters: the constant is a node with no input at all.
+                        holds_shared[index] = match runtimes[index].broadcast.as_ref() {
+                            Some(broadcast) => {
+                                let vector = match broadcast.operand {
+                                    ScalarOperand::Right(_) => nodes[index].input,
+                                    ScalarOperand::Left(_) => {
+                                        by_path.get(&paths[index].right()).copied()
+                                    }
+                                };
+                                broadcast.drops_labels()
+                                    || vector.is_some_and(|vector| holds_shared[vector])
+                            }
+                            None => false,
+                        };
+                    }
+                    NodeTag::Vector => {
+                        // A selection keeps samples of the series it read, so pieces of one label
+                        // set stay pieces: they hold disjoint points, so ranking them apart picks
+                        // what ranking the merged series would, and what is above treats them as
+                        // it treats a map's. `limitk` is the exception: it counts series in input
+                        // order, so it merges the pieces first and hands over whole series.
+                        let limitk = matches!(
+                            expr,
+                            NativeExpr::Vector {
+                                op: BoundVectorOp::LimitK { .. },
+                                ..
+                            }
+                        );
+                        if limitk && input_holds_shared {
+                            if let Some(vector) = runtimes[index].vector.as_mut() {
+                                vector.merge_input = true;
+                            }
+                            holds_shared[index] = false;
+                        } else {
+                            holds_shared[index] = input_holds_shared;
+                        }
                     }
                     NodeTag::Window => {
                         let (drops_metric_name, input_schema) = match expr {
@@ -2675,14 +3191,6 @@ impl NativeExecutionState {
             }
         }
 
-        // A caller names a node by the position the metrics give it, and a chunk it queues is bound
-        // to the input that position names, so every position is indexed once the pass has given the
-        // whole tree one.
-        let by_path: HashMap<NodePath, usize> = paths
-            .iter()
-            .enumerate()
-            .map(|(index, path)| (path.clone(), index))
-            .collect();
         // Every input node is where a caller's chunks can enter, and each of them is named by its
         // own position when a caller queues a chunk. A tree of unary nodes has one input; a binary
         // node adds one per operand, so a tree of nested binary nodes has as many as it has leaves.
@@ -2799,12 +3307,12 @@ impl NativeExecutionState {
 
     /// Reports a stream that ended inside a series, without closing any node.
     ///
-    /// Closing is destructive -- a window's evaluator takes itself apart -- and the binary nodes
-    /// still have to compute after this check, so what is read here is only the state that follows
-    /// what each node was handed: an input node reports the series it handed over without the chunk
-    /// that ends it, and a binary node reports an operand that is still open on either side. A
-    /// truncation is therefore refused before a binary kernel allocates its workspace, rather than
-    /// after one has already been computed on half a vector.
+    /// Closing is destructive -- a window's evaluator takes itself apart -- and the binary and
+    /// vector nodes still have to compute after this check, so what is read here is only the
+    /// state that follows what each node was handed: an input node reports the series it handed
+    /// over without the chunk that ends it, and a binary or vector node reports an input that is
+    /// still open. A truncation is therefore refused before a kernel allocates its workspace, rather
+    /// than after one has already been computed on half a vector.
     fn unclosed(&self) -> Result<()> {
         // A source series that never ended is refused before anything is merged: the close a merge
         // synthesises would make it look like one that did.
@@ -2814,6 +3322,9 @@ impl NativeExecutionState {
         for (path, runtime) in self.paths.iter().zip(&self.runtimes) {
             if let Some(binary) = &runtime.binary {
                 binary.closed(path)?;
+            }
+            if let Some(vector) = &runtime.vector {
+                vector.input.ensure_closed(Reader::Vector(path))?;
             }
         }
         Ok(())
@@ -2851,8 +3362,9 @@ impl NativeExecutionState {
 /// The driver owns the state and nothing else: every decision a node makes was bound before the
 /// tree existed, so a pull only reads the position and runs the bound operation.
 ///
-/// A window directly over a source evaluates its chunks as they arrive, and a map at the root hands
-/// its chunks on as it produces them: both stream. A window whose input can hold two series under
+/// A window directly over a source evaluates its chunks as they arrive, a map at the root hands
+/// its chunks on as it produces them, and a binary node over a constant transforms each chunk of
+/// the vector side as it arrives: all three stream. A window whose input can hold two series under
 /// one canonical label set collects that input instead, merges each set once and evaluates it, so
 /// it reports at [`Self::finish`] rather than as its input arrives.
 pub struct NativeExecutor {
@@ -2933,9 +3445,12 @@ impl NativeExecutor {
     ///
     /// A window and a map take whole chunks from their input, so nothing beyond the chunk in hand
     /// is materialised on their edge -- except below a window that collects its input, which holds
-    /// that input until [`Self::finish`]. A binary node is the other exception: it pairs two whole
-    /// vectors point by point, so it retains every chunk each operand hands over and reports `None`
-    /// until [`Self::finish`] ends the input, which is when it computes its result.
+    /// that input until [`Self::finish`]. A binary node that matches two vectors is the other
+    /// exception: it pairs two whole vectors point by point, so it retains every chunk each operand
+    /// hands over and reports `None` until [`Self::finish`] ends the input, which is when it
+    /// computes its result. A binary node that broadcasts a constant is not one: it pairs each
+    /// value of the vector side with the constant and hands the transformed chunk up as it arrives. A vector node
+    /// reads its one input whole the same way.
     ///
     /// A chunk's `is_last` says the series whose data it carries ended. It does not say its label
     /// set is finished: two source series whose labels were rewritten into one set are two pieces
@@ -3104,9 +3619,10 @@ impl NativeExecutor {
     /// Whether the node at `index` has produced everything it ever will.
     ///
     /// A pull that finds nothing does not answer it: a collecting window reports nothing until it
-    /// is flushed, and a binary node reports nothing until both nodes it reads from are finished.
-    /// Each node therefore answers from its own state and from its children's, which is what keeps
-    /// a binary node from computing on an operand a window below it has not handed over yet.
+    /// is flushed, and a binary node that matches two vectors reports nothing until both nodes it
+    /// reads from are finished. Each node therefore answers from its own state and from its
+    /// children's, which is what keeps a binary node from computing on an operand a window below it
+    /// has not handed over yet.
     fn settled(&self, index: usize) -> bool {
         let runtime = &self.state.runtimes[index];
         if !runtime.queued.is_empty() || runtime.merge.is_some() {
@@ -3114,10 +3630,32 @@ impl NativeExecutor {
         }
         match self.state.nodes[index].tag {
             NodeTag::Input => true,
+            // A scalar produces its value without reading anything, so it is settled from the
+            // start: there is no chunk it owes its consumer.
+            NodeTag::Scalar => true,
             NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
                 .input
                 .is_none_or(|child| self.settled(child)),
+            NodeTag::Vector => {
+                runtime
+                    .vector
+                    .as_ref()
+                    .is_some_and(|vector| vector.computed)
+                    && self.state.nodes[index]
+                        .input
+                        .is_none_or(|child| self.settled(child))
+            }
             NodeTag::Binary => {
+                // A broadcast owes only what its vector side has not handed over yet: it answers
+                // each chunk as it reads it and keeps nothing, so it is settled exactly when that
+                // side is. A vector match is settled once its kernel ran and both operands are.
+                if let Some(broadcast) = &runtime.broadcast {
+                    let vector = match broadcast.operand {
+                        ScalarOperand::Right(_) => self.state.nodes[index].input,
+                        ScalarOperand::Left(_) => self.state.right_input(index).ok(),
+                    };
+                    return vector.is_some_and(|vector| self.settled(vector));
+                }
                 runtime
                     .binary
                     .as_ref()
@@ -3213,6 +3751,10 @@ impl NativeExecutor {
         let input = self.state.nodes[index].input;
         match tag {
             NodeTag::Input => self.state.runtimes[index].pop_source(),
+            // A scalar owes its consumer no chunk: it produces one value and no series, and the
+            // value is the constant on the tree, which the consumer reads off its own binding. A
+            // pull of it is therefore empty by construction and says nothing has stalled.
+            NodeTag::Scalar => Ok(None),
             NodeTag::Map => {
                 let child = input.ok_or_else(|| missing_input(tag))?;
                 // An operation that empties every position yields no chunk, and the map asks its
@@ -3263,6 +3805,13 @@ impl NativeExecutor {
                 // one is the input a spec of two fields would have had to carry.
                 let left = input.ok_or_else(|| missing_input(tag))?;
                 let right = self.state.right_input(index)?;
+                // A broadcast reads the vector side only: the constant is on the node's binding, so
+                // there is no second stream to pull and no chunk to retain. Each chunk is
+                // transformed as it arrives and handed up, which is what keeps a broadcast over a
+                // whole vector from costing the vector.
+                if self.state.runtimes[index].broadcast.is_some() {
+                    return self.broadcast_node(index, left, right);
+                }
                 // Both operands are read to the end of what they hand over: before the input ends a
                 // binary node only retains the chunks, because a pair is not decided until both
                 // sides are whole, and after it ends this is the drain that empties the two.
@@ -3283,6 +3832,61 @@ impl NativeExecutor {
                 // A result holds one value per field, and a field may hold none where another
                 // does, so its values are counted rather than read as its positions.
                 runtime.pop_queued(evaluated_values)
+            }
+            NodeTag::Vector => {
+                let child = input.ok_or_else(|| missing_input(tag))?;
+                // Which samples are kept at a point is not decided until the whole input has
+                // arrived, so the input is read to the end before anything is handed over.
+                while let Some(chunk) = self.pull(child)? {
+                    let path = &self.state.paths[index];
+                    self.state.runtimes[index].retain_vector(path, chunk)?;
+                }
+                if !self.inputs_finished || !self.settled(child) {
+                    return Ok(None);
+                }
+                let path = &self.state.paths[index];
+                let runtime = &mut self.state.runtimes[index];
+                runtime.compute_vector(path)?;
+                runtime.pop_queued(evaluated_values)
+            }
+        }
+    }
+
+    /// Pulls the vector side of the broadcast at `index` until it hands over a chunk, and returns
+    /// that chunk transformed.
+    ///
+    /// Only the vector side is pulled: the scalar side is the constant the node was bound to. The
+    /// chunk is transformed inside this call and nothing of it is kept, so what a broadcast holds
+    /// does not grow with the vector it reads.
+    fn broadcast_node(
+        &mut self,
+        index: usize,
+        left: usize,
+        right: usize,
+    ) -> Result<Option<NativeChunk>> {
+        let vector = {
+            let broadcast = self.state.runtimes[index]
+                .broadcast
+                .as_ref()
+                .ok_or_else(|| no_broadcast(&self.state.paths[index]))?;
+            match broadcast.operand {
+                ScalarOperand::Right(_) => left,
+                ScalarOperand::Left(_) => right,
+            }
+        };
+        // An operation that empties every position yields no chunk, and the node asks its vector
+        // side again rather than reporting a decision it did not make.
+        loop {
+            let Some(chunk) = self.pull(vector)? else {
+                // Nothing is left in the vector side. Before the input ends that is a stall rather
+                // than an end, and so is a vector side still holding collected input: the node has
+                // answered everything it can and owes whatever that side has not produced yet.
+                return Ok(None);
+            };
+            let path = &self.state.paths[index];
+            let runtime = &mut self.state.runtimes[index];
+            if let Some(output) = runtime.broadcast(path, chunk)? {
+                return Ok(Some(NativeChunk::Evaluated(output)));
             }
         }
     }
@@ -3433,14 +4037,14 @@ fn map_chunk(
                     }
                     // The closing chunk names the series the map would have produced, so the
                     // operations not run still decide its labels.
-                    let mut metric = series.metric;
+                    let mut metric = series.metric.clone();
                     for op in &ops[index..] {
                         match op {
                             MapOp::Label(rewrite) => rewrite.apply(&mut metric)?,
                             MapOp::Math(_) => metric = drop_metric_name(&metric)?,
                         }
                     }
-                    let empty = no_row_series(schema, &series.time, metric)?;
+                    let empty = no_row_series(schema, &series, metric)?;
                     return EvaluatedChunk::try_new(empty, true).map(Some);
                 }
             },
@@ -3449,19 +4053,21 @@ fn map_chunk(
     EvaluatedChunk::try_new(series, chunk.is_last).map(Some)
 }
 
-/// A series named `metric` with no row at all, placed after the last position of `time`.
+/// A series carrying `metric` and no row at all.
 ///
 /// It is what a closing chunk holds when the operation emptied its input: the labels say which
-/// series closed, and the axis is empty because no position holds a value.
-fn no_row_series(schema: &SeriesSchema, time: &TimeAxis, metric: MetricName) -> Result<Series> {
-    let grid = time.grid().ok_or_else(|| {
+/// series closed, and the axis is empty because no position holds a value. `metric` is the identity
+/// the operation produces — a map drops the name, a filtering comparison keeps it — so the caller
+/// says which, rather than this function deciding for it.
+fn no_row_series(schema: &SeriesSchema, series: &Series, metric: MetricName) -> Result<Series> {
+    let grid = series.time.grid().ok_or_else(|| {
         DataFusionError::Execution("a mapped chunk must be addressed on a grid".to_string())
     })?;
     let fields = (0..schema.fields.len())
         .map(|_| Samples::from_float(Float64Array::from(Vec::<f64>::new())))
         .collect();
     let fields = SeriesFields::try_from_vec(fields).map_err(series_error)?;
-    let at = time.last_position().map_or(0, |last| last + 1);
+    let at = series.time.last_position().map_or(0, |last| last + 1);
     let time = GridRange::try_new(Arc::clone(grid), at, 0).map_err(series_error)?;
     Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)
 }
@@ -3496,7 +4102,9 @@ fn evaluated_values(chunk: &NativeChunk) -> usize {
 /// The rejection of a node kind this runtime does not execute yet.
 ///
 /// It names the kind and the node's position: the position is what the metrics and `EXPLAIN` call
-/// the same node, so a reader can find it in the tree.
+/// the same node, so a reader can find it in the tree. An aggregate is the one kind left here: a
+/// scalar executes as a value node, and a binary node executes both as a vector match and as a
+/// constant broadcast.
 fn not_implemented(kind: &str, path: &NodePath) -> DataFusionError {
     DataFusionError::NotImplemented(format!(
         "the native runtime does not execute {kind} nodes yet: {kind} at {path}"
@@ -3587,6 +4195,158 @@ fn truncated_input(path: &NodePath) -> DataFusionError {
 /// The error for a node asked to compute without the runtime its kind holds.
 fn no_binary(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!("the node at {path} holds no binary operation"))
+}
+
+fn no_vector(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!("the node at {path} holds no vector operation"))
+}
+
+/// The error for a node asked to broadcast without the broadcast its kind holds.
+fn no_broadcast(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!("the node at {path} holds no scalar broadcast"))
+}
+
+/// The rejection of a scalar broadcast whose matching is not the one a constant can take.
+///
+/// A constant has no labels, so there is nothing to match it against: Prometheus does not consult
+/// the matching modifiers of a vector–scalar operation at all. A tree that carries them therefore
+/// describes an operation that is not the one it would compute, which is refused rather than run
+/// as if the modifiers were absent.
+fn matched_scalar(path: &NodePath) -> DataFusionError {
+    DataFusionError::NotImplemented(format!(
+        "the native runtime does not execute a scalar broadcast whose constant carries matching \
+         modifiers: a constant has no labels to match, so the operation this Binary at {path} \
+         describes is not the one it would compute"
+    ))
+}
+
+/// The rejection of a binary node whose operands are neither two evaluated vectors nor one
+/// evaluated vector and one constant.
+///
+/// `operands` says which shape arrived and why that shape has no path here, so a tree a later
+/// stage compiles is refused for a reason a reader can act on. The kind and the position are named
+/// the way every other rejection in this runtime names them.
+fn unsupported_binary(path: &NodePath, operands: &str) -> DataFusionError {
+    DataFusionError::NotImplemented(format!(
+        "the native runtime does not execute this Binary node: it reads {operands}, and this \
+         runtime reads two evaluated vectors or one evaluated vector and one constant, at {path}"
+    ))
+}
+
+/// The broadcast a binary node with one constant operand is, read off its binding.
+///
+/// The two sides say which mode this is: one evaluated vector and one constant is a broadcast. The
+/// constant comes from the scalar node's own binding — the value the node produces — and the
+/// operation from the matching the compiler bound; [`ScalarOperand`] preserves the constant's side.
+///
+/// Of the rejection arms in the operand-type match below, only the two-constant one is a shape a
+/// tree that `validate` accepts can put here; the others are backstops that keep the match
+/// exhaustive. That is not the wide safety margin it looks like: [`NativeNode::validate`] refuses a
+/// binary operand that produces neither evaluated values nor a scalar before any of this runs, so a
+/// raw side or an aggregate-state side can never reach this function at all. The refusals after the
+/// match — a constant operand that is not a literal scalar node, and a constant carrying matching
+/// modifiers — are reachable through a validated tree.
+fn broadcast_runtime(
+    path: &NodePath,
+    left: &NativeNode,
+    right: &NativeNode,
+    matching: &BinaryMatching,
+) -> Result<BroadcastRuntime> {
+    let (scalar_operand, vector, constant) = match (&left.output, &right.output) {
+        (NativeType::Samples(vector), NativeType::Scalar(_)) if vector.eval_grid.is_some() => (
+            ScalarOperand::Right as fn(f64) -> ScalarOperand,
+            vector,
+            right,
+        ),
+        (NativeType::Scalar(_), NativeType::Samples(vector)) if vector.eval_grid.is_some() => (
+            ScalarOperand::Left as fn(f64) -> ScalarOperand,
+            vector,
+            left,
+        ),
+        // The two-constant pair is reachable through the state builder, which is what this arm
+        // guards: `validate` accepts a binary node of two constants (it binds them to a scalar), and
+        // a compiler that could not fold a scalar–scalar operation would emit one. No constant has
+        // labels or fields to broadcast over, so there is no vector to apply the operation to. The
+        // executor test `an_unimplemented_node_is_reported_not_panicked` builds this pair directly.
+        (NativeType::Scalar(_), NativeType::Scalar(_)) => {
+            return Err(unsupported_binary(
+                path,
+                "two constants, which broadcast over no vector",
+            ));
+        }
+        // Raw samples or aggregate state: `validate` already refused either as a binary operand, so
+        // this arm is the exhaustiveness backstop rather than a reachable path.
+        (_, _) => {
+            return Err(unsupported_binary(
+                path,
+                "an operand that is neither evaluated samples nor a constant, which no validated \
+                 tree binds as a binary operand",
+            ));
+        }
+    };
+    let NativeExpr::Scalar(BoundScalar { value }) = &constant.expr else {
+        // NotImplemented rather than Execution: this is a shape the runtime does not support, not a
+        // tree whose values are wrong. A caller that falls back to another planner on NotImplemented
+        // then still can, which an Execution would deny it.
+        return Err(DataFusionError::NotImplemented(format!(
+            "the native runtime does not execute the Binary node at {path}, which broadcasts an \
+             operand that is not a literal scalar: the constant side has to be a Scalar node, and a \
+             computed constant such as `1 < bool 2` is not one until it is folded"
+        )));
+    };
+    // A constant has no labels, so the modifiers a vector–vector operation would use have no
+    // meaning here: a tree that carries them describes another operation than the one it computes.
+    if matching.labels != MatchingLabels::Ignoring(Vec::new())
+        || matching.cardinality != Cardinality::OneToOne
+        || matching.fill != FillValues::default()
+    {
+        return Err(matched_scalar(path));
+    }
+    Ok(BroadcastRuntime {
+        operand: scalar_operand(*value),
+        op: broadcast_op(path, matching)?,
+        sample_schema: Arc::clone(vector),
+    })
+}
+
+/// The operation a binary node's `matching` describes.
+///
+/// A comparison is a filter unless it was bound as `bool`, and a filter keeps the label set it
+/// read while every other operation drops the metric name. Arithmetic has no `bool` form, so one
+/// bound that way describes a node the compiler does not produce and is refused.
+fn broadcast_op(path: &NodePath, matching: &BinaryMatching) -> Result<BroadcastOp> {
+    let arithmetic = |op: ArithmeticOp| {
+        if matching.return_bool {
+            Err(DataFusionError::Execution(format!(
+                "the binary node at {path} carries `bool` on an arithmetic operator, which has no \
+                 bool form"
+            )))
+        } else {
+            Ok(BroadcastOp::Arithmetic(op))
+        }
+    };
+    let comparison = |op: ComparisonOp| {
+        if matching.return_bool {
+            Ok(BroadcastOp::Compare(Comparison::Bool(op)))
+        } else {
+            Ok(BroadcastOp::Compare(Comparison::Filter(op)))
+        }
+    };
+    match matching.op {
+        BinaryOp::Add => arithmetic(ArithmeticOp::Add),
+        BinaryOp::Sub => arithmetic(ArithmeticOp::Subtract),
+        BinaryOp::Mul => arithmetic(ArithmeticOp::Multiply),
+        BinaryOp::Div => arithmetic(ArithmeticOp::Divide),
+        BinaryOp::Mod => arithmetic(ArithmeticOp::Modulo),
+        BinaryOp::Pow => arithmetic(ArithmeticOp::Power),
+        BinaryOp::Atan2 => arithmetic(ArithmeticOp::Atan2),
+        BinaryOp::Eq => comparison(ComparisonOp::Equal),
+        BinaryOp::Ne => comparison(ComparisonOp::NotEqual),
+        BinaryOp::Gt => comparison(ComparisonOp::Greater),
+        BinaryOp::Lt => comparison(ComparisonOp::Less),
+        BinaryOp::Ge => comparison(ComparisonOp::GreaterEqual),
+        BinaryOp::Le => comparison(ComparisonOp::LessEqual),
+    }
 }
 
 /// The error for a reservation the platform cannot express.

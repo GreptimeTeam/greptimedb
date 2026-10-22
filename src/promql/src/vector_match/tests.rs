@@ -130,7 +130,7 @@ fn random_side(rng: &mut StdRng, grid: &Arc<EvalGrid>, fields: usize) -> Side {
         }
         // Each label set starts its own series: only `begin_series` resets the builder.
         builder.begin_series();
-        let values = random_dense(rng, grid.timestamps().len(), fields);
+        let values = random_dense(rng, grid.spec().len as usize, fields);
         for (index, row) in values.iter().enumerate() {
             builder.push(index, row).unwrap();
         }
@@ -489,7 +489,7 @@ fn binary_vectors_match_prometheus_reference() {
             fill: FillValues::default(),
         };
         let fields = lhs_fields.min(rhs_fields);
-        let points = grid.timestamps().len();
+        let points = grid.spec().len as usize;
         let expected = per_field(fields, points, |field| {
             reference_binary(
                 &matching,
@@ -561,7 +561,7 @@ fn set_vectors_match_prometheus_reference() {
         let rhs = random_side(&mut rng, &grid, fields);
         let op = [SetOp::And, SetOp::Or, SetOp::Unless][rng.random_range(0..3)];
         let labels = random_labels(&mut rng);
-        let points = grid.timestamps().len();
+        let points = grid.spec().len as usize;
         let expected = per_field(fields, points, |field| {
             reference_set(
                 op,
