@@ -484,6 +484,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         window: None,
         map: None,
         binary: None,
+        broadcast: None,
         vector: None,
         source_schema: None,
         emitted: None,
@@ -505,6 +506,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
             Arc::new(binary_matching(BinaryOp::Add)),
             [Arc::clone(schema), Arc::clone(schema)],
         )),
+        broadcast: None,
         vector: None,
         source_schema: None,
         emitted: None,
@@ -1081,12 +1083,15 @@ fn a_downstream_window_emits_before_its_input_series_ends() {
 }
 
 /// Every node kind the runtime does not execute is rejected, naming the kind and its position.
+///
+/// A scalar is not one of them any more: it is a value node, and a binary node over a constant is
+/// executed as a broadcast. The binary shapes that stay refused are the ones no kernel here takes,
+/// and the aggregate is still a kind this runtime does not run at all.
 #[test]
 fn an_unimplemented_node_is_reported_not_panicked() {
     // One grid shared by the nodes that validate by allocation identity.
     let statement = || grid(0, 120_000, 2);
 
-    let scalar_tree = scalar(1.0, statement());
     let aggregate_tree = {
         let out = statement();
         NativeNode {
@@ -1101,18 +1106,30 @@ fn an_unimplemented_node_is_reported_not_panicked() {
             output: NativeType::Samples(evaluated_schema(out)),
         }
     };
-    let binary_tree = {
+    // Two constants make a scalar, which is a legal node and a shape no binary here broadcasts
+    // over: there is no vector to pair either of them with.
+    let two_scalars_tree = {
+        let out = statement();
+        NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(scalar(1.0, Arc::clone(&out))),
+                right: Box::new(scalar(2.0, Arc::clone(&out))),
+                matching: binary_matching(BinaryOp::Add),
+            },
+            output: NativeType::Scalar(out),
+        }
+    };
+    // A constant carries no labels, so the matching modifiers of a vector–scalar operation have no
+    // meaning: the operation this tree names is not the one it would compute.
+    let matched_scalar_tree = {
         let out = statement();
         NativeNode {
             expr: NativeExpr::Binary {
                 left: Box::new(window(input(), Arc::clone(&out))),
                 right: Box::new(scalar(1.0, Arc::clone(&out))),
                 matching: BinaryMatching {
-                    op: BinaryOp::Add,
-                    return_bool: false,
-                    labels: MatchingLabels::Ignoring(Vec::new()),
-                    cardinality: Cardinality::OneToOne,
-                    fill: FillValues::default(),
+                    labels: MatchingLabels::On(vec!["job".into()]),
+                    ..binary_matching(BinaryOp::Mul)
                 },
             },
             output: NativeType::Samples(evaluated_schema(out)),
@@ -1120,11 +1137,16 @@ fn an_unimplemented_node_is_reported_not_panicked() {
     };
 
     let cases = [
-        ("Scalar", "root", scalar_tree),
-        ("Aggregate", "root", aggregate_tree),
-        ("Binary", "root", binary_tree),
+        (
+            "Aggregate",
+            "root",
+            "does not execute Aggregate",
+            aggregate_tree,
+        ),
+        ("Binary", "root", "two constants", two_scalars_tree),
+        ("Binary", "root", "matching modifiers", matched_scalar_tree),
     ];
-    for (kind, path, root) in cases {
+    for (kind, path, reason, root) in cases {
         // Legality stays `validate`'s: the plan accepts these trees, the runtime does not run them.
         let tree = NativeTree::try_new(root).expect("the bound tree is legal");
         let error = match NativeExecutionState::try_new(
@@ -1143,6 +1165,7 @@ fn an_unimplemented_node_is_reported_not_panicked() {
         let message = error.to_string();
         assert!(message.contains(kind), "{kind}: {message}");
         assert!(message.contains(&format!("at {path}")), "{message}");
+        assert!(message.contains(reason), "{reason}: {message}");
     }
 }
 
@@ -6422,6 +6445,804 @@ fn an_all_missing_match_group_fits_its_pool() {
     );
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Scalar broadcasts, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// A binary node over `left` and `right` where one side is a constant, bound the way the compiler
+/// binds a broadcast: the output is the vector side's fields on the statement's grid.
+fn broadcast_of(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let vector = left
+        .output
+        .samples()
+        .or_else(|| right.output.samples())
+        .expect("a broadcast reads one evaluated vector")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields: vector.fields.clone(),
+            eval_grid: vector.eval_grid.clone(),
+        })),
+    }
+}
+
+/// `vector <op> constant`, on the grid the vector is evaluated on.
+fn broadcast_right(
+    vector: NativeNode,
+    constant: f64,
+    op: BinaryOp,
+    return_bool: bool,
+) -> NativeNode {
+    let grid = vector
+        .output
+        .grid()
+        .expect("a broadcast reads a grid")
+        .clone();
+    let matching = BinaryMatching {
+        return_bool,
+        ..binary_matching(op)
+    };
+    broadcast_of(vector, scalar(constant, grid), matching)
+}
+
+/// `constant <op> vector`, on the grid the vector is evaluated on.
+fn broadcast_left(
+    constant: f64,
+    vector: NativeNode,
+    op: BinaryOp,
+    return_bool: bool,
+) -> NativeNode {
+    let grid = vector
+        .output
+        .grid()
+        .expect("a broadcast reads a grid")
+        .clone();
+    let matching = BinaryMatching {
+        return_bool,
+        ..binary_matching(op)
+    };
+    broadcast_of(scalar(constant, grid), vector, matching)
+}
+
+/// The metric name a chunk carries, or `None` when the operation dropped it.
+fn name_of(chunk: &EvaluatedChunk) -> Option<&str> {
+    chunk.series.metric.name()
+}
+
+/// A constant on the right multiplies every value of the vector and drops the metric name.
+///
+/// The chunk arrives as it is pushed, before the input ends: a broadcast answers a chunk from that
+/// chunk alone, so nothing waits for the vector to be complete.
+#[test]
+fn a_constant_on_the_right_multiplies_every_value() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        100.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![1.0, 2.0, 3.0, 4.0], true))
+        .unwrap();
+    let streamed = execution
+        .next_chunk()
+        .unwrap()
+        .expect("a broadcast answers the chunk it read without waiting for the end of the input");
+    assert!(streamed.is_last, "the closing the chunk carried is kept");
+    assert_eq!(
+        sample_values(&streamed),
+        vec![Some(100.0), Some(200.0), Some(300.0), Some(400.0)]
+    );
+    assert!(
+        name_of(&streamed).is_none(),
+        "arithmetic drops the metric name, and the chunk still carries it"
+    );
+
+    let out = run(&mut execution);
+    assert!(
+        out.is_empty(),
+        "the chunk was already handed over, so the end of the input owes nothing"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// The side a constant is on decides which operand the vector's value is.
+///
+/// Division is not commutative, so `x / 100` and `100 / x` answering different values is what says
+/// the operand direction survived the broadcast.
+#[test]
+fn a_broadcast_keeps_the_operand_direction() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let values = || vec![100.0, 200.0, 400.0];
+    let run_one = |root: NativeNode| -> Vec<Option<f64>> {
+        let tree = NativeTree::try_new(root).unwrap();
+        let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+        execution
+            .push_evaluated(evaluated_chunk(&schema, 0, values(), true))
+            .unwrap();
+        let out = run(&mut execution);
+        assert_eq!(out.len(), 1, "one chunk in, one chunk out");
+        sample_values(&out[0])
+    };
+    assert_eq!(
+        run_one(broadcast_right(
+            evaluated_input(Arc::clone(&grid)),
+            100.0,
+            BinaryOp::Div,
+            false,
+        )),
+        vec![Some(1.0), Some(2.0), Some(4.0)],
+        "x / 100 divides the vector's value"
+    );
+    assert_eq!(
+        run_one(broadcast_left(
+            100.0,
+            evaluated_input(Arc::clone(&grid)),
+            BinaryOp::Div,
+            false,
+        )),
+        vec![Some(1.0), Some(0.5), Some(0.25)],
+        "100 / x divides the constant by the vector's value"
+    );
+    assert_eq!(
+        run_one(broadcast_right(
+            evaluated_input(Arc::clone(&grid)),
+            100.0,
+            BinaryOp::Sub,
+            false,
+        )),
+        vec![Some(0.0), Some(100.0), Some(300.0)],
+        "x - 100 subtracts from the vector's value"
+    );
+    assert_eq!(
+        run_one(broadcast_left(
+            100.0,
+            evaluated_input(Arc::clone(&grid)),
+            BinaryOp::Sub,
+            false,
+        )),
+        vec![Some(0.0), Some(-100.0), Some(-300.0)],
+        "100 - x subtracts the vector's value"
+    );
+}
+
+/// A `bool` comparison reports `1`/`0` at every position and drops the metric name.
+#[test]
+fn a_bool_comparison_reports_one_and_zero() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        true,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![1.0, -1.0, 0.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        addressed(&out),
+        vec![(0, vec![Some(1.0), Some(0.0), Some(0.0)])],
+        "`x > bool 0` answers 1 or 0 at every position it read"
+    );
+    assert!(
+        name_of(&out[0]).is_none(),
+        "a bool comparison drops the metric name"
+    );
+}
+
+/// A filtering comparison keeps only the positions that passed, and keeps the label set it read.
+#[test]
+fn a_filtering_comparison_keeps_the_positions_that_passed() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![1.0, -1.0, 0.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(1.0))],
+        "only the position that passed is handed over"
+    );
+    assert_eq!(
+        name_of(&out[0]),
+        Some("requests"),
+        "a filter keeps the label set it read"
+    );
+}
+
+/// `-1 * x` is the negation shape: a constant on the left, multiplying every value.
+#[test]
+fn a_constant_of_minus_one_on_the_left_negates_the_vector() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_left(
+        -1.0,
+        evaluated_input(Arc::clone(&grid)),
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![1.0, -2.0, 5.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        addressed(&out),
+        vec![(0, vec![Some(-1.0), Some(2.0), Some(-5.0)])],
+        "-1 * x negates every value of the vector"
+    );
+}
+
+/// A position the vector held no value at stays missing, and a position it skipped stays skipped.
+///
+/// The chunk that is not last is answered as it arrives: a broadcast transforms a chunk and hands
+/// it up, so `is_last` is the only thing that says where a series ends.
+#[test]
+fn a_broadcast_preserves_missing_values_and_skipped_positions() {
+    let grid = grid(0, 60_000, 6);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        2.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+
+    // Position 0 holds a value and position 1 holds none: the axis covers both, so the difference
+    // is the field's validity rather than the axis's rows.
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            0,
+            vec![Some(3.0), None],
+            false,
+        ))
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("a broadcast answers a chunk that does not close its series");
+    assert!(!first.is_last, "the chunk that did not close is not closed");
+    assert_eq!(
+        decided(&[first]),
+        vec![(0, Some(6.0)), (1, None)],
+        "the positions are unchanged and the missing one stayed missing"
+    );
+
+    // The last chunk sits at position 5: positions 2 to 4 are skipped, not empty values.
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            5,
+            vec![Some(4.0)],
+            true,
+        ))
+        .unwrap();
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the closing chunk is answered as it arrives");
+    assert!(second.is_last);
+    assert_eq!(decided(&[second]), vec![(5, Some(8.0))]);
+    assert!(
+        execution.finish().unwrap().is_empty(),
+        "both chunks were handed over as they arrived, so the end of the input owes nothing"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// An empty non-closing filter result does not end a broadcast before a later chunk passes.
+#[test]
+fn a_filter_empty_nonclosing_chunk_does_not_end_the_broadcast() {
+    let grid = grid(0, 60_000, 5);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![-1.0, -2.0], false))
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a non-closing chunk with no passing positions emits no output but does not end the series"
+    );
+
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 2, vec![3.0, -4.0, 5.0], true))
+        .unwrap();
+    let passing = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the broadcast remains live and hands over a later passing chunk");
+    assert!(
+        passing.is_last,
+        "only the later input chunk closes the series"
+    );
+    assert_eq!(
+        decided(std::slice::from_ref(&passing)),
+        vec![(2, Some(3.0)), (4, Some(5.0))]
+    );
+    assert_eq!(
+        name_of(&passing),
+        Some("requests"),
+        "the filtering comparison preserves the input labels"
+    );
+    assert!(
+        execution.finish().unwrap().is_empty(),
+        "the sole closing chunk was handed over exactly once"
+    );
+}
+
+/// A filter that passes nothing on the chunk that closes a series still closes it.
+/// The chunk it hands over holds no row and carries the label set the operation produces, which is
+/// the only way the consumer downstream learns that the series ended rather than that no input has
+/// arrived yet.
+#[test]
+fn a_filter_that_passes_nothing_still_closes_the_series() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+
+    // A filtering comparison keeps the label set it read, so the closing chunk carries it.
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        false,
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![-1.0, -2.0], false))
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a chunk that passed nothing and closed nothing has nothing to hand over"
+    );
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 2, vec![-3.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        out.len(),
+        1,
+        "the closing chunk is handed over even though it holds no value"
+    );
+    assert!(out[0].is_last, "the empty chunk closes the series");
+    assert_eq!(
+        out[0].series.time.len(),
+        0,
+        "a filter that passed nothing hands over no row"
+    );
+    assert_eq!(
+        name_of(&out[0]),
+        Some("requests"),
+        "a filter keeps the labels it read, so the closing chunk carries them"
+    );
+    assert_eq!(
+        series_start(&out[0]),
+        3,
+        "the empty chunk closes at the end"
+    );
+
+    // A `bool` comparison drops the name, so its empty closing chunk carries the dropped one.
+    let bool_tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        0.0,
+        BinaryOp::Gt,
+        true,
+    ))
+    .unwrap();
+    let mut execution = executor(&bool_tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            0,
+            vec![None; 3],
+            true,
+        ))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        out.len(),
+        1,
+        "the closing chunk of an all-missing input arrives"
+    );
+    assert!(out[0].is_last);
+    assert_eq!(out[0].series.time.len(), 0);
+    assert!(
+        name_of(&out[0]).is_none(),
+        "a bool comparison drops the metric name, and the empty closing chunk carries that"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A broadcast holds the chunk it is working on and nothing more, however long the vector is.
+///
+/// The same series arrives in one chunk and in many: what the node reserves has to be the chunk in
+/// hand and the label sets it handed out, not the vector it read, or a broadcast over a long series
+/// would cost the whole series.
+#[test]
+fn a_broadcast_does_not_retain_the_vector_it_reads() {
+    // The most the node ever reserved, over the same series delivered in `count` chunks.
+    let peak =
+        |count: usize| -> usize {
+            let grid = grid(0, 60_000, count as u64);
+            let schema = evaluated_schema(Arc::clone(&grid));
+            let tree = NativeTree::try_new(broadcast_right(
+                evaluated_input(Arc::clone(&grid)),
+                2.0,
+                BinaryOp::Mul,
+                false,
+            ))
+            .unwrap();
+            let pool = bounded_pool(32 << 10);
+            let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+            let mut peak = 0;
+            for index in 0..count {
+                execution
+                    .push_evaluated(evaluated_chunk(
+                        &schema,
+                        index,
+                        vec![index as f64],
+                        index + 1 == count,
+                    ))
+                    .unwrap_or_else(|error| {
+                        panic!("chunk {index} of {count} did not fit: {error}");
+                    });
+                // The consumer drops every chunk: a reader that streams the vector never holds it, and
+                // neither may the node.
+                drop(execution.next_chunk().unwrap_or_else(|error| {
+                    panic!("chunk {index} of {count} did not fit: {error}")
+                }));
+                let held = execution.state().reserved_bytes();
+                assert_eq!(
+                    held,
+                    pool.reserved(),
+                    "chunk {index} of {count}: the state and the pool disagree on what is held"
+                );
+                assert!(
+                    held <= (8 << 10),
+                    "chunk {index} of {count} holds {held} bytes of one float and one label set"
+                );
+                peak = peak.max(held);
+            }
+            // The series ends, and the node holds nothing afterwards.
+            drop(run(&mut execution));
+            assert_eq!(execution.state().reserved_bytes(), 0);
+            assert_eq!(pool.reserved(), 0);
+            peak
+        };
+    assert_eq!(
+        peak(64),
+        peak(1024),
+        "the reservation grew with the number of chunks the same vector arrived in"
+    );
+}
+
+/// A window above a broadcast that drops the metric name merges what that broadcast collapses.
+///
+/// The multiplication rewrites the label set, so two input series with different names and one set
+/// of tags become one label set under it. A window above therefore has to collect its input and
+/// merge the pieces before it evaluates: reporting each piece on its own answers two series where
+/// Prometheus answers one, and the second piece's positions are exactly the ones the first left
+/// empty. `holds_shared` is what tells the window to collect, so a window that streams here is the
+/// regression this test exists for.
+#[test]
+fn a_window_above_a_broadcast_merges_the_series_it_collapses() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(window_with(
+        broadcast_right(
+            evaluated_input(Arc::clone(&grid)),
+            2.0,
+            BinaryOp::Mul,
+            false,
+        ),
+        RangeFunction::LastOverTime,
+        60_000,
+        Some(Arc::clone(&grid)),
+        Arc::clone(&grid),
+    ))
+    .unwrap();
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, pool(), &set);
+    // Two series that only differ by name, each holding the half of the grid the other leaves empty.
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("requests", "x"),
+            0,
+            vec![Some(1.0), Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("requests_total", "x"),
+            2,
+            vec![Some(3.0), Some(4.0)],
+            true,
+        ))
+        .unwrap();
+
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![
+            (0, Some(2.0)),
+            (1, Some(4.0)),
+            (2, Some(6.0)),
+            (3, Some(8.0))
+        ],
+        "the window did not merge the two pieces the broadcast collapsed onto one label set"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the merged series closed more or less than once"
+    );
+    // The node counts the source series it collected, not the merged one: two fragments arrived
+    // with `is_last`, so two source series ended. What proves the merge happened is the single
+    // closing chunk above -- a window that streamed would have closed each piece on its own.
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::COMPLETED_SERIES),
+        2,
+        "the window did not see both source series end"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// A broadcast hands one chunk over for every chunk it reads, and closes the series once.
+///
+/// The metrics are what says the chunk-per-chunk behaviour held: one input batch per chunk read, one
+/// output batch per chunk handed over, and one closed series for the series that ended.
+#[test]
+fn a_broadcast_reports_one_chunk_in_for_each_chunk_out() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        2.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, pool(), &set);
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 0, vec![1.0, 2.0], false))
+        .unwrap();
+    execution
+        .push_evaluated(evaluated_chunk(&schema, 2, vec![3.0, 4.0], true))
+        .unwrap();
+    let out = run(&mut execution);
+    assert_eq!(
+        addressed(&out),
+        vec![
+            (0, vec![Some(2.0), Some(4.0)]),
+            (2, vec![Some(6.0), Some(8.0)])
+        ],
+        "each chunk is answered as it arrived, at the positions it held"
+    );
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::INPUT_BATCHES),
+        2,
+        "the node read two chunks"
+    );
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::OUTPUT_BATCHES),
+        2,
+        "the node handed two chunks over"
+    );
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::COMPLETED_SERIES),
+        1,
+        "the series closed once, on the chunk that said so"
+    );
+    // The scalar side is a node of the tree and reads nothing: it has no input at all.
+    assert_eq!(
+        count(&set, &NodePath::root().right(), NodeMetric::INPUT_BATCHES),
+        0,
+        "the constant was pulled as a stream"
+    );
+}
+
+/// A broadcast forwards the settled pieces of a streaming window and its eventual close.
+#[test]
+fn a_broadcast_over_a_streaming_window_hands_over_the_points_it_settles() {
+    let inner_grid = grid(0, 60_000, 5);
+    let outer_grid = grid(0, 120_000, 3);
+    let inner_schema = evaluated_schema(Arc::clone(&inner_grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        window_with(
+            evaluated_input(Arc::clone(&inner_grid)),
+            RangeFunction::LastOverTime,
+            240_000,
+            Some(Arc::clone(&inner_grid)),
+            outer_grid,
+        ),
+        100.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let set = ExecutionPlanMetricsSet::new();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &set);
+    execution
+        .push_evaluated(evaluated_chunk(
+            &inner_schema,
+            0,
+            vec![1.0, 2.0, 3.0],
+            false,
+        ))
+        .unwrap();
+
+    let mut out = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    assert_eq!(decided(&out), vec![(0, Some(100.0)), (1, Some(300.0))]);
+    assert!(out.iter().all(|chunk| !chunk.is_last));
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::COMPLETED_SERIES),
+        0
+    );
+
+    execution
+        .push_evaluated(evaluated_chunk(&inner_schema, 3, vec![4.0, 5.0], true))
+        .unwrap();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    out.extend(execution.finish().unwrap());
+    assert_eq!(
+        decided(&out),
+        vec![(0, Some(100.0)), (1, Some(300.0)), (2, Some(500.0))]
+    );
+    assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+    assert!(out.last().unwrap().is_last);
+    assert!(out.iter().all(|chunk| name_of(chunk).is_none()));
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A broadcast waits for a collecting window to flush before answering its series.
+#[test]
+fn a_broadcast_above_a_collecting_window_waits_for_its_flush() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        window_with(
+            map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+            RangeFunction::LastOverTime,
+            60_000,
+            Some(Arc::clone(&grid)),
+            Arc::clone(&grid),
+        ),
+        10.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated_at(
+            &NodePath::root().left().input().input(),
+            evaluated_chunk_of(&schema, metric(), 0, vec![Some(-1.0)], true),
+        )
+        .unwrap();
+
+    assert!(execution.next_chunk().unwrap().is_none());
+    let out = run(&mut execution);
+    assert_eq!(decided(&out), vec![(0, Some(10.0))]);
+    assert_eq!(out.iter().filter(|chunk| chunk.is_last).count(), 1);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A broadcast rejects distinct input names that become one output label set at occupied points.
+#[test]
+fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reservation() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(broadcast_right(
+        evaluated_input(Arc::clone(&grid)),
+        100.0,
+        BinaryOp::Mul,
+        false,
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let first_metric =
+        MetricName::try_new(Some("requests".to_string().into()), Vec::new()).unwrap();
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            first_metric,
+            0,
+            vec![Some(1.0), Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("first series output");
+    assert_eq!(
+        decided(std::slice::from_ref(&first)),
+        vec![(0, Some(100.0)), (1, Some(200.0))]
+    );
+
+    let second_metric =
+        MetricName::try_new(Some("requests_total".to_string().into()), Vec::new()).unwrap();
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            second_metric,
+            0,
+            vec![Some(3.0), Some(4.0)],
+            true,
+        ))
+        .unwrap();
+    let error = execution
+        .next_chunk()
+        .expect_err("the output label set and occupied positions conflict");
+    let message = error.to_string();
+    assert!(
+        message.contains("that both hold a value of field"),
+        "expected the collision the node produces, got: {message:?}"
+    );
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "error retained a pool reservation: {message}"
+    );
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        0,
+        "error retained execution bytes: {message}"
+    );
 }
 
 fn vector_op(inner: NativeNode, op: BoundVectorOp) -> NativeNode {

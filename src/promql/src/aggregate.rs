@@ -16,8 +16,13 @@
 //! is keyed by absolute grid index, never by local row number; sparse state and trimmed output
 //! do not expand the full grid.
 
+mod state;
 #[cfg(test)]
 mod tests;
+
+pub use state::{
+    AccumulatorState, FloatMerger, PartialAggregate, PartialGroup, StateField, merge_count_values,
+};
 
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
@@ -28,12 +33,14 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 
+use crate::go_format::format_float_f;
 use crate::grid_series::{GridSeriesBuilder, external};
-use crate::map::{drop_empty_labels, validate_float_series, validate_scalar};
+use crate::histogram_eval::histogram_string;
+use crate::map::{drop_empty_labels, validate_float_series, validate_grid_series, validate_scalar};
 use crate::range_eval::quantile;
 
 /// Float aggregations without a parameter.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregateOp {
     Sum,
     Count,
@@ -139,28 +146,37 @@ impl FloatAggregator {
 
     /// The result of every group, in the order the groups first appeared.
     pub fn finish(self) -> Result<Vec<Series>> {
-        let width = self.schema.fields.len();
-        let mut builder = GridSeriesBuilder::try_new(self.schema)?;
-        let mut output = Vec::with_capacity(self.groups.len());
-        let mut row = Vec::with_capacity(width);
-        for group in self.groups {
-            // One builder serves every group, so each result series starts explicitly.
-            builder.begin_series();
-            for (&block, states) in &group.blocks {
-                // The last block can extend past the grid; only points with a sample are pushed.
-                for (offset, point) in states.chunks_exact(width).enumerate() {
-                    if !point.iter().any(|state| state.seen) {
-                        continue;
-                    }
-                    row.clear();
-                    row.extend(point.iter().map(|state| state.finish(self.op)));
-                    builder.push(block * BLOCK_POINTS + offset, &row)?;
-                }
-            }
-            output.extend(builder.finish(group.metric)?);
-        }
-        Ok(output)
+        finish_groups(self.schema, self.op, self.groups)
     }
+}
+
+/// Turns the state of `groups` into result series, in group order.
+fn finish_groups(
+    schema: Arc<SeriesSchema>,
+    op: AggregateOp,
+    groups: Vec<Group>,
+) -> Result<Vec<Series>> {
+    let width = schema.fields.len();
+    let mut builder = GridSeriesBuilder::try_new(schema)?;
+    let mut output = Vec::with_capacity(groups.len());
+    let mut row = Vec::with_capacity(width);
+    for group in groups {
+        // One builder serves every group, so each result series starts explicitly.
+        builder.begin_series();
+        for (&block, states) in &group.blocks {
+            // The last block can extend past the grid; only points with a sample are pushed.
+            for (offset, point) in states.chunks_exact(width).enumerate() {
+                if !point.iter().any(|state| state.seen) {
+                    continue;
+                }
+                row.clear();
+                row.extend(point.iter().map(|state| state.finish(op)));
+                builder.push(block * BLOCK_POINTS + offset, &row)?;
+            }
+        }
+        output.extend(builder.finish(group.metric)?);
+    }
+    Ok(output)
 }
 
 /// `quantile(q, v)`, with `q` read at each grid point from an unlabelled single-field scalar on
@@ -262,7 +278,8 @@ pub fn aggregate_quantile(
 
 /// `count_values(label, v)`: at each grid point, the number of samples in each group of series
 /// that share a value, with the value written to `label` in Prometheus' `FormatFloat(v, 'f', -1)`
-/// form. With `by`, `label` is part of the grouping; with `without`, it is dropped if listed.
+/// form, or for a native histogram as its `FloatHistogram.String`. With `by`, `label` is part of
+/// the grouping; with `without`, it is dropped if listed.
 pub fn count_values(
     schema: &Arc<SeriesSchema>,
     input: &[Series],
@@ -283,7 +300,11 @@ pub fn count_values(
         }
         without => without,
     };
-    validate_input(schema, input, checked)?;
+    // Unlike the other aggregations, this one reads histogram samples too.
+    validate_grouping(schema, checked)?;
+    for series in input {
+        validate_grid_series(schema, series)?;
+    }
     if label.is_empty() {
         return Err(DataFusionError::Execution(format!(
             "invalid label name {label:?}"
@@ -301,23 +322,29 @@ pub fn count_values(
     let mut group_index = HashMap::new();
     // Counts are kept per point that has one, not in blocks: a gauge with distinct values makes
     // about one group per sample.
-    let mut groups: Vec<(MetricName, BTreeMap<usize, Vec<f64>>)> = Vec::new();
+    let mut groups: Counts = Vec::new();
     for series in input {
         // Equal bits format to the same label value, so each distinct value of a series
-        // resolves its group once.
-        let mut group_of_value: HashMap<u64, usize> = HashMap::new();
+        // resolves its group once. A histogram is keyed by the text it is written as.
+        let mut group_of_value: HashMap<Value, usize> = HashMap::new();
         for (field_index, field) in series.fields.iter().enumerate() {
             for ((point, _), sample) in series.time.positions().zip(field.iter()) {
-                let SampleRef::Float(value) = sample else {
-                    continue;
+                let key = match sample {
+                    SampleRef::Missing => continue,
+                    SampleRef::Float(value) => Value::Float(value.to_bits()),
+                    SampleRef::Histogram(h) => Value::Histogram(histogram_string(&h)?),
                 };
-                let group = match group_of_value.entry(value.to_bits()) {
+                let group = match group_of_value.entry(key) {
                     Entry::Occupied(entry) => *entry.get(),
                     Entry::Vacant(entry) => {
+                        // Prometheus writes a float in Go's `'f'` form and a histogram as
+                        // `FloatHistogram.String` does.
+                        let text = match entry.key() {
+                            Value::Float(bits) => format_float_f(f64::from_bits(*bits)),
+                            Value::Histogram(text) => text.clone(),
+                        };
                         let mut metric = series.metric.clone();
-                        metric
-                            .set(label, Arc::from(format_value(value)))
-                            .map_err(external)?;
+                        metric.set(label, Arc::from(text)).map_err(external)?;
                         let metric = grouping.apply(&metric)?;
                         let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
                             groups.push((metric, BTreeMap::new()));
@@ -333,9 +360,16 @@ pub fn count_values(
             }
         }
     }
+    count_series(schema, groups)
+}
+
+/// Counts per point and field: one series per label set, a count of 0 being no sample.
+type Counts = Vec<(MetricName, BTreeMap<usize, Vec<f64>>)>;
+
+fn count_series(schema: &Arc<SeriesSchema>, groups: Counts) -> Result<Vec<Series>> {
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut output = Vec::with_capacity(groups.len());
-    let mut row = Vec::with_capacity(width);
+    let mut row = Vec::with_capacity(schema.fields.len());
     for (metric, counts) in groups {
         builder.begin_series();
         for (point, counts) in counts {
@@ -348,69 +382,29 @@ pub fn count_values(
     Ok(output)
 }
 
-/// Go's `strconv.FormatFloat(value, 'f', -1, 64)`: the fewest significant digits that round-trip,
-/// in positional notation. When two candidates of that length are equally close, Go takes the
-/// even one while Rust's shortest formatting rounds up, so the digits are recomputed with Rust's
-/// exact formatting, which rounds half to even. The recomputed digits only count when they still
-/// parse back to `value`: just above a power of two the lower neighbour is half as far away, so
-/// the even candidate can name that neighbour, and only the other one round-trips.
-fn format_value(value: f64) -> String {
-    match value {
-        f64::INFINITY => return "+Inf".to_string(),
-        f64::NEG_INFINITY => return "-Inf".to_string(),
-        _ if value.is_nan() => return "NaN".to_string(),
-        _ => {}
-    }
-    let shortest = format!("{value:e}");
-    let mantissa = shortest.split_once('e').expect("exponent format").0;
-    let significant = mantissa.chars().filter(char::is_ascii_digit).count();
-    let exact = format!("{value:.precision$e}", precision = significant - 1);
-    let digits = if exact.parse::<f64>() == Ok(value) {
-        &exact
-    } else {
-        &shortest
-    };
-    let (mantissa, exponent) = digits.split_once('e').expect("exponent format");
-    let exponent: i64 = exponent.parse().expect("integer exponent");
-    let (sign, mantissa) = match mantissa.strip_prefix('-') {
-        Some(unsigned) => ("-", unsigned),
-        None => ("", mantissa),
-    };
-    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    // The decimal point goes after `exponent + 1` digits.
-    let point = exponent + 1;
-    let mut out = String::from(sign);
-    if point <= 0 {
-        out.push_str("0.");
-        out.extend(std::iter::repeat_n('0', (-point) as usize));
-        out.push_str(digits.trim_end_matches('0'));
-    } else if point as usize >= digits.len() {
-        out.push_str(&digits);
-        out.extend(std::iter::repeat_n('0', point as usize - digits.len()));
-    } else {
-        let (whole, fraction) = digits.split_at(point as usize);
-        out.push_str(whole);
-        let fraction = fraction.trim_end_matches('0');
-        if !fraction.is_empty() {
-            out.push('.');
-            out.push_str(fraction);
-        }
-    }
-    out
+/// The value of a `count_values` sample, as it is grouped.
+#[derive(PartialEq, Eq, Hash)]
+enum Value {
+    Float(u64),
+    Histogram(String),
 }
 
 /// Schema validation is repeated because Series exposes its fields publicly.
 fn validate_input(schema: &SeriesSchema, input: &[Series], grouping: Grouping<'_>) -> Result<()> {
+    validate_grouping(schema, grouping)?;
+    for series in input {
+        validate_float_series(schema, series)?;
+    }
+    Ok(())
+}
+
+fn validate_grouping(schema: &SeriesSchema, grouping: Grouping<'_>) -> Result<()> {
     if schema.eval_grid.is_none() {
         return Err(DataFusionError::Execution(
             "Aggregate requires an evaluated grid".into(),
         ));
     }
-    grouping.validate(schema)?;
-    for series in input {
-        validate_float_series(schema, series)?;
-    }
-    Ok(())
+    grouping.validate(schema)
 }
 
 impl Grouping<'_> {
@@ -530,7 +524,6 @@ impl FloatState {
             *self = Self {
                 seen: true,
                 value: match op {
-                    AggregateOp::Group => 1.0,
                     // The running sum of squared deviations; Prometheus starts it at NaN for a
                     // non-finite first sample.
                     AggregateOp::Stddev | AggregateOp::Stdvar if !sample.is_finite() => f64::NAN,
@@ -597,7 +590,8 @@ impl FloatState {
             AggregateOp::Avg if self.incremental_mean => self.mean + self.compensation,
             AggregateOp::Avg => self.value / self.count + self.compensation / self.count,
             AggregateOp::Count => self.count,
-            AggregateOp::Min | AggregateOp::Max | AggregateOp::Group => self.value,
+            AggregateOp::Min | AggregateOp::Max => self.value,
+            AggregateOp::Group => 1.0,
             AggregateOp::Stdvar => self.value / self.count,
             AggregateOp::Stddev => (self.value / self.count).sqrt(),
         })
