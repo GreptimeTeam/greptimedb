@@ -1262,7 +1262,6 @@ mod tests {
         std::fs::read_dir(dir).unwrap().next().is_none()
     }
 
-    /// Returns true if the store rejects even an empty append, which it does only once stopped.
     /// Opens the raft-engine WAL under `data_home` again, which only succeeds once the previous
     /// engine was released (raft-engine holds a lock on its directory while open).
     async fn assert_raft_engine_wal_reopens(data_home: &str) {
@@ -1273,6 +1272,7 @@ mod tests {
         reopened.stop().await.unwrap();
     }
 
+    /// Returns true if the store rejects even an empty append, which it does only once stopped.
     async fn is_stopped(log_store: &ObjectStoreLogStore) -> bool {
         matches!(
             log_store.append_batch(vec![]).await,
@@ -1632,6 +1632,34 @@ mod tests {
         assert_matches!(err, Error::StopRegionEngine { .. });
         assert_eq!(2, stop_calls.load(Ordering::Relaxed));
         assert!(is_stopped(&log_store).await);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_closes_raft_engine_wal_of_written_region() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("raft-engine-wal-written-region");
+        let mut datanode = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::RaftEngine(RaftEngineConfig::default()),
+            Arc::new(MemoryKvBackend::new()),
+        )
+        .build()
+        .await
+        .unwrap();
+        let region_server = datanode.region_server();
+        let request = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&request);
+        region_server
+            .handle_request(REGION, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        put_rows(&region_server, &schema, 0..3, false).await;
+
+        datanode.shutdown().await.unwrap();
+
+        // The open region and its writes must not keep the WAL referenced: if the datanode does
+        // not hold the last reference, it only stops the WAL and the reopen below fails.
+        assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
     }
 
     #[tokio::test]

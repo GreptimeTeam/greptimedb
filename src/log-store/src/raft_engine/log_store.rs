@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, hash_map};
 use std::fmt::{Debug, Formatter};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -360,6 +361,12 @@ impl LogStore for RaftEngineLogStore {
         let max_batch_size = self.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let cancel = self.readers_cancel.clone();
+        // Set when the read is cancelled before the last entry, so the stream ends with an error
+        // instead of an end of stream that would look like the whole WAL was read. A flag rather
+        // than an error sent on the channel: the reader is usually cancelled while blocked on a
+        // full channel, where there is no room for one.
+        let truncated = Arc::new(AtomicBool::new(false));
+        let reader_truncated = truncated.clone();
         let _handle = common_runtime::spawn_global(self.readers.track_future(async move {
             while start_index <= last_index {
                 let mut vec = Vec::with_capacity(max_batch_size);
@@ -383,7 +390,11 @@ impl LogStore for RaftEngineLogStore {
                         }
                         // Stop on shutdown, or when the reader side is closed.
                         let sent = tokio::select! {
-                            _ = cancel.cancelled() => false,
+                            biased;
+                            _ = cancel.cancelled() => {
+                                reader_truncated.store(true, Ordering::Release);
+                                false
+                            }
                             sent = tx.send(Ok(vec)) => sent.is_ok(),
                         };
                         if !sent {
@@ -392,7 +403,8 @@ impl LogStore for RaftEngineLogStore {
                     }
                     Err(e) => {
                         tokio::select! {
-                            _ = cancel.cancelled() => {}
+                            biased;
+                            _ = cancel.cancelled() => reader_truncated.store(true, Ordering::Release),
                             _ = tx.send(Err(e)) => {}
                         }
                         break;
@@ -406,6 +418,10 @@ impl LogStore for RaftEngineLogStore {
                 let res = res?;
 
                 yield Ok(res.into_iter().map(Entry::from).collect::<Vec<_>>());
+            }
+            // The channel closes once the reader task ends, after it set the flag.
+            if truncated.load(Ordering::Acquire) {
+                yield IllegalStateSnafu.fail();
             }
         });
         Ok(Box::pin(s))
@@ -750,8 +766,16 @@ mod tests {
         )
         .await;
         assert_eq!(4, entries.len());
-        drop(stream);
         reopened.close().await.unwrap();
+
+        // The cancelled read ends with an error, not with an end of stream that would pass for a
+        // complete read of the WAL.
+        let batches = stream.collect::<Vec<_>>().await;
+        assert!(batches.len() < 4);
+        assert!(matches!(
+            batches.last(),
+            Some(Err(Error::IllegalState { .. }))
+        ));
     }
 
     #[tokio::test]
