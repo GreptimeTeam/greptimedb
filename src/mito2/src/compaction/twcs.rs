@@ -38,6 +38,7 @@ use crate::compaction::run::{
 };
 use crate::compaction::twcs::units::{ClosedMergeOptions, PickLimits};
 use crate::error::{JoinSnafu, Result};
+use crate::region::options::MergeMode;
 use crate::sst::file::{FileHandle, Level, overlaps};
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 use crate::sst::version::LevelMeta;
@@ -120,6 +121,9 @@ pub struct TwcsPicker {
     pub max_output_file_size: Option<u64>,
     /// Whether the target region is in append mode.
     pub append_mode: bool,
+    /// LastNonNull picks expand to an overlap closure, so cannot use partial
+    /// small-file reductions that must leave large peers untouched.
+    pub(crate) merge_mode: MergeMode,
     /// Max background compaction tasks.
     pub max_background_tasks: Option<usize>,
     /// Optional time range that constrains candidate compaction windows.
@@ -294,7 +298,24 @@ impl TwcsPicker {
         } else {
             let settling = !self.all_windows_inactive
                 && is_settling_window(window.time_window, active_window, time_window_size);
+            let num_l1_files = l1_files.len();
             self.pick_inactive_window(l0_files, l1_files, mapper, settling, quiet)
+                .or_else(|| {
+                    if self.merge_mode == MergeMode::LastNonNull
+                        || num_l1_files < self.inactive_window_l1_merge_trigger
+                    {
+                        return None;
+                    }
+                    // Include even append-mode files excluded from normal picks:
+                    // a small-file merge must not add conflicts with large peers.
+                    let pick = units::pick_small_l1(&window.files, mapper, self.pick_limits())?;
+                    Some(WindowPick {
+                        class: PickClass::FileReduction,
+                        branch: "inactive:pick_small_l1",
+                        inputs: pick.inputs,
+                        found_runs: pick.units,
+                    })
+                })
         }
     }
 
@@ -1406,6 +1427,7 @@ mod tests {
                 time_window_seconds: Some(3),
                 max_output_file_size,
                 append_mode: false,
+                merge_mode: MergeMode::LastRow,
                 max_background_tasks: None,
                 time_range: None,
                 all_windows_inactive: false,
@@ -1430,6 +1452,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -1487,6 +1510,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -1550,6 +1574,7 @@ mod tests {
             time_window_seconds: Some(3600),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2119,6 +2144,7 @@ mod tests {
                 time_window_seconds: None,
                 max_output_file_size: None,
                 append_mode: false,
+                merge_mode: MergeMode::LastRow,
                 max_background_tasks: None,
                 time_range: None,
                 all_windows_inactive: false,
@@ -2271,6 +2297,7 @@ mod tests {
             time_window_seconds: None,
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2343,6 +2370,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2392,6 +2420,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: Some(1000),
             append_mode: true,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2427,6 +2456,7 @@ mod tests {
             time_window_seconds: Some(1),
             max_output_file_size: Some(1_000),
             append_mode: true,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2473,6 +2503,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
@@ -2501,6 +2532,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2549,6 +2581,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
@@ -2602,6 +2635,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2650,6 +2684,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2700,6 +2735,7 @@ mod tests {
             time_window_seconds: Some(3600),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2750,6 +2786,7 @@ mod tests {
             time_window_seconds: Some(3600),
             max_output_file_size: Some(1024 * 1024 * 1024),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2785,6 +2822,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: Some(1),
             time_range: None,
             all_windows_inactive: false,
@@ -2883,6 +2921,7 @@ mod tests {
             time_window_seconds: Some(3),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: Some(1),
             time_range: TimestampRange::new(
                 Timestamp::new_millisecond(7_200),
@@ -2922,6 +2961,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2951,6 +2991,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: Some(1_000),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -2981,6 +3022,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3011,6 +3053,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3040,6 +3083,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3084,6 +3128,7 @@ mod tests {
             time_window_seconds: Some(1000),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3267,6 +3312,7 @@ mod tests {
             time_window_seconds: Some(1),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3319,6 +3365,7 @@ mod tests {
             time_window_seconds: Some(1),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3357,6 +3404,7 @@ mod tests {
             time_window_seconds: Some(1),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3408,6 +3456,7 @@ mod tests {
             time_window_seconds: Some(1),
             max_output_file_size: Some(512),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3456,6 +3505,7 @@ mod tests {
             time_window_seconds: Some(1),
             max_output_file_size: Some(100),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
@@ -3556,6 +3606,95 @@ mod tests {
                 output.len(),
                 "active: {active_window}, manual: {all_windows_inactive}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inactive_windows_merge_small_l1_without_large_peer() {
+        let large =
+            new_file_handle_with_size_and_sequence(FileId::random(), 3_000, 3_999, 1, 1, 1_000);
+        let small = priority_test_files(3, 1, 20, true);
+        let files = [vec![large.clone()], small.to_vec()].concat();
+        // The immediate predecessor is settling; the older window is not quiet.
+        for (active_window, merge_mode, trigger, expected) in [
+            (4, MergeMode::LastRow, 2, 1),
+            (5, MergeMode::LastRow, 2, 1),
+            (4, MergeMode::LastNonNull, 2, 0),
+            (5, MergeMode::LastNonNull, 2, 0),
+            (4, MergeMode::LastRow, 4, 0),
+        ] {
+            let picker = TwcsPicker {
+                merge_mode,
+                inactive_window_l1_merge_trigger: trigger,
+                ..priority_test_picker(1)
+            };
+            let output = picker
+                .build_output_with_time_range(
+                    RegionId::from_u64(1),
+                    assign_to_windows(files.iter(), 1),
+                    Some(active_window),
+                    Some(1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                expected,
+                output.len(),
+                "active: {active_window}, mode: {merge_mode:?}, trigger: {trigger}"
+            );
+            if expected == 0 {
+                continue;
+            }
+            let inputs: HashSet<_> = output[0].inputs.iter().map(FileHandle::file_id).collect();
+            assert_eq!(
+                small
+                    .iter()
+                    .map(FileHandle::file_id)
+                    .collect::<HashSet<_>>(),
+                inputs
+            );
+            assert!(
+                !output[0].filter_deleted,
+                "the unselected large file still overlaps"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_small_l1_fallback_checks_large_append_mode_peer() {
+        // Two conflicting small files form a non-rectangular area. Their union
+        // would introduce a conflict with the large file in the empty corner.
+        let files = [
+            (0, 20, b"a", b"m", 20),
+            (10, 30, b"l", b"z", 20),
+            (0, 5, b"y", b"z", 1_000),
+        ]
+        .map(|(start, end, min, max, size)| {
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                start,
+                end,
+                1,
+                1,
+                size,
+                pk_range(min, max),
+            )
+        });
+        for append_mode in [false, true] {
+            let picker = TwcsPicker {
+                append_mode,
+                ..priority_test_picker(1)
+            };
+            let output = picker
+                .build_output_with_time_range(
+                    RegionId::from_u64(1),
+                    assign_to_windows(files.iter(), 1),
+                    Some(1),
+                    Some(1),
+                )
+                .await
+                .unwrap();
+            assert!(output.is_empty(), "append mode: {append_mode}");
         }
     }
 
@@ -3684,6 +3823,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: Some(2_000),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3716,6 +3856,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: Some(100_000),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3748,6 +3889,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: Some(100_000),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3780,6 +3922,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: Some(1_000_000),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
@@ -3920,6 +4063,7 @@ mod tests {
             time_window_seconds: Some(60),
             max_output_file_size: Some(512 * 1024 * 1024),
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: Some(1),
             time_range: None,
             all_windows_inactive: false,
@@ -4171,6 +4315,7 @@ mod tests {
                 time_window_seconds: Some(60),
                 max_output_file_size: Some(max_output_size),
                 append_mode: false,
+                merge_mode: MergeMode::LastRow,
                 max_background_tasks: Some(1),
                 time_range: None,
                 all_windows_inactive: false,
@@ -4265,6 +4410,7 @@ mod tests {
                 time_window_seconds: Some(60),
                 max_output_file_size: Some(file_size),
                 append_mode: false,
+                merge_mode: MergeMode::LastRow,
                 max_background_tasks: Some(1),
                 time_range: None,
                 all_windows_inactive: manual,
@@ -4410,6 +4556,7 @@ mod tests {
             time_window_seconds: Some(100),
             max_output_file_size: None,
             append_mode: false,
+            merge_mode: MergeMode::LastRow,
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,

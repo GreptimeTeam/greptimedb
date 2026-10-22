@@ -19,6 +19,7 @@
 //! together.
 //!
 //! - [`pick_active_l1`] reduces the L1 file count of the active window.
+//! - [`pick_small_l1`] reduces small L1 files without rewriting large peers.
 //! - [`pick_closed_merge`] only merges intervals of an inactive window whose
 //!   outputs cannot add conflicts. Compaction outputs stay inside the bounding
 //!   box of the inputs, so they can only overlap files intruding on that box.
@@ -68,6 +69,9 @@ use crate::sst::primary_key::PrimaryKeyRangeMapper;
 /// An L1 file reduction may rewrite at most this many output files' worth of
 /// bytes per SST it removes.
 const MAX_REWRITE_FILES_PER_REDUCED_FILE: u64 = 4;
+
+/// A small L1 file occupies at most one quarter of the output size budget.
+const SMALL_L1_SIZE_FACTOR: u64 = 4;
 
 /// Maximum number of index nodes visited while building conflict structures for
 /// a pick. Above this, the picker falls back to a bounded file reduction instead
@@ -217,6 +221,39 @@ fn pick_reducing_interval_where(
     });
 
     best.map(|(_, _, range)| range)
+}
+
+/// Reduces small L1 files left behind by a closed merge, including in settling
+/// windows. The input bytes fit in one output and no input dominates its peers,
+/// so each merge removes files without repeatedly rewriting an accumulator.
+///
+/// Large and L0 files remain in the external conflict index. Check only the
+/// best reducing interval to bound planning work; rejecting it can miss other
+/// admissible intervals, but cannot increase the window's conflict count.
+pub(crate) fn pick_small_l1(
+    files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    limits: PickLimits,
+) -> Option<UnitPick> {
+    let max_output = limits.max_output_file_size.filter(|size| *size > 0)?;
+    let extents = extents_of(files, mapper);
+    let mut units = single_file_units(files, &extents);
+    units.retain(|unit| {
+        let file = &files[unit.files[0]];
+        file.level() == 1 && file.size() <= max_output / SMALL_L1_SIZE_FACTOR
+    });
+    sort_units(&mut units);
+    let range = pick_reducing_interval_where(&units, limits, |stats| stats.size <= max_output)?;
+    let index = ExtentIndex::new(&extents);
+    if !adds_no_conflicts(&units[range.clone()], &extents, &index, 1) {
+        return None;
+    }
+    Some(UnitPick {
+        inputs: collect_inputs(&units[range], files),
+        reduces_files: true,
+        units: units.len(),
+        dense_fallback: false,
+    })
 }
 
 /// Thresholds of the closed merge pick.
@@ -1214,6 +1251,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_small_l1_reduction_limits() {
+        let mapper = primary_key_mapper_for_test();
+        // Empty/single inputs, the small-file boundary, balance, byte and count
+        // caps, and an unlimited output size all affect eligibility.
+        for (sizes, max_output, max_inputs, expected) in [
+            (vec![], Some(16), 16, 0),
+            (vec![4], Some(16), 16, 0),
+            (vec![4, 4], Some(16), 16, 2),
+            (vec![5, 5], Some(16), 16, 0),
+            (vec![4, 1], Some(16), 16, 0),
+            (vec![4, 2, 2], Some(16), 16, 3),
+            (vec![4; 8], Some(16), 16, 4),
+            (vec![4; 8], Some(16), 3, 3),
+            (vec![4, 4], Some(16), 1, 0),
+            (vec![4, 4], Some(0), 16, 0),
+            (vec![4, 4], None, 16, 0),
+        ] {
+            let files = sizes
+                .iter()
+                .map(|&size| file(0, 100, b"a", b"z", size))
+                .collect::<Vec<_>>();
+            let pick = pick_small_l1(
+                &files,
+                &mapper,
+                PickLimits {
+                    max_output_file_size: max_output,
+                    max_input_files: max_inputs,
+                },
+            );
+            assert_eq!(
+                expected,
+                pick.map_or(0, |pick| pick.inputs.len()),
+                "sizes={sizes:?}, target={max_output:?}, cap={max_inputs}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_small_l1_checks_unselected_large_and_l0_files() {
+        let mapper = primary_key_mapper_for_test();
+        let small = [file(0, 10, b"a", b"b", 4), file(90, 100, b"y", b"z", 4)];
+        for level in [0, 1] {
+            for (min, max, expected) in [(b"m", b"n", false), (b"a", b"z", true)] {
+                let peer = new_file_handle_with_size_sequence_and_primary_key_range(
+                    FileId::random(),
+                    0,
+                    100,
+                    level,
+                    1,
+                    100,
+                    pk_range(min, max),
+                );
+                let files = [small.to_vec(), vec![peer]].concat();
+                let pick = pick_small_l1(&files, &mapper, limits(16));
+                assert_eq!(
+                    expected,
+                    pick.is_some(),
+                    "level={level}, range={min:?}..{max:?}"
+                );
+                if let Some(pick) = pick {
+                    assert_eq!(ids(&small), ids(&pick.inputs));
+                }
+            }
+        }
+        // A small L0 must not be selected as the second member of an L1 merge.
+        let l0 = new_file_handle_with_size_sequence_and_primary_key_range(
+            FileId::random(),
+            90,
+            100,
+            0,
+            1,
+            4,
+            pk_range(b"y", b"z"),
+        );
+        assert!(pick_small_l1(&[small[0].clone(), l0], &mapper, limits(16)).is_none());
+    }
+
     fn ids(files: &[FileHandle]) -> HashSet<FileId> {
         files.iter().map(|file| file.file_id().file_id()).collect()
     }
@@ -1923,6 +2038,25 @@ mod tests {
             );
             assert_eq!(more_merges, steps > base, "seed {seed}: {steps} vs {base}");
         }
+    }
+
+    #[test]
+    fn test_small_l1_merges_terminate() {
+        let mapper = primary_key_mapper_for_test();
+        let steps = run_windows_to_fixpoint(
+            &mut Rng(31),
+            |rng| {
+                let mut files = random_window(rng);
+                // Include a reducible cluster inside a large peer as well as
+                // random external intruders to exercise the conflict guard.
+                files.push(sim_file(0, 3000, 0, 400, 64));
+                files.extend((0..8).map(|_| sim_file(0, 100, 0, 8, 1 + rng.next(4))));
+                files
+            },
+            |files| pick_small_l1(files, &mapper, limits(MAX_OUTPUT)),
+            |files| (conflict_pairs(files), files.len()),
+        );
+        assert!(steps >= 300);
     }
 
     #[test]

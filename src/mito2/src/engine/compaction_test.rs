@@ -582,6 +582,169 @@ async fn assert_partial_compaction_preserves_delete_order(flat_format: bool) {
     );
 }
 
+/// Exercise the small-L1 fallback with real SST sizes, preserved tombstones,
+/// and both layouts. No fabricated file metadata or hand-picked merge inputs.
+#[rstest::rstest]
+#[tokio::test]
+async fn test_inactive_small_l1_compaction_preserves_large_peer(
+    #[values(false, true)] flat_format: bool,
+    #[values(3600, 7200)] active_ts: usize,
+) {
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, columns) = env_for_manual_compaction(&mut env, region_id, flat_format).await;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(41);
+    let mut old_rows = build_rows_for_key("m", 10, 16, 0);
+    for _ in 0..30_000 {
+        old_rows.extend(build_rows_for_key(
+            &format!("a{:032x}", rand::Rng::random::<u128>(&mut rng)),
+            1,
+            2,
+            0,
+        ));
+    }
+    for _ in 0..2 {
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: columns.clone(),
+                rows: old_rows.clone(),
+            },
+        )
+        .await;
+        flush(&engine, region_id).await;
+    }
+    compact(&engine, region_id).await;
+    let region = engine.get_region(region_id).unwrap();
+    let table_dir = region.table_dir().to_string();
+    let large = region.version().ssts.levels()[1]
+        .files()
+        .next()
+        .unwrap()
+        .clone();
+    const OUTPUT_SIZE: u64 = 64 * 1024;
+    assert!(large.size() > 8 * OUTPUT_SIZE);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: SetRegionOptions {
+                    options: vec![
+                        SetRegionOption::Twsc(
+                            "compaction.twcs.max_output_file_size".into(),
+                            "64KiB".into(),
+                        ),
+                        SetRegionOption::Twsc(
+                            "compaction.twcs.inactive_window.l1_merge_trigger".into(),
+                            "2".into(),
+                        ),
+                    ],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Each pair of L0 files becomes one small L1. The first contains a Delete
+    // masking the large SST; later pairs update other rows in its key/time box.
+    for ts in 10..14 {
+        for _ in 0..2 {
+            let rows = Rows {
+                schema: columns.clone(),
+                rows: build_rows_for_key("m", ts, ts + 2, ts),
+            };
+            if ts == 10 {
+                engine
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Delete(RegionDeleteRequest {
+                            rows,
+                            hint: None,
+                            partition_expr_version: None,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                put_rows(&engine, region_id, rows).await;
+            }
+            flush(&engine, region_id).await;
+        }
+        compact(&engine, region_id).await;
+    }
+    put_and_flush(&engine, region_id, &columns, active_ts..active_ts + 1).await;
+    let version = region.version();
+    let small = version.ssts.levels()[1]
+        .files()
+        .filter(|file| file.file_id() != large.file_id())
+        .collect::<Vec<_>>();
+    assert_eq!(4, small.len());
+    assert!(small.iter().all(|file| file.size() <= OUTPUT_SIZE / 4));
+    let small_ids = small
+        .iter()
+        .map(|file| file.file_id())
+        .collect::<HashSet<_>>();
+    let pick = preview_regular_compaction(&engine, region_id).await;
+    assert_eq!(1, pick.outputs.len());
+    assert_eq!(
+        small_ids,
+        pick.outputs[0]
+            .inputs
+            .iter()
+            .map(|file| file.file_id())
+            .collect()
+    );
+    assert!(!pick.outputs[0].filter_deleted);
+    let before = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+
+    // Even manual cleanup cannot rewrite the dominant peer within the closed
+    // merge's output bound, so it executes the same small-only fallback.
+    compact(&engine, region_id).await;
+    let version = region.version();
+    let l1 = version.ssts.levels()[1].files().collect::<Vec<_>>();
+    assert_eq!(2, l1.len());
+    assert!(l1.iter().any(|file| file.file_id() == large.file_id()));
+    let output = l1
+        .iter()
+        .find(|file| file.file_id() != large.file_id())
+        .unwrap();
+    assert!(!small_ids.contains(&output.file_id()));
+    assert_eq!(1, count_sst_deletes(&engine, region_id, output).await);
+    let after = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+    assert_eq!(before, after);
+    crate::test_util::reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    let reopened = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+    assert_eq!(before, reopened);
+}
+
 /// Region fixture containing only identifiers, so it cannot pin an old SST snapshot.
 struct CompactionTestRegion {
     region_id: RegionId,
