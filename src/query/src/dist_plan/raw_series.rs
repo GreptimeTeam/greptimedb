@@ -100,8 +100,9 @@ mod tests {
     use datatypes::arrow::array::Float64Array;
     use datatypes::schema::Schema;
     use datatypes::series::frame::{
-        pack_raw_series_chunk, raw_series_frame_schema_with_label_decode, LabelDecodeColumn,
-        LabelDecodeEncoding, LabelDecodeSpec, LabelDecodeTag, RawLabelMode, LABEL_DECODE_VERSION,
+        LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeSpec,
+        LabelDecodeTag, RawLabelMode, pack_raw_series_chunk,
+        raw_series_frame_schema_with_label_decode,
     };
     use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
     use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
@@ -552,8 +553,10 @@ mod tests {
             .await
             .err()
             .expect("expected zero-target error");
-        assert!(error
-            .to_string()
-            .contains("raw series request has zero targets"));
+        assert!(
+            error
+                .to_string()
+                .contains("raw series request has zero targets")
+        );
     }
 }
