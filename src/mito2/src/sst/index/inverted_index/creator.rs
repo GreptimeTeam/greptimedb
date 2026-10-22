@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -31,7 +30,7 @@ use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
 use mito_codec::row_converter::{SortField, SparseOffsetsCache};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use smallvec::SmallVec;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId};
@@ -39,12 +38,13 @@ use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiErrorsSnafu, DecodeSnafu, EncodeSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu,
-    PuffinAddBlobSnafu, PushIndexValueSnafu, Result,
+    BiErrorsSnafu, ConvertVectorSnafu, DecodeSnafu, EncodeSnafu, IndexFinishSnafu,
+    InvalidRecordBatchSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushIndexValueSnafu,
+    Result,
 };
 use crate::read::Batch;
 use crate::sst::index::TYPE_INVERTED_INDEX;
-use crate::sst::index::column::column_index_rows;
+use crate::sst::index::column::{column_index_rows, extract_json_type_hint_values};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
@@ -81,8 +81,8 @@ pub struct InvertedIndexer {
     /// The memory usage of the index creator.
     memory_usage: Arc<AtomicUsize>,
 
-    /// Ids of indexed columns and their encoded target keys.
-    indexed_column_ids: Vec<(ColumnId, String)>,
+    /// Index targets and their encoded keys.
+    index_targets: Vec<(IndexTarget, String)>,
 
     /// Region metadata for column lookups.
     metadata: RegionMetadataRef,
@@ -90,14 +90,13 @@ pub struct InvertedIndexer {
 
 impl InvertedIndexer {
     /// Creates a new `InvertedIndexer`.
-    /// Should ensure that the number of tag columns is greater than 0.
     pub fn new(
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
         segment_row_count: NonZeroUsize,
-        indexed_column_ids: HashSet<ColumnId>,
+        index_targets: Vec<IndexTarget>,
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&metadata.region_id, &sst_file_id),
@@ -118,11 +117,11 @@ impl InvertedIndexer {
             metadata.primary_key_encoding,
             metadata.primary_key_columns(),
         );
-        let indexed_column_ids = indexed_column_ids
+        let index_targets = index_targets
             .into_iter()
-            .map(|col_id| {
-                let target_key = format!("{}", IndexTarget::ColumnId(col_id));
-                (col_id, target_key)
+            .map(|target| {
+                let key = target.encode();
+                (target, key)
             })
             .collect();
         Self {
@@ -134,7 +133,7 @@ impl InvertedIndexer {
             stats: Statistics::new(TYPE_INVERTED_INDEX),
             aborted: false,
             memory_usage,
-            indexed_column_ids,
+            index_targets,
             metadata: metadata.clone(),
         }
     }
@@ -182,44 +181,69 @@ impl InvertedIndexer {
         let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
         let mut sparse_columns: SmallVec<[(ColumnId, &str); 8]> = SmallVec::new();
 
-        for (col_id, target_key) in &self.indexed_column_ids {
-            let Some(column_meta) = self.metadata.column_by_id(*col_id) else {
-                debug!(
-                    "Column {} not found in the metadata during building inverted index",
-                    col_id
-                );
-                continue;
+        for (target, target_key) in &self.index_targets {
+            let (vector, sort_field, semantic_type) = match target {
+                IndexTarget::ColumnId(col_id) => {
+                    let Some(col_meta) = self.metadata.column_by_id(*col_id) else {
+                        debug!(
+                            "Column {} not found in the metadata during building inverted index",
+                            col_id
+                        );
+                        continue;
+                    };
+                    let col_name = &col_meta.column_schema.name;
+                    let Some(col_array) = batch.column_by_name(col_name) else {
+                        if is_sparse && col_meta.semantic_type == SemanticType::Tag {
+                            if self.codec.pk_col_info(*col_id).is_some() {
+                                sparse_columns.push((*col_id, target_key));
+                            }
+                        } else {
+                            debug!(
+                                "Column {} not found in the batch during building inverted index",
+                                col_id
+                            );
+                        }
+                        continue;
+                    };
+                    let vector =
+                        Helper::try_into_vector(col_array.clone()).context(ConvertVectorSnafu)?;
+                    let sort_field = SortField::new(vector.data_type());
+                    (vector, sort_field, col_meta.semantic_type)
+                }
+                IndexTarget::JsonPath(target) => {
+                    let col_id = target.column_id();
+                    let col = self.metadata.column_by_id(col_id).with_context(|| {
+                        InvalidRecordBatchSnafu {
+                            reason: format!("Missing JSON index column {col_id}"),
+                        }
+                    })?;
+                    let root =
+                        batch
+                            .column_by_name(&col.column_schema.name)
+                            .with_context(|| InvalidRecordBatchSnafu {
+                                reason: format!("Missing JSON index column {col_id} in batch"),
+                            })?;
+                    let leaf = extract_json_type_hint_values(root, target.path())?;
+                    let field = SortField::new(leaf.data_type());
+                    (leaf, field, SemanticType::Field)
+                }
             };
-            let column_name = &column_meta.column_schema.name;
-            if let Some(column_array) = batch.column_by_name(column_name) {
-                // Convert Arrow array to VectorRef using Helper
-                let vector = Helper::try_into_vector(column_array.clone())
-                    .context(crate::error::ConvertVectorSnafu)?;
-                let sort_field = SortField::new(vector.data_type());
-
-                for (row, count) in column_index_rows(batch, column_meta.semantic_type) {
-                    let elem = IndexValueCodec::encode_value(
-                        vector.get_ref(row),
-                        &sort_field,
-                        &mut self.value_buf,
-                    )
-                    .context(EncodeSnafu)?;
-                    if self.index_creator.push_with_name_n(target_key, elem, count) {
-                        self.index_creator
-                            .spill()
-                            .await
-                            .context(PushIndexValueSnafu)?;
-                    }
+            for (row, count) in column_index_rows(batch, semantic_type) {
+                let value = IndexValueCodec::encode_value(
+                    vector.get_ref(row),
+                    &sort_field,
+                    &mut self.value_buf,
+                )
+                .context(EncodeSnafu)?;
+                if self
+                    .index_creator
+                    .push_with_name_n(target_key, value, count)
+                {
+                    self.index_creator
+                        .spill()
+                        .await
+                        .context(PushIndexValueSnafu)?;
                 }
-            } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
-                if self.codec.pk_col_info(*col_id).is_some() {
-                    sparse_columns.push((*col_id, target_key));
-                }
-            } else {
-                debug!(
-                    "Column {} not found in the batch during building inverted index",
-                    col_id
-                );
             }
         }
 
@@ -293,36 +317,35 @@ impl InvertedIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for (col_id, target_key) in &self.indexed_column_ids {
-            match self.codec.pk_col_info(*col_id) {
-                // pk
-                Some(col_info) => {
-                    let pk_idx = col_info.idx;
-                    let field = &col_info.field;
-                    let value = batch
-                        .pk_col_value(self.codec.decoder(), pk_idx, *col_id)?
-                        .filter(|v| !v.is_null())
-                        .map(|v| {
-                            self.value_buf.clear();
-                            IndexValueCodec::encode_nonnull_value(
-                                v.as_value_ref(),
-                                field,
-                                &mut self.value_buf,
-                            )
-                            .context(EncodeSnafu)?;
-                            Ok(self.value_buf.as_slice())
-                        })
-                        .transpose()?;
+        for (target, target_key) in &self.index_targets {
+            let (vector, sort_field) = match target {
+                IndexTarget::ColumnId(col_id) => {
+                    if let Some(col_info) = self.codec.pk_col_info(*col_id) {
+                        let pk_idx = col_info.idx;
+                        let field = &col_info.field;
+                        let value = batch
+                            .pk_col_value(self.codec.decoder(), pk_idx, *col_id)?
+                            .filter(|v| !v.is_null())
+                            .map(|v| {
+                                self.value_buf.clear();
+                                IndexValueCodec::encode_nonnull_value(
+                                    v.as_value_ref(),
+                                    field,
+                                    &mut self.value_buf,
+                                )
+                                .context(EncodeSnafu)?;
+                                Ok(self.value_buf.as_slice())
+                            })
+                            .transpose()?;
 
-                    if self.index_creator.push_with_name_n(target_key, value, n) {
-                        self.index_creator
-                            .spill()
-                            .await
-                            .context(PushIndexValueSnafu)?;
+                        if self.index_creator.push_with_name_n(target_key, value, n) {
+                            self.index_creator
+                                .spill()
+                                .await
+                                .context(PushIndexValueSnafu)?;
+                        }
+                        continue;
                     }
-                }
-                // fields
-                None => {
                     let Some(values) = batch.field_col_value(*col_id) else {
                         debug!(
                             "Column {} not found in the batch during building inverted index",
@@ -331,34 +354,34 @@ impl InvertedIndexer {
                         continue;
                     };
                     let sort_field = SortField::new(values.data.data_type());
-                    for i in 0..n {
-                        self.value_buf.clear();
-                        let value = values.data.get_ref(i);
-                        if value.is_null() {
-                            if self.index_creator.push_with_name(target_key, None) {
-                                self.index_creator
-                                    .spill()
-                                    .await
-                                    .context(PushIndexValueSnafu)?;
-                            }
-                        } else {
-                            IndexValueCodec::encode_nonnull_value(
-                                value,
-                                &sort_field,
-                                &mut self.value_buf,
-                            )
-                            .context(EncodeSnafu)?;
-                            if self
-                                .index_creator
-                                .push_with_name(target_key, Some(&self.value_buf))
-                            {
-                                self.index_creator
-                                    .spill()
-                                    .await
-                                    .context(PushIndexValueSnafu)?;
-                            }
-                        }
-                    }
+                    (values.data.clone(), sort_field)
+                }
+                IndexTarget::JsonPath(target) => {
+                    let col_id = target.column_id();
+                    let root = batch
+                        .field_col_value(col_id)
+                        .with_context(|| InvalidRecordBatchSnafu {
+                            reason: format!("Missing JSON index column {col_id} in batch"),
+                        })?
+                        .data
+                        .to_arrow_array();
+                    let leaf = extract_json_type_hint_values(&root, target.path())?;
+                    let field = SortField::new(leaf.data_type());
+                    (leaf, field)
+                }
+            };
+            for row in 0..n {
+                let value = IndexValueCodec::encode_value(
+                    vector.get_ref(row),
+                    &sort_field,
+                    &mut self.value_buf,
+                )
+                .context(EncodeSnafu)?;
+                if self.index_creator.push_with_name(target_key, value) {
+                    self.index_creator
+                        .spill()
+                        .await
+                        .context(PushIndexValueSnafu)?;
                 }
             }
         }
@@ -428,8 +451,14 @@ impl InvertedIndexer {
         self.temp_file_provider.cleanup().await
     }
 
-    pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.indexed_column_ids.iter().map(|(col_id, _)| *col_id)
+    /// Returns column-level index IDs, excluding JSON path targets.
+    pub fn indexed_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
+        self.index_targets
+            .iter()
+            .filter_map(|(target, _)| match target {
+                IndexTarget::ColumnId(col_id) => Some(*col_id),
+                IndexTarget::JsonPath(_) => None,
+            })
     }
 
     pub fn memory_usage(&self) -> usize {
@@ -439,20 +468,25 @@ impl InvertedIndexer {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
 
     use api::v1::SemanticType;
     use datafusion_expr::{Expr as DfExpr, Operator, binary_expr, col, lit};
+    use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StructArray};
+    use datatypes::arrow::buffer::NullBuffer;
+    use datatypes::arrow::datatypes::{Field, Schema};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use futures::future::BoxFuture;
+    use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+    use index::inverted_index::search::predicate::{InListPredicate, Predicate};
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use object_store::ObjectStore;
     use object_store::services::Memory;
-    use puffin::puffin_manager::PuffinManager;
     use puffin::puffin_manager::cache::PuffinMetadataCache;
+    use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;
@@ -463,6 +497,7 @@ mod tests {
     use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
     use crate::sst::file::{RegionFileId, RegionIndexId};
+    use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -574,7 +609,11 @@ mod tests {
             intm_mgr,
             memory_threshold,
             NonZeroUsize::new(segment_row_count).unwrap(),
-            sst_indexed_column_ids,
+            sst_indexed_column_ids
+                .iter()
+                .copied()
+                .map(IndexTarget::ColumnId)
+                .collect(),
         );
 
         for (str_tag, i32_tag, u64_field) in &rows {
@@ -658,6 +697,156 @@ mod tests {
         for (expr, expected) in cases {
             let actual = applier_factory(expr.clone()).await;
             assert_eq!(actual, expected, "{expr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_json_hint_index_both_formats() {
+        for flat in [false, true] {
+            let (dir, factory) = PuffinManagerFactory::new_for_test_async("json_hint_index").await;
+            let mut metadata = (*mock_region_metadata()).clone();
+            let column = &mut metadata.column_metadatas[3].column_schema;
+            column.data_type =
+                ConcreteDataType::json2(datatypes::types::json_type::JsonNativeType::Object(
+                    datatypes::types::json_type::JsonObjectType::new(),
+                ));
+            column.with_extension_type(&datatypes::extension::json::Json2ExtensionType::new(
+                Arc::new(datatypes::extension::json::JsonMetadata::new(
+                    datatypes::json::JsonSettings::try_new(
+                        vec![datatypes::json::JsonTypeHint {
+                            path: vec!["value".into()],
+                            data_type: ConcreteDataType::int64_datatype(),
+                            inverted_index: true,
+                        }],
+                        Some(0),
+                    )
+                    .unwrap(),
+                )),
+            ));
+            let metadata = Arc::new(metadata);
+            let file_id = FileId::random();
+            let target = IndexTarget::new_json_path(4, vec!["value".into()]).unwrap();
+            let mut creator = InvertedIndexer::new(
+                file_id,
+                &metadata,
+                new_intm_mgr(dir.path().to_string_lossy()).await,
+                None,
+                NonZeroUsize::new(2).unwrap(),
+                vec![target.clone()],
+            );
+            let values: ArrayRef = Arc::new(Int64Array::from(vec![Some(1), None, Some(1), None]));
+            let root: ArrayRef = Arc::new(StructArray::new(
+                vec![Field::new("value", values.data_type().clone(), true)].into(),
+                vec![values],
+                Some(NullBuffer::from(vec![true, false, true, true])),
+            ));
+            for start in [0, 2] {
+                let array = root.slice(start, 2);
+                if flat {
+                    let batch = RecordBatch::try_new(
+                        Arc::new(Schema::new(vec![Field::new(
+                            "field_u64",
+                            array.data_type().clone(),
+                            true,
+                        )])),
+                        vec![array],
+                    )
+                    .unwrap();
+                    creator.update_flat(&batch).await.unwrap();
+                } else {
+                    let mut batch = Batch::new(
+                        vec![],
+                        Arc::new(UInt64Vector::from_vec(vec![0, 1])),
+                        Arc::new(UInt64Vector::from_vec(vec![0, 0])),
+                        Arc::new(UInt8Vector::from_vec(vec![1, 1])),
+                        vec![BatchColumn {
+                            column_id: 4,
+                            data: Helper::try_into_vector(array).unwrap(),
+                        }],
+                    )
+                    .unwrap();
+                    creator.update(&mut batch).await.unwrap();
+                }
+            }
+            // JSON paths must not be advertised as ordinary column indexes.
+            assert_eq!(creator.indexed_column_ids().count(), 0);
+            let store = mock_object_store();
+            let manager = factory.build(
+                store.clone(),
+                RegionFilePathFactory::new("table0".into(), PathType::Bare),
+            );
+            let index_id = RegionIndexId::new(RegionFileId::new(metadata.region_id, file_id), 0);
+            let mut writer = manager.writer(&index_id).await.unwrap();
+            let (rows, bytes) = creator.finish(&mut writer).await.unwrap();
+            assert_eq!(rows, 4);
+            assert!(bytes > 0);
+            writer.finish().await.unwrap();
+            let reader = manager.reader(&index_id).await.unwrap();
+            let blob = reader
+                .blob(INDEX_BLOB_TYPE)
+                .await
+                .unwrap()
+                .reader()
+                .await
+                .unwrap();
+            let reader = InvertedIndexBlobReader::new(blob);
+            let metas = reader.metadata(None).await.unwrap();
+            assert_eq!(metas.total_row_count, 4);
+            assert_eq!(metas.metas.len(), 1);
+            let meta = &metas.metas[&target.encode()];
+            let fst = reader
+                .fst(
+                    meta.base_offset + u64::from(meta.relative_fst_offset),
+                    meta.fst_size,
+                    None,
+                )
+                .await
+                .unwrap();
+            let mut encoded = Vec::new();
+            IndexValueCodec::encode_nonnull_value(
+                ValueRef::Int64(1),
+                &SortField::new(ConcreteDataType::int64_datatype()),
+                &mut encoded,
+            )
+            .unwrap();
+            assert!(fst.get(&encoded).is_some());
+            // Null parent and leaf rows must not add values to the FST.
+            assert_eq!(fst.len(), 1);
+            assert!(meta.null_bitmap_size > 0);
+            // Apply the generated index to both matching and non-matching values.
+            for (value, expected) in [(2, vec![]), (1, vec![0, 1])] {
+                let mut bytes = Vec::new();
+                IndexValueCodec::encode_nonnull_value(
+                    ValueRef::Int64(value),
+                    &SortField::new(ConcreteDataType::int64_datatype()),
+                    &mut bytes,
+                )
+                .unwrap();
+                let predicates = BTreeMap::from([(
+                    target.clone(),
+                    vec![Predicate::InList(InListPredicate {
+                        list: BTreeSet::from([bytes]),
+                    })],
+                )]);
+                let applier = InvertedIndexApplier::new(
+                    "table0".into(),
+                    PathType::Bare,
+                    store.clone(),
+                    factory.clone(),
+                    predicates,
+                    BTreeMap::from([(target.clone(), ConcreteDataType::int64_datatype())]),
+                )
+                .unwrap();
+                let plan = applier.plan_for_sst(&metadata).unwrap().unwrap();
+                let output = applier
+                    .apply(index_id, None, &plan.index_applier, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    output.matched_segment_ids.iter_ones().collect::<Vec<_>>(),
+                    expected
+                );
+            }
         }
     }
 
