@@ -46,7 +46,7 @@ use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundSelect, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -480,11 +480,12 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
             pool,
         ),
         queued: VecDeque::new(),
+        queued_tables: 0,
         instant: None,
         window: None,
         map: None,
         binary: None,
-        select: None,
+        vector: None,
         source_schema: None,
         emitted: None,
         merge: None,
@@ -497,6 +498,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
     NodeRuntime {
         buffer: NodeBuffer::new(&NodePath::root(), Arc::new(NodeMetrics::default()), pool),
         queued: VecDeque::new(),
+        queued_tables: 0,
         instant: None,
         window: None,
         map: None,
@@ -504,7 +506,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
             Arc::new(binary_matching(BinaryOp::Add)),
             [Arc::clone(schema), Arc::clone(schema)],
         )),
-        select: None,
+        vector: None,
         source_schema: None,
         emitted: None,
         merge: None,
@@ -6423,10 +6425,10 @@ fn an_all_missing_match_group_fits_its_pool() {
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
-fn select(inner: NativeNode, op: BoundSelect) -> NativeNode {
+fn vector_op(inner: NativeNode, op: BoundVectorOp) -> NativeNode {
     let output = inner.output.clone();
     NativeNode {
-        expr: NativeExpr::Select {
+        expr: NativeExpr::Vector {
             input: Box::new(inner),
             op,
         },
@@ -6461,9 +6463,9 @@ fn decided_by_job(chunks: &[EvaluatedChunk]) -> Vec<(String, Decided)> {
 fn topk_ranks_whole_series_at_each_point() {
     let grid = grid(0, 60_000, 3);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(select(
+    let tree = NativeTree::try_new(vector_op(
         evaluated_input(Arc::clone(&grid)),
-        BoundSelect::TopK {
+        BoundVectorOp::TopK {
             k: 1.0,
             top: true,
             group: Grouping::By(Arc::from([])),
@@ -6504,16 +6506,16 @@ fn topk_ranks_whole_series_at_each_point() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// `limitk` takes series in label order, not in the order they arrived: `{job="x"}` is kept at
-/// both points although `{job="y"}` arrived first. The two series a map folds into `{job="x"}`
-/// stay pieces, each kept where it holds the point.
+/// `limitk` takes series in the order its input hands them over, not in label order, and the two
+/// series a map folds into `{job="z"}` are one series placed where it first arrived: it is kept at
+/// both points although `{job="y"}` sorts first and arrived before the piece that fills point 0.
 #[test]
-fn limitk_takes_series_in_label_order() {
+fn limitk_takes_series_in_input_order() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(select(
+    let tree = NativeTree::try_new(vector_op(
         map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
-        BoundSelect::LimitK {
+        BoundVectorOp::LimitK {
             k: 1.0,
             group: Grouping::By(Arc::from([])),
         },
@@ -6521,6 +6523,7 @@ fn limitk_takes_series_in_label_order() {
     .unwrap();
     let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
     for chunk in [
+        evaluated_chunk_of(&schema, named_metric("a", "z"), 1, vec![Some(1.0)], true),
         evaluated_chunk_of(
             &schema,
             named_metric("b", "y"),
@@ -6528,32 +6531,28 @@ fn limitk_takes_series_in_label_order() {
             vec![Some(2.0), Some(2.0)],
             true,
         ),
-        evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(1.0)], true),
-        evaluated_chunk_of(&schema, named_metric("c", "x"), 0, vec![Some(3.0)], true),
+        evaluated_chunk_of(&schema, named_metric("c", "z"), 0, vec![Some(3.0)], true),
     ] {
         execution.push_evaluated(chunk).unwrap();
     }
     let chunks = run(&mut execution);
     assert_eq!(
         decided_by_job(&chunks),
-        vec![
-            ("x".to_string(), vec![(1, Some(1.0))]),
-            ("x".to_string(), vec![(0, Some(3.0))]),
-        ]
+        vec![("z".to_string(), vec![(0, Some(3.0)), (1, Some(1.0))])]
     );
 }
 
-/// A binary node above a selection reads what the selection kept, once the selection has read its
+/// A binary node above a vector node reads what `topk` kept, once the vector node has read its
 /// whole input: `topk` keeps `{job="b"}` at point 0 and `{job="a"}` at point 1, so only point 1
 /// matches the right side's `{job="a"}`.
 #[test]
-fn a_binary_node_reads_what_a_selection_kept() {
+fn a_binary_node_reads_what_a_vector_node_kept() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
     let tree = NativeTree::try_new(binary_of(
-        select(
+        vector_op(
             evaluated_input(Arc::clone(&grid)),
-            BoundSelect::TopK {
+            BoundVectorOp::TopK {
                 k: 1.0,
                 top: true,
                 group: Grouping::By(Arc::from([])),
@@ -6617,9 +6616,9 @@ fn absent_answers_where_the_input_holds_nothing() {
         }],
     )
     .unwrap();
-    let tree = NativeTree::try_new(select(
+    let tree = NativeTree::try_new(vector_op(
         evaluated_input(Arc::clone(&grid)),
-        BoundSelect::Absent {
+        BoundVectorOp::Absent {
             labels: labels.clone(),
         },
     ))
@@ -6652,9 +6651,9 @@ fn absent_answers_where_the_input_holds_nothing() {
 fn sort_desc_hands_over_series_in_value_order() {
     let grid = grid(0, 60_000, 1);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(select(
+    let tree = NativeTree::try_new(vector_op(
         evaluated_input(Arc::clone(&grid)),
-        BoundSelect::Sort(SortOrder::Desc),
+        BoundVectorOp::Sort(SortOrder::Desc),
     ))
     .unwrap();
     let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
@@ -6684,9 +6683,9 @@ fn a_sorted_series_is_queued_at_what_its_slices_hold() {
     let points = 1_000;
     let grid = grid(0, 60_000, points);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(select(
+    let tree = NativeTree::try_new(vector_op(
         evaluated_input(Arc::clone(&grid)),
-        BoundSelect::Sort(SortOrder::ByLabel(vec!["job".into()])),
+        BoundVectorOp::Sort(SortOrder::ByLabel(vec!["job".into()])),
     ))
     .unwrap();
     let pool = bounded_pool(48 * 1024);
@@ -6702,12 +6701,84 @@ fn a_sorted_series_is_queued_at_what_its_slices_hold() {
                 start + 100 == points as usize,
             ))
             .unwrap();
-        // The selection retains each chunk as it arrives, at what its slice holds.
+        // The vector node retains each chunk as it arrives, at what its slice holds.
         assert!(execution.next_chunk().unwrap().is_none());
     }
     let chunks = run(&mut execution);
     assert_eq!(decided(&chunks).len(), points as usize);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// Two sorted results share one histogram table, so the table stays charged until the second one
+/// leaves, not only until the first one does.
+#[test]
+fn a_table_shared_by_queued_results_stays_charged_until_the_last_leaves() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::Sort(SortOrder::ByLabel(vec!["job".into()])),
+    ))
+    .unwrap();
+    let table = histogram_table(2, 64);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for (job, index) in [("a", 0), ("b", 1)] {
+        execution
+            .push_evaluated(evaluated_histogram_chunk_of(
+                &schema,
+                named_metric("m", job),
+                0,
+                vec![Some(index)],
+                &table,
+                true,
+            ))
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(first.series.metric.get("job"), Some("a"));
+    drop(first);
+    assert!(pool.reserved() >= histogram_table_bytes(&table));
+    let second = execution.next_chunk().unwrap().expect("two sorted results");
+    assert_eq!(second.series.metric.get("job"), Some("b"));
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `limitk` takes the order a sort below it decided: `sort_desc` puts `{job="z"}` first, so it is
+/// the one `limitk(1, ...)` keeps, although `{job="a"}` sorts first by label.
+#[test]
+fn limitk_keeps_the_order_a_sort_below_it_decided() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::Sort(SortOrder::Desc),
+        ),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (job, value) in [("a", 1.0), ("z", 2.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("v", job),
+                0,
+                vec![Some(value)],
+                true,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        decided_by_job(&run(&mut execution)),
+        vec![("z".to_string(), vec![(0, Some(2.0))])]
+    );
 }
 
 /// `histogram_quantile` reads a classic histogram from the bucket series that share its labels,
@@ -6716,9 +6787,9 @@ fn a_sorted_series_is_queued_at_what_its_slices_hold() {
 fn histogram_quantile_reads_the_buckets_of_the_whole_vector() {
     let grid = grid(0, 60_000, 1);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(select(
+    let tree = NativeTree::try_new(vector_op(
         evaluated_input(Arc::clone(&grid)),
-        BoundSelect::Histogram(HistogramFunction::Quantile(0.5)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
     ))
     .unwrap();
     let bucket = |le: &str| {
@@ -6764,9 +6835,9 @@ fn histogram_quantile_reads_the_buckets_of_the_whole_vector() {
 fn histogram_quantile_reads_the_pieces_of_one_label_set_as_one_series() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(select(
+    let tree = NativeTree::try_new(vector_op(
         evaluated_input(Arc::clone(&grid)),
-        BoundSelect::Histogram(HistogramFunction::Quantile(0.5)),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.5)),
     ))
     .unwrap();
     let metric = |tags: &[(&str, &str)]| {

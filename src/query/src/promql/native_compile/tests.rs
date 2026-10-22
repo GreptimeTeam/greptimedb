@@ -1160,14 +1160,14 @@ fn a_math_function_over_a_non_vector_argument_is_refused_and_names_it() {
     }
 }
 
-/// The sorts, `absent` and the classic histogram functions bind a selection over the vector they
+/// The sorts, `absent` and the classic histogram functions bind a vector operation over the vector they
 /// are given, the histogram functions with their constants folded. `absent` derives its
 /// labels from the selector's matchers as Prometheus does: the first equality of a name sets the
 /// label and any other matcher of it removes it, the matchers that accept a missing label read
 /// last; `__name__` and the table-choosing matchers are not labels, and any expression other than
 /// a selector answers without labels.
 #[test]
-fn whole_vector_functions_bind_a_selection() {
+fn whole_vector_functions_bind_a_vector_operation() {
     let cases = [
         ("sort(x)", "sort"),
         ("sort_desc(rate(x[5m]))", "sort_desc"),
@@ -1198,6 +1198,6 @@ fn whole_vector_functions_bind_a_selection() {
             .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
         let display = tree.to_string();
         let root = display.lines().nth(1).expect("a compiled tree has a root");
-        assert_eq!(root, format!("  root Select {op}"), "`{query}`");
+        assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
     }
 }
