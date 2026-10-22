@@ -2439,6 +2439,58 @@ fn a_backward_disjoint_claim_after_spare_capacity_is_charged_correctly() {
     );
 }
 
+/// A backward claim that joins two spare-capacity runs charges a replacement vector's shrinkage.
+#[test]
+fn a_backward_claim_merging_spare_capacity_runs_accounts_for_shrinkage() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 3).unwrap()).unwrap());
+    let chunk = |values: Vec<Option<f64>>| Series {
+        metric: metric(&[(HOST, "shrink")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 3)])
+            .expect("the chunk covers the small grid"),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(values))),
+    };
+
+    labels
+        .claim(&chunk(vec![Some(1.0), None, Some(1.0)]))
+        .expect("the first claim stores runs at positions 0 and 2");
+    let runs = labels.seen.values().next().unwrap().first().unwrap();
+    assert_eq!(
+        vec![(0, 1), (2, 3)],
+        runs.iter()
+            .map(|run| (run.start, run.end))
+            .collect::<Vec<_>>()
+    );
+    let before_capacity = runs.capacity();
+    let before_reserved = pool.reserved();
+
+    labels
+        .claim(&chunk(vec![None, Some(1.0), None]))
+        .expect("the disjoint middle position joins both existing runs");
+
+    let runs = labels.seen.values().next().unwrap().first().unwrap();
+    let after_capacity = runs.capacity();
+    assert_eq!(
+        vec![(0, 3)],
+        runs.iter()
+            .map(|run| (run.start, run.end))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        before_capacity > after_capacity,
+        "the regression requires replacement-vector shrinkage (before={before_capacity}, after={after_capacity})"
+    );
+    let run_size = std::mem::size_of::<crate::native::runs::Run>();
+    assert_eq!(
+        before_reserved - (before_capacity - after_capacity) * run_size,
+        pool.reserved(),
+        "the reservation tracks the replacement vector's actual capacity decrease"
+    );
+}
+
 /// A newly retained field is charged for the cloned run vector's capacity, not incoming slack.
 #[test]
 fn a_new_field_claim_is_charged_for_its_retained_capacity() {
