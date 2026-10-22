@@ -2439,6 +2439,52 @@ fn a_backward_disjoint_claim_after_spare_capacity_is_charged_correctly() {
     );
 }
 
+/// A newly retained field is charged for the cloned run vector's capacity, not incoming slack.
+#[test]
+fn a_new_field_claim_is_charged_for_its_retained_capacity() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 4).unwrap()).unwrap());
+    let first = Series {
+        metric: metric(&[(HOST, "new-field")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 1)]).unwrap(),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
+    };
+    labels.claim(&first).unwrap();
+
+    let incoming = Series {
+        metric: metric(&[(HOST, "new-field")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 4)]).unwrap(),
+        fields: SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![None, None, None, None])),
+            Samples::from_float(Float64Array::from(vec![Some(1.0), None, Some(2.0), None])),
+        ])
+        .unwrap(),
+    };
+    let incoming_runs = occupied_runs(&incoming).unwrap();
+    assert_eq!(2, incoming_runs[1].len());
+    assert!(
+        incoming_runs[1].capacity() > incoming_runs[1].len(),
+        "the incoming run vector has spare capacity"
+    );
+    let before = pool.reserved();
+    labels.claim(&incoming).unwrap();
+
+    let retained = &labels.seen.values().next().unwrap()[1];
+    assert_eq!(2, retained.len());
+    assert_eq!(
+        retained.capacity() * std::mem::size_of::<crate::native::runs::Run>(),
+        pool.reserved() - before,
+        "the reservation charges the retained cloned vector capacity"
+    );
+    assert!(
+        retained.capacity() < incoming_runs[1].capacity(),
+        "the incoming spare capacity was not retained or charged"
+    );
+}
+
 /// Chunked fields are traversed sequentially while occupancy is converted into grid runs.
 #[test]
 fn chunked_samples_occupancy_preserves_sparse_rows() {
@@ -2485,6 +2531,7 @@ fn a_touching_append_with_full_capacity_does_not_rebuild_history() {
         .unwrap();
     stored.shrink_to_fit();
     let cap = stored.capacity();
+    let allocation = stored.as_ptr();
     assert_eq!(
         stored.len(),
         cap,
@@ -2506,6 +2553,11 @@ fn a_touching_append_with_full_capacity_does_not_rebuild_history() {
         cap,
         stored.capacity(),
         "extending a run did not allocate or copy its history"
+    );
+    assert_eq!(
+        allocation,
+        stored.as_ptr(),
+        "extending a run retained the stored vector allocation"
     );
     assert_eq!(
         before,
