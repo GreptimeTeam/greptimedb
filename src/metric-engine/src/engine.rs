@@ -31,6 +31,7 @@ mod sync;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -375,6 +376,29 @@ impl RegionEngine for MetricEngine {
             utils::to_data_region_id(region_id),
         ] {
             if let Err(e) = self.inner.mito.set_region_role(x, role)
+                && e.status_code() != StatusCode::RegionNotFound
+            {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: Instant,
+    ) -> Result<(), BoxedError> {
+        // ignore the region not found error
+        for x in [
+            utils::to_metadata_region_id(region_id),
+            utils::to_data_region_id(region_id),
+        ] {
+            if let Err(e) = self
+                .inner
+                .mito
+                .set_region_role_with_lease(x, role, deadline)
                 && e.status_code() != StatusCode::RegionNotFound
             {
                 return Err(e);

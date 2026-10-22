@@ -131,6 +131,8 @@ pub(crate) struct RegionWriteCtx {
     pub(crate) delete_num: usize,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Option<Arc<AtomicU64>>,
+    /// Leader deadline of the region when the write was prepared.
+    pub(crate) leader_deadline: u64,
 }
 
 impl RegionWriteCtx {
@@ -167,6 +169,7 @@ impl RegionWriteCtx {
             delete_num: 0,
             bulk_parts: vec![],
             written_bytes,
+            leader_deadline: u64::MAX,
         }
     }
 
@@ -247,6 +250,14 @@ impl RegionWriteCtx {
 
     /// Sets error and marks all write operations are failed.
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
+        self.fail_waiters(err);
+
+        // Fail the whole write operation.
+        self.failed = true;
+    }
+
+    /// Sets error for all notifiers. The writes still go to the memtables.
+    pub(crate) fn fail_waiters(&mut self, err: Arc<Error>) {
         // Set error for all notifiers.
         for notify in self
             .wal_notifiers
@@ -258,9 +269,6 @@ impl RegionWriteCtx {
         for notify in &mut self.bulk_notifiers {
             notify.err = Some(err.clone());
         }
-
-        // Fail the whole write operation.
-        self.failed = true;
     }
 
     /// Returns whether the write operation is already marked as failed.

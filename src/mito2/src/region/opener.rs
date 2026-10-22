@@ -468,6 +468,7 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
+            leader_deadline: Default::default(),
             region_stats: RegionStats::new(),
             stats: self.stats,
         }))
@@ -706,6 +707,7 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
+            leader_deadline: Default::default(),
             region_stats: RegionStats::new(),
             stats: self.stats.clone(),
         };
