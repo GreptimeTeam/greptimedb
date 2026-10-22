@@ -28,7 +28,7 @@ use datatypes::series::{MetricName, SeriesOrdering};
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundSelect, BoundWindow, Grouping, NativeExpr, NativeNode,
+    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode,
     NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
@@ -103,15 +103,15 @@ fn describe(node: &NativeNode) -> String {
             let ops: Vec<String> = op.ops.iter().map(math_op).collect();
             ops.join(", ")
         }
-        NativeExpr::Select { op, .. } => match op {
-            BoundSelect::TopK { k, top, group } => format!(
+        NativeExpr::Vector { op, .. } => match op {
+            BoundVectorOp::TopK { k, top, group } => format!(
                 "{} {k} {}",
                 if *top { "topk" } else { "bottomk" },
                 grouping(group)
             ),
-            BoundSelect::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
-            BoundSelect::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
-            BoundSelect::Sort(order) => match order {
+            BoundVectorOp::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
+            BoundVectorOp::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
+            BoundVectorOp::Sort(order) => match order {
                 SortOrder::Asc => "sort".to_string(),
                 SortOrder::Desc => "sort_desc".to_string(),
                 SortOrder::ByLabel(labels) => format!("sort_by_label [{}]", label_list(labels)),
@@ -119,7 +119,7 @@ fn describe(node: &NativeNode) -> String {
                     format!("sort_by_label_desc [{}]", label_list(labels))
                 }
             },
-            BoundSelect::Absent { labels } => format!("absent {{{}}}", label_pairs(labels)),
+            BoundVectorOp::Absent { labels } => format!("absent {{{}}}", label_pairs(labels)),
         },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} {}",
@@ -298,7 +298,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Window { .. } => "Window",
         NativeExpr::Map { .. } => "Map",
         NativeExpr::Aggregate { .. } => "Aggregate",
-        NativeExpr::Select { .. } => "Select",
+        NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
     }
 }

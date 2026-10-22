@@ -574,7 +574,7 @@ fn labels_with_name(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
 }
 
 /// Prometheus `labels.Compare`: label pairs in name order, then the shorter set first.
-pub(crate) fn compare_labels(a: &MetricName, b: &MetricName) -> Ordering {
+fn compare_labels(a: &MetricName, b: &MetricName) -> Ordering {
     labels_with_name(a).cmp(&labels_with_name(b))
 }
 
