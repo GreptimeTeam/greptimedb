@@ -43,7 +43,8 @@ use crate::test_util::{
 const LEASE: Duration = Duration::from_secs(10);
 const REGION_ID: RegionId = RegionId::new(1, 1);
 
-/// Creates [REGION_ID] on an engine whose writes need a lease. The node has no lease yet.
+/// Creates [REGION_ID] on an engine whose writes need a lease. The node has no lease yet, and
+/// the clock of the lease checks stands still until a test moves it.
 async fn create_region(
     env: &mut TestEnv,
     topic: Option<String>,
@@ -53,6 +54,7 @@ async fn create_region(
         .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
         .await;
     engine.require_write_lease();
+    engine.freeze_lease_clock(Instant::now());
     let request = CreateRequestBuilder::new().kafka_topic(topic).build();
     let schema = rows_schema(&request);
     engine
@@ -87,6 +89,21 @@ fn put(
         skip_wal: false,
     });
     tokio::spawn(async move { engine.handle_request(region_id, request).await })
+}
+
+/// Writes rows `0..3` and waits until the write is held after its WAL append.
+async fn put_and_hold(
+    listener: &WriteWalListener,
+    engine: &MitoEngine,
+    schema: &[ColumnSchema],
+) -> JoinHandle<Result<RegionResponse, BoxedError>> {
+    listener.pause_next();
+    let mut write = put(engine, REGION_ID, schema, 0);
+    tokio::select! {
+        () = listener.wait_appended() => {}
+        result = &mut write => panic!("the write finished before its WAL append: {result:?}"),
+    }
+    write
 }
 
 async fn count_rows(engine: &MitoEngine) -> usize {
@@ -128,12 +145,11 @@ async fn test_lease_expires_while_writing_wal(factory: Option<LogStoreFactory>) 
         .with_log_store_factory(factory.clone());
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let (listener, engine, schema) = create_region(&mut env, topic).await;
-    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    let deadline = Instant::now() + LEASE;
+    grant(&engine, RegionRole::Leader, deadline);
 
-    listener.pause_next();
-    let write = put(&engine, REGION_ID, &schema, 0);
-    listener.wait_appended().await;
-    engine.advance_lease_clock(LEASE);
+    let write = put_and_hold(&listener, &engine, &schema).await;
+    engine.freeze_lease_clock(deadline);
     listener.resume();
     assert_retryable(write.await.unwrap(), unacknowledged);
     // The write is in the WAL, so it is applied rather than undone.
@@ -152,18 +168,13 @@ async fn test_lease_renewed_while_writing_wal() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("lease-renewed-while-writing-wal").await;
     let (listener, engine, schema) = create_region(&mut env, None).await;
-    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    let deadline = Instant::now() + LEASE;
+    grant(&engine, RegionRole::Leader, deadline);
 
-    listener.pause_next();
-    let write = put(&engine, REGION_ID, &schema, 0);
-    listener.wait_appended().await;
+    let write = put_and_hold(&listener, &engine, &schema).await;
     // The grant keeps the region writable rather than staging, and still extends the deadline.
-    grant(
-        &engine,
-        RegionRole::StagingLeader,
-        Instant::now() + 2 * LEASE,
-    );
-    engine.advance_lease_clock(LEASE);
+    grant(&engine, RegionRole::StagingLeader, deadline + LEASE);
+    engine.freeze_lease_clock(deadline);
     listener.resume();
     assert_eq!(3, write.await.unwrap().unwrap().affected_rows);
 }
@@ -176,21 +187,16 @@ async fn test_downgrade_while_writing_wal(#[case] lease_expires: bool) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("downgrade-while-writing-wal").await;
     let (listener, engine, schema) = create_region(&mut env, None).await;
-    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    let deadline = Instant::now() + LEASE;
+    grant(&engine, RegionRole::Leader, deadline);
 
-    listener.pause_next();
-    let write = put(&engine, REGION_ID, &schema, 0);
-    listener.wait_appended().await;
+    let write = put_and_hold(&listener, &engine, &schema).await;
     // The metasrv renews the lease as DowngradingLeader once the route marks the region as
     // downgrading. A write already in the WAL is acknowledged, but only within the Leader
     // deadline, which such grants do not extend.
-    grant(
-        &engine,
-        RegionRole::DowngradingLeader,
-        Instant::now() + 2 * LEASE,
-    );
+    grant(&engine, RegionRole::DowngradingLeader, deadline + LEASE);
     if lease_expires {
-        engine.advance_lease_clock(LEASE);
+        engine.freeze_lease_clock(deadline);
     }
     listener.resume();
     let result = write.await.unwrap();

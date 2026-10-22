@@ -27,6 +27,7 @@ use crate::error::{Error, Result, UnexpectedSnafu, WriteGroupSnafu};
 use crate::memtable::KeyValues;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics;
+use crate::region::MitoRegionRef;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
 use crate::wal::{EntryId, WalWriter};
@@ -131,8 +132,9 @@ pub(crate) struct RegionWriteCtx {
     pub(crate) delete_num: usize,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Option<Arc<AtomicU64>>,
-    /// Leader deadline of the region when the write was prepared.
-    pub(crate) leader_deadline: u64,
+    /// The region and its Leader deadline when the write was prepared, if the write needs a
+    /// lease.
+    pub(crate) lease: Option<(MitoRegionRef, u64)>,
 }
 
 impl RegionWriteCtx {
@@ -169,7 +171,7 @@ impl RegionWriteCtx {
             delete_num: 0,
             bulk_parts: vec![],
             written_bytes,
-            leader_deadline: u64::MAX,
+            lease: None,
         }
     }
 
