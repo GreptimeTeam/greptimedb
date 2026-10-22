@@ -26,13 +26,13 @@ use mito_codec::row_converter::SparseOffsetsCache;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::FileId;
+use store_api::storage::{FileId, consts};
 
 use super::codec;
 use super::metadata::{self, Block, Column, Page, PageReference, Trailer, pack};
 use super::{
-    ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, OPERATION, Part, SEQUENCE,
-    TimestampColumn, TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
+    ColumnarSamplesFormat, MANIFEST_LIMIT, Manifest, MetricSeriesId, Part, TimestampColumn,
+    TimestampUnit, VERSION, ValueColumn, invalid, require, valid_rows,
 };
 use crate::error::{Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
@@ -166,11 +166,11 @@ impl SamplesWriter {
         )?;
         let (times, _) = timestamp_array_to_primitive(time)
             .ok_or_else(|| invalid("invalid sample timestamp array"))?;
-        let sequence = column(SEQUENCE)?
+        let sequence = column(consts::SEQUENCE_COLUMN_NAME)?
             .as_any()
             .downcast_ref::<UInt64Array>()
             .ok_or_else(|| invalid("invalid sample sequence type"))?;
-        let operations = column(OPERATION)?
+        let operations = column(consts::OP_TYPE_COLUMN_NAME)?
             .as_any()
             .downcast_ref::<UInt8Array>()
             .ok_or_else(|| invalid("invalid sample operation type"))?;
@@ -189,7 +189,7 @@ impl SamplesWriter {
                     .ok_or_else(|| invalid("invalid sample field array"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let keys = column("__primary_key")?;
+        let keys = column(consts::PRIMARY_KEY_COLUMN_NAME)?;
         require(keys.null_count() == 0, "null sample primary key")?;
         let binary = keys.as_any().downcast_ref::<BinaryArray>();
         let dictionary = keys.as_any().downcast_ref::<DictionaryArray<UInt32Type>>();

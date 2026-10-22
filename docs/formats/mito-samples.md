@@ -622,6 +622,23 @@ indexes; row/byte packing replaces the benchmark's hourly default. OpenDAL and
 the absence of caches also change performance. Measure the port independently;
 no performance equivalence is asserted.
 
+The benchmark follow-ups from [PR #9887](https://github.com/GreptimeTeam/greptimedb/pull/9887)
+include:
+
+- High-churn series with only a few rows per SST. Report stored bytes per row
+  and separate metadata from column payloads across different rows-per-series
+  distributions. Each identity change starts a new block, whose descriptor is
+  220 bytes before metadata compression with one present field, in addition to
+  the mandatory timestamp, sequence, and operation chunks and the value chunk.
+- Integer-valued Float64 counters. Compare the current XOR encoding with an
+  exact `first`/`step` progression encoding like the prototype in
+  [PR #9556](https://github.com/GreptimeTeam/greptimedb/pull/9556), measuring encoded
+  and compressed sizes as well as encode/decode throughput. Include steady
+  counters, resets, irregular increments, and nulls; any candidate must preserve
+  Float64 bits exactly and fall back for values it cannot represent losslessly.
+
+These measurements are deferred and do not change the version-1 wire contract.
+
 Additional field types, value statistics/predicates, exact primary keys,
 dedicated job/instance identifier components, label reconstruction, cache
 integration, deeper trees, and query integration are deferred. The byte assignments
