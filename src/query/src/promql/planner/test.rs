@@ -1688,6 +1688,14 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     // The node carries the query a reader wrote, not the shape it compiled to.
     let fused = find_fused_series(&plan).expect("the plan holds a native node");
     assert_eq!("rate(some_metric[5m])", fused.promql());
+    assert_eq!(
+        vec!["timestamp", "field_0", "tag_0"],
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
