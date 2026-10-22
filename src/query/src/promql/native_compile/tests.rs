@@ -3933,7 +3933,7 @@ fn a_compiled_sum_by_groups_its_members_and_sums_each_group() {
             b"a",
             agg_metric("x", &[("job", "api"), ("instance", "a")]),
             &all,
-            &vec![1.0; 21],
+            &[1.0; 21],
         ),
         // One sample halfway between grid points 0 and 1, so only grid point 1 selects it.
         agg_raw_chunk(
@@ -3949,7 +3949,7 @@ fn a_compiled_sum_by_groups_its_members_and_sums_each_group() {
             b"e",
             agg_metric("x", &[("job", "api"), ("instance", "e")]),
             &[2_400, 7_400, 12_400, 17_400],
-            &vec![5.0; 4],
+            &[5.0; 4],
         ),
         // The whole grid, holding ten.
         agg_raw_chunk(
@@ -3957,7 +3957,7 @@ fn a_compiled_sum_by_groups_its_members_and_sums_each_group() {
             b"c",
             agg_metric("x", &[("job", "db"), ("instance", "c")]),
             &all,
-            &vec![10.0; 21],
+            &[10.0; 21],
         ),
         // One sample halfway between grid points 0 and 1, holding twenty.
         agg_raw_chunk(
@@ -4014,14 +4014,14 @@ fn a_compiled_sum_without_drops_the_named_label_and_the_name() {
             b"a",
             agg_metric("x", &[("job", "api"), ("instance", "a"), ("zone", "west")]),
             &timestamps,
-            &vec![1.0; 21],
+            &[1.0; 21],
         ),
         agg_raw_chunk(
             &schema,
             b"b",
             agg_metric("x", &[("job", "api"), ("instance", "b"), ("zone", "east")]),
             &timestamps,
-            &vec![2.0; 21],
+            &[2.0; 21],
         ),
     ];
 
