@@ -184,24 +184,34 @@ impl ObjectStoreIo {
     /// error, before any object it listed that the caller has not taken yet;
     /// dropping the stream stops the listing.
     pub(crate) fn list_ahead(&self) -> BoxStream<'static, Result<ListedObject>> {
-        let (tx, rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
-        let listing = self.clone().send_listing(tx);
+        let (listing, rx) = self.clone().listing();
         let listing = AbortOnDropHandle::new(common_runtime::spawn_global(listing));
         settle_listing(rx, listing, self.object_prefix.clone())
     }
 
-    /// Lists the objects under the prefix into `tx`, waiting while it is full.
-    async fn send_listing(self, tx: mpsc::Sender<ListedObject>) -> object_store::Result<()> {
-        let mut lister = self.store.lister(&self.object_prefix).await?;
-        while let Some(entry) = lister.try_next().await? {
-            // The receiver is gone only once the stream was dropped.
-            if let Some(object) = self.listed_object(&entry)
-                && tx.send(object).await.is_err()
-            {
-                break;
+    /// Returns the listing of the objects under the prefix and the receiver it
+    /// sends them to; it waits while the receiver holds
+    /// [`LISTING_AHEAD_OBJECTS`] of them.
+    fn listing(
+        self,
+    ) -> (
+        impl Future<Output = object_store::Result<()>> + Send + 'static,
+        mpsc::Receiver<ListedObject>,
+    ) {
+        let (tx, rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
+        let listing = async move {
+            let mut lister = self.store.lister(&self.object_prefix).await?;
+            while let Some(entry) = lister.try_next().await? {
+                // The receiver is gone only once the stream was dropped.
+                if let Some(object) = self.listed_object(&entry)
+                    && tx.send(object).await.is_err()
+                {
+                    break;
+                }
             }
-        }
-        Ok(())
+            Ok::<_, object_store::Error>(())
+        };
+        (listing, rx)
     }
 
     pub(crate) fn object_path(&self, object_seq: u64) -> String {
@@ -647,9 +657,9 @@ mod tests {
             .build()
             .unwrap();
         let io = ObjectStoreIo::new(store.layer(mock), "datanodes/1/epochs/2/").unwrap();
-        let (tx, mut rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
+        let (listing, mut rx) = io.listing();
         // Out of the cooperative budget, so it waits only on a full channel.
-        let mut listing = pin!(tokio::task::unconstrained(io.send_listing(tx)));
+        let mut listing = pin!(tokio::task::unconstrained(listing));
 
         // Nothing takes the objects, so the listing waits once the backlog is
         // full, with the directory entry and the object waiting to be sent
