@@ -803,7 +803,7 @@ fn subquery_window(
              in its anchored interval or the statement's range"
         ))
     })?;
-    let child_grid = Arc::new(EvalGrid::try_new(child_spec).map_err(grid_error)?);
+    let child_grid = Arc::new(EvalGrid::try_deferred(child_spec).map_err(grid_error)?);
     let inner = compile_expr(
         &Context {
             stmt: context.stmt,

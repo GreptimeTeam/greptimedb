@@ -2648,6 +2648,57 @@ fn a_subquery_with_an_empty_child_grid_is_refused() {
     );
 }
 
+/// Large subquery child grids compile as deferred grids without allocating one timestamp per point.
+#[test]
+fn large_subquery_child_grids_compile_deferred() {
+    const DAY_STEP_GRID: (i64, i64, u64) = (-86_399_999, 1, 86_400_000);
+    let cases = [
+        ("rate(x[1d:1ms] @ 0)", false),
+        ("rate(rate(x[1d:1ms] @ 0)[1d:1ms] @ 0)", true),
+    ];
+
+    for (query, nested) in cases {
+        let mut stmt = eval_stmt(query);
+        stmt.end = UNIX_EPOCH;
+        stmt.interval = Duration::from_millis(1);
+        let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (input, outer) = root_window(&tree);
+        assert_eq!(child_grid(outer), DAY_STEP_GRID, "`{query}` outer grid");
+        if nested {
+            let NativeExpr::Window { op: inner, .. } = &input.expr else {
+                panic!(
+                    "`{query}` inner expression is not a window: {:?}",
+                    input.expr
+                );
+            };
+            assert_eq!(child_grid(inner), DAY_STEP_GRID, "`{query}` inner grid");
+        }
+    }
+
+    // This range makes the eager timestamp vector's capacity exceed isize::MAX bytes, while its
+    // child GridSpec remains valid and the deferred compiler path should require no such allocation.
+    let range_ms = (isize::MAX / 8 + 1) as u64;
+    let mut stmt = eval_stmt("rate(x[1ms:1ms] @ 0)");
+    stmt.end = UNIX_EPOCH;
+    stmt.interval = Duration::from_millis(1);
+    let PromExpr::Call(call) = &mut stmt.expr else {
+        unreachable!("query parses to a call");
+    };
+    let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
+        unreachable!("call argument parses to a subquery");
+    };
+    subquery.range = Duration::from_millis(range_ms);
+
+    let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect("a huge but valid deferred child grid should compile");
+    let (_, window) = root_window(&tree);
+    let grid = child_grid(window);
+    assert_eq!(grid.0, -(range_ms as i64) + 1);
+    assert_eq!(grid.1, 1);
+    assert_eq!(grid.2, range_ms);
+}
+
 /// A sampled child endpoint can fit even when the unrounded read-window endpoint does not.
 #[test]
 fn a_subquery_accepts_an_in_range_sampled_endpoint() {
