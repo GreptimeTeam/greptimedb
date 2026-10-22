@@ -1391,3 +1391,48 @@ fn count_values_keeps_neighbours_of_a_power_of_two_apart() {
         ]
     );
 }
+
+/// Prometheus counts a histogram sample under the text `FloatHistogram.String` writes it as, so
+/// equal histograms share a group and a float beside them has its own.
+#[test]
+fn count_values_counts_histograms_by_their_text() {
+    use crate::grid_series::reference::OwnedHistogram;
+    use crate::grid_series::{GridSample, GridSeriesBuilder};
+    use crate::histogram_eval::float_histogram::FloatHistogram;
+    use crate::histogram_eval::histogram_string;
+
+    let schema = schema_with_grid_len(&["value"], 1);
+    let histogram =
+        OwnedHistogram::parse("0/0/0/4000000000000000/3ff0000000000000/0/1_1/4000000000000000///");
+    let text = histogram_string(&histogram.view()).unwrap();
+    let series = |job: &str, sample: GridSample| {
+        let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
+        builder.push_samples(0, &[Some(sample)]).unwrap();
+        builder
+            .finish(metric("m", &[("job", job)]))
+            .unwrap()
+            .unwrap()
+    };
+    let sample = || {
+        GridSample::Histogram(Box::new(
+            FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+        ))
+    };
+    let input = [
+        series("a", sample()),
+        series("b", sample()),
+        series("c", GridSample::Float(2.0)),
+    ];
+    let mut counts: Vec<(String, f64)> = count_values(&schema, &input, "v", Grouping::By(&[]))
+        .unwrap()
+        .iter()
+        .map(|series| {
+            let SampleRef::Float(count) = series.fields.as_slice()[0].sample(0) else {
+                panic!("a count is a float");
+            };
+            (series.metric.get("v").unwrap().to_string(), count)
+        })
+        .collect();
+    counts.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(counts, [("2".to_string(), 1.0), (text, 2.0)]);
+}

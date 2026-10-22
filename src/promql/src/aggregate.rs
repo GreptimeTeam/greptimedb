@@ -35,7 +35,8 @@ use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 
 use crate::go_format::format_float_f;
 use crate::grid_series::{GridSeriesBuilder, external};
-use crate::map::{drop_empty_labels, validate_float_series, validate_scalar};
+use crate::histogram_eval::histogram_string;
+use crate::map::{drop_empty_labels, validate_float_series, validate_grid_series, validate_scalar};
 use crate::range_eval::quantile;
 
 /// Float aggregations without a parameter.
@@ -277,7 +278,8 @@ pub fn aggregate_quantile(
 
 /// `count_values(label, v)`: at each grid point, the number of samples in each group of series
 /// that share a value, with the value written to `label` in Prometheus' `FormatFloat(v, 'f', -1)`
-/// form. With `by`, `label` is part of the grouping; with `without`, it is dropped if listed.
+/// form, or for a native histogram as its `FloatHistogram.String`. With `by`, `label` is part of
+/// the grouping; with `without`, it is dropped if listed.
 pub fn count_values(
     schema: &Arc<SeriesSchema>,
     input: &[Series],
@@ -298,7 +300,11 @@ pub fn count_values(
         }
         without => without,
     };
-    validate_input(schema, input, checked)?;
+    // Unlike the other aggregations, this one reads histogram samples too.
+    validate_grouping(schema, checked)?;
+    for series in input {
+        validate_grid_series(schema, series)?;
+    }
     if label.is_empty() {
         return Err(DataFusionError::Execution(format!(
             "invalid label name {label:?}"
@@ -319,20 +325,26 @@ pub fn count_values(
     let mut groups: Counts = Vec::new();
     for series in input {
         // Equal bits format to the same label value, so each distinct value of a series
-        // resolves its group once.
-        let mut group_of_value: HashMap<u64, usize> = HashMap::new();
+        // resolves its group once. A histogram is keyed by the text it is written as.
+        let mut group_of_value: HashMap<Value, usize> = HashMap::new();
         for (field_index, field) in series.fields.iter().enumerate() {
             for ((point, _), sample) in series.time.positions().zip(field.iter()) {
-                let SampleRef::Float(value) = sample else {
-                    continue;
+                let key = match sample {
+                    SampleRef::Missing => continue,
+                    SampleRef::Float(value) => Value::Float(value.to_bits()),
+                    SampleRef::Histogram(h) => Value::Histogram(histogram_string(&h)?),
                 };
-                let group = match group_of_value.entry(value.to_bits()) {
+                let group = match group_of_value.entry(key) {
                     Entry::Occupied(entry) => *entry.get(),
                     Entry::Vacant(entry) => {
+                        // Prometheus writes a float in Go's `'f'` form and a histogram as
+                        // `FloatHistogram.String` does.
+                        let text = match entry.key() {
+                            Value::Float(bits) => format_float_f(f64::from_bits(*bits)),
+                            Value::Histogram(text) => text.clone(),
+                        };
                         let mut metric = series.metric.clone();
-                        metric
-                            .set(label, Arc::from(format_float_f(value)))
-                            .map_err(external)?;
+                        metric.set(label, Arc::from(text)).map_err(external)?;
                         let metric = grouping.apply(&metric)?;
                         let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
                             groups.push((metric, BTreeMap::new()));
@@ -370,18 +382,29 @@ fn count_series(schema: &Arc<SeriesSchema>, groups: Counts) -> Result<Vec<Series
     Ok(output)
 }
 
+/// The value of a `count_values` sample, as it is grouped.
+#[derive(PartialEq, Eq, Hash)]
+enum Value {
+    Float(u64),
+    Histogram(String),
+}
+
 /// Schema validation is repeated because Series exposes its fields publicly.
 fn validate_input(schema: &SeriesSchema, input: &[Series], grouping: Grouping<'_>) -> Result<()> {
+    validate_grouping(schema, grouping)?;
+    for series in input {
+        validate_float_series(schema, series)?;
+    }
+    Ok(())
+}
+
+fn validate_grouping(schema: &SeriesSchema, grouping: Grouping<'_>) -> Result<()> {
     if schema.eval_grid.is_none() {
         return Err(DataFusionError::Execution(
             "Aggregate requires an evaluated grid".into(),
         ));
     }
-    grouping.validate(schema)?;
-    for series in input {
-        validate_float_series(schema, series)?;
-    }
-    Ok(())
+    grouping.validate(schema)
 }
 
 impl Grouping<'_> {

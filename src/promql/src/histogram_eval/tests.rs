@@ -25,7 +25,7 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use super::float_histogram::{AddOutcome, FloatHistogram};
 use super::{
     HistogramAggregate, HistogramFunction, NativeHistogramFunction, aggregate_histograms,
-    evaluate_histograms, histogram_quantiles, map_native_histogram,
+    evaluate_histograms, histogram_quantiles, histogram_string, map_native_histogram,
 };
 use crate::grid_series::merge_same_labelset;
 use crate::grid_series::reference::{
@@ -859,6 +859,21 @@ fn native_histogram_functions_keep_the_runs_of_a_sparse_series() {
         assert!(
             values.iter().all(|value| value.is_finite()),
             "{function:?} produced {values:?}"
+        );
+    }
+}
+
+/// Go `FloatHistogram.String` over fixed and random histograms (`narthex-golden-histstring`):
+/// bucket order, inclusiveness, empty buckets skipped, the zero bucket, custom bounds and `%g`.
+#[test]
+fn histogram_string_matches_prometheus() {
+    for line in include_str!("string_cases.txt").lines() {
+        let (encoded, expected) = line.split_once('\t').expect("tab-separated case");
+        let histogram = OwnedHistogram::parse(encoded);
+        assert_eq!(
+            histogram_string(&histogram.view()).unwrap(),
+            expected,
+            "{encoded}"
         );
     }
 }
