@@ -27,7 +27,7 @@ pub use state::{
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
-use std::mem::{align_of, size_of};
+use std::mem::size_of;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -779,86 +779,41 @@ fn grouping_workspace_bytes(metric: &MetricName) -> usize {
 /// Conservative backing estimate for Rust 1.98.1's insert-only `HashMap` (hashbrown 0.17.1).
 /// Bucket count follows its 7/8 load factor; entries, one control byte per bucket and the
 /// 16-byte control-group tail are counted. This models requested table storage, not allocator slack.
+/// An upper bound on the bytes the group index holds for `capacity` entries.
+///
+/// The table keeps its entries in a power-of-two number of buckets below `16/7` of the usable
+/// capacity, with one control byte beside each bucket. Three buckets per entry therefore covers the
+/// table whatever exact growth the map uses, which is what keeps this a bound rather than a model of
+/// one implementation: a toolchain that changes how the map grows cannot make it under-count.
 fn hash_map_backing_bytes(capacity: usize) -> usize {
-    let Ok(buckets) = hash_buckets(capacity) else {
-        return usize::MAX;
-    };
-    let entry = size_of::<(LabelKey, usize)>();
-    let alignment = align_of::<(LabelKey, usize)>().max(16);
-    let Some(data) = buckets.checked_mul(entry) else {
-        return usize::MAX;
-    };
-    let Some(aligned) = data
-        .checked_add(alignment - 1)
-        .map(|bytes| bytes / alignment * alignment)
-    else {
-        return usize::MAX;
-    };
-    if buckets == 0 {
-        return 0;
-    }
-    aligned
-        .checked_add(buckets)
-        .and_then(|bytes| bytes.checked_add(16))
-        .unwrap_or(usize::MAX)
+    capacity
+        .saturating_mul(3)
+        .saturating_mul(size_of::<(LabelKey, usize)>() + 1)
 }
 
+/// An upper bound on the capacity a map holding `capacity` entries grows to.
 fn next_hash_capacity(capacity: usize) -> usize {
-    match capacity {
-        0 => 3,
-        1..=3 => 7,
-        4..=7 => 14,
-        8..=14 => 28,
-        15..=28 => 56,
-        _ => capacity.saturating_mul(2),
-    }
+    capacity.saturating_mul(2).max(7)
 }
 
-fn hash_buckets(capacity: usize) -> Result<usize> {
-    if capacity == 0 {
-        return Ok(0);
-    }
-    if capacity <= 3 {
-        return Ok(4);
-    }
-    let target = capacity
-        .checked_mul(8)
-        .ok_or_else(|| DataFusionError::Execution("aggregate map capacity overflow".into()))?
-        / 7;
-    target
-        .checked_next_power_of_two()
-        .ok_or_else(|| DataFusionError::Execution("aggregate map capacity overflow".into()))
+/// An upper bound on the bytes one B-tree node holds.
+///
+/// A node keeps at most eleven key/value pairs and twelve child pointers, plus a header of a few
+/// words; the leaf form is smaller than that. The header allowance is generous on purpose, so the
+/// bound does not depend on how a toolchain lays the node out.
+fn btree_node_bytes() -> usize {
+    11 * size_of::<(usize, Box<[FloatState]>)>() + 16 * size_of::<usize>()
 }
 
-/// Maximum B-tree node count for `entries`: each non-root node contains at least five entries
-/// in Rust 1.98.1's `alloc` B=6 tree. Node bytes derive from the aligned generic node layout.
+/// An upper bound on the bytes a B-tree of `entries` holds.
+///
+/// Every node but the root keeps at least five entries, so `entries / 5` nodes is enough to hold
+/// them; a tree of one entry is one node.
 fn btree_backing_bytes(entries: usize) -> usize {
     if entries == 0 {
         return 0;
     }
-    let Some(nodes) = 1usize.checked_add((entries - 1).div_ceil(5)) else {
-        return usize::MAX;
-    };
-    let key_value = size_of::<(usize, Box<[FloatState]>)>();
-    let Some(leaf) = align_up(
-        size_of::<Option<(std::ptr::NonNull<()>, u16)>>() + size_of::<u16>() + 11 * key_value,
-        align_of::<usize>(),
-    ) else {
-        return usize::MAX;
-    };
-    let Some(internal) = leaf
-        .checked_add(12 * size_of::<std::ptr::NonNull<()>>())
-        .and_then(|bytes| align_up(bytes, align_of::<usize>()))
-    else {
-        return usize::MAX;
-    };
-    nodes.saturating_mul(internal)
-}
-
-fn align_up(bytes: usize, alignment: usize) -> Option<usize> {
-    bytes
-        .checked_add(alignment - 1)
-        .map(|bytes| bytes / alignment * alignment)
+    entries.div_ceil(5).saturating_mul(btree_node_bytes())
 }
 
 fn pending_bytes(fields: usize) -> usize {
