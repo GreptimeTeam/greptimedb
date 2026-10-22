@@ -53,7 +53,7 @@ use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
     compute_parallel_channel_size,
 };
-use crate::read::seq_scan::SeqScan;
+use crate::read::seq_scan::{FlatReadMode, SeqScan};
 use crate::read::series_candidate::{SeriesCandidateScanner, is_sparse_metric_metadata};
 use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, SeriesReader};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
@@ -719,6 +719,7 @@ impl SeriesDistributor {
 
         // Create PartitionPruner covering all partitions
         let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let needs_merge = all_partition_ranges.len() > 1;
         let partition_pruner = Arc::new(PartitionPruner::new(
             self.pruner.clone(),
             &all_partition_ranges,
@@ -751,7 +752,11 @@ impl SeriesDistributor {
                     SeqScan::build_flat_partition_range_read(
                         &stream_ctx,
                         &part_range,
-                        false,
+                        if needs_merge {
+                            FlatReadMode::CrossRangeMerge
+                        } else {
+                            FlatReadMode::Sequential
+                        },
                         &part_metrics,
                         partition_pruner,
                         file_scan_semaphore,

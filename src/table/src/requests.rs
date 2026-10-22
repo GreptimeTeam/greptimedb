@@ -73,6 +73,7 @@ pub fn is_trace_table(table_info: &crate::metadata::TableInfo) -> bool {
     )
 }
 
+/// Retained table metadata; OTLP metrics always use Prometheus-compatible conversion.
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 

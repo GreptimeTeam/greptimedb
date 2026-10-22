@@ -53,11 +53,9 @@ use common_base::cancellation::CancellableFuture;
 use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
-use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::key::table_name::TableNameKey;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use common_query::Output;
@@ -65,12 +63,10 @@ use common_recordbatch::RecordBatchStreamWrapper;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
-use dashmap::DashMap;
 use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt, future};
-use lazy_static::lazy_static;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
@@ -84,14 +80,10 @@ use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
-use servers::error::{
-    self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
-    OtlpMetricModeIncompatibleSnafu, UnexpectedResultSnafu,
-};
+use servers::error::{self as server_error, AuthSnafu, ExecuteQuerySnafu, UnexpectedResultSnafu};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
-use servers::otlp::metrics::legacy_normalize_otlp_name;
 use servers::prometheus_handler::{
     ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
 };
@@ -108,7 +100,6 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
-use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
 
 use crate::error::{
@@ -118,10 +109,6 @@ use crate::error::{
 };
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
-
-lazy_static! {
-    static ref OTLP_LEGACY_DEFAULT_VALUE: String = "legacy".to_string();
-}
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -155,12 +142,6 @@ pub struct Instance {
             common_grpc::flow_write::Reply,
         >,
     >,
-
-    // cache for otlp metrics
-    // first layer key: db-string
-    // key: direct input metric name
-    // value: if runs in legacy mode
-    otlp_metrics_table_legacy_cache: Arc<DashMap<String, DashMap<String, bool>>>,
 }
 
 impl Instance {
@@ -499,137 +480,6 @@ impl Instance {
             .await
             .context(TableOperationSnafu)
     }
-
-    async fn check_otlp_legacy(
-        &self,
-        names: &[String],
-        ctx: &QueryContextRef,
-    ) -> server_error::Result<bool> {
-        let db_string = ctx.get_db_string();
-        // fast cache check
-        let cache = self
-            .otlp_metrics_table_legacy_cache
-            .entry(db_string.clone())
-            .or_default();
-        if let Some(flag) = fast_legacy_check(&cache, names)? {
-            return Ok(flag);
-        }
-        // release cache reference to avoid lock contention
-        drop(cache);
-
-        let catalog = ctx.current_catalog();
-        let schema = ctx.current_schema();
-
-        // query legacy table names
-        let normalized_names = names
-            .iter()
-            .map(|n| legacy_normalize_otlp_name(n))
-            .collect::<Vec<_>>();
-        let table_names = normalized_names
-            .iter()
-            .map(|n| TableNameKey::new(catalog, &schema, n))
-            .collect::<Vec<_>>();
-        let table_values = self
-            .table_metadata_manager()
-            .table_name_manager()
-            .batch_get(table_names)
-            .await
-            .context(CommonMetaSnafu)?;
-        let table_ids = table_values
-            .into_iter()
-            .filter_map(|v| v.map(|vi| vi.table_id()))
-            .collect::<Vec<_>>();
-
-        // means no existing table is found, use new mode
-        if table_ids.is_empty() {
-            return Ok(false);
-        }
-
-        // has existing table, check table options
-        let table_infos = self
-            .table_metadata_manager()
-            .table_info_manager()
-            .batch_get(&table_ids)
-            .await
-            .context(CommonMetaSnafu)?;
-        let options = table_infos
-            .values()
-            .map(|info| {
-                info.table_info
-                    .meta
-                    .options
-                    .extra_options
-                    .get(OTLP_METRIC_COMPAT_KEY)
-                    .unwrap_or(&OTLP_LEGACY_DEFAULT_VALUE)
-            })
-            .collect::<Vec<_>>();
-        if !options.is_empty() {
-            // check value consistency
-            let has_prom = options.iter().any(|opt| *opt == OTLP_METRIC_COMPAT_PROM);
-            let has_legacy = options
-                .iter()
-                .any(|opt| *opt == OTLP_LEGACY_DEFAULT_VALUE.as_str());
-            ensure!(!(has_prom && has_legacy), OtlpMetricModeIncompatibleSnafu);
-            Ok(has_legacy)
-        } else {
-            // no table info, use new mode
-            Ok(false)
-        }
-    }
-
-    fn cache_otlp_legacy(
-        &self,
-        names: &[String],
-        ctx: &QueryContextRef,
-        is_legacy: bool,
-    ) -> server_error::Result<()> {
-        let cache = self
-            .otlp_metrics_table_legacy_cache
-            .entry(ctx.get_db_string())
-            .or_default();
-        cache_legacy_mode(&cache, names, is_legacy)
-    }
-}
-
-fn fast_legacy_check(
-    cache: &DashMap<String, bool>,
-    names: &[String],
-) -> server_error::Result<Option<bool>> {
-    let hit_cache = names
-        .iter()
-        .filter_map(|name| cache.get(name))
-        .collect::<Vec<_>>();
-    CACHE_HIT
-        .with_label_values(&["otlp_metrics_legacy"])
-        .inc_by(hit_cache.len() as u64);
-    CACHE_MISS
-        .with_label_values(&["otlp_metrics_legacy"])
-        .inc_by((names.len() - hit_cache.len()) as u64);
-    if !hit_cache.is_empty() {
-        let hit_legacy = hit_cache.iter().any(|en| *en.value());
-        let hit_prom = hit_cache.iter().any(|en| !*en.value());
-
-        // hit but have true and false, means both legacy and new mode are used
-        // we cannot handle this case, so return error
-        // add doc links in err msg later
-        ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
-
-        Ok(Some(hit_legacy))
-    } else {
-        Ok(None)
-    }
-}
-
-fn cache_legacy_mode(
-    cache: &DashMap<String, bool>,
-    names: &[String],
-    is_legacy: bool,
-) -> server_error::Result<()> {
-    for name in names {
-        let cached = cache.entry(name.clone()).or_insert(is_legacy);
-        ensure!(*cached == is_legacy, OtlpMetricModeIncompatibleSnafu);
-    }
-    Ok(())
 }
 
 /// If the relevant variables are set, the timeout is enforced for all PostgreSQL statements.
@@ -1996,6 +1846,7 @@ mod tests {
     use common_error::ext::{BoxedError, ErrorExt, PlainError};
     use common_error::status_code::StatusCode;
     use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
+    use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
     use common_frontend::slow_query_event::SlowQueryEvent;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -3457,21 +3308,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_instance_shared_state() -> TestResult<()> {
-        let instance =
-            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
-                .await?;
-
-        let _event_recorder = instance.event_recorder();
-        assert!(Arc::ptr_eq(
-            &instance.otlp_metrics_table_legacy_cache,
-            &instance.clone().otlp_metrics_table_legacy_cache,
-        ));
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_restricted_endpoint_handlers_check_permissions() -> TestResult<()> {
         let checker = Arc::new(RejectEndpointPermissionChecker::default());
         let plugins = Plugins::new();
@@ -3925,33 +3761,6 @@ mod tests {
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
         Ok(())
-    }
-
-    #[test]
-    fn test_fast_legacy_check_is_read_only() {
-        let hits = CACHE_HIT.with_label_values(&["otlp_metrics_legacy"]);
-        let misses = CACHE_MISS.with_label_values(&["otlp_metrics_legacy"]);
-        let before = (hits.get(), misses.get());
-        let cache = DashMap::new();
-        cache.insert("metric1".to_string(), true);
-
-        let names = vec!["metric1".to_string(), "metric2".to_string()];
-        assert_eq!(Some(true), fast_legacy_check(&cache, &names).unwrap());
-        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 1));
-        assert!(!cache.contains_key("metric2"));
-
-        cache_legacy_mode(&cache, &names, true).unwrap();
-        assert!(*cache.get("metric2").unwrap().value());
-        assert!(cache_legacy_mode(&cache, &names, false).is_err());
-        assert!(*cache.get("metric2").unwrap().value());
-
-        let cache_incompatible = DashMap::new();
-        cache_incompatible.insert("metric1".to_string(), true);
-        cache_incompatible.insert("metric2".to_string(), false);
-        assert!(fast_legacy_check(&cache_incompatible, &names).is_err());
-        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
-        assert_eq!(None, fast_legacy_check(&cache, &[]).unwrap());
-        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
     }
 
     #[test]

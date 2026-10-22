@@ -9174,7 +9174,255 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         assert!(body.contains("otlp_exponential_latency"), "{query}: {body}");
     }
 
+    test_otlp_delta_exponential_queries(&client).await;
+    test_otlp_invalid_metric_names(&client).await;
+
     guard.remove_all().await;
+}
+
+async fn test_otlp_invalid_metric_names(client: &TestClient) {
+    for (name, strategy) in [
+        ("!!!", "UnderscoreEscapingWithSuffixes"),
+        ("bad/name", "NoTranslation"),
+    ] {
+        for reverse in [false, true] {
+            let gauge = |name| serde_json::json!({"name":name,"gauge":{"dataPoints":[{"timeUnixNano":"60000000000","asDouble":7.0}]}});
+            let mut metrics = vec![gauge(name), gauge("valid_name_sibling")];
+            if reverse {
+                metrics.reverse();
+            }
+            let request: ExportMetricsServiceRequest = serde_json::from_value(
+                serde_json::json!({"resourceMetrics":[{"scopeMetrics":[{"metrics":metrics}]}]}),
+            )
+            .unwrap();
+            let res = client
+                .post("/v1/otlp/v1/metrics")
+                .header("content-type", "application/x-protobuf")
+                .header("x-greptime-otlp-metric-translation-strategy", strategy)
+                .body(request.encode_to_vec())
+                .send()
+                .await;
+            assert_eq!(res.status(), StatusCode::OK);
+            let response = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
+            assert_eq!(response.partial_success.unwrap().rejected_data_points, 1);
+        }
+    }
+    validate_data(
+        "valid_metric_name_sibling",
+        client,
+        "SELECT greptime_value FROM valid_name_sibling",
+        "[[7.0]]",
+    )
+    .await;
+}
+
+async fn test_otlp_delta_exponential_queries(client: &TestClient) {
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
+        ResourceMetrics, ScopeMetrics, exponential_histogram_data_point, metric,
+    };
+    let request =
+        |name: &str, samples: &[(u64, u64, u64)], temporality| ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: name.into(),
+                        data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                            aggregation_temporality: temporality as i32,
+                            data_points: samples
+                                .iter()
+                                .map(|&(start, end, count)| ExponentialHistogramDataPoint {
+                                    start_time_unix_nano: start * 1_000_000_000,
+                                    time_unix_nano: end * 1_000_000_000,
+                                    count,
+                                    sum: Some(count as f64 * 1.5),
+                                    zero_threshold: 0.001,
+                                    positive: Some(exponential_histogram_data_point::Buckets {
+                                        offset: 0,
+                                        bucket_counts: vec![count],
+                                    }),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+    for (name, samples) in [
+        (
+            "delta_interval",
+            vec![(0, 60, 10), (60, 120, 20), (120, 180, 15)],
+        ),
+        ("delta_crossing", vec![(90, 150, 12)]),
+        ("delta_left", vec![(60, 120, 10)]),
+        ("delta_gap", vec![(120, 180, 10), (240, 300, 20)]),
+    ] {
+        let res = client
+            .post("/v1/otlp/v1/metrics")
+            .header("content-type", "application/x-protobuf")
+            .body(request(name, &samples, AggregationTemporality::Delta).encode_to_vec())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            ExportMetricsServiceResponse::decode(res.bytes().await)
+                .unwrap()
+                .partial_success
+                .is_none()
+        );
+    }
+    for flushed in [false, true] {
+        if flushed {
+            for name in [
+                "delta_interval",
+                "delta_crossing",
+                "delta_left",
+                "delta_gap",
+            ] {
+                flush_table(client, name).await;
+            }
+        }
+        for (expression, time, expected) in [
+            (
+                "histogram_count(sum_over_time(delta_interval[3m]))",
+                180,
+                Some(45.0),
+            ),
+            (
+                "histogram_sum(sum_over_time(delta_interval[3m]))",
+                180,
+                Some(67.5),
+            ),
+            (
+                "histogram_count(sum_over_time(delta_interval[3m]) / 180)",
+                180,
+                Some(0.25),
+            ),
+            (
+                "histogram_sum(sum_over_time(delta_interval[3m]) / 180)",
+                180,
+                Some(0.375),
+            ),
+            (
+                "histogram_fraction(1, 2, sum_over_time(delta_interval[3m]))",
+                180,
+                Some(1.0),
+            ),
+            (
+                "histogram_count(sum_over_time(delta_crossing[3m]))",
+                300,
+                Some(12.0),
+            ),
+            (
+                "histogram_count(sum_over_time(delta_gap[3m]))",
+                300,
+                Some(30.0),
+            ),
+            ("sum_over_time(delta_left[3m])", 300, None),
+            ("sum_over_time(delta_interval[3m])", 500, None),
+        ] {
+            let res = client
+                .get(&format!(
+                    "/v1/prometheus/api/v1/query?query={}&time={time}",
+                    encode(expression)
+                ))
+                .send()
+                .await;
+            assert_eq!(res.status(), StatusCode::OK, "{expression}");
+            let body: serde_json::Value = res.json().await;
+            let results = body["data"]["result"].as_array().unwrap();
+            if let Some(expected) = expected {
+                assert_eq!(results.len(), 1, "{expression}: {body}");
+                let value = body["data"]["result"][0]["value"][1]
+                    .as_str()
+                    .unwrap()
+                    .parse::<f64>()
+                    .unwrap();
+                assert!((value - expected).abs() < 1e-12, "{expression}: {body}");
+            } else {
+                assert!(results.is_empty(), "{expression}: {body}");
+            }
+        }
+    }
+    let metadata: serde_json::Value = client
+        .get("/v1/prometheus/api/v1/metadata?metric=delta_interval")
+        .send()
+        .await
+        .json()
+        .await;
+    assert_eq!(
+        metadata["data"]["delta_interval"][0]["type"], "unknown",
+        "{metadata}"
+    );
+    // Both creation orders keep cumulative and delta identities distinct.
+    let mut mixed = request(
+        "mixed_created",
+        &[(0, 60, 10)],
+        AggregationTemporality::Cumulative,
+    );
+    mixed.resource_metrics.extend(
+        request(
+            "mixed_created",
+            &[(0, 60, 20)],
+            AggregationTemporality::Delta,
+        )
+        .resource_metrics,
+    );
+    let response = client
+        .post("/v1/otlp/v1/metrics")
+        .header("content-type", "application/x-protobuf")
+        .body(mixed.encode_to_vec())
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let metadata: serde_json::Value = client
+        .get("/v1/prometheus/api/v1/metadata?metric=mixed_created")
+        .send()
+        .await
+        .json()
+        .await;
+    assert_eq!(
+        metadata["data"]["mixed_created"][0]["type"], "unknown",
+        "{metadata}"
+    );
+    for (name, first, second) in [
+        (
+            "delta_first",
+            AggregationTemporality::Delta,
+            AggregationTemporality::Cumulative,
+        ),
+        (
+            "cumulative_first",
+            AggregationTemporality::Cumulative,
+            AggregationTemporality::Delta,
+        ),
+    ] {
+        for temporality in [first, second] {
+            let res = client
+                .post("/v1/otlp/v1/metrics")
+                .header("content-type", "application/x-protobuf")
+                .body(request(name, &[(0, 60, 10)], temporality).encode_to_vec())
+                .send()
+                .await;
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+        for flushed in [false, true] {
+            if flushed {
+                flush_table(client, name).await;
+            }
+            validate_data(
+                "delta_identity",
+                client,
+                &format!("SELECT COUNT(*) FROM {name}"),
+                "[[2]]",
+            )
+            .await;
+        }
+    }
 }
 
 pub async fn test_otlp_metric_translation_strategies(store_type: StorageType) {

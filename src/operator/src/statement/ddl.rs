@@ -128,10 +128,20 @@ use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
 
+/// Options shared by SQL DDL submission paths.
 #[derive(Debug, Clone, Copy)]
-struct DdlSubmitOptions {
+pub(crate) struct DdlSubmitOptions {
     wait: bool,
     timeout: Duration,
+}
+
+impl Default for DdlSubmitOptions {
+    fn default() -> Self {
+        Self {
+            wait: SubmitDdlTaskRequest::default_wait(),
+            timeout: SubmitDdlTaskRequest::default_timeout(),
+        }
+    }
 }
 
 #[cfg(not(feature = "enterprise"))]
@@ -155,7 +165,9 @@ fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
     Ok(Output::new_with_record_batches(batches))
 }
 
-fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
+/// Parses DDL submission options using the existing request defaults.
+pub(crate) fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
+    let defaults = DdlSubmitOptions::default();
     let wait = match options.get(DDL_WAIT) {
         Some(value) => value.parse::<bool>().map_err(|_| {
             InvalidSqlSnafu {
@@ -163,7 +175,7 @@ fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
             }
             .build()
         })?,
-        None => SubmitDdlTaskRequest::default_wait(),
+        None => defaults.wait,
     };
 
     let timeout = match options.get(DDL_TIMEOUT) {
@@ -173,7 +185,7 @@ fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
             }
             .build()
         })?,
-        None => SubmitDdlTaskRequest::default_timeout(),
+        None => defaults.timeout,
     };
 
     Ok(DdlSubmitOptions { wait, timeout })
@@ -1721,11 +1733,28 @@ impl StatementExecutor {
         }
     }
 
-    #[tracing::instrument(skip_all)]
     pub async fn truncate_table(
         &self,
         table_name: TableName,
         time_ranges: Vec<(Timestamp, Timestamp)>,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        self.truncate_table_with_options(
+            table_name,
+            time_ranges,
+            DdlSubmitOptions::default(),
+            query_context,
+        )
+        .await
+    }
+
+    /// Truncates a table, optionally waiting for the submitted procedure to finish.
+    #[tracing::instrument(name = "truncate_table", skip_all)]
+    pub(crate) async fn truncate_table_with_options(
+        &self,
+        table_name: TableName,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
+        ddl_options: DdlSubmitOptions,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
@@ -1744,8 +1773,19 @@ impl StatementExecutor {
                 table_name: table_name.to_string(),
             })?;
         let table_id = table.table_info().table_id();
-        self.truncate_table_procedure(&table_name, table_id, time_ranges, query_context)
+        let response = self
+            .truncate_table_procedure(
+                &table_name,
+                table_id,
+                time_ranges,
+                ddl_options,
+                query_context,
+            )
             .await?;
+
+        if !ddl_options.wait {
+            return build_procedure_id_output(response.key);
+        }
 
         Ok(Output::new_with_affected_rows(0))
     }
@@ -2357,16 +2397,19 @@ impl StatementExecutor {
         table_name: &TableName,
         table_id: TableId,
         time_ranges: Vec<(Timestamp, Timestamp)>,
+        ddl_options: DdlSubmitOptions,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let executor_context = to_executor_context(query_context, TriggerReason::Manual);
-        let request = SubmitDdlTaskRequest::new(DdlTask::new_truncate_table(
+        let mut request = SubmitDdlTaskRequest::new(DdlTask::new_truncate_table(
             table_name.catalog_name.clone(),
             table_name.schema_name.clone(),
             table_name.table_name.clone(),
             table_id,
             time_ranges,
         ));
+        request.wait = ddl_options.wait;
+        request.timeout = ddl_options.timeout;
 
         self.procedure_executor
             .submit_ddl_task(executor_context, request)
@@ -3365,6 +3408,10 @@ mod test {
 
     #[test]
     fn test_parse_ddl_options() {
+        let defaults = parse_ddl_options(&OptionMap::default()).unwrap();
+        assert!(defaults.wait);
+        assert_eq!(defaults.timeout, SubmitDdlTaskRequest::default_timeout());
+
         let options = OptionMap::from([
             ("timeout".to_string(), "5m".to_string()),
             ("wait".to_string(), "false".to_string()),
@@ -3372,6 +3419,23 @@ mod test {
         let ddl_options = parse_ddl_options(&options).unwrap();
         assert!(!ddl_options.wait);
         assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+
+        let options = OptionMap::from([("timeout".to_string(), "1500ms".to_string())]);
+        assert_eq!(
+            parse_ddl_options(&options).unwrap().timeout,
+            Duration::from_millis(1500)
+        );
+        for (key, value) in [
+            ("wait", "yes"),
+            ("timeout", "not-a-duration"),
+            ("timeout", "-1s"),
+        ] {
+            let options = OptionMap::from([(key.to_string(), value.to_string())]);
+            assert!(matches!(
+                parse_ddl_options(&options),
+                Err(error::Error::InvalidSql { .. })
+            ));
+        }
     }
 
     #[test]

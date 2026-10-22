@@ -21,6 +21,8 @@ use datafusion_common::{ScalarValue, ToDFSchema};
 use datafusion_expr::Expr;
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion_expr::simplify::SimplifyContext;
+use datafusion_optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::{
@@ -381,8 +383,21 @@ impl PartitionExpr {
             .clone()
             .to_dfschema_ref()
             .context(error::ToDFSchemaSnafu)?;
-        let execution_props = &ExecutionProps::default();
         let expr = self.try_as_logical_expr()?;
+        // Persisted partition bounds keep the unit (and type) they were created
+        // with, so after a schema change like widening the time index unit the
+        // expression may mix types with the columns it is evaluated against.
+        // Coerce it against the schema so comparisons share a common type, the
+        // same way `PredicateGroup` does for region partition filters.
+        let simplifier = ExprSimplifier::new(
+            SimplifyContext::builder()
+                .with_schema(df_schema.clone())
+                .build(),
+        );
+        let expr = simplifier
+            .coerce(expr, &df_schema)
+            .context(error::CoercePartitionExprSnafu)?;
+        let execution_props = &ExecutionProps::default();
         create_physical_expr(
             &expr,
             &df_schema,

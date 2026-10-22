@@ -417,7 +417,7 @@ impl SlowQueryTimer {
             SlowQueriesRecordType::SystemTable => {
                 self.recorder.record(Box::new(slow_query_event));
             }
-            // Record the slow query in a specific logs file.
+            // Record the slow query through its dedicated logger.
             SlowQueriesRecordType::Log => {
                 slow!(
                     cost = slow_query_event.cost,

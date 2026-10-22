@@ -29,17 +29,18 @@ pub(crate) const METADATA_SCHEMA: &str = "schema";
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use ::auth::UserProviderRef;
+use ::auth::{UserInfoRef, UserProviderRef};
 use derive_builder::Builder;
-use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
+use pgwire::api::auth::{AuthDriver, ServerParameterProvider, StartupHandler};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::Session;
 use session::context::Channel;
 
-use self::auth_handler::PgLoginVerifier;
+use self::auth_handler::{PgUserProviderSource, ZeroPidSecretKeyGenerator};
 use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -76,9 +77,11 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 
 pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
-    login_verifier: PgLoginVerifier,
+    auth_source: Option<Arc<PgUserProviderSource>>,
     force_tls: bool,
-    param_provider: Arc<GreptimeDBStartupParameters>,
+    auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>, UserInfoRef>,
+    /// SCRAM selected; failures get the uniform metric label.
+    is_scram_auth: AtomicBool,
 
     batching_enabled: bool,
     session: Arc<Session>,
@@ -129,9 +132,14 @@ impl MakePostgresServerHandler {
         ));
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
-            login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
+            auth_source: self
+                .user_provider
+                .clone()
+                .map(|p| Arc::new(PgUserProviderSource::new(p))),
             force_tls: self.force_tls,
-            param_provider: self.param_provider.clone(),
+            auth_driver: AuthDriver::new(self.param_provider.clone())
+                .with_pid_secret_key_generator(Arc::new(ZeroPidSecretKeyGenerator)),
+            is_scram_auth: AtomicBool::new(false),
 
             batching_enabled,
             session: session.clone(),

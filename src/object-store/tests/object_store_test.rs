@@ -21,12 +21,13 @@ use common_telemetry::info;
 use datafusion_object_store::path::Path;
 use datafusion_object_store::{ObjectStore as ArrowObjectStore, ObjectStoreExt};
 use futures::TryStreamExt;
-use object_store::ObjectStore;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
+use object_store::{HttpTransporter, ObjectStore, OperationContext};
 use object_store_opendal::OpendalStore;
 use opendal::EntryMode;
 use opendal::services::{Azblob, Gcs, Memory, Oss};
+use opendal_http_transport_reqwest::ReqwestTransport;
 use prometheus::{Encoder, TextEncoder};
 use tempfile::TempDir;
 
@@ -303,13 +304,26 @@ async fn test_s3_backend() -> Result<()> {
         }
 
         let store = ObjectStore::new(builder).unwrap();
+        // Match production S3 clients: retry transient transport failures without
+        // retrying conditional-write conflicts or weakening their assertions.
+        let store = object_store::util::with_retry_layers(store);
         let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
         test_object_list_start_after(&store).await?;
-        test_conditional_creation(&store).await?;
+        // MinIO can close the socket after a 412 response without Connection: close.
+        // A pooled read or multipart abort can race that close. Use fresh connections
+        // for this test rather than retrying conditional commits with ambiguous results.
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()?;
+        let transport = HttpTransporter::new(ReqwestTransport::new(client));
+        let conditional_store = store
+            .clone()
+            .with_context(OperationContext::new().with_http_transport(transport));
+        test_conditional_creation(&conditional_store).await?;
         assert_opendal_metrics();
         guard.remove_all().await?;
     }
@@ -345,16 +359,24 @@ async fn test_conditional_creation(store: &ObjectStore) -> Result<()> {
                         writer.close().await
                     }
                     .await;
-                    if result.is_err() {
-                        writer.abort().await.unwrap();
-                    }
-                    result
+                    let abort_result = if result.is_err() {
+                        writer.abort().await
+                    } else {
+                        Ok(())
+                    };
+                    (result, abort_result)
                 }
             };
-            let (a, b) = tokio::join!(attempt(payload.clone()), attempt(payload.clone()));
+            let ((a, a_abort), (b, b_abort)) =
+                tokio::join!(attempt(payload.clone()), attempt(payload.clone()));
+            assert!(
+                a_abort.is_ok() && b_abort.is_ok(),
+                "{path}: writes: {a:?}, {b:?}; aborts: {a_abort:?}, {b_abort:?}"
+            );
             assert_eq!(
                 usize::from(a.is_ok()) + usize::from(b.is_ok()),
-                usize::from(!preexisting)
+                usize::from(!preexisting),
+                "{path}: writes: {a:?}, {b:?}"
             );
             for error in [a.err(), b.err()].into_iter().flatten() {
                 assert!(
