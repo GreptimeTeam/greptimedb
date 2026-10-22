@@ -399,7 +399,13 @@ async fn test_gc_worker_basic_compact() {
 
     let region = engine.get_region(region_id).unwrap();
     let manifest = region.manifest_ctx.manifest().await;
-    let removed_file_num = manifest.removed_files.removed_files[0].files.len();
+    // A manual compaction may take several rounds, each recording its removals.
+    let removed_file_num: usize = manifest
+        .removed_files
+        .removed_files
+        .iter()
+        .map(|removed| removed.files.len())
+        .sum();
     assert!(removed_file_num > 0);
 
     let version = manifest.manifest_version;
@@ -488,9 +494,11 @@ async fn test_gc_worker_compact_with_ref() {
     let file_ref_manifest = FileRefsManifest {
         file_refs: HashMap::from([(
             region_id,
-            manifest.removed_files.removed_files[0]
-                .files
+            manifest
+                .removed_files
+                .removed_files
                 .iter()
+                .flat_map(|removed| removed.files.iter())
                 .map(|removed_file| match removed_file {
                     RemovedFile::File(file_id, v) => FileRef::new(region_id, *file_id, *v),
                     RemovedFile::Index(file_id, v) => FileRef::new(region_id, *file_id, Some(*v)),
