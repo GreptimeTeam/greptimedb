@@ -16,8 +16,13 @@
 //! is keyed by absolute grid index, never by local row number; sparse state and trimmed output
 //! do not expand the full grid.
 
+mod state;
 #[cfg(test)]
 mod tests;
+
+pub use state::{
+    AccumulatorState, FloatMerger, PartialAggregate, PartialGroup, StateField, merge_count_values,
+};
 
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
@@ -34,7 +39,7 @@ use crate::map::{drop_empty_labels, validate_float_series, validate_scalar};
 use crate::range_eval::quantile;
 
 /// Float aggregations without a parameter.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregateOp {
     Sum,
     Count,
@@ -140,28 +145,37 @@ impl FloatAggregator {
 
     /// The result of every group, in the order the groups first appeared.
     pub fn finish(self) -> Result<Vec<Series>> {
-        let width = self.schema.fields.len();
-        let mut builder = GridSeriesBuilder::try_new(self.schema)?;
-        let mut output = Vec::with_capacity(self.groups.len());
-        let mut row = Vec::with_capacity(width);
-        for group in self.groups {
-            // One builder serves every group, so each result series starts explicitly.
-            builder.begin_series();
-            for (&block, states) in &group.blocks {
-                // The last block can extend past the grid; only points with a sample are pushed.
-                for (offset, point) in states.chunks_exact(width).enumerate() {
-                    if !point.iter().any(|state| state.seen) {
-                        continue;
-                    }
-                    row.clear();
-                    row.extend(point.iter().map(|state| state.finish(self.op)));
-                    builder.push(block * BLOCK_POINTS + offset, &row)?;
-                }
-            }
-            output.extend(builder.finish(group.metric)?);
-        }
-        Ok(output)
+        finish_groups(self.schema, self.op, self.groups)
     }
+}
+
+/// Turns the state of `groups` into result series, in group order.
+fn finish_groups(
+    schema: Arc<SeriesSchema>,
+    op: AggregateOp,
+    groups: Vec<Group>,
+) -> Result<Vec<Series>> {
+    let width = schema.fields.len();
+    let mut builder = GridSeriesBuilder::try_new(schema)?;
+    let mut output = Vec::with_capacity(groups.len());
+    let mut row = Vec::with_capacity(width);
+    for group in groups {
+        // One builder serves every group, so each result series starts explicitly.
+        builder.begin_series();
+        for (&block, states) in &group.blocks {
+            // The last block can extend past the grid; only points with a sample are pushed.
+            for (offset, point) in states.chunks_exact(width).enumerate() {
+                if !point.iter().any(|state| state.seen) {
+                    continue;
+                }
+                row.clear();
+                row.extend(point.iter().map(|state| state.finish(op)));
+                builder.push(block * BLOCK_POINTS + offset, &row)?;
+            }
+        }
+        output.extend(builder.finish(group.metric)?);
+    }
+    Ok(output)
 }
 
 /// `quantile(q, v)`, with `q` read at each grid point from an unlabelled single-field scalar on
@@ -302,7 +316,7 @@ pub fn count_values(
     let mut group_index = HashMap::new();
     // Counts are kept per point that has one, not in blocks: a gauge with distinct values makes
     // about one group per sample.
-    let mut groups: Vec<(MetricName, BTreeMap<usize, Vec<f64>>)> = Vec::new();
+    let mut groups: Counts = Vec::new();
     for series in input {
         // Equal bits format to the same label value, so each distinct value of a series
         // resolves its group once.
@@ -334,9 +348,16 @@ pub fn count_values(
             }
         }
     }
+    count_series(schema, groups)
+}
+
+/// Counts per point and field: one series per label set, a count of 0 being no sample.
+type Counts = Vec<(MetricName, BTreeMap<usize, Vec<f64>>)>;
+
+fn count_series(schema: &Arc<SeriesSchema>, groups: Counts) -> Result<Vec<Series>> {
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut output = Vec::with_capacity(groups.len());
-    let mut row = Vec::with_capacity(width);
+    let mut row = Vec::with_capacity(schema.fields.len());
     for (metric, counts) in groups {
         builder.begin_series();
         for (point, counts) in counts {
@@ -480,7 +501,6 @@ impl FloatState {
             *self = Self {
                 seen: true,
                 value: match op {
-                    AggregateOp::Group => 1.0,
                     // The running sum of squared deviations; Prometheus starts it at NaN for a
                     // non-finite first sample.
                     AggregateOp::Stddev | AggregateOp::Stdvar if !sample.is_finite() => f64::NAN,
@@ -547,7 +567,8 @@ impl FloatState {
             AggregateOp::Avg if self.incremental_mean => self.mean + self.compensation,
             AggregateOp::Avg => self.value / self.count + self.compensation / self.count,
             AggregateOp::Count => self.count,
-            AggregateOp::Min | AggregateOp::Max | AggregateOp::Group => self.value,
+            AggregateOp::Min | AggregateOp::Max => self.value,
+            AggregateOp::Group => 1.0,
             AggregateOp::Stdvar => self.value / self.count,
             AggregateOp::Stddev => (self.value / self.count).sqrt(),
         })
