@@ -504,16 +504,17 @@ fn reject_a_split_logical_series(
             return;
         }
         // A node can leave two raw series on one canonical label set. A map always can: it drops
-        // `__name__` and every empty-valued tag. A window can whenever it did not merge its input,
-        // because `{zone=""}` and the absent `zone` are one label set and two raw keys, which a bare
-        // tree says nothing about: a check on the function alone accepts `last_over_time`, whose
-        // output keeps the name and can still hold both raw series. Every window is therefore taken
-        // to be a possible rewriter, and the refusal below is what narrows that to the shape that
-        // costs correctness - a window with a window above it, a window being the only consumer
-        // here.
+        // `__name__` and every empty-valued tag. An instant selection preserves its input labels,
+        // rather than dropping them, but can still leave two raw series on one canonical label set:
+        // `{zone=""}` and the absent `zone` are one label set and two raw keys. A window can
+        // whenever it did not merge its input, which a bare tree says nothing about: a check on the
+        // function alone accepts `last_over_time`, whose output keeps the name and can still hold
+        // both raw series. Every map, instant selection, and window is therefore taken to be a
+        // possible rewriter, and the refusal below is what narrows that to the shape that costs
+        // correctness - a window with a rewriter below it, a window being the only consumer here.
         let rewrites = matches!(
             node.expr,
-            NativeExpr::Map { .. } | NativeExpr::Window { .. }
+            NativeExpr::Map { .. } | NativeExpr::Instant { .. } | NativeExpr::Window { .. }
         );
         if rewrites && let Some(above) = &consumer {
             rejection = Some((path.as_str().to_string(), above.clone()));

@@ -181,6 +181,36 @@ fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
 }
 
+/// An instant selection feeding a range window.
+fn instant_window_tree() -> NativeTree {
+    let instant = instant_tree().root().clone();
+    let grid = instant
+        .output
+        .samples()
+        .expect("an instant selection produces samples")
+        .eval_grid
+        .clone()
+        .expect("an instant selection's output is evaluated on a grid");
+    let evaluated = instant.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(instant),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: RANGE_MS,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                },
+                input_grid: Some(Arc::clone(&grid)),
+                output_grid: grid,
+            },
+        },
+        output: evaluated,
+    })
+    .expect("the bound tree is legal")
+}
+
 /// Two windows stacked, `rate(last_over_time(x[1s])[2s])`, which no compiler produces.
 ///
 /// A range function has to apply directly to a selector, and a selector is raw samples, so a tree
@@ -1468,6 +1498,42 @@ fn a_nested_window_over_two_partitions_is_refused() {
     // merges them into one series before the window above it evaluates.
     plan(nested_window_tree(), memory_exec(Vec::new()))
         .expect("a single partition cannot split a logical series");
+}
+
+/// An instant selection can leave distinct raw labels on one canonical label set for a window.
+#[test]
+fn an_instant_then_window_over_two_partitions_is_refused() {
+    let error = plan(
+        instant_window_tree(),
+        memory_exec_partitioned(vec![vec![], vec![]]),
+    )
+    .expect_err("each partition could hand the window only one fragment");
+    let message = error.to_string();
+    assert!(
+        message.contains("`root.input`"),
+        "the refusal must name the instant selection: {message}"
+    );
+    assert!(
+        message.contains("`root`"),
+        "the refusal must name the consuming window: {message}"
+    );
+    assert!(
+        message.contains("2 partitions"),
+        "the refusal must name the partition count: {message}"
+    );
+}
+
+/// A single partition cannot split a logical series, even when an instant feeds a window.
+#[test]
+fn an_instant_then_window_over_one_partition_is_accepted() {
+    plan(instant_window_tree(), memory_exec(Vec::new())).expect("one partition sees all fragments");
+}
+
+/// A window directly over raw input remains valid across partitions without a preceding rewriter.
+#[test]
+fn a_window_over_raw_input_on_two_partitions_is_accepted() {
+    plan(rate_tree(), memory_exec_partitioned(vec![vec![], vec![]]))
+        .expect("ordinary input-to-window trees do not split a logical series");
 }
 
 /// One poll reads at most [`POLL_BUDGET`] chunks of input, and stopping there loses nothing.
