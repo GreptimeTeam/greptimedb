@@ -125,9 +125,9 @@ async fn manifest(store: &ObjectStore, handle: &SeriesIndexFileHandle) -> Manife
         .unwrap()
         .objects
         .iter()
-        .find(|p| p.ends_with("manifest.json"))
+        .find(|object| object.path.ends_with("manifest.json"))
         .unwrap();
-    serde_json::from_slice(&store.read(path).await.unwrap().to_bytes()).unwrap()
+    serde_json::from_slice(&store.read(&path.path).await.unwrap().to_bytes()).unwrap()
 }
 fn request(names: &[&str]) -> SeriesReadRequest {
     SeriesReadRequest {
@@ -302,6 +302,99 @@ async fn aggregation_projection_and_independent_reads() {
     req.filters
         .push(SimpleFilterEvaluator::new("__series_min_ts".into(), 1i64, Operator::Eq).unwrap());
     assert!(reader.read(req).is_err());
+}
+
+#[tokio::test]
+async fn inconsistent_object_sizes_are_rejected() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSeriesFormat::default();
+    let handle = build(
+        &format,
+        &store,
+        &[batch(
+            &[new_sparse_primary_key(&["a", "x"], &meta, 1, 1)],
+            false,
+            0,
+        )],
+    )
+    .await;
+    for case in 0..6 {
+        let mut entry = handle.entry().clone();
+        let artifact = entry.artifact.as_mut().unwrap();
+        let reason = match case {
+            0 => {
+                artifact.objects.push(artifact.objects[0].clone());
+                "duplicate series artifact object"
+            }
+            1 => {
+                artifact.objects[0].file_size += 1;
+                "series part length mismatch"
+            }
+            2 => {
+                artifact.objects.last_mut().unwrap().file_size = super::MANIFEST_LIMIT as u64 + 1;
+                "series manifest exceeds size limit"
+            }
+            3 => {
+                artifact.file_size += 1;
+                "series artifact size mismatch"
+            }
+            4 => {
+                entry.file_size += 1;
+                "series artifact size mismatch"
+            }
+            5 => {
+                artifact.objects.pop();
+                "missing series manifest object"
+            }
+            _ => unreachable!(),
+        };
+        let (purger, _) = series_index_channel(store.clone());
+        let invalid = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
+        let error = format.reader(store.clone(), invalid).await.err().unwrap();
+        assert!(error.to_string().contains(reason), "case {case}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn truncated_objects_are_rejected() {
+    let store = store();
+    let meta = metadata();
+    let format = ColumnarSeriesFormat::default();
+    let handle = build(
+        &format,
+        &store,
+        &[batch(
+            &[new_sparse_primary_key(&["a", "x"], &meta, 1, 1)],
+            false,
+            0,
+        )],
+    )
+    .await;
+    let artifact = handle.entry().artifact.as_ref().unwrap();
+    let part = &artifact.objects[0];
+    let reader = format.reader(store.clone(), handle.clone()).await.unwrap();
+    let bytes = store.read(&part.path).await.unwrap().to_bytes();
+    store
+        .write(&part.path, bytes.slice(..bytes.len() - 1))
+        .await
+        .unwrap();
+    assert!(
+        reader
+            .read(request(&[TSID_COLUMN]))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .is_err()
+    );
+
+    let manifest = artifact.objects.last().unwrap();
+    let bytes = store.read(&manifest.path).await.unwrap().to_bytes();
+    store
+        .write(&manifest.path, bytes.slice(..bytes.len() - 1))
+        .await
+        .unwrap();
+    assert!(format.reader(store, handle).await.is_err());
 }
 
 #[tokio::test]
@@ -714,7 +807,7 @@ async fn real_format_reconciliation_and_fallback() {
     let old_catalog = store.read(&catalog_path).await.unwrap().to_bytes();
     let old = snapshot.series_indexes.values().next().unwrap();
     store
-        .delete(&old.entry().artifact.as_ref().unwrap().objects[0])
+        .delete(&old.entry().artifact.as_ref().unwrap().objects[0].path)
         .await
         .unwrap();
     let layer = object_store::layers::mock::MockLayerBuilder::default()
@@ -757,7 +850,8 @@ async fn real_format_reconciliation_and_fallback() {
             .as_ref()
             .unwrap()
             .objects
-            .contains(path)
+            .iter()
+            .any(|object| &object.path == path)
     }));
     engine.stop().await.unwrap();
 }
@@ -881,8 +975,8 @@ async fn filesystem_drop_cleans_only_owned_atomic_output() {
     .await
     .unwrap();
     let artifact = second.finish().await.unwrap();
-    for path in artifact.objects {
-        assert!(store.exists(&path).await.unwrap());
+    for object in artifact.objects {
+        assert!(store.exists(&object.path).await.unwrap());
     }
     assert_eq!(std::fs::read_dir(&temporary).unwrap().count(), 0);
 }
@@ -962,7 +1056,10 @@ async fn malformed_manifest_and_timestamp_independence() {
         .as_mut()
         .unwrap()
         .objects
-        .push("unowned".into());
+        .push(crate::series_index::artifact::ArtifactObject {
+            path: "unowned".into(),
+            file_size: 0,
+        });
     let (purger, _) = series_index_channel(store.clone());
     let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);
     assert!(format.reader(store, handle).await.is_err());
@@ -1109,7 +1206,15 @@ async fn opendal_reads_sparse_part_beyond_four_gib() {
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let mut entry = handle.entry().clone();
     entry.file_size = manifest_bytes.len() as u64 + manifest.files[0].file_size;
-    entry.artifact.as_mut().unwrap().file_size = entry.file_size;
+    let artifact = entry.artifact.as_mut().unwrap();
+    artifact.file_size = entry.file_size;
+    for object in &mut artifact.objects {
+        object.file_size = if object.path == manifest.path() {
+            manifest_bytes.len() as u64
+        } else {
+            manifest.files[0].file_size
+        };
+    }
     store.write(&manifest.path(), manifest_bytes).await.unwrap();
     let (purger, _) = series_index_channel(store.clone());
     let handle = SeriesIndexFileHandle::new(meta.region_id, entry, purger);

@@ -25,7 +25,7 @@ use snafu::{IntoError, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::{JoinSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
-use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata};
+use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::catalog::SeriesIndexEntry;
 use crate::series_index::columnar::codec::{self, encode_dictionary, encode_integers};
 use crate::series_index::columnar::metadata::{
@@ -328,12 +328,9 @@ impl ColumnarWriter {
             return Ok(());
         }
         let rows = std::mem::take(&mut self.rows);
-        let tags = self.tags.clone();
-        let options = self.options.clone();
-        let (mut block, chunks) =
-            common_runtime::spawn_blocking_compact(move || encode_block(rows, &tags, &options))
-                .await
-                .context(JoinSnafu)??;
+        // TODO: benchmark inline versus offloaded codecs for latency, throughput,
+        // and async-worker responsiveness before adding scheduling overhead.
+        let (mut block, chunks) = encode_block(rows, &self.tags, &self.options)?;
         let mut descriptor = Vec::new();
         block.encode(&mut descriptor);
         require(
@@ -383,19 +380,14 @@ impl ColumnarWriter {
         last: MetricSeriesId,
     ) -> Result<PageReference> {
         let position = self.position;
-        let options = self.options.clone();
-        let (payload, bytes) = common_runtime::spawn_blocking_compact(move || {
-            pack(
-                &page.encode(),
-                position,
-                1,
-                options.compression,
-                options.zstd_level,
-                true,
-            )
-        })
-        .await
-        .context(JoinSnafu)??;
+        let (payload, bytes) = pack(
+            &page.encode(),
+            position,
+            1,
+            self.options.compression,
+            self.options.zstd_level,
+            true,
+        )?;
         self.position = payload.end()?;
         self.outputs.write(bytes).await?;
         Ok(PageReference {
@@ -473,11 +465,21 @@ impl ColumnarWriter {
             "series manifest exceeds size limit",
         )?;
         let mut file_size = bytes.len() as u64;
+        let manifest_size = file_size;
+        let mut objects = Vec::with_capacity(self.manifest.files.len() + 1);
         for part in &self.manifest.files {
+            objects.push(ArtifactObject {
+                path: self.manifest.part_path(part.part_id),
+                file_size: part.file_size,
+            });
             file_size = file_size
                 .checked_add(part.file_size)
                 .ok_or_else(|| invalid("series artifact length overflow"))?;
         }
+        objects.push(ArtifactObject {
+            path: self.manifest.path(),
+            file_size: manifest_size,
+        });
         self.outputs.open(self.manifest.path()).await?;
         self.outputs.write(bytes).await?;
         self.outputs.close().await?;
@@ -485,7 +487,7 @@ impl ColumnarWriter {
         Ok(ArtifactMetadata {
             format: ArtifactFormat::ColumnarSeries,
             generation: self.manifest.generation,
-            objects: self.outputs.paths.clone(),
+            objects,
             file_size,
         })
     }

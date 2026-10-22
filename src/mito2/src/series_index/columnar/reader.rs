@@ -26,9 +26,7 @@ use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::error::{
-    JoinSnafu, NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result, SerdeJsonSnafu,
-};
+use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result, SerdeJsonSnafu};
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::codec::{self, Dictionary};
 use crate::series_index::columnar::metadata::{self, Block, Column, Page, PageReference, Trailer};
@@ -60,11 +58,18 @@ impl ColumnarReader {
         )?;
         let region = handle.file_id().region_id().as_u64();
         let path = format!("{region}/series/{}/manifest.json", entry.index_uuid);
-        let length = store
-            .stat(&path)
-            .await
-            .context(OpenDalSnafu)?
-            .content_length();
+        let mut objects = HashMap::with_capacity(artifact.objects.len());
+        for object in &artifact.objects {
+            require(
+                objects
+                    .insert(object.path.as_str(), object.file_size)
+                    .is_none(),
+                "duplicate series artifact object",
+            )?;
+        }
+        let length = *objects
+            .get(path.as_str())
+            .ok_or_else(|| invalid("missing series manifest object"))?;
         require(
             length <= MANIFEST_LIMIT as u64,
             "series manifest exceeds size limit",
@@ -114,14 +119,22 @@ impl ColumnarReader {
                 require(last < part.first, "unordered series parts")?;
             }
             previous = Some(part.last);
-            paths.insert(manifest.part_path(part.part_id));
+            let part_path = manifest.part_path(part.part_id);
+            require(
+                objects.get(part_path.as_str()) == Some(&part.file_size),
+                "series part length mismatch",
+            )?;
+            paths.insert(part_path);
             file_size = file_size
                 .checked_add(part.file_size)
                 .ok_or_else(|| invalid("series artifact length overflow"))?;
         }
         require(
             paths.len() == artifact.objects.len()
-                && artifact.objects.iter().all(|p| paths.contains(p)),
+                && artifact
+                    .objects
+                    .iter()
+                    .all(|object| paths.contains(&object.path)),
             "series artifact object set mismatch",
         )?;
         require(
@@ -176,9 +189,14 @@ impl FormatReader for ColumnarReader {
             for part in &manifest.files {
                 if !matches_range(part.first, part.last, &request) { continue; }
                 let path = manifest.part_path(part.part_id);
-                let size = store.stat(&path).await.context(OpenDalSnafu)?.content_length();
-                require(size == part.file_size, "series part length mismatch")?;
+                let size = part.file_size;
                 let framing = fetch_byte_ranges(&path, store.clone(), &[0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
+                require(
+                    framing.len() == 2
+                        && framing[0].len() as u64 == metadata::HEADER_SIZE
+                        && framing[1].len() as u64 == metadata::TRAILER_SIZE,
+                    "series framing length mismatch",
+                )?;
                 metadata::validate_header(&framing[0])?;
                 let trailer = Trailer::decode(&framing[1], size)?;
                 require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
@@ -263,9 +281,14 @@ async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Re
     let mut buffers = fetch_byte_ranges(path, store.clone(), std::slice::from_ref(&(start..end)))
         .await
         .context(OpenDalSnafu)?;
-    buffers
+    let bytes = buffers
         .pop()
-        .ok_or_else(|| invalid("missing series range response"))
+        .ok_or_else(|| invalid("missing series range response"))?;
+    require(
+        bytes.len() as u64 == end - start,
+        "series range length mismatch",
+    )?;
+    Ok(bytes)
 }
 
 /// TODO: integrate with Mito's cache using store/region, generation, part, reference,
@@ -291,14 +314,10 @@ async fn load_metadata_page(
         reference.payload.end()?,
     )
     .await?;
-    let reference = reference.clone();
-    let names = names.to_vec();
-    common_runtime::spawn_blocking_query(move || {
-        let decoded = reference.payload.unpack(&bytes)?;
-        Page::decode(&decoded, &reference, depth, payload_end, &names)
-    })
-    .await
-    .context(JoinSnafu)?
+    // TODO: benchmark inline versus offloaded codecs for latency, throughput,
+    // and async-worker responsiveness before adding scheduling overhead.
+    let decoded = reference.payload.unpack(&bytes)?;
+    Page::decode(&decoded, reference, depth, payload_end, names)
 }
 
 #[derive(Debug)]
@@ -378,51 +397,46 @@ async fn load_column_chunk(
         )));
     }
     let bytes = read_range(store, path, column.payload.offset, column.payload.end()?).await?;
-    let column = column.clone();
     let rows = block.rows as usize;
     let first = block.first;
     let last = block.last;
-    common_runtime::spawn_blocking_query(move || {
-        let bytes = column.payload.unpack(&bytes)?;
-        if integer {
-            let values = codec::decode_integers(&bytes, rows)?;
-            if column.name == TSID_COLUMN {
-                require(
-                    values.first() == Some(&first)
-                        && values.last() == Some(&last)
-                        && values.windows(2).all(|v| v[0] < v[1]),
-                    "invalid series TSID ordering/bounds",
-                )?;
-            } else {
-                require(values.iter().all(|&v| v > 0), "zero series row count")?;
-            }
-            Ok(Decoded::Integers(values))
+    let bytes = column.payload.unpack(&bytes)?;
+    if integer {
+        let values = codec::decode_integers(&bytes, rows)?;
+        if column.name == TSID_COLUMN {
+            require(
+                values.first() == Some(&first)
+                    && values.last() == Some(&last)
+                    && values.windows(2).all(|v| v[0] < v[1]),
+                "invalid series TSID ordering/bounds",
+            )?;
         } else {
-            let dictionary = codec::decode_dictionary(&bytes, rows)?;
-            require(
-                dictionary.codes.iter().filter(|&&code| code == 0).count()
-                    == column.null_count as usize,
-                "series dictionary null count mismatch",
-            )?;
-            let min = dictionary
-                .codes
-                .iter()
-                .filter_map(|&code| dictionary.values[code as usize].as_ref())
-                .min();
-            let max = dictionary
-                .codes
-                .iter()
-                .filter_map(|&code| dictionary.values[code as usize].as_ref())
-                .max();
-            require(
-                column.bounds.as_ref().map(|(a, b)| (a, b)) == min.zip(max),
-                "series dictionary bounds mismatch",
-            )?;
-            Ok(Decoded::Strings(dictionary))
+            require(values.iter().all(|&v| v > 0), "zero series row count")?;
         }
-    })
-    .await
-    .context(JoinSnafu)?
+        Ok(Decoded::Integers(values))
+    } else {
+        let dictionary = codec::decode_dictionary(&bytes, rows)?;
+        require(
+            dictionary.codes.iter().filter(|&&code| code == 0).count()
+                == column.null_count as usize,
+            "series dictionary null count mismatch",
+        )?;
+        let min = dictionary
+            .codes
+            .iter()
+            .filter_map(|&code| dictionary.values[code as usize].as_ref())
+            .min();
+        let max = dictionary
+            .codes
+            .iter()
+            .filter_map(|&code| dictionary.values[code as usize].as_ref())
+            .max();
+        require(
+            column.bounds.as_ref().map(|(a, b)| (a, b)) == min.zip(max),
+            "series dictionary bounds mismatch",
+        )?;
+        Ok(Decoded::Strings(dictionary))
+    }
 }
 
 async fn get_column(store: &ObjectStore, path: &str, block: &Block, name: &str) -> Result<Decoded> {

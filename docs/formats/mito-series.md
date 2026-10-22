@@ -55,9 +55,11 @@ timestamp columns and is separate from the existing Parquet index schema.
 
 The manifest is written only after every part is closed successfully. The
 existing catalog publication commits the artifact. `ArtifactMetadata.objects`
-lists the manifest and every part, and `file_size` is their total stored size.
+lists the manifest and every part as `{ path, file_size }` objects, and the
+artifact-level `file_size` is their total stored size. Object sizes are recorded
+by the writer; the manifest does not store its own size.
 These lifecycle object paths are derived from the generation and part IDs;
-the existing artifact ownership API remains unchanged.
+artifact ownership and deferred purge behavior remain unchanged.
 The reader obtains part order from the manifest, not object-list ordering.
 An empty build has a manifest with an empty file list and creates no part files.
 
@@ -483,16 +485,20 @@ types, as other Mito index implementations do. Do not add a parallel storage tra
 or a native filesystem adapter. Memory and filesystem OpenDAL services and the
 existing mock layers provide test backends.
 
-- Fetch the manifest and part lengths through OpenDAL. Fetch headers, trailers,
-  metadata pages, and selected column ranges through asynchronous range reads.
+- Use the artifact metadata's recorded object sizes to read the manifest and
+  locate part trailers without stat requests. Validate part sizes against the
+  manifest and reject duplicate object paths or inconsistent totals. Fetch headers,
+  trailers, metadata pages, and selected column ranges through asynchronous range reads.
   Reuse `fetch_byte_ranges` where applicable. Its range coalescing can fetch gaps
   between selected chunks; those bytes do not cause unselected columns to decode.
 - Open outputs through `writer_with`, using `DEFAULT_WRITE_BUFFER_SIZE` and
   `DEFAULT_WRITE_CONCURRENCY`. Stream bytes without buffering an entire part.
   Call `close` before reporting success; count all committed object bytes.
 - Use existing `OpenDalSnafu` error conversion. Keep codec work separate from I/O
-  and run substantial synchronous compression/decompression on Mito's shared
-  blocking runtime rather than blocking async worker threads.
+  and run codecs inline, matching the format benchmark. TODO: compare inline
+  and offloaded codecs for latency, concurrent throughput, and async-worker
+  responsiveness before choosing an offloading policy. No comparative benchmark
+  currently establishes a performance advantage for either policy.
 - Until successful finish, the writer owns every output in its generation.
   Failure or explicit abort aborts live OpenDAL writers, removes completed
   unpublished objects, and aborts each live OpenDAL writer to clean its own atomic-write temporary
