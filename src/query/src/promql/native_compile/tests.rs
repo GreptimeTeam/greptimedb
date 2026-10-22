@@ -2277,55 +2277,66 @@ fn every_folding_aggregate_groups_the_way_it_was_written() {
     assert_grouping_labels(op, &["instance"]);
 }
 
-/// The aggregates that are not a fold are refused with the reason they are a different shape rather
-/// than as "unsupported": a ranking aggregate keeps some of its input's series, and `count_values`
-/// writes one output label per distinct value, so neither reports one value per group per grid point
-/// and neither could be bound as a kind of this tree.
+/// The aggregates that are not a fold bind as a vector operation over the expression they
+/// aggregate, with their parameter folded and their grouping kept; `limit_ratio` keeps whole series
+/// whatever the grouping. A parameter only known at run time is refused, as for `quantile`.
 #[test]
-fn the_aggregates_that_are_not_a_fold_say_why_they_are_a_different_shape() {
-    let ranking = "selects some of its input's series";
+fn the_aggregates_that_are_not_a_fold_bind_a_vector_operation() {
     let cases = [
-        ("topk(3, x)", "topk", ranking),
-        ("bottomk(3, x)", "bottomk", ranking),
-        ("limitk(3, x)", "limitk", ranking),
-        ("limit_ratio(0.5, x)", "limit_ratio", ranking),
+        ("topk(1 + 2, x)", "topk 3 by []"),
+        ("bottomk by(job) (3, x)", "bottomk 3 by [job]"),
         (
-            "count_values(\"v\", x)",
-            "count_values",
-            "writes one output label per distinct value",
+            "limitk(2, rate(x[5m])) without(instance)",
+            "limitk 2 without [instance]",
+        ),
+        ("limit_ratio by(job) (0.5, x)", "limit_ratio 0.5"),
+        (
+            r#"count_values without(job) ("v", x)"#,
+            r#"count_values "v" without [job]"#,
         ),
     ];
+    for (query, op) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let display = tree.to_string();
+        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        assert_eq!(root, format!("  root Vector {op}"), "`{query}`");
+    }
 
-    for (query, name, reason) in cases {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .expect_err(&format!("`{query}` compiled, and it should not have"));
+    let error = compile(
+        &eval_stmt("topk(scalar(x), x)"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("a run-time k compiled");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("first argument"), "{message}");
+    // The rejection quotes the accepted subset, so that quote has to name every aggregator this
+    // compiler takes: one stale word there makes every rejection lie about what it binds.
+    for aggregator in [
+        "sum",
+        "avg",
+        "count",
+        "min",
+        "max",
+        "group",
+        "stddev",
+        "stdvar",
+        "quantile",
+        "topk",
+        "bottomk",
+        "limitk",
+        "limit_ratio",
+        "count_values",
+    ] {
         assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "`{query}` did not report NotImplemented: {error}"
+            message.contains(&format!("`{aggregator}")),
+            "the rejection does not quote `{aggregator}`: {message}"
         );
-        let message = error.to_string();
-        assert!(
-            message.contains(&format!("the aggregate `{name}` in")),
-            "`{query}` did not name the aggregate it found: {message}"
-        );
-        assert!(
-            message.contains(reason),
-            "`{query}` did not say why it is a different shape: {message}"
-        );
-        assert!(
-            message.contains("one value per grid point"),
-            "`{query}` did not say what a fold would report instead: {message}"
-        );
-        // The rejection quotes the accepted subset, so that quote has to name the whole aggregate
-        // set: one stale word there makes every rejection lie about what this compiler takes.
-        for aggregator in [
-            "sum", "avg", "count", "min", "max", "group", "stddev", "stdvar", "quantile",
-        ] {
-            assert!(
-                message.contains(&format!("`{aggregator}")),
-                "`{query}`'s rejection does not quote `{aggregator}` as accepted: {message}"
-            );
-        }
     }
 }
 

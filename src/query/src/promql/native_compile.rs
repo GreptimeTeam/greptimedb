@@ -39,6 +39,10 @@
 //!                                                  e.g. count (x) by(job)
 //!   quantile(<constant>, <expression>) [(by|without)(<labels>)]
 //!                                                  e.g. quantile(0.9, x) by(job)
+//!   <selector aggregator>(<constant>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. topk(3, x) by(job), limit_ratio(0.5, x)
+//!   count_values(<string>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. count_values("v", x)
 //!
 //! <matrix>    <selector>[<range>]<modifiers>       a range selector: raw samples
 //!           | <expression>[<range>:<step>]<modifiers>
@@ -50,7 +54,8 @@
 //! ```
 //!
 //! where `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` or
-//! `quantile`, the function names are [`range_signature`]'s and [`math_signature`]'s, and which side
+//! `quantile`, `<selector aggregator>` is `topk`, `bottomk`, `limitk` or `limit_ratio`, the
+//! function names are [`range_signature`]'s and [`math_signature`]'s, and which side
 //! of the matrix a range function's constants go on is [`RangeSignature`]'s: before it for
 //! `quantile_over_time`, after it for `predict_linear` and `double_exponential_smoothing`. A math
 //! function's constants always follow its vector.
@@ -70,8 +75,10 @@
 //! `<expression>` → `Window` whose input is evaluated (the subquery, whose input grid is its own),
 //! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to) and, over
 //! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side),
-//! `Scalar` (that constant) and `Aggregate` (one of the nine aggregators that fold a group's values
-//! into one value per grid point, optionally grouped). Everything else is a
+//! `Scalar` (that constant), `Aggregate` (one of the nine aggregators that fold a group's values
+//! into one value per grid point, optionally grouped) and `Vector` (an operation over the whole
+//! vector at each point: a sort, `absent`, a classic histogram function, a selecting aggregator or
+//! `count_values`). Everything else is a
 //! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
 //! because rejecting a query the compiler does not understand is the only honest alternative to
 //! compiling it into something else.
@@ -164,7 +171,9 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          that folds a group's values into one value per grid point — `sum`, `avg`, \
                          `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
-                         grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; a \
+                         grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
+                         `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
+                         them, as in `topk(3, x) by(job)` and `count_values(\"v\", x)`; a \
                          sort, `absent` or `histogram_quantile` / `histogram_fraction` over any of \
                          them (`sort_desc(x)`, `absent(x{job=\"a\"})`, \
                          `histogram_quantile(0.9, rate(x[5m]))`); a range function's own \
@@ -468,11 +477,11 @@ fn binary_op(op: &TokenType) -> Option<BinaryOp> {
 /// cannot execute keeps this the one place that says what an aggregate means, so a kernel landing
 /// later changes no binding.
 ///
-/// The rest of the parser's aggregates are a different shape, and are refused with the reason rather
-/// than folded into a kind that would compute something else: `topk`, `bottomk`, `limitk` and
-/// `limit_ratio` select some of the input's series, so they do not report one value per group per
-/// grid point, and `count_values` writes one output label per distinct value rather than folding a
-/// group's values at all.
+/// The rest of the parser's aggregates are a different shape and bind as a vector operation
+/// ([`vector_aggregate`]) rather than as a kind that would compute something else: `topk`,
+/// `bottomk`, `limitk` and `limit_ratio` select some of the input's series, so they do not report
+/// one value per group per grid point, and `count_values` writes one output label per distinct value
+/// rather than folding a group's values at all.
 ///
 /// The grouping is bound in the tree's own terms, because `by` and `without` are not each other's
 /// inverse: `by(job)` keeps `job` and drops every other label, while `without(instance)` keeps every
@@ -514,22 +523,15 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
                 quantile: constant_argument(&op.to_string(), param, 0)?,
             }
         }
-        // A ranking aggregate keeps some of the input's series, so what it reports is not one value
-        // per group per grid point: `topk(3, x)` answers with three series, not with the groups'
-        // folded values.
-        token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO => {
-            return Err(not_implemented(&format!(
-                "the aggregate `{op}` in `{aggregate}`, which selects some of its input's series \
-                 rather than folding each group's values into one value per grid point"
-            )));
-        }
-        // `count_values` folds nothing: it writes one output label per distinct value it saw, which
-        // is a shape no folded value can spell.
-        token::T_COUNT_VALUES => {
-            return Err(not_implemented(&format!(
-                "the aggregate `{op}` in `{aggregate}`, which writes one output label per distinct \
-                 value rather than folding each group's values into one value per grid point"
-            )));
+        // A ranking aggregate keeps some of the input's series, and `count_values` writes one
+        // output label per distinct value: neither folds a group into one value per grid point, so
+        // both read the whole vector in a `Vector` node instead.
+        token::T_TOPK
+        | token::T_BOTTOMK
+        | token::T_LIMITK
+        | token::T_LIMIT_RATIO
+        | token::T_COUNT_VALUES => {
+            return vector_aggregate(context, aggregate);
         }
         // The parser's `aggregate_op` rule lists exactly the fourteen names above, so this arm is
         // an operator this compiler was not taught rather than one it means to fold.
@@ -554,6 +556,55 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
         },
         output,
     })
+}
+
+/// Binds `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` as a vector operation over
+/// the expression it aggregates.
+///
+/// The parser gives each of them its parameter: a number for the first four, folded to the constant
+/// it means like a `quantile`, and a string for `count_values`, the label it writes the value to.
+fn vector_aggregate(context: &Context, aggregate: &AggregateExpr) -> Result<NativeNode> {
+    let AggregateExpr {
+        op,
+        expr,
+        param,
+        modifier,
+    } = aggregate;
+    let name = op.to_string();
+    let param = param.as_ref().ok_or_else(|| {
+        not_implemented(&format!(
+            "the aggregate `{op}` in `{aggregate}`, which takes a parameter as its first argument"
+        ))
+    })?;
+    let group = grouping(modifier.as_ref());
+    let bound = match op.id() {
+        token::T_TOPK | token::T_BOTTOMK => BoundVectorOp::TopK {
+            k: constant_argument(&name, param, 0)?,
+            top: op.id() == token::T_TOPK,
+            group,
+        },
+        token::T_LIMITK => BoundVectorOp::LimitK {
+            k: constant_argument(&name, param, 0)?,
+            group,
+        },
+        // `limit_ratio` keeps whole series by their label hash, so a grouping changes nothing.
+        token::T_LIMIT_RATIO => BoundVectorOp::LimitRatio {
+            ratio: constant_argument(&name, param, 0)?,
+        },
+        _ => {
+            let PromExpr::StringLiteral(StringLiteral { val }) = unparen(param) else {
+                return Err(not_implemented(&format!(
+                    "the aggregate `{op}` in `{aggregate}`, whose label `{param}` is not a string \
+                     literal"
+                )));
+            };
+            BoundVectorOp::CountValues {
+                label: Arc::from(val.as_str()),
+                group,
+            }
+        }
+    };
+    vector_call(context, &name, bound, expr)
 }
 
 /// How a `by` or `without` modifier identifies a group, in the tree's own terms.
