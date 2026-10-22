@@ -9,8 +9,9 @@ as JSON2.
 ## Validation and query results
 
 Invalid exemplar-owned labels, out-of-range exemplar timestamps, and invalid
-OTLP exemplar IDs or missing values cause that exemplar to be dropped. Valid
-samples and sibling exemplars are retained. The
+OTLP exemplar IDs or missing values cause that exemplar to be dropped. OTLP
+histogram exemplars that cannot be assigned to an emitted bucket are also
+dropped. Valid samples and sibling exemplars are retained. The
 `greptime_servers_exemplars_dropped_total` counter records these drops, with
 `protocol` values `prometheus_v1`, `prometheus_v2`, and `otlp`.
 

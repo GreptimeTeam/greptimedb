@@ -1235,17 +1235,14 @@ fn encode_histogram(
                     continue;
                 }
             };
-            let bucket = bucket_values
-                .iter()
-                .position(|(bound, _)| {
-                    value <= *bound || (value.is_nan() && *bound == f64::INFINITY)
-                })
-                .ok_or_else(|| {
-                    error::InvalidOtlpMetricInputSnafu {
-                        reason: "exemplar does not belong to an emitted histogram bucket",
-                    }
-                    .build()
-                })?;
+            let Some(bucket) = bucket_values.iter().position(|(bound, _)| {
+                value <= *bound || (value.is_nan() && *bound == f64::INFINITY)
+            }) else {
+                crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                    .with_label_values(&["otlp"])
+                    .inc();
+                continue;
+            };
             by_bucket[bucket].push(exemplar);
         }
         for ((bound, value), bucket_exemplars) in bucket_values.into_iter().zip(by_bucket) {
@@ -2697,6 +2694,104 @@ mod tests {
             assert_eq!(conversion.outcome.accepted_data_points, 3);
             assert_eq!(conversion.outcome.rejected_data_points, 0);
             assert_eq!(conversion.exemplar_rows, 6);
+        }
+    }
+
+    #[test]
+    fn test_unassignable_histogram_exemplars_preserve_metric_payload() {
+        use common_query::prelude::EXEMPLAR_METRIC_COLUMN;
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        for is_legacy in [false, true] {
+            let metrics = vec![
+                Metric {
+                    name: "gauge".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![NumberDataPoint {
+                            time_unix_nano: 1,
+                            value: Some(Value::AsDouble(7.0)),
+                            ..Default::default()
+                        }],
+                    })),
+                    ..Default::default()
+                },
+                Metric {
+                    name: "histogram".into(),
+                    data: Some(metric::Data::Histogram(Histogram {
+                        data_points: vec![HistogramDataPoint {
+                            time_unix_nano: 1,
+                            count: 1,
+                            explicit_bounds: vec![1.0],
+                            // Cumulative conversion tolerates a missing infinity bucket.
+                            bucket_counts: vec![1],
+                            exemplars: [2.0, 0.5, f64::INFINITY, f64::NAN]
+                                .into_iter()
+                                .map(|value| Exemplar {
+                                    time_unix_nano: 1,
+                                    value: Some(exemplar::Value::AsDouble(value)),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ..Default::default()
+                        }],
+                        aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    })),
+                    ..Default::default()
+                },
+            ];
+            let conversion = to_grpc_insert_requests(
+                metrics_request(metrics),
+                &mut OtlpMetricCtx {
+                    is_legacy,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(conversion.rows, 3);
+            assert_eq!(conversion.outcome.accepted_data_points, 2);
+            assert_eq!(conversion.outcome.rejected_data_points, 0);
+            for (table, value) in [
+                ("gauge", 7.0),
+                ("histogram_bucket", 1.0),
+                ("histogram_count", 1.0),
+            ] {
+                let rows = conversion
+                    .requests
+                    .inserts
+                    .iter()
+                    .find(|request| request.table_name == table)
+                    .unwrap()
+                    .rows
+                    .as_ref()
+                    .unwrap();
+                let value_index = rows
+                    .schema
+                    .iter()
+                    .position(|column| column.column_name == greptime_value())
+                    .unwrap();
+                assert_eq!(rows.rows.len(), 1);
+                assert_eq!(
+                    rows.rows[0].values[value_index].value_data,
+                    Some(ValueData::F64Value(value))
+                );
+            }
+            assert_eq!(conversion.exemplar_rows, 1);
+            let rows = conversion.exemplars.inserts[0].rows.as_ref().unwrap();
+            for (column, value) in [
+                (greptime_value(), ValueData::F64Value(0.5)),
+                (
+                    EXEMPLAR_METRIC_COLUMN,
+                    ValueData::StringValue("histogram_bucket".into()),
+                ),
+                ("le", ValueData::StringValue("1".into())),
+            ] {
+                let index = rows
+                    .schema
+                    .iter()
+                    .position(|c| c.column_name == column)
+                    .unwrap();
+                assert_eq!(rows.rows[0].values[index].value_data, Some(value));
+            }
         }
     }
 
