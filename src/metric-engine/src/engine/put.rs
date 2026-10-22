@@ -2607,17 +2607,21 @@ mod tests {
                 .await
         );
 
-        // A drop rejected before the WAL append is not applied. The retried drop still deletes
-        // the metadata of the logical region.
+        // A drop rejected before the WAL append is not applied, also when it fails again. Each
+        // attempt reports the lease error, and the retry after the lease is renewed still
+        // deletes the metadata of the logical region.
         let logical_region_id = env.default_logical_region_id();
         engine
             .set_region_role_by_lease(physical_region_id, grant(Instant::now()))
             .unwrap();
-        let err = engine
-            .handle_request(logical_region_id, drop_request())
-            .await
-            .unwrap_err();
-        assert!(err.is_retryable(), "{err:?}");
+        for _ in 0..2 {
+            let err = engine
+                .handle_request(logical_region_id, drop_request())
+                .await
+                .unwrap_err();
+            assert!(err.is_retryable(), "{err:?}");
+            assert_ne!(StatusCode::RegionNotFound, err.status_code(), "{err:?}");
+        }
         engine
             .set_region_role_by_lease(
                 physical_region_id,
@@ -2633,5 +2637,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!logical_regions.contains(&logical_region_id));
+        assert!(
+            !metadata_region
+                .has_logical_region_lock(logical_region_id)
+                .await
+        );
     }
 }

@@ -166,7 +166,7 @@ impl MetricEngineInner {
             self.state
                 .write()
                 .unwrap()
-                .mark_logical_region_dropping(logical_region_id)?;
+                .mark_logical_region_dropping(logical_region_id);
             return Err(err);
         }
 

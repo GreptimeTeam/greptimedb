@@ -174,6 +174,7 @@ impl MetricEngineState {
             state.logical_regions.insert(logical_region_id);
             self.logical_regions
                 .insert(logical_region_id, physical_region_id);
+            self.dropping_logical_regions.remove(&logical_region_id);
         }
     }
 
@@ -201,6 +202,7 @@ impl MetricEngineState {
             .insert(logical_region_id);
         self.logical_regions
             .insert(logical_region_id, physical_region_id);
+        self.dropping_logical_regions.remove(&logical_region_id);
     }
 
     /// Replace the logical columns of the logical region with given columns.
@@ -262,7 +264,11 @@ impl MetricEngineState {
             })?
             .logical_regions;
 
-        LOGICAL_REGION_COUNT.sub(logical_regions.len() as i64);
+        let num_dropping = self.dropping_logical_regions.len();
+        self.dropping_logical_regions
+            .retain(|_, physical| *physical != physical_region_id);
+        let num_dropping = num_dropping - self.dropping_logical_regions.len();
+        LOGICAL_REGION_COUNT.sub((logical_regions.len() + num_dropping) as i64);
 
         for logical_region in logical_regions {
             self.logical_regions.remove(logical_region);
@@ -290,19 +296,17 @@ impl MetricEngineState {
     }
 
     /// Stops writes to a logical region whose drop failed, and keeps its physical region for a
-    /// retried drop.
-    pub fn mark_logical_region_dropping(&mut self, logical_region_id: RegionId) -> Result<()> {
-        let physical_region_id = self
-            .logical_regions
-            .get(&logical_region_id)
-            .copied()
-            .context(PhysicalRegionNotFoundSnafu {
-                region_id: logical_region_id,
-            })?;
-        self.remove_logical_region(logical_region_id)?;
+    /// retried drop. A region that is already dropping stays so.
+    pub fn mark_logical_region_dropping(&mut self, logical_region_id: RegionId) {
+        let Some(physical_region_id) = self.logical_regions.remove(&logical_region_id) else {
+            return;
+        };
+        if let Some(state) = self.physical_regions.get_mut(&physical_region_id) {
+            state.remove_logical_region(logical_region_id);
+        }
+        self.logical_columns.remove(&logical_region_id);
         self.dropping_logical_regions
             .insert(logical_region_id, physical_region_id);
-        Ok(())
     }
 
     /// Returns the physical region of a logical region to drop, including one whose drop failed.
@@ -319,6 +323,7 @@ impl MetricEngineState {
             .dropping_logical_regions
             .remove(&logical_region_id)
             .is_some()
+            && !self.logical_regions.contains_key(&logical_region_id)
         {
             return Ok(());
         }
@@ -327,5 +332,58 @@ impl MetricEngineState {
 
     pub fn is_logical_region_exist(&self, logical_region_id: RegionId) -> bool {
         self.logical_regions().contains_key(&logical_region_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::options::IndexOptions;
+
+    fn state_with_logical_region(physical: RegionId, logical: RegionId) -> MetricEngineState {
+        let mut state = MetricEngineState::default();
+        state.add_physical_region(
+            physical,
+            HashMap::new(),
+            PrimaryKeyEncoding::Sparse,
+            PhysicalRegionOptions {
+                index: IndexOptions::None,
+            },
+            TimeUnit::Millisecond,
+        );
+        state.add_logical_region(physical, logical);
+        state
+    }
+
+    #[test]
+    fn test_drop_logical_region_recovered_while_dropping() {
+        let physical = to_data_region_id(RegionId::new(1, 1));
+        let logical = RegionId::new(2, 1);
+        let mut state = state_with_logical_region(physical, logical);
+        // The drop fails twice, then the physical region recovers the logical region.
+        state.mark_logical_region_dropping(logical);
+        state.mark_logical_region_dropping(logical);
+        assert!(!state.is_logical_region_exist(logical));
+        assert_eq!(Some(physical), state.physical_region_to_drop(logical));
+        state.add_logical_region(physical, logical);
+
+        // The retried drop removes the region from all the state.
+        state.finish_logical_region_drop(logical).unwrap();
+        assert_eq!(None, state.physical_region_to_drop(logical));
+        assert!(
+            state.physical_region_states()[&physical]
+                .logical_regions()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_remove_physical_region_with_dropping_logical_region() {
+        let physical = to_data_region_id(RegionId::new(1, 1));
+        let logical = RegionId::new(2, 1);
+        let mut state = state_with_logical_region(physical, logical);
+        state.mark_logical_region_dropping(logical);
+        state.remove_physical_region(physical).unwrap();
+        assert_eq!(None, state.physical_region_to_drop(logical));
     }
 }
