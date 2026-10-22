@@ -1445,9 +1445,9 @@ impl Error {
     /// Returns whether a failed manifest update may have been persisted.
     ///
     /// Unknown errors are treated conservatively because deleting output SSTs after an ambiguous
-    /// manifest write could leave the manifest referencing missing files. A kind the retry layer
-    /// retries can come back after an earlier attempt was stored, so it never proves nothing was
-    /// written.
+    /// manifest write could leave the manifest referencing missing files. The retry layer returns
+    /// the last attempt's error, so an error that can follow a stored attempt (throttling, or a 403
+    /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
             Error::UpdateManifest { .. }
@@ -1461,7 +1461,6 @@ impl Error {
                 ErrorKind::Unsupported
                     | ErrorKind::ConfigInvalid
                     | ErrorKind::NotFound
-                    | ErrorKind::PermissionDenied
                     | ErrorKind::IsADirectory
                     | ErrorKind::NotADirectory
                     | ErrorKind::AlreadyExists
@@ -1848,7 +1847,6 @@ mod tests {
             ErrorKind::Unsupported,
             ErrorKind::ConfigInvalid,
             ErrorKind::NotFound,
-            ErrorKind::PermissionDenied,
             ErrorKind::IsADirectory,
             ErrorKind::NotADirectory,
             ErrorKind::AlreadyExists,
@@ -1864,8 +1862,12 @@ mod tests {
             );
         }
 
-        // RateLimited can be returned after retries even though an earlier attempt was stored.
-        for kind in [ErrorKind::Unexpected, ErrorKind::RateLimited] {
+        // The last retry can fail with these kinds even though an earlier attempt was stored.
+        for kind in [
+            ErrorKind::Unexpected,
+            ErrorKind::RateLimited,
+            ErrorKind::PermissionDenied,
+        ] {
             let error = OpenDalSnafu {}.into_error(object_store::Error::new(kind, "test"));
             assert!(
                 error.may_have_persisted_manifest_update(),

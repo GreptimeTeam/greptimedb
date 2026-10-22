@@ -1414,7 +1414,7 @@ impl object_store::layers::mock::Write for FailingManifestWriter {
     ) -> object_store::layers::mock::Result<()> {
         if matches!(self.failure, ManifestWriteFailure::BeforeWrite) {
             return Err(object_store::layers::mock::Error::new(
-                object_store::layers::mock::ErrorKind::PermissionDenied,
+                object_store::layers::mock::ErrorKind::Unsupported,
                 "manifest write rejected before persistence",
             ));
         }
