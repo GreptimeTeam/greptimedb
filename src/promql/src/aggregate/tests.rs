@@ -500,6 +500,11 @@ fn incremental_retained_bytes_match_full_recount_after_updates() {
     let mut aggregator =
         FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone", "rack"]))
             .unwrap();
+    assert_eq!(
+        aggregator.state_bytes(),
+        aggregator.recounted_state_bytes(),
+        "initial state"
+    );
     let updates = [
         input(
             &schema,
