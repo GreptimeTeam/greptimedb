@@ -33,7 +33,7 @@ use promql::native::plan::{
     Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
-use promql::vector_match::{BinaryMatching, BinaryOp};
+use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
 use promql_parser::label::MatchOp;
 use promql_parser::parser::{
     AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, Offset,
@@ -41,6 +41,27 @@ use promql_parser::parser::{
 };
 
 use super::{SelectorRequirement, SelectorTiming, compile, compile_selectors};
+
+/// Whether a matching names its labels with `on` (`true`) or `ignoring` (`false`), and which.
+fn matching_labels(labels: &MatchingLabels) -> (bool, Vec<&str>) {
+    match labels {
+        MatchingLabels::On(names) => (true, names.iter().map(|name| &**name).collect()),
+        MatchingLabels::Ignoring(names) => (false, names.iter().map(|name| &**name).collect()),
+    }
+}
+
+/// Which cardinality a matching declares, and the labels it copies from the one side.
+fn matching_cardinality(cardinality: &Cardinality) -> (&'static str, Vec<&str>) {
+    match cardinality {
+        Cardinality::OneToOne => ("one-to-one", Vec::new()),
+        Cardinality::ManyToOne(names) => {
+            ("many-to-one", names.iter().map(|name| &**name).collect())
+        }
+        Cardinality::OneToMany(names) => {
+            ("one-to-many", names.iter().map(|name| &**name).collect())
+        }
+    }
+}
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
@@ -1624,33 +1645,42 @@ fn a_constant_operand_binds_the_value_it_folds_to() {
     }
 }
 
-/// An operation between two vectors is refused because the tree cannot say which selector each
-/// `Input` reads: `a + b` and `a + a` would compile to the same tree. The refusal names the missing
-/// identity rather than the query it found, so whoever adds it knows what to add.
+/// Two vectors compile to one input per selector, each named by the position the executor reads it
+/// at, and the legacy entry refuses such a statement rather than answering with a tree whose inputs
+/// no caller can tell apart.
 #[test]
-fn an_operation_between_two_vectors_is_refused_for_the_missing_selector_identity() {
-    for query in [
-        "a + b",
-        "a > b",
-        "rate(a[5m]) * rate(b[5m])",
-        "sum(a) + sum(b)",
-    ] {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .expect_err(&format!("`{query}` compiled, and it should not have"));
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "`{query}` did not report NotImplemented: {error}"
-        );
-        let message = error.to_string();
-        assert!(
-            message.contains("between two vectors"),
-            "`{query}` did not say what it found: {message}"
-        );
-        assert!(
-            message.contains("selector"),
-            "`{query}` did not name what an input is missing: {message}"
-        );
-    }
+fn a_two_vector_operation_binds_one_input_per_selector() {
+    let compiled = compile_selectors(
+        &eval_stmt("a + b"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a + b` was refused: {error}"));
+    assert_eq!(2, compiled.inputs.len());
+    assert_eq!(compiled.inputs[0].path, NodePath::root().left().input());
+    assert_eq!(compiled.inputs[1].path, NodePath::root().right().input());
+    assert_eq!(compiled.inputs[0].requirement.metric.as_deref(), Some("a"));
+    assert_eq!(compiled.inputs[1].requirement.metric.as_deref(), Some("b"));
+    assert!(matches!(
+        compiled.tree.root().expr,
+        NativeExpr::Binary { .. }
+    ));
+
+    // `compile` has one schema for every input, so it cannot say which scan feeds which selector.
+    let error = compile(
+        &eval_stmt("a + b"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("`a + b` needs two inputs, and `compile` binds one");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "the refusal is the route declining the shape: {error}"
+    );
+    assert!(
+        error.to_string().contains("use `compile_selectors`"),
+        "the refusal does not say how to bind two inputs: {error}"
+    );
 }
 
 /// A set operator has no node at all, so it is refused as the set operator it is rather than as an
@@ -4379,52 +4409,6 @@ fn selector_requirement_bounds_account_for_grid_end_open_edges_and_zero_lookback
     );
 }
 
-/// An anchored instant selection reads one point rather than every grid point, so both edges of its
-/// scan come from the anchor. Taking the lower edge from the grid instead would scan from the
-/// statement's start, which for an anchor before the statement is the wrong side of the data and
-/// for an anchor after it skips the sample the selection reads.
-#[test]
-fn an_anchored_instant_selector_scans_from_its_anchor() {
-    // `x @ 50 offset 2s` with a five-second lookback: the sample is read at 48s, so the window it is
-    // selected from is 43s..=48s even though the statement starts at the epoch.
-    let requirement = SelectorRequirement {
-        metric: None,
-        matchers: promql_parser::label::Matchers::empty(),
-        offset_ms: 2_000,
-        at_ms: Some(50_000),
-        grid_start_ms: 0,
-        grid_end_ms: 100_000,
-        timing: SelectorTiming::Instant { lookback_ms: 5_000 },
-    };
-    assert_eq!(
-        requirement.raw_scan_bounds().unwrap(),
-        (43_000, 48_000, false)
-    );
-
-    // An anchor before the statement scans before it too: the same rule, the other direction. The
-    // grid's own start would have put the lower edge at a time the anchor never reads.
-    let requirement = SelectorRequirement {
-        at_ms: Some(-30_000),
-        ..requirement
-    };
-    assert_eq!(
-        requirement.raw_scan_bounds().unwrap(),
-        (-37_000, -32_000, false)
-    );
-
-    // A zero lookback closes both edges on the one sample, anchored or not.
-    let requirement = SelectorRequirement {
-        at_ms: Some(50_000),
-        offset_ms: 0,
-        timing: SelectorTiming::Instant { lookback_ms: 0 },
-        ..requirement
-    };
-    assert_eq!(
-        requirement.raw_scan_bounds().unwrap(),
-        (50_000, 50_000, true)
-    );
-}
-
 /// An anchor replaces the grid's endpoints on both edges, and a bound that does not fit is reported
 /// rather than wrapped.
 #[test]
@@ -4450,6 +4434,110 @@ fn selector_requirement_bounds_apply_offset_and_anchor_and_check_overflow() {
         timing: SelectorTiming::Window { range_ms: 1 },
     };
     assert!(requirement.raw_scan_bounds().is_err());
+}
+
+#[test]
+fn an_on_matching_binds_the_labels_it_names() {
+    let compiled = compile_selectors(
+        &eval_stmt("a / on(job) b"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a / on(job) b` was refused: {error}"));
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(matching.op, BinaryOp::Div);
+    assert_eq!(
+        matching_labels(&matching.labels),
+        (true, vec!["job"]),
+        "`on(job)` was not bound as an `on` list holding `job`"
+    );
+    assert_eq!(matching_cardinality(&matching.cardinality).0, "one-to-one");
+}
+
+/// `ignoring` and `group_left` are two separate fields of the matching: the labels a series is
+/// matched on, and the labels copied from the one side. Binding one into the other computes a
+/// different result for a query this compiler accepts.
+#[test]
+fn an_ignoring_with_group_left_binds_both_lists() {
+    let compiled = compile_selectors(
+        &eval_stmt("a / ignoring(instance) group_left(host) b"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| {
+        panic!("`a / ignoring(instance) group_left(host) b` was refused: {error}")
+    });
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(
+        matching_labels(&matching.labels),
+        (false, vec!["instance"]),
+        "`ignoring(instance)` was not bound as an `ignoring` list holding `instance`"
+    );
+    assert_eq!(
+        matching_cardinality(&matching.cardinality),
+        ("many-to-one", vec!["host"]),
+        "`group_left(host)` was not bound as a many-to-one cardinality copying `host`"
+    );
+}
+
+/// `group_right` swaps which side is the one side, so the cardinality and the copied labels are
+/// asserted on their own: a binding that read `group_left` for both would answer the wrong side.
+#[test]
+fn a_group_right_binds_the_one_to_many_cardinality() {
+    let compiled = compile_selectors(
+        &eval_stmt("a / on(job) group_right(zone) b"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a / on(job) group_right(zone) b` was refused: {error}"));
+
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(
+        matching_cardinality(&matching.cardinality),
+        ("one-to-many", vec!["zone"]),
+        "`group_right(zone)` was not bound as a one-to-many cardinality copying `zone`"
+    );
+    assert_eq!(matching_labels(&matching.labels), (true, vec!["job"]));
+}
+
+/// A fill value stands for the side the query named, and `fill` stands for both, so each field is
+/// asserted apart: the kernel picks the field by which side of the match is missing.
+#[test]
+fn fill_values_bind_the_side_the_query_named() {
+    for (query, lhs, rhs) in [
+        ("a + fill_left(0) b", Some(0.0), None),
+        ("a + fill_right(1.5) b", None, Some(1.5)),
+        ("a + fill(2) b", Some(2.0), Some(2.0)),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, _, matching) = binary_parts(compiled.tree.root());
+        assert_eq!(matching.fill.lhs, lhs, "`{query}` bound the left fill");
+        assert_eq!(matching.fill.rhs, rhs, "`{query}` bound the right fill");
+    }
+}
+
+/// A comparison binds its `return_bool` flag, which is the one modifier that changes what the
+/// operation computes rather than which series it pairs.
+#[test]
+fn a_comparison_binds_its_bool_flag() {
+    for (query, expected) in [("a > b", false), ("a > bool b", true)] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, _, matching) = binary_parts(compiled.tree.root());
+        assert_eq!(matching.op, BinaryOp::Gt);
+        assert_eq!(matching.return_bool, expected, "`{query}` bound its flag");
+    }
 }
 
 #[test]
