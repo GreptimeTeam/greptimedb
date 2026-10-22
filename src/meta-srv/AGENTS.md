@@ -46,10 +46,10 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
 - **Datanode process fence**: `HeartbeatHandlerGroup::check_request` checks
   every datanode request carrying a `node_epoch` against the highest epoch of
   its node id (`handler/node_epoch.rs`, outside the handler chain). The leader
-  answers from memory, cleared on every leader change it receives from the
-  election (not from the leader change callbacks), and reads the KV backend
-  uncached only for a node's first request after the change or a higher
-  epoch. The session then updates its pusher and calls
+  answers from memory, which follows the election's leader changes (not the
+  leader change callbacks) and is used only after an `Elected` change, and
+  reads the KV backend uncached only for a node's first request after the
+  change or a higher epoch. The session then updates its pusher and calls
   `handle_checked`, which runs the chain. Stale and clock-ahead requests skip
   the chain; unverified ones get no region lease and no mailbox delivery. A
   datanode stream registers its pusher on its first request that passes the

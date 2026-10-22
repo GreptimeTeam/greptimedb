@@ -58,17 +58,29 @@ pub(crate) type NodeEpochCacheRef = Arc<NodeEpochCache>;
 /// The highest epoch of each datanode that the leader has read or written in the kv backend
 /// in its current term.
 ///
-/// It is cleared on every leader change of the election, which it receives itself rather than
-/// from the metasrv's leader change loop, so a slow leader change callback cannot delay it.
-#[derive(Default)]
+/// It follows the leader changes of the election itself rather than the metasrv's leader
+/// change loop, so a slow leader change callback cannot delay it. It is cleared on every
+/// change, and used only while the last change it has received elected this metasrv. The
+/// election reports this metasrv as the leader before it sends the change, so a check that
+/// sees the leadership first may find the cache not yet in use, but never filled before the
+/// change.
 pub(crate) struct NodeEpochCache {
     inner: Mutex<NodeEpochCacheInner>,
+}
+
+impl Default for NodeEpochCache {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 #[derive(Default)]
 struct NodeEpochCacheInner {
     /// The leader changes of the election; `None` without an election.
     leader_changes: Option<broadcast::Receiver<LeaderChangeMessage>>,
+    /// Whether the last leader change received elected this metasrv. Always true without an
+    /// election.
+    elected: bool,
     /// Grows on every leader change, so a kv read started before a change cannot fill the cache
     /// after it.
     term: u64,
@@ -76,15 +88,19 @@ struct NodeEpochCacheInner {
 }
 
 impl NodeEpochCacheInner {
-    /// Clears the cache if the election has sent a leader change since the last call. The
-    /// election sends a step down before it can report this metasrv as the leader again, so a
-    /// check that has seen this metasrv as the leader of a later term also sees the change.
+    /// Clears the cache if the election has sent a leader change since the last call.
     fn observe_leader_changes(&mut self) {
         let Some(leader_changes) = &mut self.leader_changes else {
             return;
         };
         let mut changed = false;
-        while let Ok(_) | Err(TryRecvError::Lagged(_)) = leader_changes.try_recv() {
+        loop {
+            match leader_changes.try_recv() {
+                Ok(msg) => self.elected = matches!(msg, LeaderChangeMessage::Elected(_)),
+                // The changes that follow tell the current leadership.
+                Err(TryRecvError::Lagged(_)) => self.elected = false,
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+            }
             changed = true;
         }
         if changed {
@@ -95,11 +111,12 @@ impl NodeEpochCacheInner {
 }
 
 impl NodeEpochCache {
-    /// Creates a cache that is cleared on every leader change of `election`.
+    /// Creates a cache that follows the leader changes of `election`.
     pub(crate) fn new(election: Option<&ElectionRef>) -> Self {
         Self {
             inner: Mutex::new(NodeEpochCacheInner {
                 leader_changes: election.map(|election| election.subscribe_leader_change()),
+                elected: election.is_none(),
                 ..Default::default()
             }),
         }
@@ -109,15 +126,21 @@ impl NodeEpochCache {
     fn get(&self, node_id: DatanodeId) -> (u64, Option<u64>) {
         let mut inner = self.inner.lock().unwrap();
         inner.observe_leader_changes();
-        (inner.term, inner.epochs.get(&node_id).copied())
+        let highest = if inner.elected {
+            inner.epochs.get(&node_id).copied()
+        } else {
+            None
+        };
+        (inner.term, highest)
     }
 
     /// Records `node_epoch`, read or written in the kv backend in `term`, as the highest epoch
-    /// of `node_id` if it is higher and no leader change has happened since.
+    /// of `node_id` if it is higher, no leader change has happened since, and the last one
+    /// elected this metasrv.
     fn fill(&self, term: u64, node_id: DatanodeId, node_epoch: u64) {
         let mut inner = self.inner.lock().unwrap();
         inner.observe_leader_changes();
-        if inner.term == term {
+        if inner.elected && inner.term == term {
             let highest = inner.epochs.entry(node_id).or_default();
             *highest = (*highest).max(node_epoch);
         }
@@ -468,6 +491,8 @@ pub(crate) mod tests {
         leader: AtomicBool,
         /// Becomes the leader right after the next leadership check, without a leader change.
         promote_after_check: AtomicBool,
+        /// Steps down right after the next leadership check.
+        step_down_after_check: AtomicBool,
         leader_changes: broadcast::Sender<LeaderChangeMessage>,
     }
 
@@ -476,6 +501,7 @@ pub(crate) mod tests {
             Self {
                 leader: AtomicBool::default(),
                 promote_after_check: AtomicBool::default(),
+                step_down_after_check: AtomicBool::default(),
                 leader_changes: broadcast::channel(16).0,
             }
         }
@@ -502,6 +528,9 @@ pub(crate) mod tests {
             let leader = self.leader.load(Ordering::Relaxed);
             if self.promote_after_check.swap(false, Ordering::Relaxed) {
                 self.leader.store(true, Ordering::Relaxed);
+            }
+            if self.step_down_after_check.swap(false, Ordering::Relaxed) {
+                self.set_leader(false);
             }
             leader
         }
@@ -916,6 +945,52 @@ pub(crate) mod tests {
         assert_eq!(fence(&res), Some("stale"));
         assert!(res.region_lease.is_none());
         assert_eq!(kv_backend.ops(), (2, 0));
+    }
+
+    #[tokio::test]
+    async fn test_follower_does_not_fill_memory_for_a_later_term() {
+        let now = current_time_millis() as u64;
+        let (e1, e2) = (now - 1000, now);
+        let (m1_group, m2_group) = (new_group(), new_group());
+        let kv_backend = Arc::new(HookedKvBackend::default());
+        let election = Arc::new(TestElection::default());
+        let m1 = new_ctx(kv_backend.clone(), Some(election.clone()));
+        let m2 = new_ctx(kv_backend.clone(), None);
+        election.set_leader(true);
+        kv_backend.record(e1).await;
+
+        // A1's check sees M1 as the leader, then M1 steps down before the check reads memory,
+        // so the check reads e1 from the kv backend as a follower.
+        election
+            .step_down_after_check
+            .store(true, Ordering::Relaxed);
+        m1_group
+            .handle(heartbeat(e1, "a1"), m1.clone())
+            .await
+            .unwrap();
+        let res = m2_group.handle(heartbeat(e2, "a2"), m2).await.unwrap();
+        assert_eq!(fence(&res), Some("accepted"));
+
+        // M1 is elected again, and its election reports the leadership before it sends the
+        // change. A1 is checked against the kv backend, not against what M1 read as a follower.
+        election.leader.store(true, Ordering::Relaxed);
+        let res = m1_group
+            .handle(heartbeat(e1, "a1"), m1.clone())
+            .await
+            .unwrap();
+        assert_eq!(fence(&res), Some("stale"));
+        assert_eq!(kv_backend.ops(), (3, 1));
+
+        // Memory is used once the change arrives.
+        election.set_leader(true);
+        for _ in 0..2 {
+            let res = m1_group
+                .handle(heartbeat(e1, "a1"), m1.clone())
+                .await
+                .unwrap();
+            assert_eq!(fence(&res), Some("stale"));
+        }
+        assert_eq!(kv_backend.ops(), (4, 1));
     }
 
     #[tokio::test]
