@@ -2308,7 +2308,11 @@ impl NodeRuntime {
             // the input again.
             let _timer = metrics.timer();
             match self.map.as_ref() {
-                Some(map) => map_chunk(&map.schema, &chunk, &map.ops),
+                // A label change can write a label far larger than the chunk, so each one is
+                // admitted before it is built.
+                Some(map) => map_chunk(&map.schema, &chunk, &map.ops, &mut |bytes| {
+                    self.buffer.grow(bytes)
+                }),
                 None => Err(DataFusionError::Execution(format!(
                     "the node at {path} holds no map"
                 ))),
@@ -4017,15 +4021,22 @@ impl NativeExecutor {
 /// the operation emptied every position, which yields no chunk at all
 /// unless this chunk closed its series: a closing chunk is still handed over, holding no position,
 /// because a consumer tells "nothing more here" from "no more input" by that chunk alone.
+///
+/// `admit` is handed the bytes a label change can write before the change builds them; an error
+/// from it stops the map.
 fn map_chunk(
     schema: &SeriesSchema,
     chunk: &EvaluatedChunk,
     ops: &[MapOp],
+    admit: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Option<EvaluatedChunk>> {
     let mut series = chunk.series.clone();
     for (index, op) in ops.iter().enumerate() {
         match op {
-            MapOp::Label(rewrite) => rewrite.apply(&mut series.metric)?,
+            MapOp::Label(rewrite) => {
+                admit(rewrite.written_bytes(&series.metric))?;
+                rewrite.apply(&mut series.metric)?;
+            }
             MapOp::Math(math) => match map_math(schema, &series, *math)? {
                 Some(mapped) => series = mapped,
                 // `clamp` with `max < min` is the empty vector, and math skips native histograms,
@@ -4040,7 +4051,10 @@ fn map_chunk(
                     let mut metric = series.metric.clone();
                     for op in &ops[index..] {
                         match op {
-                            MapOp::Label(rewrite) => rewrite.apply(&mut metric)?,
+                            MapOp::Label(rewrite) => {
+                                admit(rewrite.written_bytes(&metric))?;
+                                rewrite.apply(&mut metric)?;
+                            }
                             MapOp::Math(_) => metric = drop_metric_name(&metric)?,
                         }
                     }

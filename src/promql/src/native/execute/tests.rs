@@ -947,9 +947,14 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
     let inner_series = inner_evaluator.push(&chunk).unwrap().unwrap();
     inner_evaluator.finish().unwrap();
     let map_schema = evaluated_schema(Arc::clone(&inner_grid));
-    let mapped_chunk = map_chunk(&map_schema, &inner_series, &[MapOp::Math(MathOp::Abs)])
-        .unwrap()
-        .expect("`abs` maps every position, so the chunk keeps its rows");
+    let mapped_chunk = map_chunk(
+        &map_schema,
+        &inner_series,
+        &[MapOp::Math(MathOp::Abs)],
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .expect("`abs` maps every position, so the chunk keeps its rows");
     assert!(
         Arc::ptr_eq(
             mapped_chunk.series.time.grid().expect("a grid chunk"),
@@ -7520,9 +7525,14 @@ fn a_label_only_map_keeps_histogram_samples() {
         true,
     );
     let rewrite = LabelRewrite::replace("job", "y", "job", "x").unwrap();
-    let mapped = map_chunk(&schema, &chunk, &[MapOp::Label(Arc::new(rewrite))])
-        .unwrap()
-        .unwrap();
+    let mapped = map_chunk(
+        &schema,
+        &chunk,
+        &[MapOp::Label(Arc::new(rewrite))],
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(mapped.series.metric.get("job"), Some("y"));
     assert_eq!(mapped.series.time.len(), 3);
     let samples = mapped.series.fields.as_slice()[0]
@@ -7536,4 +7546,48 @@ fn a_label_only_map_keeps_histogram_samples() {
             SampleRef::Histogram(_)
         ]
     ));
+}
+
+/// `label_join` over one source listed a thousand times writes a label a thousand times the
+/// input's, so the map admits that before it builds the label: the bound covers the label it
+/// writes, and a pool that cannot hold it refuses the chunk and gets every byte back.
+#[test]
+fn a_label_change_admits_the_label_it_writes_before_building_it() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let job = "j".repeat(1024);
+    let sources = vec!["job"; 1024];
+    let join = Arc::new(LabelRewrite::join("dst", "", &sources).unwrap());
+    let chunk = evaluated_chunk_of(&schema, named_metric("m", &job), 0, vec![Some(1.0)], true);
+
+    let mut admitted = 0;
+    map_chunk(
+        &schema,
+        &chunk,
+        &[MapOp::Label(Arc::clone(&join))],
+        &mut |bytes| {
+            admitted += bytes;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(admitted >= 1024 * 1024, "{admitted}");
+    // Each capture reference of a `label_replace` template can repeat the whole source value.
+    let replace = LabelRewrite::replace("dst", &"$1".repeat(8), "job", "(.*)").unwrap();
+    let mut metric = named_metric("m", &job);
+    let bound = replace.written_bytes(&metric);
+    replace.apply(&mut metric).unwrap();
+    assert!(bound >= metric.get("dst").unwrap().len() + "dst".len());
+
+    let pool = bounded_pool(256 * 1024);
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Label(join)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution.push_evaluated(chunk).unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("Resources exhausted"), "{error}");
+    assert_eq!(pool.reserved(), 0);
 }
