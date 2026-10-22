@@ -2529,8 +2529,8 @@ mod tests {
         assert_eq!(5, response.affected_rows);
 
         // The lease expires while dropping that logical region, which writes have used. The
-        // delete is applied, so the engine forgets the region: writes to it fail, and a retried
-        // drop finds it missing.
+        // delete is applied, so writes no longer use its cached columns, and a retried drop
+        // removes the region.
         let drop_request = || {
             RegionRequest::Drop(RegionDropRequest {
                 fast_path: false,
@@ -2560,22 +2560,38 @@ mod tests {
                 grant(Instant::now() + Duration::from_secs(10)),
             )
             .unwrap();
-        let request = RegionRequest::Put(RegionPutRequest {
-            skip_wal: false,
-            rows: Rows {
-                schema: test_util::row_schema_with_tags(&["job", "tag2"]),
-                rows: test_util::build_rows(2, 5),
-            },
-            hint: None,
-            partition_expr_version: None,
-        });
-        let err = engine
-            .handle_request(logical_region_id, request)
+        let put_request = || {
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
+                rows: Rows {
+                    schema: test_util::row_schema_with_tags(&["job", "tag2"]),
+                    rows: test_util::build_rows(2, 5),
+                },
+                hint: None,
+                partition_expr_version: None,
+            })
+        };
+        engine
+            .handle_request(logical_region_id, put_request())
             .await
             .unwrap_err();
-        assert_eq!(StatusCode::RegionNotFound, err.status_code(), "{err:?}");
-        let err = engine
+        let metadata_region = &engine.inner.metadata_region;
+        assert!(
+            metadata_region
+                .has_logical_region_lock(logical_region_id)
+                .await
+        );
+        engine
             .handle_request(logical_region_id, drop_request())
+            .await
+            .unwrap();
+        assert!(
+            !metadata_region
+                .has_logical_region_lock(logical_region_id)
+                .await
+        );
+        let err = engine
+            .handle_request(logical_region_id, put_request())
             .await
             .unwrap_err();
         assert_eq!(StatusCode::RegionNotFound, err.status_code(), "{err:?}");

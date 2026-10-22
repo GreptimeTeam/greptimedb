@@ -766,6 +766,14 @@ fn get_all_with_prefix(
 
 #[cfg(test)]
 impl MetadataRegion {
+    /// Returns whether a lock is registered for the logical region.
+    pub async fn has_logical_region_lock(&self, logical_region_id: RegionId) -> bool {
+        self.logical_region_lock
+            .read()
+            .await
+            .contains_key(&logical_region_id)
+    }
+
     /// Retrieves the value associated with the given key in the specified region.
     /// Returns `Ok(None)` if the key is not found.
     pub async fn get(&self, region_id: RegionId, key: &str) -> Result<Option<String>> {
