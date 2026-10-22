@@ -139,6 +139,39 @@ impl LabelRewrite {
         }))
     }
 
+    /// An upper bound on the bytes the label this change writes to `metric` takes, read before it
+    /// is built.
+    ///
+    /// The written value can be far larger than the input: `label_join` concatenates its sources,
+    /// listed any number of times, and every `$` reference of a `label_replace` template can expand
+    /// to the whole source value. The bound counts each source once per listing and each `$` as
+    /// one whole source value.
+    pub fn written_bytes(&self, metric: &MetricName) -> usize {
+        let value = |name: &str| metric.get(name).map_or(0, str::len);
+        match &self.0 {
+            Change::Replace {
+                dst,
+                replacement,
+                src,
+                ..
+            } => {
+                let references = replacement.matches('$').count();
+                dst.len()
+                    .saturating_add(replacement.len())
+                    .saturating_add(references.saturating_mul(value(src)))
+            }
+            Change::Join {
+                dst,
+                separator,
+                src,
+            } => src.iter().fold(
+                dst.len()
+                    .saturating_add(separator.len().saturating_mul(src.len())),
+                |total, name| total.saturating_add(value(name)),
+            ),
+        }
+    }
+
     /// Changes `metric` the way the function changes one series.
     pub fn apply(&self, metric: &mut MetricName) -> Result<()> {
         let mut value = String::new();

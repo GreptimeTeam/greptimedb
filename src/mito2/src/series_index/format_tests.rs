@@ -30,7 +30,7 @@ use store_api::storage::FileId;
 
 use crate::config::MitoConfig;
 use crate::error::{OpenDalSnafu, Result, UnexpectedSnafu};
-use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata};
+use crate::series_index::artifact::{ArtifactFormat, ArtifactMetadata, ArtifactObject};
 use crate::series_index::catalog::{SeriesIndexEntry, load_version_control};
 use crate::series_index::format::{FormatWriter, SamplesFormat, SeriesFormats, SeriesIndexFormat};
 use crate::series_index::maintenance::reconcile_series_indexes;
@@ -64,8 +64,11 @@ impl FormatWriter for FakeWriter {
         Ok(self.artifact)
     }
     async fn abort(self: Box<Self>) -> Result<()> {
-        for path in &self.artifact.objects {
-            self.store.delete(path).await.context(OpenDalSnafu)?;
+        for object in &self.artifact.objects {
+            self.store
+                .delete(&object.path)
+                .await
+                .context(OpenDalSnafu)?;
         }
         Ok(())
     }
@@ -81,6 +84,7 @@ impl SamplesFormat for FakeSamples {
         _metadata: RegionMetadataRef,
         store: ObjectStore,
         prefix: &str,
+        _source_file_id: FileId,
         generation: FileId,
     ) -> Result<Box<dyn FormatWriter>> {
         let objects = vec![format!("{prefix}data"), format!("{prefix}directory")];
@@ -92,7 +96,10 @@ impl SamplesFormat for FakeSamples {
             artifact: ArtifactMetadata {
                 format: self.format(),
                 generation,
-                objects,
+                objects: objects
+                    .into_iter()
+                    .map(|path| ArtifactObject { path, file_size: 4 })
+                    .collect(),
                 file_size: 8,
             },
             fail: self.fail.clone(),
@@ -156,7 +163,7 @@ async fn format_skeleton_build_reopen_and_retire() {
     // Rebuilding a missing sidecar replaces its generation but retains old readers' files.
     let old = snapshot.samples.values().next().unwrap().clone();
     store
-        .delete(&old.entry().artifact.objects[0])
+        .delete(&old.entry().artifact.objects[0].path)
         .await
         .unwrap();
     let stats = reconcile_series_indexes(
@@ -244,7 +251,7 @@ impl SeriesIndexFormat for FakeIndex {
             artifact: ArtifactMetadata {
                 format: self.format(),
                 generation: entry.index_uuid,
-                objects: vec![path],
+                objects: vec![ArtifactObject { path, file_size: 4 }],
                 file_size: 4,
             },
             fail: Arc::new(AtomicBool::new(false)),
@@ -321,7 +328,7 @@ async fn format_index_rebuild_is_scoped_and_scans_fall_back_to_ssts() {
 
     let missing = before.series_indexes.values().next().unwrap();
     store
-        .delete(&missing.entry().artifact.as_ref().unwrap().objects[0])
+        .delete(&missing.entry().artifact.as_ref().unwrap().objects[0].path)
         .await
         .unwrap();
     assert_eq!(1, reconcile().await.unwrap().built_series);
@@ -397,7 +404,7 @@ async fn format_catalog_failure_preserves_published_artifacts() {
     let catalog = store.read(&catalog_path).await.unwrap().to_bytes();
     let old = before.samples.values().next().unwrap();
     store
-        .delete(&old.entry().artifact.objects[0])
+        .delete(&old.entry().artifact.objects[0].path)
         .await
         .unwrap();
     let layer = MockLayerBuilder::default()
@@ -427,11 +434,13 @@ async fn format_catalog_failure_preserves_published_artifacts() {
     assert_eq!(catalog, store.read(&catalog_path).await.unwrap().to_bytes());
     let cleanup = purges.try_recv().unwrap().objects.unwrap();
     assert_eq!(2, cleanup.len());
-    assert!(
-        cleanup
+    assert!(cleanup.iter().all(|path| {
+        !old.entry()
+            .artifact
+            .objects
             .iter()
-            .all(|path| !old.entry().artifact.objects.contains(path))
-    );
+            .any(|object| &object.path == path)
+    }));
     assert!(purges.try_recv().is_err());
     let reopened = load_version_control(&store, region.region_id, &purger).await;
     assert_eq!(

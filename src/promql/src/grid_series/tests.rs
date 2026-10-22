@@ -312,12 +312,7 @@ fn runs_never_bridge_positions_without_a_value() {
     let series = builder.finish(metric(0)).unwrap().expect("two rows");
     // One series over a million-position grid, with two runs, and the axis says where they sit.
     assert_eq!(
-        series
-            .time
-            .grid()
-            .expect("a grid series")
-            .timestamps()
-            .len(),
+        series.time.grid().expect("a grid series").spec().len as usize,
         SPAN,
         "the grid really holds a million positions"
     );
@@ -787,7 +782,7 @@ fn merge_of_many_segments_keeps_one_row_per_value() {
     assert_eq!(merged.len(), 1);
     let series = &merged[0];
     assert_eq!(
-        series.time.grid().unwrap().timestamps().len(),
+        series.time.grid().unwrap().spec().len as usize,
         GRID,
         "the grid really holds a million positions"
     );
@@ -971,7 +966,10 @@ mod acceptance {
         // The axis lends the grid's buffer instead of copying it: the fast path is not only a
         // label, it is the same rows without per-series timestamp storage.
         assert!(
-            matches!(series.time.timestamps(), std::borrow::Cow::Borrowed(_)),
+            matches!(
+                series.time.timestamps().unwrap(),
+                std::borrow::Cow::Borrowed(_)
+            ),
             "a single range lends its timestamps"
         );
     }

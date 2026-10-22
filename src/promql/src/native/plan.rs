@@ -31,14 +31,15 @@
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
+use datatypes::series::{MetricName, SeriesOrdering};
 
-use crate::histogram_eval::NativeHistogramFunction;
+use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::BinaryMatching;
 
 /// What one node produces.
@@ -190,10 +191,43 @@ pub enum MapOp {
 }
 
 /// Which aggregate a node computes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Every kind here folds a group's values into one value per grid point. The aggregates that
+/// instead select some of the input's series (`topk`, `bottomk`, `limitk`, `limit_ratio`) or write
+/// one output label per distinct value (`count_values`) are a different shape and have no variant,
+/// so a node cannot claim to compute one of them.
+///
+/// A kind may be bound before its kernel exists: whether the tree can run is
+/// [`NativeTree::try_new`]'s and the runtime's question, not this enum's.
+///
+/// `Eq` is missing because [`AggregateKind::Quantile`] carries an `f64`, as
+/// [`RangeFunction::QuantileOverTime`] does.
+///
+/// [`RangeFunction::QuantileOverTime`]: crate::range_eval::RangeFunction::QuantileOverTime
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AggregateKind {
-    /// `sum` over the values of each group at each grid point.
+    /// `sum`: the total of each group's values at each grid point.
     Sum,
+    /// `avg`: the mean of each group's values at each grid point.
+    Avg,
+    /// `count`: how many values each group has at each grid point.
+    Count,
+    /// `min`: the smallest of each group's values at each grid point.
+    Min,
+    /// `max`: the largest of each group's values at each grid point.
+    Max,
+    /// `group`: `1` where a group has any value at a grid point.
+    Group,
+    /// `stddev`: the standard deviation of each group's values at each grid point.
+    Stddev,
+    /// `stdvar`: the variance of each group's values at each grid point.
+    Stdvar,
+    /// `quantile`: the φ-quantile of each group's values at each grid point, as written.
+    Quantile {
+        /// The φ the query wrote, which `0` to `1` does not bound: Prometheus reads a negative φ as
+        /// `-Infinity` and one above `1` as `+Infinity`.
+        quantile: f64,
+    },
 }
 
 /// Where an aggregate sits in the execution, which decides whether its output is a query value.
@@ -234,6 +268,33 @@ pub struct BoundAggregate {
     pub stage: AggregateStage,
 }
 
+/// An operator over the whole input vector at each grid point: one that keeps some of the input's
+/// samples with their series' labels and values, orders the series, reports where none is present,
+/// or reads a classic histogram from its bucket series.
+///
+/// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
+/// field.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundVectorOp {
+    /// `topk` (`top`) or `bottomk`: the `k` largest or smallest values of each group.
+    TopK { k: f64, top: bool, group: Grouping },
+    /// `limitk`: the first `k` series of each group that hold a sample, in input order.
+    LimitK { k: f64, group: Grouping },
+    /// `limit_ratio`: the series whose label hash falls in the ratio; it keeps whole series, so it
+    /// has no grouping.
+    LimitRatio { ratio: f64 },
+    /// `sort`, `sort_desc`, `sort_by_label` and `sort_by_label_desc`: the input's series in another
+    /// order, which only an instant result shows. `sort` and `sort_desc` also drop histogram
+    /// samples, in a range result too.
+    Sort(SortOrder),
+    /// `absent`: `1` under `labels` at every point where the input holds no sample. The labels are
+    /// what the compiler derives from the argument's matchers.
+    Absent { labels: MetricName },
+    /// `histogram_quantile` or `histogram_fraction`: each classic histogram is read from the bucket
+    /// series that share its labels, so this too reads the whole vector at a point.
+    Histogram(HistogramFunction),
+}
+
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
 #[derive(Clone, Debug)]
 pub enum NativeExpr {
@@ -260,6 +321,11 @@ pub enum NativeExpr {
     Aggregate {
         input: Box<NativeNode>,
         op: BoundAggregate,
+    },
+    /// An operation over the whole input vector at each grid point.
+    Vector {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
     },
     /// A binary operation between two inputs, with its matching rules.
     ///
@@ -367,11 +433,11 @@ impl NativeNode {
                 }
                 ensure_not_interleaved(input)?;
                 // What is checked here and just below is that the declared input grid equals the
-                // input's grid, and that the output grid matches the declared one. The grid is
-                // not checked to cover the window's read range
-                // `(out.start - offset - range, out.end - offset]`: only a subquery feeds an
-                // evaluated input to a window, and this compiler does not accept subqueries yet,
-                // so that coverage check waits for it.
+                // input's grid, and that the output grid matches the declared one. That the grid
+                // covers the window's read range
+                // `(out.start - offset - range, out.end - offset]` is not checked here: only a
+                // subquery feeds an evaluated input to a window, and deriving that coverage is the
+                // compiler's, which builds the subquery's child grid to span it.
                 match (op.input_grid.as_ref(), schema.eval_grid.as_ref()) {
                     (None, None) => {}
                     (Some(bound), Some(actual)) if bound.spec() == actual.spec() => {}
@@ -401,6 +467,20 @@ impl NativeNode {
                 ensure_samples(&self.output, "a map")?;
                 ensure_same_fields(&input.output, &self.output, "a map")?;
                 ensure_grid(&self.output, input_grid, "a map")?;
+            }
+            NativeExpr::Vector { input, .. } => {
+                input.validate()?;
+                // A vector operation keeps the input's fields and grid, so it consumes and produces
+                // the same evaluated vector.
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid(&format!(
+                        "a vector operation consumes an evaluated vector, not {}",
+                        input.output.describe()
+                    )));
+                };
+                ensure_samples(&self.output, "a vector operation")?;
+                ensure_same_fields(&input.output, &self.output, "a vector operation")?;
+                ensure_grid(&self.output, input_grid, "a vector operation")?;
             }
             NativeExpr::Aggregate { input, op } => {
                 input.validate()?;

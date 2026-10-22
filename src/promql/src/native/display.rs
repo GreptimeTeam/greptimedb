@@ -22,16 +22,18 @@
 use std::fmt::{self, Write};
 use std::sync::Arc;
 
-use datatypes::series::SeriesOrdering;
 use datatypes::series::time::EvalGrid;
+use datatypes::series::{MetricName, SeriesOrdering};
 
+use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
+use crate::select::SortOrder;
 use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The header line of every tree.
@@ -102,11 +104,33 @@ fn describe(node: &NativeNode) -> String {
             let ops: Vec<String> = op.ops.iter().map(map_op).collect();
             ops.join(", ")
         }
+        NativeExpr::Vector { op, .. } => match op {
+            BoundVectorOp::TopK { k, top, group } => format!(
+                "{} {k} {}",
+                if *top { "topk" } else { "bottomk" },
+                grouping(group)
+            ),
+            BoundVectorOp::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
+            BoundVectorOp::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
+            BoundVectorOp::Sort(order) => match order {
+                SortOrder::Asc => "sort".to_string(),
+                SortOrder::Desc => "sort_desc".to_string(),
+                SortOrder::ByLabel(labels) => format!("sort_by_label [{}]", label_list(labels)),
+                SortOrder::ByLabelDesc(labels) => {
+                    format!("sort_by_label_desc [{}]", label_list(labels))
+                }
+            },
+            BoundVectorOp::Absent { labels } => format!("absent {{{}}}", label_pairs(labels)),
+            BoundVectorOp::Histogram(HistogramFunction::Quantile(quantile)) => {
+                format!("histogram_quantile {quantile}")
+            }
+            BoundVectorOp::Histogram(HistogramFunction::Fraction { lower, upper }) => {
+                format!("histogram_fraction {lower} {upper}")
+            }
+        },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} [{}] {}",
-            match op.kind {
-                AggregateKind::Sum => "sum",
-            },
+            aggregate_kind(op.kind),
             match &op.group {
                 Grouping::By(_) => "by",
                 Grouping::Without(_) => "without",
@@ -149,6 +173,21 @@ fn fill(values: FillValues) -> String {
         side("fill_left", values.lhs),
         side("fill_right", values.rhs)
     )
+}
+
+/// The PromQL name of an aggregate, with the constant argument it was bound to.
+fn aggregate_kind(kind: AggregateKind) -> String {
+    match kind {
+        AggregateKind::Sum => "sum".to_string(),
+        AggregateKind::Avg => "avg".to_string(),
+        AggregateKind::Count => "count".to_string(),
+        AggregateKind::Min => "min".to_string(),
+        AggregateKind::Max => "max".to_string(),
+        AggregateKind::Group => "group".to_string(),
+        AggregateKind::Stddev => "stddev".to_string(),
+        AggregateKind::Stdvar => "stdvar".to_string(),
+        AggregateKind::Quantile { quantile } => format!("quantile {quantile}"),
+    }
 }
 
 /// A window: what it runs, over which range, and where it lands.
@@ -262,6 +301,30 @@ fn binary_op(op: BinaryOp) -> &'static str {
     }
 }
 
+/// The labels of `metric` as `name="value"` pairs, the metric name first.
+fn label_pairs(metric: &MetricName) -> String {
+    metric
+        .name()
+        .map(|name| format!("__name__={name:?}"))
+        .into_iter()
+        .chain(
+            metric
+                .tags()
+                .iter()
+                .map(|tag| format!("{}={:?}", tag.name, tag.value)),
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A grouping as `by [labels]` or `without [labels]`.
+fn grouping(group: &Grouping) -> String {
+    match group {
+        Grouping::By(labels) => format!("by [{}]", label_list(labels)),
+        Grouping::Without(labels) => format!("without [{}]", label_list(labels)),
+    }
+}
+
 /// What kind of node this is, as its line names it.
 fn kind(expr: &NativeExpr) -> &'static str {
     match expr {
@@ -271,6 +334,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Window { .. } => "Window",
         NativeExpr::Map { .. } => "Map",
         NativeExpr::Aggregate { .. } => "Aggregate",
+        NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
     }
 }
