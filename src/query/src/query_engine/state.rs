@@ -99,6 +99,7 @@ pub struct QueryEngineState {
     table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
+    experimental_native_promql: bool,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -332,6 +333,7 @@ impl QueryEngineState {
             table_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
+            experimental_native_promql: options.experimental_native_promql,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -478,6 +480,10 @@ impl QueryEngineState {
     /// which is used by `DfContextProviderAdapter::get_window_meta`.
     pub fn register_window_function(&self, func: WindowUDF) {
         self.df_context.register_udwf(func);
+    }
+
+    pub(crate) fn experimental_native_promql(&self) -> bool {
+        self.experimental_native_promql
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

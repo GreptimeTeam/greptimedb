@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::SeriesDivide;
+use promql::extension_plan::{FusedSeries, SeriesDivide};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -113,9 +113,9 @@ pub struct DistPlannerAnalyzer {
     /// Whether every region a rewritten plan reads is reached in process.
     ///
     /// A region input normally has to be encoded to Substrait before it can leave the frontend, and
-    /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. When
-    /// regions are reached in process, that input travels as a `LogicalPlan` instead, so nothing is
-    /// encoded and no node has to be cut for encoding's sake.
+    /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. In
+    /// process, a root `FusedSeries` plan travels as a `LogicalPlan` instead and skips that gate;
+    /// other plans retain the ordinary encoding checks.
     ///
     /// Whoever builds the query engine sets this, once, from the transport it wired. It is neither a
     /// query-time decision nor a property of a region.
@@ -445,12 +445,11 @@ struct PlanRewriter {
     /// Whether the whole plan this rewriter walks can be encoded to Substrait.
     /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
     ///
-    /// Only read when that gate applies, i.e. when `in_process_region_transport` is false. With
-    /// in-process regions the question has no answer worth computing and the field stays `false`.
+    /// Used for the ordinary standalone fast path when the root plan is encodable. It is not
+    /// needed when the root itself is the in-process `FusedSeries` exception.
     whole_plan_encodable: bool,
-    /// Whether the regions this plan reads are reached in process, so an input crosses to a region
-    /// as a `LogicalPlan` rather than as Substrait bytes. See [`DistPlannerAnalyzer`].
-    in_process_region_transport: bool,
+    /// In-process transport skips the encodability gate only when the rewritten root itself is FusedSeries.
+    skip_encodability_gate: bool,
     /// Current level in the tree
     level: usize,
     /// Simulated stack for the `rewrite` recursion
@@ -506,19 +505,23 @@ struct PlanRewriter {
     new_child_plan: Option<LogicalPlan>,
 }
 
+fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>())
+}
+
 impl PlanRewriter {
     /// `plan` must be the root of the tree that is about to be rewritten, otherwise
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
     fn new(plan: &LogicalPlan, in_process_region_transport: bool) -> Self {
+        let skip_encodability_gate = in_process_region_transport && is_fused_series_plan(plan);
         Self {
-            // Only a plan that crosses to a region as Substrait bytes has to encode at all, and
-            // encoding is the expensive part of a pass. With in-process regions the answer is never
-            // read, so it is not computed.
-            whole_plan_encodable: !in_process_region_transport
+            // Preserve the ordinary whole-plan fast path unless this is the in-process root
+            // exception: no node in that tree needs an encoding check.
+            skip_encodability_gate,
+            whole_plan_encodable: !skip_encodability_gate
                 && DFLogicalSubstraitConvertor
                     .encode(plan, DefaultSerializer)
                     .is_ok(),
-            in_process_region_transport,
             ..Default::default()
         }
     }
@@ -551,15 +554,13 @@ impl PlanRewriter {
         // When the root does not encode, the plan holds at least one node that has to stay
         // on the frontend and only the per-node check locates it.
         //
-        // This question only exists for a plan that has to cross to a region as Substrait bytes.
-        // With in-process regions the same `LogicalPlan` is handed to `RegionServer::handle_read`
-        // never having been encoded, so encodability says nothing about where a node may run, and
-        // asking it would cut the plan at the first node with no serializer branch (`FusedSeries`)
-        // before `check_plan` could decide. Skipping it only removes a reason to expand: every
+        // For the in-process root `FusedSeries` exception, encodability says nothing about where
+        // a node may run, and asking it would cut the plan at the first node with no serializer
+        // branch before `check_plan` could decide. Skipping it only removes a reason to expand: every
         // check below still runs, and a node they call `NonCommutative`/`Unimplemented`/
         // `Unsupported` still expands, so a node no serializer lists only rides to a region when
         // the categorizer places it there.
-        if !self.in_process_region_transport
+        if !self.skip_encodability_gate
             && !self.whole_plan_encodable
             && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
         {

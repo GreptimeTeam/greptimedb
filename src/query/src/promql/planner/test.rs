@@ -1693,6 +1693,44 @@ async fn native_fused_flag_off_keeps_the_existing_plan() {
     assert!(display.contains("PromRangeManipulate"), "{display}");
 }
 
+/// The native selector scan is bounded to the range selector window, not the table retention.
+#[tokio::test]
+async fn native_fused_rate_scan_has_bounded_time_filter() {
+    let plan = build_native_fused_plan("rate(some_metric[5m])", true).await;
+    let display = plan.display_indent().to_string();
+
+    assert!(
+        display.contains("timestamp >= TimestampMillisecond(-299999, None)")
+            && display.contains("timestamp <= TimestampMillisecond(100000000, None)"),
+        "native scan should include the bounded five-minute statement window: {display}"
+    );
+}
+
+/// An anchored native range scan uses the anchor, while preserving the outer statement window.
+#[tokio::test]
+async fn native_fused_offset_rate_scan_uses_offset_window_bounds() {
+    let plan = build_native_fused_plan("rate(some_metric[5m] offset 10s)", true).await;
+    let display = plan.display_indent().to_string();
+
+    assert!(
+        display.contains("timestamp >= TimestampMillisecond(-309999, None)")
+            && display.contains("timestamp <= TimestampMillisecond(99990000, None)"),
+        "native scan should account for the selector offset: {display}"
+    );
+}
+
+#[tokio::test]
+async fn native_fused_anchored_rate_scan_uses_anchor_bounds() {
+    let plan = build_native_fused_plan("rate(some_metric[5m] @ 300)", true).await;
+    let display = plan.display_indent().to_string();
+
+    assert!(
+        display.contains("timestamp >= TimestampMillisecond(1, None)")
+            && display.contains("timestamp <= TimestampMillisecond(300000, None)"),
+        "native scan should cover the five-minute window ending at the anchor: {display}"
+    );
+}
+
 #[tokio::test]
 async fn single_abs() {
     do_single_instant_function_call("abs", "abs").await;
