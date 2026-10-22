@@ -32,7 +32,6 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::datasource::DefaultTableSource;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datatypes::series::SeriesOrdering;
@@ -44,9 +43,7 @@ use promql_parser::parser::{
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use store_api::storage::TimeSeriesDistribution;
 
-use crate::dummy_catalog::DummyTableProvider;
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{compile, statement_grid};
 use crate::promql::planner::PromPlanner;
@@ -57,8 +54,8 @@ use crate::promql::planner::PromPlanner;
 /// and read exactly the way the other per-query override in this crate is read
 /// ([`remote_dyn_filter_pushdown_enabled_from_extensions`]): a query-context extension, which a
 /// client can set per request over the HTTP hints header or as a gRPC context key. The engine-wide
-/// option is a query-engine setting that `QueryEngineState` consumes while it is built and does not
-/// keep, so it is not readable from the planner's call site; see [`native_promql_requested`].
+/// option is applied while building query-engine state; this planner reads the per-query request
+/// extension at the call site; see [`native_promql_requested`].
 ///
 /// [`QueryOptions::experimental_native_promql`]: crate::options::QueryOptions::experimental_native_promql
 /// [`remote_dyn_filter_pushdown_enabled_from_extensions`]:
@@ -160,7 +157,7 @@ impl PromPlanner {
         // physical planner turns it into the region scan the node reads, and building a scan here
         // instead would let the two paths disagree about the columns they read.
         let table_ref = self.table_ref()?;
-        let input = self.create_table_scan_plan(table_ref.clone()).await?;
+        let mut input = self.create_table_scan_plan(table_ref.clone()).await?;
         // The node reads the region scan itself, so the plan below it has to *be* that scan: a
         // filter, a projection or a `__tsid` rewrite in between produces a different physical
         // child, and the physical layer cannot reach through it. Declining here, while the logical
@@ -168,17 +165,39 @@ impl PromPlanner {
         let LogicalPlan::TableScan(_) = &input else {
             return Ok(None);
         };
+        let offset = selector
+            .offset
+            .as_ref()
+            .map(|offset| match offset {
+                promql_parser::parser::Offset::Pos(duration) => duration.as_millis() as i64,
+                promql_parser::parser::Offset::Neg(duration) => -(duration.as_millis() as i64),
+            })
+            .unwrap_or_default();
+        let (saved_start, saved_end, saved_range) = (self.ctx.start, self.ctx.end, self.ctx.range);
+        self.ctx.range = selector_range_millis(prom_expr);
+        // Keep the fused scan's bounds identical to the legacy selector scan, including @ and offset.
+        let time_filter = (|| {
+            let anchored = self.at_modifier_offset(&selector.at, &selector.offset)?;
+            if anchored.is_some() {
+                self.ctx.end = saved_start;
+            }
+            self.build_time_index_filter(anchored.unwrap_or(offset), &input.schema())
+        })();
+        self.ctx.start = saved_start;
+        self.ctx.end = saved_end;
+        self.ctx.range = saved_range;
+        let time_filter = time_filter?;
+        if let Some(filter) = time_filter {
+            let LogicalPlan::TableScan(scan) = &mut input else {
+                unreachable!();
+            };
+            scan.filters.push(filter);
+        }
         // A window over a native histogram yields a histogram, which the output schema below
         // cannot declare; the existing path evaluates those with its own kernels.
         if Self::field_columns_contain_native_histogram(input.schema(), &fields) {
             return Ok(None);
         }
-        // A raw series frame is produced by the region's series scan, which a region scan only
-        // prepares when the request asks for the per-series distribution. Without the hint the
-        // region scans by row and has no raw frame to hand over, so the node would be planned with
-        // an input that cannot feed it.
-        let input = with_per_series_distribution(input);
-
         let Some(stmt) = self.native_statement(prom_expr) else {
             return Ok(None);
         };
@@ -293,42 +312,25 @@ fn fused_output_schema(
     ))
 }
 
-/// The selector's own scan, asking the region for the per-series distribution.
-///
-/// The distribution is a hint on the *table scan*, which the region server reads when it builds
-/// the region scan: `PerSeries` is what makes a region prepare its series scan, whose raw-series
-/// entrypoint is the only one that packs a series' chunks into the frame this node reads. The
-/// existing planner asks for the same hint indirectly, through a sort on `(series key, time)` that
-/// [`ScanHintRule`](crate::optimizer::scan_hint::ScanHintRule) turns into this distribution; the
-/// native node has no such sort below it, because it reads raw samples rather than sorted rows, so
-/// the hint is attached here.
-///
-/// The provider is cloned for this use-site first, exactly as that rule does: a catalog provider can
-/// be shared by several scans, and a hint attached to the shared one would change their requests
-/// too. A table whose provider is not the region-server provider - a test fixture, or an engine
-/// this route cannot read - is left untouched, and the physical route declines it there.
-fn with_per_series_distribution(plan: LogicalPlan) -> LogicalPlan {
-    let LogicalPlan::TableScan(mut scan) = plan else {
-        return plan;
-    };
-    let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
-        return LogicalPlan::TableScan(scan);
-    };
-    let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() else {
-        return LogicalPlan::TableScan(scan);
-    };
-    let adapter = provider.clone_for_scan();
-    adapter.with_distribution(TimeSeriesDistribution::PerSeries);
-    scan.source = Arc::new(DefaultTableSource::new(Arc::new(adapter)));
-    LogicalPlan::TableScan(scan)
-}
-
 /// The one selector `expr` folds, if it names exactly one.
 ///
 /// The walk follows the grammar the native compiler accepts — a call, a range selector, a selector
 /// and parentheses — and stops at every other shape, because a shape the compiler cannot compile
 /// needs no selector resolved. Two distinct selectors are not one input, and a tree built over the
 /// wrong one of them would evaluate a window the query did not write.
+fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
+    match expr {
+        PromExpr::MatrixSelector(matrix) => Some(matrix.range.as_millis() as i64),
+        PromExpr::Paren(paren) => selector_range_millis(&paren.expr),
+        PromExpr::Call(call) => call
+            .args
+            .args
+            .iter()
+            .find_map(|arg| selector_range_millis(arg)),
+        _ => None,
+    }
+}
+
 fn single_selector(expr: &PromExpr) -> Option<&VectorSelector> {
     let mut selectors = Vec::new();
     collect_selectors(expr, &mut selectors);
