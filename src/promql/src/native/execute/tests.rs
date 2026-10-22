@@ -45,7 +45,7 @@ use crate::map::MathOp;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::vector_match::{
@@ -483,6 +483,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         map: None,
         binary: None,
         broadcast: None,
+        vector: None,
         source_schema: None,
         emitted: None,
         merge: None,
@@ -503,6 +504,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
             [Arc::clone(schema), Arc::clone(schema)],
         )),
         broadcast: None,
+        vector: None,
         source_schema: None,
         emitted: None,
         merge: None,
@@ -6148,7 +6150,8 @@ fn an_operand_chunk_that_rewinds_is_refused_with_or_without_values() {
     let message = error.to_string();
     assert!(
         message.contains("do not continue each other")
-            && message.contains("the left operand of the binary node at root")
+            && message.contains("the binary node at root")
+            && message.contains("by its left operand")
             && message.contains("after the series already reached 2"),
         "{message}"
     );
@@ -7237,4 +7240,180 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
         0,
         "error retained execution bytes: {message}"
     );
+}
+
+fn vector_op(inner: NativeNode, op: BoundVectorOp) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op,
+        },
+        output,
+    }
+}
+
+/// The positions a series decided, with their values.
+type Decided = Vec<(usize, Option<f64>)>;
+
+/// The values a chunk stream decided, by the `job` label of the series that holds them.
+fn decided_by_job(chunks: &[EvaluatedChunk]) -> Vec<(String, Decided)> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            (
+                chunk
+                    .series
+                    .metric
+                    .get("job")
+                    .unwrap_or_default()
+                    .to_string(),
+                decided(std::slice::from_ref(chunk)),
+            )
+        })
+        .collect()
+}
+
+/// `topk` ranks the whole vector at each point, so a series that arrives in several chunks is one
+/// candidate, and the reservation is given back once the kept series are handed over.
+#[test]
+fn topk_ranks_whole_series_at_each_point() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for chunk in [
+        evaluated_chunk_of(
+            &schema,
+            named_metric("m", "a"),
+            0,
+            vec![Some(1.0), Some(5.0)],
+            false,
+        ),
+        evaluated_chunk_of(&schema, named_metric("m", "a"), 2, vec![Some(7.0)], true),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("m", "b"),
+            0,
+            vec![Some(3.0), Some(4.0), Some(6.0)],
+            true,
+        ),
+    ] {
+        execution.push_evaluated(chunk).unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        decided_by_job(&chunks),
+        vec![
+            ("a".to_string(), vec![(1, Some(5.0)), (2, Some(7.0))]),
+            ("b".to_string(), vec![(0, Some(3.0))]),
+        ]
+    );
+    assert!(chunks.iter().all(|chunk| chunk.is_last));
+    assert_eq!(chunks[0].series.metric.name(), Some("m"));
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `limitk` takes series in the order its input hands them over, not in label order, and the two
+/// series a map folds into `{job="z"}` are one series placed where it first arrived: it is kept at
+/// both points although `{job="y"}` sorts first and arrived before the piece that fills point 0.
+#[test]
+fn limitk_takes_series_in_input_order() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for chunk in [
+        evaluated_chunk_of(&schema, named_metric("a", "z"), 1, vec![Some(1.0)], true),
+        evaluated_chunk_of(
+            &schema,
+            named_metric("b", "y"),
+            0,
+            vec![Some(2.0), Some(2.0)],
+            true,
+        ),
+        evaluated_chunk_of(&schema, named_metric("c", "z"), 0, vec![Some(3.0)], true),
+    ] {
+        execution.push_evaluated(chunk).unwrap();
+    }
+    let chunks = run(&mut execution);
+    assert_eq!(
+        decided_by_job(&chunks),
+        vec![("z".to_string(), vec![(0, Some(3.0)), (1, Some(1.0))])]
+    );
+}
+
+/// A binary node above a vector node reads what `topk` kept, once the vector node has read its
+/// whole input: `topk` keeps `{job="b"}` at point 0 and `{job="a"}` at point 1, so only point 1
+/// matches the right side's `{job="a"}`.
+#[test]
+fn a_binary_node_reads_what_a_vector_node_kept() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(binary_of(
+        vector_op(
+            evaluated_input(Arc::clone(&grid)),
+            BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+        ),
+        evaluated_input(Arc::clone(&grid)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let (left, right) = (NodePath::root().left().input(), NodePath::root().right());
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (path, chunk) in [
+        (
+            &left,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(1.0), Some(5.0)],
+                true,
+            ),
+        ),
+        (
+            &right,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "a"),
+                0,
+                vec![Some(10.0), Some(10.0)],
+                true,
+            ),
+        ),
+        (
+            &left,
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "b"),
+                0,
+                vec![Some(3.0), Some(4.0)],
+                true,
+            ),
+        ),
+    ] {
+        execution.push_evaluated_at(path, chunk).unwrap();
+    }
+    assert_eq!(decided(&run(&mut execution)), vec![(1, Some(15.0))]);
 }
