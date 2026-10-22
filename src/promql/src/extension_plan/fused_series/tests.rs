@@ -70,7 +70,7 @@ use store_api::region_engine::RawLabelSource;
 
 use super::{
     FusedSeries, FusedSeriesBinding, LabelSets, OutputColumn, POLL_BUDGET, label_set,
-    series_to_record_batch,
+    occupied_runs, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
@@ -2386,6 +2386,222 @@ fn a_forward_chunk_does_not_rebuild_the_stored_runs() {
         1,
         labels.seen.len(),
         "every chunk belongs to one label set, so the history is one entry"
+    );
+}
+
+/// A backward disjoint claim after a spare-capacity run merge updates the exact memory charge.
+#[test]
+fn a_backward_disjoint_claim_after_spare_capacity_is_charged_correctly() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
+    let chunk = |start, len| Series {
+        metric: metric(&[(HOST, "h")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, len)])
+            .unwrap(),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; len]))),
+    };
+    labels.claim(&chunk(10, 2)).unwrap();
+    let runs = labels
+        .seen
+        .values_mut()
+        .next()
+        .unwrap()
+        .first_mut()
+        .unwrap();
+    let old_capacity = runs.capacity();
+    runs.reserve(16);
+    let new_capacity = runs.capacity();
+    labels
+        .reservation
+        .as_mut()
+        .unwrap()
+        .try_grow((new_capacity - old_capacity) * std::mem::size_of::<crate::native::runs::Run>())
+        .unwrap();
+    let before = pool.reserved();
+
+    labels
+        .claim(&chunk(0, 1))
+        .expect("the position is disjoint and earlier than stored history");
+    let runs = labels.seen.values().next().unwrap().first().unwrap();
+    assert_eq!(
+        vec![(0, 1), (10, 12)],
+        runs.iter()
+            .map(|run| (run.start, run.end))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        before - (new_capacity - runs.capacity()) * std::mem::size_of::<crate::native::runs::Run>(),
+        pool.reserved(),
+        "the accounting follows the replacement vector's actual capacity"
+    );
+}
+
+/// Chunked fields are traversed sequentially while occupancy is converted into grid runs.
+#[test]
+fn chunked_samples_occupancy_preserves_sparse_rows() {
+    let values = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![Some(1.0), None])),
+        Samples::from_float(Float64Array::from(vec![None, Some(2.0)])),
+    ])
+    .unwrap();
+    let series = Series {
+        metric: metric(&[(HOST, "chunked")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 4)]).unwrap(),
+        fields: SeriesFields::one(values),
+    };
+    let runs = occupied_runs(&series).expect("chunked occupancy is read through a forward cursor");
+    assert_eq!(
+        vec![(0, 1), (3, 4)],
+        runs[0]
+            .iter()
+            .map(|run| (run.start, run.end))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Appending a run that touches stored history reuses its last slot instead of rebuilding it.
+#[test]
+fn a_touching_append_with_full_capacity_does_not_rebuild_history() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let mut labels = LabelSets::default();
+    labels.attach(&pool);
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
+    let chunk = |start| Series {
+        metric: metric(&[(HOST, "touch")], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, 1)]).unwrap(),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
+    };
+    labels.claim(&chunk(0)).unwrap();
+    let stored = labels
+        .seen
+        .values_mut()
+        .next()
+        .unwrap()
+        .first_mut()
+        .unwrap();
+    stored.shrink_to_fit();
+    let cap = stored.capacity();
+    assert_eq!(
+        stored.len(),
+        cap,
+        "the test requires a full-capacity run list"
+    );
+    let before = absorb_rebuilds();
+    labels
+        .claim(&chunk(1))
+        .expect("the touching position extends the same run");
+    let stored = labels.seen.values().next().unwrap().first().unwrap();
+    assert_eq!(
+        vec![(0, 2)],
+        stored
+            .iter()
+            .map(|run| (run.start, run.end))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cap,
+        stored.capacity(),
+        "extending a run did not allocate or copy its history"
+    );
+    assert_eq!(
+        before,
+        absorb_rebuilds(),
+        "touching append uses the append path"
+    );
+}
+
+/// A failed claim does not mutate the shared entry, while its reservation owner remains alive.
+#[test]
+fn a_refused_growth_keeps_shared_label_entry_unchanged() {
+    use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+    let limit = 4096;
+    let pool = Arc::new(GreedyMemoryPool::new(limit));
+    let erased: Arc<dyn MemoryPool> = pool.clone();
+    let mut labels = LabelSets::default();
+    labels.attach(&erased);
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
+    let chunk = |host: &str, start| Series {
+        metric: metric(&[(HOST, host)], Some(METRIC)),
+        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, 1)]).unwrap(),
+        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
+    };
+    labels
+        .claim(&chunk("shared", 0))
+        .expect("initial label fits");
+    let key = label_set(&chunk("shared", 0).metric);
+    let before_runs = labels.seen[&key][0]
+        .iter()
+        .map(|run| (run.start, run.end))
+        .collect::<Vec<_>>();
+    let before_reserved = pool.reserved();
+    let mut blocker: MemoryReservation = MemoryConsumer::new("test blocker").register(&erased);
+    blocker
+        .try_grow(limit - before_reserved)
+        .expect("the blocker occupies remaining capacity");
+    let error = labels
+        .claim(&chunk("shared", 2))
+        .expect_err("growth exceeds the pool");
+    assert!(!error.to_string().is_empty(), "pool refusal is reported");
+    assert_eq!(
+        before_runs,
+        labels.seen[&key][0]
+            .iter()
+            .map(|run| (run.start, run.end))
+            .collect::<Vec<_>>(),
+        "the persistent entry is unchanged"
+    );
+    assert_eq!(limit, pool.reserved(), "both reservations remain live");
+    drop(blocker);
+    assert_eq!(
+        before_reserved,
+        pool.reserved(),
+        "the plan-owned entry remains charged"
+    );
+}
+
+/// Binding ordering includes field names, while schema ordering refuses unequal DF schemas.
+#[test]
+fn unequal_binding_and_output_schema_are_not_ordered_equal() {
+    let tree = rate_tree();
+    let left = binding(&tree);
+    let other_schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: "different".into(),
+        }]),
+        eval_grid: None,
+    });
+    let right = binding_of(&tree, other_schema, left.tags.clone());
+    assert_ne!(left, right);
+    assert_ne!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
+
+    let left_node = fused(tree.clone());
+    let nullability_changed = Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, false),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(NAME, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let right_node = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding(&rate_tree()),
+        input_plan(frame_schema()),
+        nullability_changed.to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    assert_ne!(left_node, right_node);
+    assert_ne!(
+        Some(std::cmp::Ordering::Equal),
+        left_node.partial_cmp(&right_node)
     );
 }
 

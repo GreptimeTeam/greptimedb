@@ -192,11 +192,27 @@ impl PartialOrd for FusedSeriesBinding {
             ord => return ord,
         }
         let (mine, theirs) = (self.grid.spec(), other.grid.spec());
-        (mine.start_ms, mine.step_ms, mine.len).partial_cmp(&(
+        match (mine.start_ms, mine.step_ms, mine.len).partial_cmp(&(
             theirs.start_ms,
             theirs.step_ms,
             theirs.len,
-        ))
+        )) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        Some(
+            self.series_schema
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .cmp(
+                    other
+                        .series_schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name.as_ref()),
+                ),
+        )
     }
 }
 
@@ -366,7 +382,19 @@ impl PartialOrd for FusedSeries {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
-        self.input.partial_cmp(&other.input)
+        match self.input.partial_cmp(&other.input) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.tree.to_string().partial_cmp(&other.tree.to_string()) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        if self.output_schema == other.output_schema {
+            Some(Ordering::Equal)
+        } else {
+            None
+        }
     }
 }
 
@@ -1178,32 +1206,53 @@ impl LabelSets {
                 // chunk has a slot of its own: a slot is a field index of the schema, so both sides
                 // count the same field the same way. A chunk of *fewer* fields than the entry
                 // leaves the remaining slots to the chunks that fill them.
-                if stored.len() < runs.len() {
-                    stored.resize_with(runs.len(), Vec::new);
+                // Stage only the affected run lists, and reserve before committing. A forward
+                // append whose existing capacity suffices needs no copy of its stored history.
+                let mut growth = 0usize;
+                let mut shrink = 0usize;
+                let mut merged_runs = Vec::with_capacity(runs.len());
+                for (index, incoming) in runs.iter().enumerate() {
+                    let Some(old) = stored.get(index) else {
+                        let copy = incoming.clone();
+                        growth += copy.capacity();
+                        merged_runs.push(Some(copy));
+                        continue;
+                    };
+                    let append_fits = incoming.is_empty()
+                        || (old.last().is_none_or(|last| incoming[0].start >= last.end)
+                            && old.capacity()
+                                >= old.len() + incoming.len()
+                                    - usize::from(old.last().is_some_and(|last| {
+                                        incoming
+                                            .first()
+                                            .is_some_and(|first| first.start == last.end)
+                                    })));
+                    if append_fits {
+                        merged_runs.push(None);
+                    } else {
+                        let mut merged = old.clone();
+                        absorb(&mut merged, incoming);
+                        if merged.capacity() >= old.capacity() {
+                            growth += merged.capacity() - old.capacity();
+                        } else {
+                            shrink += old.capacity() - merged.capacity();
+                        }
+                        merged_runs.push(Some(merged));
+                    }
                 }
-                // What this entry grows by is what its vectors' capacity grew by, and nothing else.
-                // `absorb` appends to a vector whose runs all end at or before the incoming ones
-                // and rebuilds one the chunk can interleave with, so the runs it ends up holding
-                // are not the only thing it allocates: the append path also has the slack a
-                // doubled capacity keeps, which charging the length a merge needs would leave
-                // unaccounted. Charging a vector's capacity again from scratch would go the other
-                // way and charge bytes the entry already paid for. Reading the capacity either
-                // side of the absorb costs nothing, and the difference is exactly what this claim
-                // allocated - which is nothing while the capacity the entry holds still covers the
-                // runs. The absorb therefore runs before the charge is taken, and a pool that
-                // refuses the growth leaves the runs recorded: that refusal fails the query that
-                // made the claim, and the runtime's own table records before its node resizes for
-                // the same reason.
-                let grown = stored
-                    .iter_mut()
-                    .zip(&runs)
-                    .map(|(stored, new)| {
-                        let before = stored.capacity();
-                        absorb(stored, new);
-                        stored.capacity() - before
-                    })
-                    .sum::<usize>();
-                reservation.try_grow(grown * size_of::<Run>())?;
+                reservation.try_grow(growth * size_of::<Run>())?;
+                for (index, (incoming, merged)) in runs.iter().zip(merged_runs).enumerate() {
+                    if let Some(merged) = merged {
+                        if index < stored.len() {
+                            stored[index] = merged;
+                        } else {
+                            stored.push(merged);
+                        }
+                    } else if index < stored.len() {
+                        absorb(&mut stored[index], incoming);
+                    }
+                }
+                reservation.try_shrink(shrink * size_of::<Run>())?;
             }
             Entry::Vacant(entry) => {
                 // Only the label-set state is this node's own cross-poll state that grows with
@@ -1264,9 +1313,10 @@ fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<Run>>> {
     }
     // `positions` walks a chunk that forms one run and one whose rows form several the same way,
     // in position order, so the holes between two runs are never read as rows.
+    let mut cursors: Vec<_> = walked.iter().map(|(_, samples)| samples.cursor()).collect();
     for (position, row) in series.time.positions() {
-        for (index, samples) in &walked {
-            if !has_value(samples, row) {
+        for ((index, _), cursor) in walked.iter().zip(&mut cursors) {
+            if !matches!(cursor.at(row), Some(sample) if !matches!(sample, SampleRef::Missing)) {
                 continue;
             }
             match runs[*index].last_mut() {
@@ -1279,18 +1329,6 @@ fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<Run>>> {
         }
     }
     Ok(runs)
-}
-
-/// Whether one field holds a value, rather than a missing position, at `index`.
-fn has_value(samples: &Samples, index: usize) -> bool {
-    match samples.dense() {
-        Some(DenseSamplesRef::Float(values)) => values.is_valid(index),
-        Some(DenseSamplesRef::Histogram(values)) => values.indices().is_valid(index),
-        Some(DenseSamplesRef::Mixed(values)) => {
-            values.floats().is_valid(index) || values.histograms().indices().is_valid(index)
-        }
-        None => !matches!(samples.sample(index), SampleRef::Missing),
-    }
 }
 
 /// The field of `runs` that holds a value where `stored` already holds one, if any.
