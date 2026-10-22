@@ -69,9 +69,10 @@ pub struct LeaderCachedKvBackend {
     check_leader: CheckLeaderRef,
     store: KvBackendRef,
     cache: ResettableKvBackendRef,
-    /// Incremented before and after each store mutation. The first increment
-    /// detects overlapping writers; the second invalidates cache fills that
-    /// read the old value while the store mutation was in flight.
+    /// Incremented before and after each store mutation, also while the cache is
+    /// disabled. The first increment detects overlapping writers; the second
+    /// invalidates cache fills and loads that read the old value while the
+    /// store mutation was in flight.
     version: AtomicUsize,
     name: String,
 }
@@ -131,15 +132,6 @@ impl LeaderCachedKvBackend {
     #[inline]
     fn is_leader(&self) -> bool {
         self.check_leader.check()
-    }
-
-    /// Writes to the store while the cache is disabled. Creates new versions around the write,
-    /// so a load or a cache fill that read the old value meanwhile drops it.
-    async fn write_uncached<T>(&self, write: impl Future<Output = Result<T>>) -> Result<T> {
-        self.create_new_version();
-        let res = write.await;
-        self.create_new_version();
-        res
     }
 
     #[inline]
@@ -225,10 +217,6 @@ impl KvBackend for LeaderCachedKvBackend {
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse> {
-        if !self.is_leader() {
-            return self.write_uncached(self.store.put(req)).await;
-        }
-
         let ver = self.create_new_version();
 
         let res = self.store.put(req.clone()).await?;
@@ -244,10 +232,6 @@ impl KvBackend for LeaderCachedKvBackend {
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
-        if !self.is_leader() {
-            return self.write_uncached(self.store.batch_put(req)).await;
-        }
-
         let ver = self.create_new_version();
 
         let res = self.store.batch_put(req.clone()).await?;
@@ -320,10 +304,6 @@ impl KvBackend for LeaderCachedKvBackend {
     }
 
     async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
-        if !self.is_leader() {
-            return self.write_uncached(self.store.compare_and_put(req)).await;
-        }
-
         let _ = self.create_new_version();
 
         let key = req.key.clone();
@@ -338,10 +318,6 @@ impl KvBackend for LeaderCachedKvBackend {
     }
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
-        if !self.is_leader() {
-            return self.write_uncached(self.store.delete_range(req)).await;
-        }
-
         let _ = self.create_new_version();
 
         let res = self.store.delete_range(req.clone()).await?;
@@ -351,10 +327,6 @@ impl KvBackend for LeaderCachedKvBackend {
     }
 
     async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-        if !self.is_leader() {
-            return self.write_uncached(self.store.batch_delete(req)).await;
-        }
-
         let _ = self.create_new_version();
 
         let res = self.store.batch_delete(req.clone()).await?;
@@ -369,10 +341,6 @@ impl TxnService for LeaderCachedKvBackend {
     type Error = Error;
 
     async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
-        if !self.is_leader() {
-            return self.write_uncached(self.store.txn(txn)).await;
-        }
-
         let _ = self.create_new_version();
 
         let res = self.store.txn(txn.clone()).await?;
@@ -757,31 +725,49 @@ mod tests {
         }
     }
 
-    /// The load reads the old value, a write commits while the cache is disabled, then the
-    /// load installs what it read.
+    /// A write made while the cache is disabled overlaps the load: the load reads the old value
+    /// either before the write commits and installs it afterwards, or while the write is in
+    /// flight and completes, with the cache enabled, before the write commits.
     #[tokio::test]
     async fn test_load_overlaps_write() {
         for write in WRITES {
-            let backing = Arc::new(ControlledBackend::default());
-            backing
-                .inner
-                .put(PutRequest::new().with_key(KEY).with_value(b"old"))
-                .await
-                .unwrap();
-            let enabled = Arc::new(EnableCache(Default::default()));
-            let store = LeaderCachedKvBackend::new(enabled.clone(), backing.clone());
+            for write_first in [false, true] {
+                let backing = Arc::new(ControlledBackend::default());
+                backing
+                    .inner
+                    .put(PutRequest::new().with_key(KEY).with_value(b"old"))
+                    .await
+                    .unwrap();
+                let enabled = Arc::new(EnableCache(Default::default()));
+                let store = LeaderCachedKvBackend::new(enabled.clone(), backing.clone());
 
-            let return_read = backing.after_read.arm();
-            let loader = store.load();
-            tokio::pin!(loader);
-            assert!(poll!(loader.as_mut()).is_pending());
-            write.execute(&store, b"new").await;
-            return_read.send(()).unwrap();
-            loader.await.unwrap();
-            enabled.0.store(true, Ordering::Relaxed);
+                if write_first {
+                    let commit = backing.before_write.arm();
+                    let writer = write.execute(&store, b"new");
+                    tokio::pin!(writer);
+                    assert!(poll!(writer.as_mut()).is_pending());
+                    store.load().await.unwrap();
+                    enabled.0.store(true, Ordering::Relaxed);
+                    commit.send(()).unwrap();
+                    writer.await;
+                } else {
+                    let return_read = backing.after_read.arm();
+                    let loader = store.load();
+                    tokio::pin!(loader);
+                    assert!(poll!(loader.as_mut()).is_pending());
+                    write.execute(&store, b"new").await;
+                    return_read.send(()).unwrap();
+                    loader.await.unwrap();
+                    enabled.0.store(true, Ordering::Relaxed);
+                }
 
-            let durable = backing.inner.get(KEY).await.unwrap();
-            assert_eq!(read(&store, false).await, durable, "{write:?}");
+                let durable = backing.inner.get(KEY).await.unwrap();
+                assert_eq!(
+                    read(&store, false).await,
+                    durable,
+                    "{write:?}, write_first={write_first}"
+                );
+            }
         }
     }
 
