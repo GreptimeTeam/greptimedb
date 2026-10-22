@@ -1688,46 +1688,27 @@ fn a_vector_matching_modifier_over_a_constant_is_refused() {
     }
 }
 
-/// A modifier inside a constant argument is refused for every call that folds one, not just for an
-/// arithmetic operand.
-///
-/// A call's constant is folded by the same [`constant_value`], so a fill written inside one has to
-/// reach the same refusal: `quantile(0.5 + fill(0) 0.1, x)` used to bind `Quantile{0.6}`, and
-/// `predict_linear(x[5m], 1 + fill(0) 2)` used to bind its second argument as `3`. Both dropped the
-/// fill the query wrote.
+/// A modifier inside a constant argument is refused, not folded into the value it computes.
 #[test]
 fn a_modifier_inside_a_folded_call_argument_is_refused() {
-    for (stmt, query, argument) in [
-        (
-            eval_stmt("quantile(0.5 + fill(0) 0.1, x)"),
-            "quantile(0.5 + fill(0) 0.1, x)",
-            "first argument",
-        ),
-        (
-            eval_stmt("predict_linear(x[5m], 1 + fill(0) 2)"),
-            "predict_linear(x[5m], 1 + fill(0) 2)",
-            "second argument",
-        ),
-    ] {
-        let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
-            .expect_err(&format!("`{query}` compiled, and it should not have"));
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "`{query}` did not report NotImplemented: {error}"
-        );
-        // The two calls refuse it on different paths -- `quantile` reads its parameter as a constant
-        // expression, a range function's constant is bound by the signature -- so what is asserted is
-        // what both have to say: which argument was folded, and that a fill is what it found.
-        let message = error.to_string();
-        assert!(
-            message.contains(argument),
-            "`{query}` blamed the wrong argument: {message}"
-        );
-        assert!(
-            message.contains("fill"),
-            "`{query}` did not name the fill it found: {message}"
-        );
-    }
+    let query = "quantile_over_time(0.5 + fill(0) 0.1, x[5m])";
+    let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err(&format!("`{query}` compiled, and it should not have"));
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "`{query}` did not report NotImplemented: {error}"
+    );
+    // The argument is read as a constant expression, so the refusal names the position it was read
+    // from and quotes the expression -- which is where the fill the query wrote is still visible.
+    let message = error.to_string();
+    assert!(
+        message.contains("first argument"),
+        "`{query}` blamed the wrong argument: {message}"
+    );
+    assert!(
+        message.contains("fill"),
+        "`{query}` did not name the fill it found: {message}"
+    );
 }
 
 /// A `bool` comparison of two constants folds to the number it reports, so the query runs.
@@ -2127,6 +2108,26 @@ fn a_computed_aggregate_quantile_is_refused_and_names_the_argument() {
     assert!(
         message.contains("number literal"),
         "`{query}` did not say what the argument has to be: {message}"
+    );
+}
+
+#[test]
+fn a_fill_inside_an_aggregate_quantile_is_refused_and_names_the_argument() {
+    let query = "quantile(0.5 + fill(0) 0.1, x)";
+    let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect_err(&format!("`{query}` compiled, and it should not have"));
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "`{query}` did not report NotImplemented: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("first argument"),
+        "`{query}` blamed the wrong argument: {message}"
+    );
+    assert!(
+        message.contains("fill"),
+        "`{query}` did not name the fill it found: {message}"
     );
 }
 
