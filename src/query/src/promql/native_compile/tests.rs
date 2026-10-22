@@ -16,9 +16,17 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use datafusion::error::DataFusionError;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datatypes::arrow::array::Float64Array;
+use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+use datatypes::series::MetricName;
 use datatypes::series::SeriesOrdering;
-use datatypes::series::samples::{FieldSpec, SeriesSchema};
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
+use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
+use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
     NativeExpr, NativeNode, NativeTree, NativeType,
@@ -2352,6 +2360,425 @@ fn the_batch_acceptance_queries_compile() {
             "`{query}` does not land on the statement's grid"
         );
     }
+}
+
+/// One raw chunk of the metric `x`, as the caller binds it from a table.
+///
+/// `values` is one sample per timestamp, and a `None` is a position whose sample is missing rather
+/// than a value: the two are not the same thing, and a broadcast has to keep the difference.
+fn raw_x(timestamps: &[i64], values: Vec<Option<f64>>, is_last: bool) -> RawSeriesChunk {
+    let metric = MetricName::try_new(Some("x".into()), vec![]).expect("a metric name");
+    RawSeriesChunk::try_new(
+        &raw_schema(),
+        Buffer::from_slice_ref(b"series-a"),
+        Some(metric),
+        RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).expect("timestamps"),
+        SeriesFields::one(Samples::from_float(Float64Array::from(values))),
+        is_last,
+    )
+    .expect("a raw chunk")
+}
+
+/// `x`'s samples at every grid point of [`eval_stmt`]'s grid, holding `1..=21`.
+fn samples_at_every_grid_point() -> (Vec<i64>, Vec<Option<f64>>) {
+    let timestamps = (0..21).map(|index| index * 5_000).collect();
+    let values = (1..=21).map(|value| Some(f64::from(value))).collect();
+    (timestamps, values)
+}
+
+/// Compiles `query`, runs it over one raw series pushed as `chunks`, and returns every chunk the
+/// root handed over.
+///
+/// This is the real path: the tree comes from the compiler rather than being built by hand here, so
+/// a binding the compiler got wrong cannot be hidden by a test that restates it.
+fn execute_compiled(query: &str, chunks: Vec<RawSeriesChunk>) -> Vec<EvaluatedChunk> {
+    let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut execution = NativeExecutor::new(
+        NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0)
+            .unwrap_or_else(|error| panic!("`{query}` was not executable: {error}")),
+    );
+    for chunk in chunks {
+        execution
+            .push_raw(chunk)
+            .unwrap_or_else(|error| panic!("`{query}` refused its input: {error}"));
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = execution
+        .next_chunk()
+        .unwrap_or_else(|error| panic!("`{query}` failed while running: {error}"))
+    {
+        out.push(chunk);
+    }
+    out.extend(
+        execution
+            .finish()
+            .unwrap_or_else(|error| panic!("`{query}` failed while closing: {error}")),
+    );
+    out
+}
+
+/// The `(grid position, value)` rows `chunks` hold, concatenated in the order they arrived.
+///
+/// A position a chunk holds no value at is not a row at all, so what the function reports is the
+/// positions that carry something: an operation that turned a value into a hole would show up as a
+/// missing entry here rather than as a `None`.
+fn rows(chunks: &[EvaluatedChunk]) -> Vec<(usize, f64)> {
+    let mut rows = Vec::new();
+    for chunk in chunks {
+        let mut field = chunk.series.fields.as_slice()[0].iter();
+        for (position, _) in chunk.series.time.positions() {
+            match field.next().expect("one sample per row") {
+                SampleRef::Float(value) => rows.push((position, value)),
+                SampleRef::Missing => {}
+                SampleRef::Histogram(_) => panic!("a scalar broadcast produced a histogram"),
+            }
+        }
+    }
+    rows
+}
+
+/// The label set the executed chunks carry, or `None` when they carry the empty one.
+fn executed_name(chunks: &[EvaluatedChunk]) -> Option<String> {
+    chunks
+        .first()
+        .and_then(|chunk| chunk.series.metric.name().map(|name| name.to_string()))
+}
+
+/// A constant on the right of a multiplication reaches the executor and multiplies every value.
+///
+/// The tree is `Binary(Mul, Instant, Scalar(100))`, which the compiler binds and the runtime runs as
+/// a broadcast: the chunk `x` produces is transformed as it arrives, and the answer keeps `x`'s
+/// positions.
+#[test]
+fn a_compiled_constant_multiplies_the_vector_it_is_paired_with() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let out = execute_compiled("x * 100", vec![raw_x(&timestamps, values, true)]);
+
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| (index, (index as f64 + 1.0) * 100.0))
+        .collect();
+    assert_eq!(
+        rows(&out),
+        expected,
+        "`x * 100` did not multiply every value"
+    );
+    // Arithmetic drops the metric name, as Prometheus does.
+    assert_eq!(executed_name(&out), None, "`x * 100` kept the metric name");
+}
+
+/// A constant on the left keeps the operand order: `100 / x` is not `x / 100`.
+#[test]
+fn a_compiled_constant_on_the_left_keeps_the_operand_order() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let divided = rows(&execute_compiled(
+        "100 / x",
+        vec![raw_x(&timestamps, values.clone(), true)],
+    ));
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| (index, 100.0 / (index as f64 + 1.0)))
+        .collect();
+    assert_eq!(divided, expected, "`100 / x` did not divide by the vector");
+
+    // The other order is a different query, and it produces different numbers: a runtime that
+    // swapped the operands would answer this one with the first one's values.
+    let other = rows(&execute_compiled(
+        "x / 100",
+        vec![raw_x(&timestamps, values, true)],
+    ));
+    assert_ne!(divided, other, "`100 / x` and `x / 100` agree");
+}
+
+/// `x > bool 0` reports one per value that passes, rather than filtering the vector.
+#[test]
+fn a_compiled_bool_comparison_reports_one_and_zero() {
+    let (timestamps, _) = samples_at_every_grid_point();
+    // Half the values are negative, so the comparison decides both ways.
+    let values = (1..=21)
+        .map(|value| Some(f64::from(value) - 10.0))
+        .collect();
+    let out = execute_compiled("x > bool 0", vec![raw_x(&timestamps, values, true)]);
+
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| {
+            let value = index as f64 + 1.0 - 10.0;
+            (index, f64::from(u8::from(value > 0.0)))
+        })
+        .collect();
+    assert_eq!(rows(&out), expected, "`x > bool 0` did not report 0/1");
+    assert_eq!(
+        executed_name(&out),
+        None,
+        "`x > bool 0` kept the metric name"
+    );
+}
+
+/// Comparisons with constant operands are folded before the executor runs the vector operation.
+/// These queries exercise the compiled tree through the native executor, including scalar broadcast,
+/// unary negation, comparison results, label dropping, and the one closing output chunk.
+#[test]
+fn a_compiled_bool_constant_comparison_runs_with_vector_arithmetic() {
+    let (timestamps, _) = samples_at_every_grid_point();
+    let values: Vec<Option<f64>> = [-2.0, 0.0, 2.0]
+        .into_iter()
+        .cycle()
+        .take(timestamps.len())
+        .map(Some)
+        .collect();
+    let cases = [
+        ("x * (1 < bool 2)", [-2.0, 0.0, 2.0]),
+        ("x * (1 > bool 2)", [0.0, 0.0, 0.0]),
+        ("-(1 < bool 2) + x", [-3.0, -1.0, 1.0]),
+        ("x > bool (1 == bool 1)", [0.0, 0.0, 1.0]),
+    ];
+
+    for (query, pattern) in cases {
+        let out = execute_compiled(query, vec![raw_x(&timestamps, values.clone(), true)]);
+        let expected: Vec<(usize, f64)> = pattern
+            .into_iter()
+            .cycle()
+            .take(timestamps.len())
+            .enumerate()
+            .collect();
+        assert_eq!(rows(&out), expected, "`{query}` returned wrong rows");
+        assert_eq!(executed_name(&out), None, "`{query}` kept the metric name");
+        assert_eq!(out.len(), 1, "`{query}` did not produce one output chunk");
+        assert!(out[0].is_last, "`{query}`'s output did not close");
+    }
+}
+
+/// `x > 0` filters, so it keeps the labels it read and drops the positions that failed.
+#[test]
+fn a_compiled_filtering_comparison_keeps_the_values_that_passed() {
+    let (timestamps, _) = samples_at_every_grid_point();
+    let values = (1..=21)
+        .map(|value| Some(f64::from(value) - 10.0))
+        .collect();
+    let out = execute_compiled("x > 0", vec![raw_x(&timestamps, values, true)]);
+
+    let expected: Vec<(usize, f64)> = (0..21)
+        .filter_map(|index| {
+            let value = index as f64 + 1.0 - 10.0;
+            (value > 0.0).then_some((index, value))
+        })
+        .collect();
+    assert_eq!(rows(&out), expected, "`x > 0` did not filter the vector");
+    assert_eq!(
+        executed_name(&out),
+        Some("x".to_string()),
+        "a filtering comparison keeps the labels it read"
+    );
+}
+
+/// The negation the compiler binds is the multiplication it means, and it runs that way.
+#[test]
+fn a_compiled_negation_negates_every_value() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let out = execute_compiled("-x", vec![raw_x(&timestamps, values, true)]);
+    let expected: Vec<(usize, f64)> = (0..21)
+        .map(|index| (index, -(index as f64 + 1.0)))
+        .collect();
+    assert_eq!(rows(&out), expected, "`-x` did not negate every value");
+}
+
+/// A negation over a window negates the window result and drops its metric name.
+#[test]
+fn a_compiled_negation_of_a_window_negates_the_window_result() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let input = || vec![raw_x(&timestamps, values.clone(), true)];
+
+    let baseline = rows(&execute_compiled("rate(x[5m])", input()));
+    assert!(
+        !baseline.is_empty(),
+        "the window answered nothing, so this case would prove nothing"
+    );
+
+    let out_chunks = execute_compiled("-rate(x[5m])", input());
+    let out = rows(&out_chunks);
+    let expected: Vec<(usize, f64)> = baseline
+        .iter()
+        .map(|(position, value)| (*position, -*value))
+        .collect();
+    assert_eq!(
+        out, expected,
+        "`-rate(x[5m])` did not negate the window's answer"
+    );
+    // `rate(x[5m]) * 100` anchors the first result at 0.5, so the rate alone is 0.005 -- the same
+    // window `(5 + 2.5 + 0) / 5 / 300s` -- and negation flips only its sign.
+    assert_eq!(
+        out.first(),
+        Some(&(1, -0.005)),
+        "the first negated rate was not the sign-flipped anchor"
+    );
+    assert_eq!(
+        executed_name(&out_chunks),
+        None,
+        "arithmetic drops the metric name"
+    );
+}
+
+/// A filtering comparison with a constant on the left keeps the written operand order.
+#[test]
+fn a_compiled_constant_on_the_left_of_a_comparison_keeps_the_operand_order() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    // This compiles ScalarOperand::Left through the real compiler, not a hand-built tree.
+    let left = execute_compiled("10 < x", vec![raw_x(&timestamps, values.clone(), true)]);
+    let left_rows = rows(&left);
+    let expected: Vec<(usize, f64)> = (0..21)
+        .filter_map(|index| {
+            let value = index as f64 + 1.0;
+            (value > 10.0).then_some((index, value))
+        })
+        .collect();
+    assert_eq!(
+        left_rows, expected,
+        "`10 < x` did not keep values greater than 10"
+    );
+    assert_eq!(
+        executed_name(&left),
+        Some("x".to_string()),
+        "a filtering comparison keeps the labels it read"
+    );
+
+    let right = rows(&execute_compiled(
+        "x < 10",
+        vec![raw_x(&timestamps, values, true)],
+    ));
+    let complementary: Vec<(usize, f64)> = (0..21)
+        .filter_map(|index| {
+            let value = index as f64 + 1.0;
+            (value < 10.0).then_some((index, value))
+        })
+        .collect();
+    assert_eq!(
+        right, complementary,
+        "`x < 10` did not keep values below 10"
+    );
+    assert_ne!(
+        left_rows, right,
+        "the two operand orders produced the same rows"
+    );
+    assert!(!left_rows.is_empty(), "`10 < x` produced no rows");
+    assert!(!right.is_empty(), "`x < 10` produced no rows");
+}
+
+/// The broadcast composes with a window: `rate(x[5m]) * 100` runs the evaluator and multiplies its
+/// answer, rather than replacing it or multiplying the input.
+///
+/// The rate itself is not re-derived here. `rate` extrapolates a counter's slope to the whole
+/// window, so hand-computing its value would be this test restating a kernel it does not own; the
+/// baseline is instead what the same executor answers for the very same input without the
+/// multiplication, which is an oracle the broadcast cannot influence.
+#[test]
+fn a_compiled_broadcast_over_a_window_multiplies_the_window_result() {
+    let (timestamps, values) = samples_at_every_grid_point();
+    let input = || vec![raw_x(&timestamps, values.clone(), true)];
+
+    let baseline = rows(&execute_compiled("rate(x[5m])", input()));
+    assert!(
+        !baseline.is_empty(),
+        "the window answered nothing, so this case would prove nothing"
+    );
+
+    let out = rows(&execute_compiled("rate(x[5m]) * 100", input()));
+    let expected: Vec<(usize, f64)> = baseline
+        .iter()
+        .map(|(position, value)| (*position, value * 100.0))
+        .collect();
+    assert_eq!(
+        out, expected,
+        "`rate(x[5m]) * 100` is not the window's answer multiplied by 100"
+    );
+
+    // One absolute anchor, so agreement with a baseline that itself regressed cannot pass. A
+    // counter rising by one every five seconds, over the window `(-295s, 5s]` that holds two
+    // samples: the second is the evaluation point, so nothing is extrapolated at the end, while the
+    // 295s of window before the first sample is far past the 5.5s threshold and is replaced by half
+    // the 5s average interval. `(5 + 2.5 + 0) / 5 / 300s = 0.005`, and `* 100` is 0.5.
+    assert_eq!(
+        out.first(),
+        Some(&(1, 0.5)),
+        "the first rate was not the extrapolated one the kernel computes"
+    );
+}
+
+/// A missing sample and a skipped position stay absent through the broadcast: it pairs values with
+/// a constant and never makes one up.
+#[test]
+fn a_compiled_broadcast_preserves_missing_values_and_skipped_positions() {
+    // Everything but the sample at 10s and the position at 20s: the first is a position that holds
+    // a missing sample, the second a position with no sample at all.
+    let mut timestamps = Vec::new();
+    let mut values = Vec::new();
+    for index in 0..21 {
+        if index == 4 {
+            continue;
+        }
+        timestamps.push(index * 5_000);
+        values.push((index != 2).then_some(index as f64 + 1.0));
+    }
+
+    let out = execute_compiled("x * 100", vec![raw_x(&timestamps, values, true)]);
+    let expected: Vec<(usize, f64)> = (0..21)
+        .filter(|index| *index != 2 && *index != 4)
+        .map(|index| (index, (index as f64 + 1.0) * 100.0))
+        .collect();
+    assert_eq!(
+        rows(&out),
+        expected,
+        "the broadcast changed which positions hold a value"
+    );
+    // And the two holes are holes, not zeros: a neighbour is present at both sides of each one.
+    let positions: Vec<usize> = rows(&out)
+        .into_iter()
+        .map(|(position, _)| position)
+        .collect();
+    assert!(!positions.contains(&2), "a missing sample became a value");
+    assert!(!positions.contains(&4), "a skipped position became a value");
+}
+
+/// A series delivered in two raw chunks is answered as one series: the rows are right, and the
+/// answer closes exactly once.
+///
+/// This is not a streaming proof, and cannot be one: the compiler puts an [`NativeExpr::Instant`]
+/// under the binary, and a selection reads a whole axis before it decides anything, so it buffers
+/// both chunks and answers the series once. What the one output chunk demonstrates is therefore
+/// finality rather than incrementality. The executor-level proof of a broadcast's streaming is
+/// `src/promql/src/native/execute/tests.rs::a_broadcast_does_not_retain_the_vector_it_reads`, which
+/// drives an evaluated source directly: a chunk is answered per chunk read and the reservation
+/// stays bounded however long the series is.
+#[test]
+fn a_compiled_broadcast_answers_a_series_delivered_in_two_chunks() {
+    let timestamps: Vec<i64> = (0..4).map(|index| index * 5_000).collect();
+    let first = raw_x(&timestamps[..2], vec![Some(1.0), Some(2.0)], false);
+    let last = raw_x(&timestamps[2..], vec![Some(3.0), Some(4.0)], true);
+
+    let out = execute_compiled("x * 100", vec![first, last]);
+    let expected: Vec<(usize, f64)> = (0..4)
+        .map(|index| (index, (index as f64 + 1.0) * 100.0))
+        .collect();
+    assert_eq!(
+        rows(&out),
+        expected,
+        "`x * 100` did not transform every chunk"
+    );
+    // One output chunk, because the selection below it answers a whole series at once: the two raw
+    // chunks are one series to the selection, so the broadcast is handed one chunk and hands one up.
+    assert_eq!(
+        out.len(),
+        1,
+        "the selection answers a whole series at once, so the broadcast saw one chunk"
+    );
+    assert_eq!(
+        out.iter().filter(|chunk| chunk.is_last).count(),
+        1,
+        "the series closed more or less than once"
+    );
+    assert!(
+        out.last().expect("an answer").is_last,
+        "the closing chunk of the input did not close the output"
+    );
 }
 
 /// `predict_linear` reads its horizon after its range selector, so the number the query wrote after
