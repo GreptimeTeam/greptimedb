@@ -1787,6 +1787,9 @@ struct SelectRuntime {
     /// The layout of the input, which is also what the node produces.
     schema: Arc<SeriesSchema>,
     input: RetainedInput,
+    /// Whether the input's pieces of one label set are merged before the kernel reads them, which
+    /// `limitk` needs when its input can hold them.
+    merge_input: bool,
     /// Whether the kernel has run. It runs at most once: the input it read is gone afterwards.
     computed: bool,
 }
@@ -1797,6 +1800,7 @@ impl SelectRuntime {
             op,
             schema,
             input: RetainedInput::default(),
+            merge_input: false,
             computed: false,
         }
     }
@@ -1825,15 +1829,22 @@ impl SelectRuntime {
                 return Err(error);
             }
         };
-        let mut assembled = assembled;
-        if matches!(self.op, BoundSelect::LimitK { .. }) {
-            // `limitk` keeps the first series in input order. Prometheus reads them in label order
-            // once a query spans its head and a block, while a scan here need not order distinct
-            // series at all, so label order is what makes the choice the same on every run. The
-            // sort is stable, so the pieces of one label set stay in the order they arrived and,
-            // holding disjoint points, are read as the one series they make up.
-            assembled.sort_by(|a, b| select::compare_labels(&a.metric, &b.metric));
-        }
+        // `limitk` keeps the first series in the order its input hands them over, as Prometheus
+        // takes the order of the vector it is given -- a sort below it decides that order. Pieces
+        // of one label set are one series there, placed where the label set first arrived, so
+        // they are merged first; ranked apart, a later piece would be counted after the series
+        // that arrived between them.
+        let assembled = if self.merge_input {
+            let rows = assembled.iter().map(|series| series.time.len()).sum();
+            buffer.grow(merge_workspace_bytes(
+                rows,
+                assembled.len(),
+                self.schema.fields.len(),
+            ))?;
+            merge_same_labelset(&self.schema, assembled)?
+        } else {
+            assembled
+        };
         buffer.grow(selection_workspace_bytes(
             &assembled,
             self.schema.fields.len(),
@@ -2887,8 +2898,23 @@ impl NativeExecutionState {
                         // A selection keeps samples of the series it read, so pieces of one label
                         // set stay pieces: they hold disjoint points, so ranking them apart picks
                         // what ranking the merged series would, and what is above treats them as
-                        // it treats a map's.
-                        holds_shared[index] = input_holds_shared;
+                        // it treats a map's. `limitk` is the exception: it counts series in input
+                        // order, so it merges the pieces first and hands over whole series.
+                        let limitk = matches!(
+                            expr,
+                            NativeExpr::Select {
+                                op: BoundSelect::LimitK { .. },
+                                ..
+                            }
+                        );
+                        if limitk && input_holds_shared {
+                            if let Some(select) = runtimes[index].select.as_mut() {
+                                select.merge_input = true;
+                            }
+                            holds_shared[index] = false;
+                        } else {
+                            holds_shared[index] = input_holds_shared;
+                        }
                     }
                     NodeTag::Window => {
                         let (drops_metric_name, input_schema) = match expr {

@@ -6502,11 +6502,11 @@ fn topk_ranks_whole_series_at_each_point() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// `limitk` takes series in label order, not in the order they arrived: `{job="x"}` is kept at
-/// both points although `{job="y"}` arrived first. The two series a map folds into `{job="x"}`
-/// stay pieces, each kept where it holds the point.
+/// `limitk` takes series in the order its input hands them over, not in label order, and the two
+/// series a map folds into `{job="z"}` are one series placed where it first arrived: it is kept at
+/// both points although `{job="y"}` sorts first and arrived before the piece that fills point 0.
 #[test]
-fn limitk_takes_series_in_label_order() {
+fn limitk_takes_series_in_input_order() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
     let tree = NativeTree::try_new(select(
@@ -6519,6 +6519,7 @@ fn limitk_takes_series_in_label_order() {
     .unwrap();
     let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
     for chunk in [
+        evaluated_chunk_of(&schema, named_metric("a", "z"), 1, vec![Some(1.0)], true),
         evaluated_chunk_of(
             &schema,
             named_metric("b", "y"),
@@ -6526,18 +6527,14 @@ fn limitk_takes_series_in_label_order() {
             vec![Some(2.0), Some(2.0)],
             true,
         ),
-        evaluated_chunk_of(&schema, named_metric("a", "x"), 1, vec![Some(1.0)], true),
-        evaluated_chunk_of(&schema, named_metric("c", "x"), 0, vec![Some(3.0)], true),
+        evaluated_chunk_of(&schema, named_metric("c", "z"), 0, vec![Some(3.0)], true),
     ] {
         execution.push_evaluated(chunk).unwrap();
     }
     let chunks = run(&mut execution);
     assert_eq!(
         decided_by_job(&chunks),
-        vec![
-            ("x".to_string(), vec![(1, Some(1.0))]),
-            ("x".to_string(), vec![(0, Some(3.0))]),
-        ]
+        vec![("z".to_string(), vec![(0, Some(3.0)), (1, Some(1.0))])]
     );
 }
 
