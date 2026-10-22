@@ -376,3 +376,336 @@ fn json_to_value(json: &JsonValue) -> Value {
 
     Value::new(None, kind)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    const KEY: &str = "region_engine";
+    const KEYS: &[&str] = &[KEY];
+
+    /// The default sequence used by the tests: two exported entries, `mito` before `file`,
+    /// with one nested table to override.
+    fn defaults() -> JsonValue {
+        json!({
+            "region_engine": [
+                {
+                    "mito": {
+                        "global_write_buffer_size": "64MB",
+                        "index": {
+                            "aux_path": "/default/aux",
+                            "cache_percent": 30
+                        }
+                    }
+                },
+                {"file": {"data_dir": "/default/data"}}
+            ],
+            "data_home": "/default/data_home"
+        })
+    }
+
+    /// A fixed set of variables, so the tests never touch the process environment and can
+    /// run in parallel.
+    fn env(vars: &[(&str, &str)]) -> Environment {
+        let mut vars_map = Map::new();
+        for (key, value) in vars {
+            vars_map.insert((*key).to_string(), (*value).to_string());
+        }
+
+        Environment::default()
+            .separator("__")
+            .try_parsing(true)
+            .source(Some(vars_map))
+    }
+
+    fn collect_with(vars: &[(&str, &str)], defaults: &JsonValue) -> Map<String, Value> {
+        TaggedSeqEnvSource::new(env(vars), KEYS, defaults)
+            .collect()
+            .unwrap()
+    }
+
+    fn collect(vars: &[(&str, &str)]) -> Map<String, Value> {
+        collect_with(vars, &defaults())
+    }
+
+    fn to_json(collected: Map<String, Value>) -> JsonValue {
+        let mut map = serde_json::Map::new();
+        for (key, value) in collected {
+            map.insert(key, value.try_deserialize().unwrap());
+        }
+
+        JsonValue::Object(map)
+    }
+
+    fn collect_json(vars: &[(&str, &str)]) -> JsonValue {
+        to_json(collect(vars))
+    }
+
+    fn collect_json_with(vars: &[(&str, &str)], defaults: &JsonValue) -> JsonValue {
+        to_json(collect_with(vars, defaults))
+    }
+
+    fn collect_error_with(vars: &[(&str, &str)], defaults: &JsonValue) -> String {
+        match TaggedSeqEnvSource::new(env(vars), KEYS, defaults).collect() {
+            Ok(_) => panic!("expected an error, got {vars:?}"),
+            Err(ConfigError::Message(message)) => message,
+            Err(other) => panic!("expected a message error, got: {other}"),
+        }
+    }
+
+    fn collect_error(vars: &[(&str, &str)]) -> String {
+        collect_error_with(vars, &defaults())
+    }
+
+    #[test]
+    fn test_collect_overrides_a_scalar_field() {
+        let collected = collect_json(&[("REGION_ENGINE__MITO__GLOBAL_WRITE_BUFFER_SIZE", "128MB")]);
+
+        let engines = collected["region_engine"].as_array().unwrap();
+        assert_eq!(engines.len(), 2);
+        assert_eq!(engines[0]["mito"]["global_write_buffer_size"], "128MB");
+        // The fields next to the override keep their default value.
+        assert_eq!(engines[0]["mito"]["index"]["aux_path"], "/default/aux");
+        assert_eq!(engines[1]["file"]["data_dir"], "/default/data");
+    }
+
+    #[test]
+    fn test_collect_overrides_a_nested_field() {
+        let collected = collect_json(&[("REGION_ENGINE__MITO__INDEX__AUX_PATH", "/tmp/aux")]);
+
+        assert_eq!(
+            collected["region_engine"][0]["mito"]["index"]["aux_path"],
+            "/tmp/aux"
+        );
+        assert_eq!(
+            collected["region_engine"][0]["mito"]["index"]["cache_percent"],
+            30
+        );
+        assert_eq!(
+            collected["region_engine"][0]["mito"]["global_write_buffer_size"],
+            "64MB"
+        );
+    }
+
+    #[test]
+    fn test_collect_merges_several_variables_of_one_entry() {
+        let collected = collect_json(&[
+            ("REGION_ENGINE__MITO__INDEX__AUX_PATH", "/tmp/aux"),
+            ("REGION_ENGINE__MITO__INDEX__CACHE_PERCENT", "50"),
+        ]);
+
+        assert_eq!(
+            collected["region_engine"][0]["mito"]["index"]["aux_path"],
+            "/tmp/aux"
+        );
+        assert_eq!(
+            collected["region_engine"][0]["mito"]["index"]["cache_percent"],
+            50
+        );
+    }
+
+    #[test]
+    fn test_collect_appends_unknown_tags_in_tag_order() {
+        let collected = collect_json(&[
+            (
+                "REGION_ENGINE__METRIC__FLUSH_METADATA_REGION_INTERVAL",
+                "1m",
+            ),
+            ("REGION_ENGINE__AAA__DATA_DIR", "/tmp/aaa"),
+        ]);
+
+        let engines = collected["region_engine"].as_array().unwrap();
+        assert_eq!(engines.len(), 4);
+        // The default entries stay first and keep their order.
+        assert_eq!(engines[0]["mito"]["global_write_buffer_size"], "64MB");
+        assert_eq!(engines[1]["file"]["data_dir"], "/default/data");
+        // Entries that only the environment mentions are appended, sorted by tag.
+        assert_eq!(engines[2], json!({"aaa": {"data_dir": "/tmp/aaa"}}));
+        assert_eq!(
+            engines[3],
+            json!({"metric": {"flush_metadata_region_interval": "1m"}})
+        );
+    }
+
+    #[test]
+    fn test_collect_keeps_the_default_sequence_without_overrides() {
+        let collected = collect_json(&[("DATA_HOME", "/srv/data")]);
+
+        assert_eq!(collected["region_engine"], defaults()["region_engine"]);
+        assert_eq!(collected["data_home"], "/srv/data");
+    }
+
+    #[test]
+    fn test_collect_removes_the_flat_keys_of_the_sequence() {
+        let collected = collect(&[
+            ("REGION_ENGINE__MITO__INDEX__AUX_PATH", "/tmp/aux"),
+            ("REGION_ENGINE_EXTRA__MITO__AUX_PATH", "/tmp/other"),
+        ]);
+
+        // A leftover `region_engine.x` key would be written after the sequence and destroy
+        // it again, so all of them must be consumed by the merge.
+        assert!(
+            !collected
+                .keys()
+                .any(|key| key.starts_with("region_engine.")),
+            "flat keys left in the collected map: {:?}",
+            collected.keys().collect::<Vec<_>>()
+        );
+        // A key that only shares the prefix is not part of the sequence.
+        assert!(collected.contains_key("region_engine_extra.mito.aux_path"));
+    }
+
+    #[test]
+    fn test_collect_without_default_entries() {
+        let collected = collect_json_with(
+            &[
+                (
+                    "REGION_ENGINE__METRIC__FLUSH_METADATA_REGION_INTERVAL",
+                    "1m",
+                ),
+                ("REGION_ENGINE__FILE__DATA_DIR", "/tmp/data"),
+            ],
+            &json!({}),
+        );
+
+        assert_eq!(
+            collected["region_engine"],
+            json!([
+                {"file": {"data_dir": "/tmp/data"}},
+                {"metric": {"flush_metadata_region_interval": "1m"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn test_collect_with_null_default_entries() {
+        let collected = collect_json_with(
+            &[("REGION_ENGINE__FILE__DATA_DIR", "/tmp/data")],
+            &json!({"region_engine": null}),
+        );
+
+        assert_eq!(
+            collected["region_engine"],
+            json!([{"file": {"data_dir": "/tmp/data"}}])
+        );
+    }
+
+    #[test]
+    fn test_collect_rejects_setting_the_whole_sequence() {
+        let message = collect_error(&[("REGION_ENGINE", "mito")]);
+
+        assert!(
+            message.contains("cannot be overridden as a whole"),
+            "{message}"
+        );
+        assert!(
+            message.contains("region_engine__<TAG>__<FIELD>"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_collect_rejects_a_numeric_index() {
+        let message = collect_error(&[("REGION_ENGINE__0__MITO__INDEX__AUX_PATH", "/tmp/aux")]);
+
+        assert!(message.contains("numeric index"), "{message}");
+        assert!(message.contains("addressed by tag name"), "{message}");
+    }
+
+    #[test]
+    fn test_collect_rejects_a_tag_without_field() {
+        let message = collect_error(&[("REGION_ENGINE__MITO", "mito")]);
+
+        assert!(message.contains("needs a field"), "{message}");
+    }
+
+    #[test]
+    fn test_collect_rejects_conflicting_overrides() {
+        let message = collect_error(&[
+            ("REGION_ENGINE__MITO__INDEX", "not-a-table"),
+            ("REGION_ENGINE__MITO__INDEX__AUX_PATH", "/tmp/aux"),
+        ]);
+
+        assert!(
+            message.contains("another environment variable sets 'region_engine.mito.index'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_collect_rejects_a_field_below_a_scalar_default() {
+        let message = collect_error(&[("REGION_ENGINE__FILE__DATA_DIR__SUB", "/tmp/sub")]);
+
+        assert!(message.contains("region_engine.file.data_dir"), "{message}");
+        assert!(
+            message.contains("default value is not a table"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_collect_rejects_a_scalar_default_sequence() {
+        let message = collect_error_with(
+            &[("REGION_ENGINE__MITO__INDEX__AUX_PATH", "/tmp/aux")],
+            &json!({"region_engine": "not-an-array"}),
+        );
+
+        assert!(
+            message.contains("not a sequence of single-key tables"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_collect_rejects_a_default_entry_with_two_tags() {
+        let message = collect_error_with(
+            &[("REGION_ENGINE__MITO__INDEX__AUX_PATH", "/tmp/aux")],
+            &json!({"region_engine": [{"mito": {}, "file": {}}]}),
+        );
+
+        assert!(message.contains("exactly one tag"), "{message}");
+    }
+
+    #[test]
+    fn test_take_entries_keeps_unrelated_keys() {
+        let mut collected = Map::new();
+        for key in [
+            "region_engine",
+            "region_engine.mito.index",
+            "region_engine_extra.mito",
+            "other",
+        ] {
+            collected.insert(
+                (*key).to_string(),
+                Value::new(None, ValueKind::String("v".to_string())),
+            );
+        }
+
+        let entries = take_entries(&mut collected, "region_engine");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["region_engine", "region_engine.mito.index"]
+        );
+        assert!(!collected.contains_key("region_engine"));
+        assert!(!collected.contains_key("region_engine.mito.index"));
+        assert!(collected.contains_key("region_engine_extra.mito"));
+        assert!(collected.contains_key("other"));
+    }
+
+    #[test]
+    fn test_is_index_like() {
+        for tag in ["0", "12", "-1", "+1", "1e3", "-1.5"] {
+            assert!(is_index_like(tag), "{tag} should look like an index");
+        }
+
+        for tag in ["mito", "file", "metric", "", "m1", "-", "+"] {
+            assert!(!is_index_like(tag), "{tag} should not look like an index");
+        }
+    }
+}
