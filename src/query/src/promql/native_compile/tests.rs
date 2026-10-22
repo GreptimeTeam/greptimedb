@@ -24,6 +24,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 use promql::map::MathOp;
+use promql::native::batch::EvaluatedChunk;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
@@ -2085,13 +2086,25 @@ fn agg_raw_chunk(
     timestamps: &[i64],
     values: &[f64],
 ) -> RawSeriesChunk {
+    agg_raw_chunk_with_last(schema, key, metric, timestamps, values, true)
+}
+
+/// One raw chunk of `metric`, keyed by `key`, with an explicit series-ending flag.
+fn agg_raw_chunk_with_last(
+    schema: &SeriesSchema,
+    key: &[u8],
+    metric: MetricName,
+    timestamps: &[i64],
+    values: &[f64],
+    is_last: bool,
+) -> RawSeriesChunk {
     RawSeriesChunk::try_new(
         schema,
         Buffer::from_slice_ref(key),
         Some(metric),
         RawTimestamps::try_new(ScalarBuffer::from(timestamps.to_vec())).unwrap(),
         SeriesFields::one(Samples::from_float(Float64Array::from(values.to_vec()))),
-        true,
+        is_last,
     )
     .unwrap()
 }
@@ -2117,24 +2130,8 @@ type AggSeries = (
     Vec<(usize, Option<f64>)>,
 );
 
-/// Runs `tree` over `chunks`, which enter at the tree's only input, and reads the answer.
-///
-/// The answer is read the way a caller reads it: the whole input is pushed, the input is ended, and
-/// what the root reports is collected. Each series is reported by its identity and the value it
-/// decided at each absolute grid position.
-fn run_aggregate_tree(tree: &NativeTree, chunks: Vec<RawSeriesChunk>) -> Vec<AggSeries> {
-    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
-    let state =
-        NativeExecutionState::try_new(tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
-    let mut execution = NativeExecutor::new(state);
-    for chunk in chunks {
-        execution
-            .push_raw(chunk)
-            .unwrap_or_else(|error| panic!("a source chunk was refused: {error}"));
-    }
-    let output = execution
-        .finish()
-        .unwrap_or_else(|error| panic!("the tree did not answer: {error}"));
+/// Reads the outputs a native execution produced.
+fn aggregate_results(output: &[EvaluatedChunk]) -> Vec<AggSeries> {
     let mut results: Vec<AggSeries> = output
         .iter()
         .map(|chunk| {
@@ -2169,6 +2166,27 @@ fn run_aggregate_tree(tree: &NativeTree, chunks: Vec<RawSeriesChunk>) -> Vec<Agg
         .collect();
     results.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
     results
+}
+
+/// Runs `tree` over `chunks`, which enter at the tree's only input, and reads the answer.
+///
+/// The answer is read the way a caller reads it: the whole input is pushed, the input is ended, and
+/// what the root reports is collected. Each series is reported by its identity and the value it
+/// decided at each absolute grid position.
+fn run_aggregate_tree(tree: &NativeTree, chunks: Vec<RawSeriesChunk>) -> Vec<AggSeries> {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
+    let state =
+        NativeExecutionState::try_new(tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+    let mut execution = NativeExecutor::new(state);
+    for chunk in chunks {
+        execution
+            .push_raw(chunk)
+            .unwrap_or_else(|error| panic!("a source chunk was refused: {error}"));
+    }
+    let output = execution
+        .finish()
+        .unwrap_or_else(|error| panic!("the tree did not answer: {error}"));
+    aggregate_results(&output)
 }
 
 /// The 21 grid points of a statement over 100 seconds in 5-second steps.
@@ -2216,6 +2234,85 @@ fn a_compiled_sum_drops_every_label_and_adds_its_group() {
         .map(|position| (position, Some(3.0 * (position as f64 + 1.0))))
         .collect();
     assert_eq!(output, vec![(None, Vec::new(), values)]);
+}
+
+#[test]
+fn a_compiled_sum_aggregates_series_chunks_after_input_ends() {
+    let schema = raw_schema();
+    let timestamps = agg_timestamps_0_to_100();
+    let values: Vec<f64> = (1..=21).map(f64::from).collect();
+    let cases = [
+        ("sum(x)", None, Vec::new()),
+        (
+            "sum by(job)(x)",
+            None,
+            vec![("job".to_string(), "api".to_string())],
+        ),
+        (
+            "sum without(instance)(x)",
+            None,
+            vec![("job".to_string(), "api".to_string())],
+        ),
+    ];
+
+    for (query, name, tags) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+        let metric = agg_metric("x", &[("job", "api"), ("instance", "a")]);
+        let chunks = vec![
+            agg_raw_chunk_with_last(
+                &schema,
+                b"a",
+                metric.clone(),
+                &timestamps[..10],
+                &values[..10],
+                false,
+            ),
+            agg_raw_chunk_with_last(
+                &schema,
+                b"a",
+                metric,
+                &timestamps[10..],
+                &values[10..],
+                true,
+            ),
+        ];
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
+        let state =
+            NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+        let mut execution = NativeExecutor::new(state);
+        for chunk in chunks {
+            execution.push_raw(chunk).unwrap();
+            assert!(
+                execution.next_chunk().unwrap().is_none(),
+                "`{query}` produced output before the whole input ended"
+            );
+        }
+        let output = execution.finish().unwrap();
+        let results = aggregate_results(&output);
+        let expected_points = values
+            .iter()
+            .enumerate()
+            .map(|(position, value)| (position, Some(*value)))
+            .collect();
+        assert_eq!(
+            results,
+            vec![(name.map(str::to_string), tags, expected_points)],
+            "`{query}`"
+        );
+    }
+}
+
+/// Empty source input is not a member of an aggregate's implicit group.
+#[test]
+fn a_compiled_aggregate_over_empty_input_produces_no_groups() {
+    for query in ["sum(x)", "sum by(job)(x)", "sum without(instance)(x)"] {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+        assert_eq!(
+            run_aggregate_tree(&tree, Vec::new()),
+            Vec::new(),
+            "`{query}` invented a group for empty input"
+        );
+    }
 }
 
 /// `sum by(job)(x)` over five series: two groups, each the sum of its own members.
@@ -2428,4 +2525,75 @@ fn a_compiled_sum_over_a_rate_groups_the_window_it_reads() {
             ),
         ]
     );
+}
+
+/// Splitting one counter's samples does not change the rate aggregate or make it answer early.
+#[test]
+fn a_compiled_sum_over_a_rate_aggregates_series_chunks_after_input_ends() {
+    let statement = EvalStmt {
+        expr: promql_parser::parser::parse("sum by(job)(rate(x[5m]))").unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(300),
+        end: UNIX_EPOCH + Duration::from_secs(400),
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(5),
+    };
+    let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+    let schema = raw_schema();
+    let timestamps: Vec<i64> = (0..=80).map(|index| index * 5_000).collect();
+    let values: Vec<f64> = (0..=80).map(|index| f64::from(index) + 1.0).collect();
+    let metric = agg_metric("x", &[("job", "api"), ("instance", "a")]);
+    let chunks = [
+        agg_raw_chunk_with_last(
+            &schema,
+            b"a",
+            metric.clone(),
+            &timestamps[..41],
+            &values[..41],
+            false,
+        ),
+        agg_raw_chunk_with_last(
+            &schema,
+            b"a",
+            metric,
+            &timestamps[41..],
+            &values[41..],
+            true,
+        ),
+    ];
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
+    let state =
+        NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+    let mut execution = NativeExecutor::new(state);
+    for chunk in chunks {
+        execution.push_raw(chunk).unwrap();
+        assert!(
+            execution.next_chunk().unwrap().is_none(),
+            "the rate aggregate produced output before the whole input ended"
+        );
+    }
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        aggregate_results(&output),
+        vec![(
+            None,
+            vec![("job".to_string(), "api".to_string())],
+            (0..21)
+                .map(|position| (position, Some(0.19999999999999998)))
+                .collect(),
+        )]
+    );
+}
+
+/// Empty source input is not a member of this aggregate's implicit group, with or without a window.
+#[test]
+fn a_compiled_sum_over_a_rate_with_empty_input_produces_no_groups() {
+    let statement = EvalStmt {
+        expr: promql_parser::parser::parse("sum by(job)(rate(x[5m]))").unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(300),
+        end: UNIX_EPOCH + Duration::from_secs(400),
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(5),
+    };
+    let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+    assert_eq!(run_aggregate_tree(&tree, Vec::new()), Vec::new());
 }

@@ -32,11 +32,11 @@
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::samples::{Samples, Series, SeriesSchema};
-use datatypes::series::time::TimeAxis;
+use datatypes::series::samples::{Series, SeriesSchema};
 
 use crate::aggregate::{AggregateOp, FloatAggregator, Grouping};
 use crate::evaluated::EvaluatedChunk;
+use crate::grid_series::series_bytes;
 use crate::map::validate_float_series;
 use crate::native::execute::{NodeBuffer, evaluated_bytes};
 use crate::native::metrics::NodePath;
@@ -77,7 +77,11 @@ impl AggregateRuntime {
     /// chunk is folded: a node this runtime cannot compute must not start, because a partial answer
     /// would be one the caller never asked for. The rejection names what was found, so a reader can
     /// tell a tree this runtime cannot run from one it cannot run correctly.
-    pub(crate) fn new(op: BoundAggregate, schema: Arc<SeriesSchema>) -> Result<Self> {
+    pub(crate) fn new(
+        op: BoundAggregate,
+        schema: Arc<SeriesSchema>,
+        buffer: &mut NodeBuffer,
+    ) -> Result<Self> {
         if op.stage != AggregateStage::Complete {
             return Err(DataFusionError::NotImplemented(format!(
                 "the native runtime does not execute a `{:?}` aggregate yet: a `Partial` aggregate \
@@ -101,6 +105,11 @@ impl AggregateRuntime {
                 )));
             }
         };
+        let name_count = match &op.group {
+            BoundGrouping::By(labels) | BoundGrouping::Without(labels) => labels.len(),
+        };
+        let name_bytes = name_count.saturating_mul(std::mem::size_of::<&str>());
+        buffer.grow(name_bytes)?;
         let names: Vec<&str> = match &op.group {
             BoundGrouping::By(labels) | BoundGrouping::Without(labels) => {
                 labels.iter().map(|label| label.as_ref()).collect()
@@ -110,11 +119,16 @@ impl AggregateRuntime {
             BoundGrouping::By(_) => Grouping::By(&names),
             BoundGrouping::Without(_) => Grouping::Without(&names),
         };
-        let accumulator = FloatAggregator::try_new(&schema, kind, grouping)?;
+        let name_bytes = names.len().saturating_mul(std::mem::size_of::<&str>());
+        let initial = FloatAggregator::try_new_budgeted(&schema, kind, grouping, |bytes| {
+            buffer.resize(bytes.saturating_add(name_bytes))
+        })?;
+        drop(names);
+        buffer.resize(initial.state_bytes())?;
         Ok(Self {
             op,
             schema,
-            accumulator: Some(accumulator),
+            accumulator: Some(initial),
             computed: false,
         })
     }
@@ -131,94 +145,74 @@ impl AggregateRuntime {
         evaluated_bytes(chunk)
     }
 
-    /// What the states this node holds are charged with.
-    ///
-    /// It is the fold's blocks and nothing else: the chunks it read are gone, so unlike a binary
-    /// operand's figure this one does not grow with the input but with the groups and the blocks
-    /// that hold them.
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.accumulator
-            .as_ref()
-            .map_or(0, FloatAggregator::state_bytes)
-    }
-
     /// Folds one chunk into its group.
     ///
     /// A chunk that closes its series closes nothing here: a group is not a series, so the last
     /// contribution of one member says nothing about the group. The fold keeps its states, which is
     /// what makes a group's answer its whole group's answer once the input ends.
-    pub(crate) fn accumulate(&mut self, path: &NodePath, chunk: EvaluatedChunk) -> Result<()> {
+    pub(crate) fn accumulate(
+        &mut self,
+        path: &NodePath,
+        chunk: EvaluatedChunk,
+        buffer: &mut NodeBuffer,
+        pending: usize,
+    ) -> Result<()> {
         // `Series` keeps its fields public, so a chunk can be built by struct literal against
         // another schema; the states are indexed by absolute position on this node's grid, so a
         // chunk of another field count or another grid would be folded into the wrong places.
         validate_float_series(&self.schema, &chunk.series)
             .map_err(|error| folded_chunk(path, &self.describe(), error))?;
         let accumulator = self.accumulator.as_mut().ok_or_else(|| no_fold(path))?;
-        // The chunk goes out of scope here, so this node holds none of what it read.
-        accumulator.update(&chunk.series)
+        // Keep the chunk covered while the fold decides whether it needs a new group or block.
+        accumulator.update_budgeted(&chunk.series, |fold_bytes| {
+            buffer.resize(pending.saturating_add(fold_bytes))
+        })?;
+        drop(chunk);
+        buffer.resize(accumulator.state_bytes())
     }
 
     /// Finishes the fold and returns one series per group, or `None` if the fold already ran.
     ///
+    /// The number of retained groups, for budgeting the output queue backing storage.
+    ///
     /// `None` is what a node reports after it has queued its series: the caller reads them from the
     /// queue, exactly as it reads the chunks a binary node queued, so a second pull does not finish
     /// a fold whose states are gone.
+    pub(crate) fn groups(&self) -> usize {
+        self.accumulator.as_ref().map_or(0, FloatAggregator::groups)
+    }
+
     pub(crate) fn compute(
         &mut self,
         path: &NodePath,
         buffer: &mut NodeBuffer,
+        queue_bytes: usize,
     ) -> Result<Option<Vec<Series>>> {
         if self.computed {
             return Ok(None);
         }
-        let Some(accumulator) = self.accumulator.take() else {
+        if self.accumulator.is_none() {
             return Err(no_fold(path));
-        };
-        let points = self
-            .schema
-            .eval_grid
-            .as_ref()
-            .map_or(0, |grid| grid.timestamps().len());
-        let fields = self.schema.fields.len();
-        let groups = accumulator.groups();
-        // The finish allocates the result boxes of its states and the builder's rows, and both are
-        // reserved before they exist: the figure is the states the fold holds -- one state per group
-        // per point of every block it filled -- plus the rows one builder pushes for the groups it
-        // produces. Like the other figures in this runtime it is a rough estimate rather than an
-        // allocation bound: the map's buckets, the metric payloads and the slack of a vector's
-        // capacity are not measured one by one.
-        buffer.grow(
-            accumulator
-                .state_bytes()
-                .saturating_add(aggregate_output_bytes(groups, points, fields)),
-        )?;
-        let output = accumulator.finish()?;
+        }
         self.computed = true;
-        // The states and the one builder are gone with the finish, so what this node holds is the
-        // series it returns; the caller queues each of them, and the reservation settles on the
-        // queue as it does for a binary result.
-        buffer.resize(aggregate_output_bytes(output.len(), points, fields))?;
+        let output = self
+            .accumulator
+            .take()
+            .ok_or_else(|| no_fold(path))?
+            .finish_budgeted(|total| buffer.resize(total.saturating_add(queue_bytes)))?;
+        let output_bytes = output.iter().fold(0usize, |bytes, series| {
+            bytes.saturating_add(series_bytes(series))
+        });
+        let output_vec_bytes = output
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Series>());
+        buffer.resize(
+            output_bytes
+                .saturating_add(output_vec_bytes)
+                .saturating_add(queue_bytes),
+        )?;
         Ok(Some(output))
     }
-}
-
-/// A rough figure for the bytes finishing `groups` groups over `points` grid points allocates.
-///
-/// It allows for one row of an `f64` per field per point the builder may push, and for the header,
-/// the axis and the sample list of each result series. The builder's vectors keep slack and the
-/// sample buffers behind a result are what the node's queue measures afterwards, so the figure is an
-/// allowance rather than an allocation bound.
-fn aggregate_output_bytes(groups: usize, points: usize, fields: usize) -> usize {
-    let rows = groups
-        .saturating_mul(points)
-        .saturating_mul(fields)
-        .saturating_mul(std::mem::size_of::<f64>());
-    let series = groups.saturating_mul(
-        std::mem::size_of::<Series>()
-            .saturating_add(std::mem::size_of::<TimeAxis>())
-            .saturating_add(std::mem::size_of::<Samples>()),
-    );
-    rows.saturating_add(series)
 }
 
 /// The rejection of a chunk that is not the layout this node folds.

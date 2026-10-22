@@ -90,7 +90,7 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis}
 use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::grid_series::{
-    GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
+    GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned, series_bytes,
 };
 use crate::instant_eval::select_instants;
 use crate::map::{MathOp, drop_metric_name, map_math};
@@ -174,32 +174,6 @@ fn raw_bytes(chunk: &RawSeriesChunk) -> usize {
 /// to its fold and drops it, so the chunk alone is what it holds for as long as it holds anything.
 pub(super) fn evaluated_bytes(chunk: &EvaluatedChunk) -> usize {
     std::mem::size_of::<EvaluatedChunk>().saturating_add(fields_bytes(&chunk.series.fields))
-}
-
-/// The bytes one evaluated series holds: its header, the axis that addresses it, the identity it
-/// carries and the sample buffers behind its fields.
-///
-/// It is the figure a fragment of an affected window is charged with as it arrives. The axis's runs
-/// and the segments of its fields are counted in one pass over the series, so the estimate costs
-/// the fragment rather than a walk over everything the node holds. A payload a fragment shares with
-/// another — a histogram table behind two slices of it, the grid behind every axis — is counted
-/// once per fragment: that over-count is accepted here rather than a deduplication that would have
-/// to keep state across fragments.
-fn series_bytes(series: &Series) -> usize {
-    let runs = series.time.runs().count();
-    let segments: usize = series
-        .fields
-        .iter()
-        .map(|field| field.segments().len())
-        .sum();
-    std::mem::size_of::<Series>()
-        .saturating_add(std::mem::size_of::<TimeAxis>())
-        .saturating_add(runs.saturating_mul(std::mem::size_of::<(usize, usize)>()))
-        .saturating_add(
-            segments.saturating_mul(std::mem::size_of::<Samples>() + std::mem::size_of::<usize>()),
-        )
-        .saturating_add(fields_bytes(&series.fields))
-        .saturating_add(metric_bytes(&series.metric))
 }
 
 /// The bytes one chunk a binary operand retains holds on its own.
@@ -1942,8 +1916,6 @@ impl NodeRuntime {
     fn enqueue(&mut self, chunk: NativeChunk) -> Result<()> {
         let positions = chunk.positions();
         let bytes = chunk.bytes();
-        // The chunk is held from here on, so the pool admits it before the queue keeps it: a
-        // rejected chunk leaves nothing behind.
         self.buffer.grow(bytes)?;
         self.queued.push_back((chunk, bytes));
         self.buffer.metrics.record_input(1, positions);
@@ -2203,10 +2175,11 @@ impl NodeRuntime {
         let metrics = Arc::clone(&self.buffer.metrics);
         {
             let _timer = metrics.timer();
-            let aggregate = self.aggregate.as_mut().ok_or_else(|| no_aggregate(path))?;
-            aggregate.accumulate(path, chunk)?;
-            let retained = aggregate.retained_bytes();
-            self.buffer.resize(retained)?;
+            let (aggregate, buffer) = (&mut self.aggregate, &mut self.buffer);
+            aggregate
+                .as_mut()
+                .ok_or_else(|| no_aggregate(path))?
+                .accumulate(path, chunk, buffer, pending)?;
         }
         metrics.record_input(1, positions);
         // A chunk that closed its series closed it for the node below: a group is not a series, so
@@ -2221,34 +2194,55 @@ impl NodeRuntime {
     /// closes it: a consumer above reads "nothing more here" from that chunk rather than from another
     /// one arriving.
     fn compute_aggregate(&mut self, path: &NodePath) -> Result<()> {
+        let groups = self
+            .aggregate
+            .as_ref()
+            .map_or(0, |aggregate| aggregate.groups());
+        let queue_capacity = self.queued.capacity();
+        let queue_target = self.queued.len().saturating_add(groups);
+        let queue_growth = queue_target
+            .saturating_sub(queue_capacity)
+            .saturating_mul(std::mem::size_of::<(NativeChunk, usize)>());
+        self.buffer.grow(queue_growth)?;
+        if groups > 0 {
+            self.queued.try_reserve_exact(groups).map_err(|error| {
+                DataFusionError::Execution(format!(
+                    "cannot reserve aggregate output queue: {error}"
+                ))
+            })?;
+        }
+        let queue_bytes = queue_target
+            .max(queue_capacity)
+            .saturating_mul(std::mem::size_of::<(NativeChunk, usize)>());
         let output = {
             let aggregate = self.aggregate.as_mut().ok_or_else(|| no_aggregate(path))?;
-            aggregate.compute(path, &mut self.buffer)?
+            aggregate.compute(path, &mut self.buffer, queue_bytes)?
         };
-        // A fold that already ran has moved its series into the queue, which the handover below
-        // charges for: leaving the reservation alone here is what keeps a queued series covered.
+        // The fold has returned its series; reserve their handover before appending them to the queue.
         let Some(output) = output else {
             return Ok(());
         };
         let mut closed = 0usize;
         for series in output {
+            let bytes = series_bytes(&series);
             let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
-            // The series are already admitted: the fold kept them inside the figure its caller
-            // reserved. What the queue keeps is the estimate of the chunk that holds one.
-            let bytes = chunk.bytes();
             self.queued.push_back((chunk, bytes));
             closed += 1;
         }
         // A group is one series and this node closes each of them exactly once, on the one chunk it
         // hands it over as.
         self.buffer.metrics.record_completed_series(closed);
-        // The fold is gone and the queue holds what it returned, so the reservation settles on the
-        // queue: what a queued series is given back with as it leaves is exactly its estimate here.
-        let queued = self
+        // The output Vec has been consumed; the node now holds only queue backing and chunks.
+        let queued_bytes = self
             .queued
             .iter()
             .fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
-        self.buffer.resize(queued)
+        let queue_backing = self
+            .queued
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(NativeChunk, usize)>());
+        self.buffer
+            .resize(queued_bytes.saturating_add(queue_backing))
     }
 
     /// Feeds one chunk to this node's instant selection.
@@ -2654,7 +2648,11 @@ impl NativeExecutionState {
                                 "the aggregate at {path} does not produce samples"
                             ))
                         })?;
-                    runtime.aggregate = Some(AggregateRuntime::new(op.clone(), schema)?);
+                    runtime.aggregate = Some(AggregateRuntime::new(
+                        op.clone(),
+                        schema,
+                        &mut runtime.buffer,
+                    )?);
                 }
                 NativeExpr::Scalar(_) => {
                     // Rejected above, where the pass has the position to name.
@@ -3634,11 +3632,7 @@ fn valid_values(chunk: &EvaluatedChunk) -> usize {
         .sum()
 }
 
-/// The values a chunk a binary node hands over holds.
-///
-/// A binary result is an evaluated chunk, so this is [`valid_values`]: one value per field sample
-/// that holds one. A raw chunk cannot reach a binary node's queue, and is answered as its positions
-/// so an impossible queue cannot under-count.
+/// The values an evaluated chunk hands over, or the timestamps a raw source hands over.
 fn evaluated_values(chunk: &NativeChunk) -> usize {
     match chunk {
         NativeChunk::Evaluated(chunk) => valid_values(chunk),

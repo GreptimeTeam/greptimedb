@@ -6792,6 +6792,7 @@ fn an_aggregate_answers_nothing_until_its_whole_input_ends() {
             true,
         ))
         .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
     assert!(!computed(&execution), "the fold finished on one series");
     assert!(
         execution.next_chunk().unwrap().is_none(),
@@ -6896,6 +6897,144 @@ fn an_aggregate_refuses_a_chunk_of_another_layout_and_returns_its_reservation() 
     assert_eq!(execution.state().reserved_bytes(), 0);
     // A stopped execution is not resumed: the fold must not be asked to continue after this.
     assert!(execution.next_chunk().is_err());
+}
+
+/// A pool rejection while the first aggregate block is admitted releases the source and fold.
+#[test]
+fn aggregate_budget_rejects_first_block_and_releases_everything() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(2_000);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            0,
+            vec![Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    assert!(execution.next_chunk().is_err());
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// The aggregate runtime charges its output queue, releases each output as it is pulled, and keeps
+/// queue backing until the runtime itself is released.
+#[test]
+fn aggregate_runtime_queue_keeps_only_backing_after_pops_until_release() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new(["job".into()]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for (job, value) in [("api", 1.0), ("db", 2.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                job_instance_metric("requests", job, "a"),
+                0,
+                vec![Some(value)],
+                true,
+            ))
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().expect("first group output");
+    assert_eq!(first.series.time.positions().count(), 1);
+    let runtime = &execution.state().runtimes[0];
+    let entry = std::mem::size_of::<(NativeChunk, usize)>();
+    assert_eq!(runtime.queued.len(), 1);
+    let remaining = runtime.queued[0].1;
+    let expected = runtime.queued.capacity() * entry + remaining;
+    assert_eq!(runtime.buffer.reservation.size(), expected);
+
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("second group output");
+    assert_eq!(second.series.time.positions().count(), 1);
+    let runtime = &execution.state().runtimes[0];
+    assert!(runtime.queued.is_empty());
+    let backing = runtime.queued.capacity() * entry;
+    assert!(backing > 0);
+    assert_eq!(runtime.buffer.reservation.size(), backing);
+    assert!(execution.next_chunk().unwrap().is_none());
+    // Pulling the terminal None releases the queue backing; only explicit close checks the
+    // runtime's final cleanup below.
+    assert_eq!(execution.state().runtimes[0].buffer.reservation.size(), 0);
+
+    execution.state.close().unwrap();
+    assert_eq!(execution.state().runtimes[0].queued.capacity(), 0);
+    assert_eq!(execution.state().runtimes[0].buffer.reservation.size(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An aggregate whose sparse output has a few points on a large grid can finish in a small pool.
+#[test]
+fn aggregate_sparse_output_budget_uses_rows_not_grid_length() {
+    let grid = grid(0, 1, 100_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(64 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            10,
+            vec![Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    let output = execution.finish().unwrap();
+    assert_eq!(groups_of(&output), vec![unlabelled(vec![(10, Some(2.0))])]);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An aggregate retains its fold before finish and release returns its reservation.
+#[test]
+fn aggregate_fold_state_is_released_after_input() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            0,
+            vec![Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    let runtime = &execution.state.runtimes[0];
+    let aggregate = runtime.aggregate.as_ref().unwrap();
+    assert_eq!(aggregate.groups(), 1);
+    assert!(!aggregate.computed);
+    assert!(pool.reserved() > 0);
+    execution.state.close().unwrap();
+    assert_eq!(pool.reserved(), 0);
 }
 
 /// An aggregate kind or stage this runtime does not compute is refused, naming what was found.

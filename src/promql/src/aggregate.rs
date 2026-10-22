@@ -22,11 +22,14 @@ mod tests;
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::mem::{align_of, size_of};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
+use datatypes::arrow::array::Float64Array;
 use datatypes::series::MetricName;
-use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
+use datatypes::series::samples::{SampleRef, Samples, Series, SeriesSchema};
+use datatypes::series::time::{GridSpan, TimeAxis};
 
 use crate::grid_series::{GridSeriesBuilder, external};
 use crate::map::{drop_empty_labels, validate_float_series, validate_scalar};
@@ -98,16 +101,37 @@ impl FloatAggregator {
         op: AggregateOp,
         grouping: Grouping<'_>,
     ) -> Result<Self> {
+        Self::try_new_budgeted(schema, op, grouping, |_| Ok(()))
+    }
+
+    pub(crate) fn try_new_budgeted(
+        schema: &Arc<SeriesSchema>,
+        op: AggregateOp,
+        grouping: Grouping<'_>,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Self> {
         validate_input(schema, &[], grouping)?;
         let (by, labels) = match grouping {
             Grouping::By(labels) => (true, labels),
             Grouping::Without(labels) => (false, labels),
         };
+        let label_storage =
+            grouping_bytes(grouping).saturating_add(labels_capacity_bytes(grouping));
+        budget(label_storage)?;
+        let mut owned_labels = Vec::new();
+        owned_labels
+            .try_reserve_exact(labels.len())
+            .map_err(|error| {
+                DataFusionError::Execution(format!(
+                    "cannot reserve aggregate grouping labels: {error}"
+                ))
+            })?;
+        owned_labels.extend(labels.iter().map(|label| Arc::from(*label)));
         Ok(Self {
             schema: schema.clone(),
             op,
             by,
-            labels: labels.iter().map(|label| Arc::from(*label)).collect(),
+            labels: owned_labels,
             group_index: HashMap::new(),
             groups: Vec::new(),
         })
@@ -115,7 +139,26 @@ impl FloatAggregator {
 
     /// Folds `series` into its group. A series that fails validation leaves the state unchanged.
     pub fn update(&mut self, series: &Series) -> Result<()> {
+        self.update_budgeted(series, |_| Ok(()))
+    }
+
+    pub(crate) fn update_budgeted(
+        &mut self,
+        series: &Series,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
         validate_float_series(&self.schema, series)?;
+        let existing_bytes = self.state_bytes();
+        let grouping_workspace = grouping_workspace_bytes(&series.metric);
+        let mut workspace_bytes =
+            grouping_workspace.saturating_add(pending_bytes(self.schema.fields.len()));
+        budget(existing_bytes.saturating_add(workspace_bytes))?;
+        workspace_bytes = workspace_bytes.saturating_add(
+            self.labels
+                .len()
+                .saturating_mul(std::mem::size_of::<&str>()),
+        );
+        budget(existing_bytes.saturating_add(workspace_bytes))?;
         let labels: Vec<&str> = self.labels.iter().map(|label| &**label).collect();
         let grouping = if self.by {
             Grouping::By(&labels)
@@ -123,17 +166,75 @@ impl FloatAggregator {
             Grouping::Without(&labels)
         };
         let metric = grouping.apply(&series.metric)?;
-        let index = match self.group_index.entry(label_key(&metric)) {
+        let key_bytes = metric
+            .tags()
+            .len()
+            .saturating_add(1)
+            .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>());
+        workspace_bytes = workspace_bytes
+            .saturating_add(grouping_workspace_bytes(&metric))
+            .saturating_add(key_bytes);
+        budget(existing_bytes.saturating_add(workspace_bytes))?;
+        let key = label_key(&metric);
+        let new_group = !self.group_index.contains_key(&key);
+        let group_capacity = self.groups.capacity();
+        let map_capacity = self.group_index.capacity();
+        if new_group {
+            let next_group_capacity = if self.groups.len() == group_capacity {
+                group_capacity.saturating_mul(2).max(4)
+            } else {
+                group_capacity
+            };
+            budget(
+                existing_bytes
+                    .saturating_add(metric_bytes(&metric))
+                    .saturating_add(key_bytes)
+                    .saturating_add(
+                        next_group_capacity
+                            .saturating_sub(group_capacity)
+                            .saturating_mul(size_of::<Group>()),
+                    )
+                    .saturating_add(if self.group_index.len() == map_capacity {
+                        hash_map_backing_bytes(next_hash_capacity(map_capacity))
+                    } else {
+                        0
+                    })
+                    .saturating_add(workspace_bytes),
+            )?;
+        }
+        let group_capacity_growth = if new_group && self.groups.len() == group_capacity {
+            group_capacity.saturating_mul(2).max(4)
+        } else {
+            group_capacity
+        };
+        if new_group && group_capacity_growth > group_capacity {
+            self.groups.reserve(1);
+        }
+        if new_group && self.group_index.len() == self.group_index.capacity() {
+            self.group_index.reserve(1);
+        }
+        let index = match self.group_index.entry(key) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 self.groups.push(Group {
-                    metric,
+                    metric: metric.clone(),
                     blocks: BTreeMap::new(),
                 });
-                *entry.insert(self.groups.len() - 1)
+                let index = self.groups.len() - 1;
+                entry.insert(index);
+                index
             }
         };
-        self.groups[index].accumulate(series, self.op);
+        drop(labels);
+        drop(metric);
+        let retained = self.state_bytes();
+        self.groups[index].accumulate(
+            series,
+            self.op,
+            &mut budget,
+            retained,
+            self.schema.fields.len(),
+        )?;
         Ok(())
     }
 
@@ -142,28 +243,92 @@ impl FloatAggregator {
         self.groups.len()
     }
 
-    /// Bytes reserved for state blocks retained by this fold.
+    /// Bytes reserved for this fold, using bounded allowances for its maps and group payloads.
     pub(crate) fn state_bytes(&self) -> usize {
-        let blocks = self
-            .groups
-            .iter()
-            .map(|group| group.blocks.len())
-            .fold(0usize, usize::saturating_add);
-        blocks
-            .saturating_mul(BLOCK_POINTS)
-            .saturating_mul(self.schema.fields.len())
-            .saturating_mul(std::mem::size_of::<FloatState>())
+        let groups = self.groups.iter().fold(0usize, |total, group| {
+            total
+                .saturating_add(metric_bytes(&group.metric))
+                .saturating_add(
+                    group
+                        .blocks
+                        .len()
+                        .saturating_mul(BLOCK_POINTS)
+                        .saturating_mul(self.schema.fields.len())
+                        .saturating_mul(std::mem::size_of::<FloatState>()),
+                )
+                .saturating_add(btree_backing_bytes(group.blocks.len()))
+        });
+        groups
+            .saturating_add(
+                self.labels
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Arc<str>>()),
+            )
+            .saturating_add(hash_map_backing_bytes(self.group_index.capacity()))
+            .saturating_add(self.group_index.keys().fold(0usize, |bytes, key| {
+                bytes.saturating_add(
+                    key.capacity()
+                        .saturating_mul(size_of::<(Arc<str>, Arc<str>)>()),
+                )
+            }))
+            .saturating_add(
+                self.labels
+                    .iter()
+                    .map(|label| label.len() + 2 * std::mem::size_of::<usize>())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.groups
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Group>()),
+            )
     }
 
     /// The result of every group, in the order the groups first appeared.
     pub fn finish(self) -> Result<Vec<Series>> {
+        self.finish_budgeted(|_| Ok(()))
+    }
+
+    pub(crate) fn finish_budgeted(
+        self,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Vec<Series>> {
+        let state = self.state_bytes();
         let width = self.schema.fields.len();
-        let mut builder = GridSeriesBuilder::try_new(self.schema)?;
-        let mut output = Vec::with_capacity(self.groups.len());
-        let mut row = Vec::with_capacity(width);
-        for group in self.groups {
+        let group_count = self.groups.len();
+        if group_count == 0 {
+            return Ok(Vec::new());
+        }
+        let groups = self.groups.into_iter();
+        let mut builder = GridSeriesBuilder::try_new(self.schema.clone())?;
+        let output_capacity_bytes = group_count.saturating_mul(std::mem::size_of::<Series>());
+        let row_capacity_bytes = width.saturating_mul(std::mem::size_of::<Option<f64>>());
+        let base = state
+            .saturating_add(output_capacity_bytes)
+            .saturating_add(row_capacity_bytes);
+        budget(base)?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(group_count).map_err(|error| {
+            DataFusionError::Execution(format!("cannot reserve aggregate outputs: {error}"))
+        })?;
+        let mut row = Vec::new();
+        row.try_reserve_exact(width).map_err(|error| {
+            DataFusionError::Execution(format!("cannot reserve aggregate row: {error}"))
+        })?;
+        let mut completed_output_bytes = 0usize;
+        for group in groups {
             // One builder serves every group, so each result series starts explicitly.
             builder.begin_series();
+            let (rows, runs) = group_rows_runs(&group, width);
+            let finish_bytes = finish_working_bytes(rows, runs, width);
+            budget(
+                state
+                    .saturating_add(output_capacity_bytes)
+                    .saturating_add(row_capacity_bytes)
+                    .saturating_add(completed_output_bytes)
+                    .saturating_add(finish_bytes),
+            )?;
+            builder.reserve_rows(rows)?;
             for (&block, states) in &group.blocks {
                 // The last block can extend past the grid; only points with a sample are pushed.
                 for (offset, point) in states.chunks_exact(width).enumerate() {
@@ -175,10 +340,78 @@ impl FloatAggregator {
                     builder.push(block * BLOCK_POINTS + offset, &row)?;
                 }
             }
-            output.extend(builder.finish(group.metric)?);
+            let finished = builder.finish(group.metric)?;
+            completed_output_bytes = completed_output_bytes.saturating_add(
+                finished
+                    .iter()
+                    .map(crate::grid_series::series_bytes)
+                    .sum::<usize>(),
+            );
+            output.extend(finished);
+            budget(
+                state
+                    .saturating_add(output_capacity_bytes)
+                    .saturating_add(row_capacity_bytes)
+                    .saturating_add(completed_output_bytes),
+            )?;
         }
         Ok(output)
     }
+}
+
+fn group_rows_runs(group: &Group, width: usize) -> (usize, usize) {
+    if width == 0 {
+        return (0, 0);
+    }
+    let mut rows = 0usize;
+    let mut runs = 0usize;
+    let mut previous: Option<usize> = None;
+    for (&block, states) in &group.blocks {
+        for (offset, point) in states.chunks_exact(width).enumerate() {
+            if point.iter().any(|state| state.seen) {
+                let index = block.saturating_mul(BLOCK_POINTS).saturating_add(offset);
+                rows = rows.saturating_add(1);
+                if previous.is_none_or(|previous| previous.checked_add(1) != Some(index)) {
+                    runs = runs.saturating_add(1);
+                }
+                previous = Some(index);
+            }
+        }
+    }
+    (rows, runs)
+}
+
+fn finish_working_bytes(rows: usize, runs: usize, width: usize) -> usize {
+    let values = rows
+        .saturating_mul(width)
+        .saturating_mul(std::mem::size_of::<f64>());
+    let validity_bytes = rows
+        .saturating_add(7)
+        .checked_div(8)
+        .unwrap_or(0)
+        .div_ceil(64)
+        .saturating_mul(64);
+    let fields = crate::grid_series::field_builder_bytes(width).saturating_add(
+        width.saturating_mul(
+            std::mem::size_of::<Float64Array>()
+                .saturating_add(std::mem::size_of::<Samples>())
+                .saturating_add(std::mem::size_of::<usize>()),
+        ),
+    );
+    let indices = rows.saturating_mul(std::mem::size_of::<usize>());
+    let spans = runs.saturating_mul(std::mem::size_of::<GridSpan>());
+    let axis_conversion = runs
+        .saturating_mul(
+            2 * std::mem::size_of::<GridSpan>() + std::mem::size_of::<Arc<[GridSpan]>>(),
+        )
+        .saturating_add(rows.saturating_mul(std::mem::size_of::<usize>()));
+    values
+        .saturating_add(width.saturating_mul(validity_bytes))
+        .saturating_add(fields)
+        .saturating_add(indices)
+        .saturating_add(spans)
+        .saturating_add(axis_conversion)
+        .saturating_add(std::mem::size_of::<Series>() + std::mem::size_of::<TimeAxis>())
 }
 
 /// `quantile(q, v)`, with `q` read at each grid point from an unlabelled single-field scalar on
@@ -462,6 +695,150 @@ impl Grouping<'_> {
 
 type LabelKey = Vec<(Arc<str>, Arc<str>)>;
 
+fn metric_bytes(metric: &MetricName) -> usize {
+    metric
+        .name()
+        .map_or(0, str::len)
+        .saturating_add(
+            metric
+                .tags()
+                .iter()
+                .map(|tag| tag.name.len() + tag.value.len())
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            metric
+                .tags()
+                .len()
+                .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>()),
+        )
+        .saturating_add(std::mem::size_of::<MetricName>())
+}
+
+fn grouping_workspace_bytes(metric: &MetricName) -> usize {
+    metric_bytes(metric)
+        .saturating_add(
+            metric
+                .tags()
+                .len()
+                .saturating_add(1)
+                .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>()),
+        )
+        .saturating_add(std::mem::size_of::<LabelKey>())
+}
+
+/// Conservative backing estimate for Rust 1.98.1's insert-only `HashMap` (hashbrown 0.17.1).
+/// Bucket count follows its 7/8 load factor; entries, one control byte per bucket and the
+/// 16-byte control-group tail are counted. This models requested table storage, not allocator slack.
+fn hash_map_backing_bytes(capacity: usize) -> usize {
+    let Ok(buckets) = hash_buckets(capacity) else {
+        return usize::MAX;
+    };
+    let entry = size_of::<(LabelKey, usize)>();
+    let alignment = align_of::<(LabelKey, usize)>().max(16);
+    let Some(data) = buckets.checked_mul(entry) else {
+        return usize::MAX;
+    };
+    let Some(aligned) = data
+        .checked_add(alignment - 1)
+        .map(|bytes| bytes / alignment * alignment)
+    else {
+        return usize::MAX;
+    };
+    if buckets == 0 {
+        return 0;
+    }
+    aligned
+        .checked_add(buckets)
+        .and_then(|bytes| bytes.checked_add(16))
+        .unwrap_or(usize::MAX)
+}
+
+fn next_hash_capacity(capacity: usize) -> usize {
+    match capacity {
+        0 => 3,
+        1..=3 => 7,
+        4..=7 => 14,
+        8..=14 => 28,
+        15..=28 => 56,
+        _ => capacity.saturating_mul(2),
+    }
+}
+
+fn hash_buckets(capacity: usize) -> Result<usize> {
+    if capacity == 0 {
+        return Ok(0);
+    }
+    if capacity <= 3 {
+        return Ok(4);
+    }
+    let target = capacity
+        .checked_mul(8)
+        .ok_or_else(|| DataFusionError::Execution("aggregate map capacity overflow".into()))?
+        / 7;
+    target
+        .checked_next_power_of_two()
+        .ok_or_else(|| DataFusionError::Execution("aggregate map capacity overflow".into()))
+}
+
+/// Maximum B-tree node count for `entries`: each non-root node contains at least five entries
+/// in Rust 1.98.1's `alloc` B=6 tree. Node bytes derive from the aligned generic node layout.
+fn btree_backing_bytes(entries: usize) -> usize {
+    if entries == 0 {
+        return 0;
+    }
+    let Some(nodes) = 1usize.checked_add((entries - 1).div_ceil(5)) else {
+        return usize::MAX;
+    };
+    let key_value = size_of::<(usize, Box<[FloatState]>)>();
+    let Some(leaf) = align_up(
+        size_of::<Option<(std::ptr::NonNull<()>, u16)>>() + size_of::<u16>() + 11 * key_value,
+        align_of::<usize>(),
+    ) else {
+        return usize::MAX;
+    };
+    let Some(internal) = leaf
+        .checked_add(12 * size_of::<std::ptr::NonNull<()>>())
+        .and_then(|bytes| align_up(bytes, align_of::<usize>()))
+    else {
+        return usize::MAX;
+    };
+    nodes.checked_mul(internal).unwrap_or(usize::MAX)
+}
+
+fn align_up(bytes: usize, alignment: usize) -> Option<usize> {
+    bytes
+        .checked_add(alignment - 1)
+        .map(|bytes| bytes / alignment * alignment)
+}
+
+fn pending_bytes(fields: usize) -> usize {
+    working_set_bytes(fields, BLOCK_POINTS)
+}
+
+fn working_set_bytes(fields: usize, pending_capacity: usize) -> usize {
+    pending_capacity
+        .saturating_mul(std::mem::size_of::<(usize, f64)>())
+        .saturating_add(fields.saturating_mul(std::mem::size_of::<Option<f64>>() + 1))
+}
+
+fn labels_capacity_bytes(grouping: Grouping<'_>) -> usize {
+    let labels = match grouping {
+        Grouping::By(labels) | Grouping::Without(labels) => labels,
+    };
+    labels.len().saturating_mul(std::mem::size_of::<Arc<str>>())
+}
+
+fn grouping_bytes(grouping: Grouping<'_>) -> usize {
+    let labels = match grouping {
+        Grouping::By(labels) | Grouping::Without(labels) => labels,
+    };
+    labels
+        .iter()
+        .map(|label| label.len() + std::mem::size_of::<Arc<str>>())
+        .sum::<usize>()
+}
+
 fn label_key(metric: &MetricName) -> LabelKey {
     let mut labels = Vec::with_capacity(metric.tags().len() + 1);
     if let Some(name) = metric.name() {
@@ -488,8 +865,16 @@ struct Group {
 }
 
 impl Group {
-    fn accumulate(&mut self, series: &Series, op: AggregateOp) {
-        let width = series.fields.len();
+    fn accumulate(
+        &mut self,
+        series: &Series,
+        op: AggregateOp,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+        mut retained: usize,
+        width: usize,
+    ) -> Result<()> {
+        let pending_capacity_bytes = BLOCK_POINTS.saturating_mul(size_of::<(usize, f64)>());
+        budget(retained.saturating_add(pending_capacity_bytes))?;
         let mut pending = Vec::with_capacity(BLOCK_POINTS);
         for (field_index, field) in series.fields.iter().enumerate() {
             // The axis says which absolute positions the field holds and the field iterator
@@ -499,15 +884,32 @@ impl Group {
             let mut block = usize::MAX;
             for ((index, _), sample) in series.time.positions().zip(field.iter()) {
                 if index / BLOCK_POINTS != block {
-                    self.update_block(block, width, field_index, op, &mut pending);
+                    retained = self.update_block(
+                        block,
+                        width,
+                        field_index,
+                        op,
+                        &mut pending,
+                        budget,
+                        retained,
+                    )?;
                     block = index / BLOCK_POINTS;
                 }
                 if let SampleRef::Float(sample) = sample {
                     pending.push((index % BLOCK_POINTS, sample));
                 }
             }
-            self.update_block(block, width, field_index, op, &mut pending);
+            retained = self.update_block(
+                block,
+                width,
+                field_index,
+                op,
+                &mut pending,
+                budget,
+                retained,
+            )?;
         }
+        Ok(())
     }
 
     /// Applies one field's samples within a block, so a block costs one lookup per field run.
@@ -518,9 +920,33 @@ impl Group {
         field_index: usize,
         op: AggregateOp,
         pending: &mut Vec<(usize, f64)>,
-    ) {
+        budget: &mut impl FnMut(usize) -> Result<()>,
+        retained: usize,
+    ) -> Result<usize> {
         if pending.is_empty() {
-            return;
+            return Ok(retained);
+        }
+        let new_block = !self.blocks.contains_key(&block);
+        let block_bytes = if new_block {
+            BLOCK_POINTS
+                .saturating_mul(width)
+                .saturating_mul(std::mem::size_of::<FloatState>())
+        } else {
+            0
+        };
+        let backing_delta = if new_block {
+            btree_backing_bytes(self.blocks.len() + 1)
+                .saturating_sub(btree_backing_bytes(self.blocks.len()))
+        } else {
+            0
+        };
+        if new_block {
+            budget(
+                retained
+                    .saturating_add(backing_delta)
+                    .saturating_add(block_bytes)
+                    .saturating_add(pending.capacity().saturating_mul(size_of::<(usize, f64)>())),
+            )?;
         }
         let states = self.blocks.entry(block).or_insert_with(|| {
             vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice()
@@ -528,6 +954,9 @@ impl Group {
         for (offset, sample) in pending.drain(..) {
             states[offset * width + field_index].update(op, sample);
         }
+        Ok(retained
+            .saturating_add(backing_delta)
+            .saturating_add(block_bytes))
     }
 }
 

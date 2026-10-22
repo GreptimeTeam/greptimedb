@@ -19,12 +19,12 @@ use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use datafusion::arrow::array::builder::NullBufferBuilder;
-use datafusion::arrow::array::{Float64Array, UInt32Array};
+use datafusion::arrow::array::{Array, Float64Array, UInt32Array};
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::MetricName;
-use datatypes::series::histogram::HistogramBatchBuilder;
+use datatypes::series::histogram::{HistogramBatch, HistogramBatchBuilder};
 use datatypes::series::samples::{
-    HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridSpan, TimeAxis};
 
@@ -34,6 +34,68 @@ use crate::histogram_eval::float_histogram::FloatHistogram;
 pub(crate) mod reference;
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn series_bytes(series: &Series) -> usize {
+    let runs = series.time.runs().count();
+    let segments: usize = series
+        .fields
+        .iter()
+        .map(|field| field.segments().len())
+        .sum();
+    std::mem::size_of::<Series>()
+        .saturating_add(std::mem::size_of::<TimeAxis>())
+        .saturating_add(runs.saturating_mul(std::mem::size_of::<(usize, usize)>()))
+        .saturating_add(
+            segments.saturating_mul(std::mem::size_of::<Samples>() + std::mem::size_of::<usize>()),
+        )
+        .saturating_add(fields_bytes(&series.fields))
+        .saturating_add(series.metric.name().map_or(0, str::len))
+        .saturating_add(std::mem::size_of_val(series.metric.tags()))
+        .saturating_add(
+            series
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| tag.name.len() + tag.value.len())
+                .sum::<usize>(),
+        )
+}
+
+fn fields_bytes(fields: &SeriesFields) -> usize {
+    fields
+        .iter()
+        .map(|field| {
+            field.segments().iter().fold(0usize, |total, segment| {
+                let bytes = match segment.dense() {
+                    Some(DenseSamplesRef::Float(values)) => values.get_array_memory_size(),
+                    Some(DenseSamplesRef::Histogram(histograms)) => histograms
+                        .indices()
+                        .get_array_memory_size()
+                        .saturating_add(histograms.batch().as_arrow().get_array_memory_size())
+                        .saturating_add(std::mem::size_of::<HistogramBatch>()),
+                    Some(DenseSamplesRef::Mixed(mixed)) => mixed
+                        .floats()
+                        .get_array_memory_size()
+                        .saturating_add(mixed.histograms().indices().get_array_memory_size())
+                        .saturating_add(
+                            mixed
+                                .histograms()
+                                .batch()
+                                .as_arrow()
+                                .get_array_memory_size(),
+                        )
+                        .saturating_add(std::mem::size_of::<HistogramBatch>()),
+                    None => 0,
+                };
+                total.saturating_add(bytes)
+            })
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+pub(crate) fn field_builder_bytes(width: usize) -> usize {
+    width.saturating_mul(std::mem::size_of::<FieldBuilder>())
+}
 
 /// Builds one grid series from rows pushed at absolute grid indices.
 ///
@@ -114,6 +176,36 @@ impl GridSeriesBuilder {
         })
     }
 
+    /// Reserves capacity for the exact number of valued rows in the next series.
+    ///
+    /// Call after `begin_series` and before its first push. Existing public callers may continue
+    /// to rely on normal growth; callers with a budget can reserve the concrete row capacity first.
+    pub(crate) fn reserve_rows(&mut self, rows: usize) -> Result<()> {
+        self.indices
+            .try_reserve_exact(rows.saturating_sub(self.indices.len()))
+            .map_err(|error| {
+                DataFusionError::Execution(format!("cannot reserve grid row indices: {error}"))
+            })?;
+        if rows == 0 {
+            return Ok(());
+        }
+        if self.fields.is_empty() {
+            self.fields = (0..self.schema.fields.len())
+                .map(|_| FieldBuilder::new(rows))
+                .collect();
+        }
+        for field in &mut self.fields {
+            field
+                .values
+                .try_reserve_exact(rows.saturating_sub(field.values.len()))
+                .map_err(|error| {
+                    DataFusionError::Execution(format!("cannot reserve grid values: {error}"))
+                })?;
+            field.nulls = NullBufferBuilder::new(rows);
+        }
+        Ok(())
+    }
+
     /// Pushes the field values at absolute grid `index`; `None` is a missing value.
     ///
     /// Indices must be strictly increasing; skipped indices are positions that hold no value.
@@ -176,7 +268,7 @@ impl GridSeriesBuilder {
             return Ok(false);
         }
         if self.fields.is_empty() {
-            self.fields = (0..len).map(|_| FieldBuilder::new()).collect();
+            self.fields = (0..len).map(|_| FieldBuilder::new(0)).collect();
         }
         self.indices.push(index);
         Ok(true)
@@ -239,24 +331,28 @@ impl GridSeriesBuilder {
         }
         let fields = std::mem::take(&mut self.fields);
         let indices = std::mem::take(&mut self.indices);
-        let samples = fields
-            .into_iter()
-            .map(|mut field| {
-                let floats = Float64Array::new(field.values.into(), field.nulls.finish());
-                let Some(column) = field.histograms else {
-                    return Ok(Samples::from_float(floats));
-                };
+        let mut samples = Vec::new();
+        samples.try_reserve_exact(fields.len()).map_err(|error| {
+            DataFusionError::Execution(format!("cannot reserve grid field descriptions: {error}"))
+        })?;
+        for mut field in fields {
+            let floats = Float64Array::new(field.values.into(), field.nulls.finish());
+            let sample = if let Some(column) = field.histograms {
                 let batch = column.batch.finish().map_err(external)?;
                 let histograms =
                     HistogramSamples::try_new(UInt32Array::from(column.indices), batch)
                         .map_err(external)?;
-                Samples::try_from_mixed(floats, histograms).map_err(external)
-            })
-            .collect::<Result<Vec<_>>>()?;
+                Samples::try_from_mixed(floats, histograms).map_err(external)?
+            } else {
+                Samples::from_float(floats)
+            };
+            samples.push(sample);
+        }
         let fields = SeriesFields::try_from_vec(samples).map_err(external)?;
         // The runs are all the axis has to remember about the gaps, and the rows are already
         // compact, so no position holding no value is visited or stored.
-        let spans = spans_of(&indices);
+        let run_count = count_runs(&indices);
+        let spans = spans_of(&indices, run_count)?;
         let time = TimeAxis::from_grid_spans(self.grid.clone(), spans).map_err(external)?;
         Series::try_new(&self.schema, metric, time, fields)
             .map(Some)
@@ -265,8 +361,19 @@ impl GridSeriesBuilder {
 }
 
 /// Cuts the retained indices into maximal runs of consecutive positions.
-fn spans_of(indices: &[usize]) -> Vec<GridSpan> {
+fn count_runs(indices: &[usize]) -> usize {
+    indices
+        .windows(2)
+        .filter(|pair| pair[1] != pair[0] + 1)
+        .count()
+        .saturating_add(usize::from(!indices.is_empty()))
+}
+
+fn spans_of(indices: &[usize], runs: usize) -> Result<Vec<GridSpan>> {
     let mut spans: Vec<GridSpan> = Vec::new();
+    spans.try_reserve_exact(runs).map_err(|error| {
+        DataFusionError::Execution(format!("cannot reserve grid spans: {error}"))
+    })?;
     let mut start = 0;
     while let Some(&position) = indices.get(start) {
         let mut len = 1;
@@ -276,14 +383,14 @@ fn spans_of(indices: &[usize]) -> Vec<GridSpan> {
         spans.push(GridSpan::new(position, len));
         start += len;
     }
-    spans
+    Ok(spans)
 }
 
 impl FieldBuilder {
-    fn new() -> Self {
+    fn new(rows: usize) -> Self {
         Self {
             values: Vec::new(),
-            nulls: NullBufferBuilder::new(0),
+            nulls: NullBufferBuilder::new(rows),
             histograms: None,
         }
     }
@@ -445,7 +552,8 @@ pub fn merge_same_labelset(schema: &Arc<SeriesSchema>, series: Vec<Series>) -> R
         // The runs are all the axis remembers about the holes, so a sparse merge stores one span
         // per run and no row for the positions between them.
         let time =
-            TimeAxis::from_grid_spans(grid.clone(), spans_of(&positions)).map_err(external)?;
+            TimeAxis::from_grid_spans(grid.clone(), spans_of(&positions, count_runs(&positions))?)
+                .map_err(external)?;
         let fields = SeriesFields::try_from_vec(fields).map_err(external)?;
         // The first fragment names the output, as it always has: a label set ignores empty values,
         // so the metric of the first member is the one the merged series keeps.

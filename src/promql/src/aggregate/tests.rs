@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use datafusion::error::DataFusionError;
 use datatypes::arrow::array::{Float64Array, UInt32Array};
 use datatypes::series::Label;
 use datatypes::series::histogram::HistogramBatchBuilder;
@@ -342,6 +343,27 @@ fn avg_compensation_matches_prometheus_bits() {
 }
 
 #[test]
+fn one_field_missing_and_another_nan_keep_row_nullability() {
+    let schema = schema(&["missing", "value"]);
+    let series = input(
+        &schema,
+        metric("m", &[]),
+        0,
+        &[
+            vec![None, None, None],
+            vec![Some(1.0), Some(f64::NAN), Some(2.0)],
+        ],
+    );
+    let output = aggregate_float(&schema, &[series], AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(values(&output[0], 0).1, vec![None, None, None]);
+    let values = values(&output[0], 1).1;
+    assert_eq!(values[0], Some(1.0));
+    assert!(values[1].unwrap().is_nan());
+    assert_eq!(values[2], Some(2.0));
+}
+
+#[test]
 fn fields_are_aggregated_independently() {
     // A field without input values at a row is null there, even for count and group; the row
     // exists because another field has a value. Single-field projections are the oracle.
@@ -470,6 +492,198 @@ fn fields_are_aggregated_independently() {
             }
         }
     }
+}
+
+#[test]
+fn budgeted_and_unbudgeted_float_aggregation_match_for_all_supported_kinds() {
+    let schema = schema(&["value"]);
+    let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0), Some(3.0)]]);
+    for op in [
+        AggregateOp::Sum,
+        AggregateOp::Count,
+        AggregateOp::Avg,
+        AggregateOp::Min,
+        AggregateOp::Max,
+        AggregateOp::Group,
+        AggregateOp::Stddev,
+        AggregateOp::Stdvar,
+    ] {
+        let mut plain = FloatAggregator::try_new(&schema, op, Grouping::By(&[])).unwrap();
+        plain.update(&series).unwrap();
+        let plain = plain.finish().unwrap();
+        let mut budgeted =
+            FloatAggregator::try_new_budgeted(&schema, op, Grouping::By(&[]), |_| Ok(())).unwrap();
+        budgeted.update_budgeted(&series, |_| Ok(())).unwrap();
+        let budgeted = budgeted.finish_budgeted(|_| Ok(())).unwrap();
+        assert_eq!(
+            values_of(&plain, 0, 128),
+            values_of(&budgeted, 0, 128),
+            "{op:?}"
+        );
+    }
+}
+
+#[test]
+fn repeated_updates_in_one_group_and_block_keep_one_block_charge() {
+    let schema = schema(&["value"]);
+    let first = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0)]]);
+    let second = input(&schema, metric("m", &[]), 1, &[vec![Some(3.0)]]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&first).unwrap();
+    let retained = aggregator.state_bytes();
+    aggregator.update(&second).unwrap();
+    assert_eq!(aggregator.state_bytes(), retained);
+}
+
+#[test]
+fn adjacent_blocks_are_admitted_and_accounted_separately() {
+    let schema = schema(&["value"]);
+    let series = input(&schema, metric("m", &[]), 63, &[vec![Some(1.0), Some(2.0)]]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    let mut admissions = Vec::new();
+    aggregator
+        .update_budgeted(&series, |bytes| {
+            admissions.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(aggregator.groups(), 1);
+    assert_eq!(aggregator.groups[0].blocks.len(), 2);
+    assert_eq!(
+        admissions.last().copied(),
+        Some(
+            aggregator
+                .state_bytes()
+                .saturating_add(std::mem::size_of::<(usize, f64)>() * BLOCK_POINTS,)
+        )
+    );
+}
+
+#[test]
+fn a_rejected_block_allocation_does_not_insert_a_block() {
+    let schema = schema(&["value"]);
+    let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0)]]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    let mut calls = 0;
+    let result = aggregator.update_budgeted(&series, |_| {
+        calls += 1;
+        if calls == 6 {
+            Err(DataFusionError::Execution("block allocation budget".into()))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 6);
+    assert_eq!(aggregator.groups(), 1);
+    assert!(aggregator.groups[0].blocks.is_empty());
+}
+
+#[test]
+fn a_map_growth_rejection_does_not_insert_the_new_group() {
+    let schema = schema(&["value"]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["i"])).unwrap();
+    let first = input(&schema, metric("m", &[("i", "0")]), 0, &[vec![Some(1.0)]]);
+    aggregator.update(&first).unwrap();
+    let mut index = 1;
+    while aggregator.group_index.len() < aggregator.group_index.capacity() {
+        let label = index.to_string();
+        let series = input(
+            &schema,
+            metric("m", &[("i", &label)]),
+            0,
+            &[vec![Some(1.0)]],
+        );
+        aggregator.update(&series).unwrap();
+        index += 1;
+    }
+    let group_count = aggregator.groups();
+    let old_state = aggregator.state_bytes();
+    assert_eq!(aggregator.group_index.capacity(), group_count);
+    let label = index.to_string();
+    let series = input(
+        &schema,
+        metric("m", &[("i", &label)]),
+        0,
+        &[vec![Some(1.0)]],
+    );
+    let mut calls = 0;
+    let mut peak = 0;
+    let result = aggregator.update_budgeted(&series, |bytes| {
+        calls += 1;
+        peak = peak.max(bytes);
+        if calls == 4 {
+            Err(DataFusionError::Execution("old+new map budget".into()))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 4);
+    assert!(peak > old_state);
+    assert_eq!(aggregator.group_index.capacity(), group_count);
+    assert_eq!(aggregator.groups(), group_count);
+    assert_eq!(aggregator.group_index.capacity(), group_count);
+    assert_eq!(
+        aggregator
+            .groups
+            .iter()
+            .map(|group| group.blocks.len())
+            .sum::<usize>(),
+        group_count
+    );
+}
+
+#[test]
+fn finish_rejection_after_first_group_is_budgeted_before_the_next() {
+    let schema = schema(&["value"]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["i"])).unwrap();
+    for (label, value) in [("a", 1.0), ("b", 2.0)] {
+        let series = input(
+            &schema,
+            metric("m", &[("i", label)]),
+            0,
+            &[vec![Some(value)]],
+        );
+        aggregator.update(&series).unwrap();
+    }
+    let mut calls = Vec::new();
+    let result = aggregator.finish_budgeted(|bytes| {
+        calls.push(bytes);
+        if calls.len() == 4 {
+            Err(DataFusionError::Execution("budget".into()))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(result.is_err());
+    assert_eq!(calls.len(), 4);
+    assert!(calls[1] > calls[0], "first builder peak");
+    assert!(calls[2] < calls[1], "first group settle");
+    assert!(calls[3] > calls[2], "second builder peak");
+
+    // The base already includes the output Vec backing; later callbacks add only the
+    // builder workspace or completed Series allocation.
+    let builder_workspace = finish_working_bytes(1, 1, 1);
+    let expected_output = aggregate_float(
+        &schema,
+        &[
+            input(&schema, metric("m", &[("i", "a")]), 0, &[vec![Some(1.0)]]),
+            input(&schema, metric("m", &[("i", "b")]), 0, &[vec![Some(2.0)]]),
+        ],
+        AggregateOp::Sum,
+        Grouping::By(&["i"]),
+    )
+    .unwrap();
+    let completed_series = crate::grid_series::series_bytes(&expected_output[0]);
+    assert_eq!(calls[1] - calls[0], builder_workspace);
+    assert_eq!(calls[2] - calls[0], completed_series);
+    assert_eq!(calls[3] - calls[2], builder_workspace);
 }
 
 #[test]
