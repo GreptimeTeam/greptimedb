@@ -361,7 +361,7 @@ impl<S> RegionWorkerLoop<S> {
                             Some(region.region_stats.written_bytes.clone()),
                             WriteSource::Request,
                         );
-                        region_ctx.leader_deadline = leader_deadline;
+                        region_ctx.lease = lease_now.map(|_| (region, leader_deadline));
 
                         e.insert(region_ctx);
                     }
@@ -517,7 +517,7 @@ impl<S> RegionWorkerLoop<S> {
                             Some(region.region_stats.written_bytes.clone()),
                             WriteSource::Request,
                         );
-                        region_ctx.leader_deadline = leader_deadline;
+                        region_ctx.lease = lease_now.map(|_| (region, leader_deadline));
 
                         e.insert(region_ctx);
                     }
@@ -604,15 +604,11 @@ impl<S> RegionWorkerLoop<S> {
         }
         let now = self.node_lease.now();
         for (region_id, region_ctx) in region_ctxs.iter_mut() {
-            if region_ctx.is_failed() || now < region_ctx.leader_deadline {
-                continue;
-            }
             // A Leader grant may have extended the deadline during the append.
-            if self
-                .regions
-                .get_region(*region_id)
-                .is_some_and(|region| now < region.leader_deadline.get())
-            {
+            let expired = region_ctx.lease.as_ref().is_some_and(|(region, deadline)| {
+                now >= *deadline && now >= region.leader_deadline.get()
+            });
+            if !expired || region_ctx.is_failed() {
                 continue;
             }
             region_ctx.fail_waiters(Arc::new(

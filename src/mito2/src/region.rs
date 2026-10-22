@@ -246,9 +246,10 @@ pub(crate) struct NodeLease {
     /// Whether writes need a lease. Only a datanode the metasrv controls sets it.
     enabled: AtomicBool,
     deadline: Deadline,
-    /// How far tests moved the clock of the lease checks forward, in nanoseconds.
+    /// The time of the lease checks while a test freezes it, in the unit of [Deadline]; 0 when
+    /// it is not frozen.
     #[cfg(any(test, feature = "test"))]
-    clock_skew: AtomicU64,
+    frozen_now: AtomicU64,
 }
 
 impl NodeLease {
@@ -267,16 +268,19 @@ impl NodeLease {
     /// Returns the current time in the unit of [Deadline].
     pub(crate) fn now(&self) -> u64 {
         #[cfg(any(test, feature = "test"))]
-        let skew = self.clock_skew.load(Ordering::Relaxed);
-        #[cfg(not(any(test, feature = "test")))]
-        let skew = 0;
-        lease_nanos(Instant::now()) + skew
+        {
+            let frozen_now = self.frozen_now.load(Ordering::Relaxed);
+            if frozen_now != 0 {
+                return frozen_now;
+            }
+        }
+        lease_nanos(Instant::now())
     }
 
     #[cfg(any(test, feature = "test"))]
-    pub(crate) fn advance_clock(&self, duration: std::time::Duration) {
-        self.clock_skew
-            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
+    pub(crate) fn freeze_clock(&self, at: Instant) {
+        self.frozen_now
+            .store(lease_nanos(at).max(1), Ordering::Relaxed);
     }
 
     /// Lets a region created or upgraded on this node write until the node's deadline. The
