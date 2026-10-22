@@ -75,6 +75,7 @@ pub mod filter_inactive_region_stats;
 pub mod flow_state_handler;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
+pub(crate) mod node_epoch;
 pub mod on_leader_start_handler;
 pub mod persist_stats_handler;
 pub mod publish_heartbeat_handler;
@@ -198,6 +199,8 @@ pub struct Pusher {
     deregister_signal_receiver: DeregisterSignalReceiver,
 
     res_header: ResponseHeader,
+    /// The `node_epoch` of the datanode process that registered the pusher, or 0.
+    node_epoch: u64,
 }
 
 impl Drop for Pusher {
@@ -220,7 +223,13 @@ impl Pusher {
             deregister_signal_sender,
             deregister_signal_receiver,
             res_header,
+            node_epoch: 0,
         }
+    }
+
+    pub(crate) fn with_node_epoch(mut self, node_epoch: u64) -> Self {
+        self.node_epoch = node_epoch;
+        self
     }
 
     #[inline]
@@ -327,12 +336,32 @@ impl Pushers {
         Ok(())
     }
 
-    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> Option<Pusher> {
-        self.0.write().await.insert(pusher_id, pusher)
+    /// Inserts the pusher unless the slot holds one with a higher node epoch, so an older
+    /// datanode process cannot take over a newer one's pusher. Returns whether it was inserted.
+    pub(crate) async fn insert(&self, pusher_id: PusherId, pusher: Pusher) -> bool {
+        let mut pushers = self.0.write().await;
+        if pushers
+            .get(&pusher_id)
+            .is_some_and(|current| current.node_epoch > pusher.node_epoch)
+        {
+            return false;
+        }
+        pushers.insert(pusher_id, pusher);
+        true
     }
 
-    async fn remove(&self, pusher_id: PusherId) -> Option<Pusher> {
-        self.0.write().await.remove(&pusher_id)
+    /// Removes the pusher if it pushes to `sender`'s channel, keeping one that another stream
+    /// has registered since.
+    async fn remove(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) -> bool {
+        let mut pushers = self.0.write().await;
+        let own = pushers
+            .get(&pusher_id)
+            .is_some_and(|pusher| pusher.sender.same_channel(sender));
+        own && pushers.remove(&pusher_id).is_some()
     }
 }
 
@@ -360,16 +389,23 @@ pub struct HeartbeatHandlerGroup {
 }
 
 impl HeartbeatHandlerGroup {
-    /// Registers the heartbeat response [`Pusher`] with the given key to the group.
+    /// Registers the heartbeat response [`Pusher`] with the given key to the group, unless the
+    /// group holds one with a higher node epoch.
     pub async fn register_pusher(&self, pusher_id: PusherId, pusher: Pusher) {
-        METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
-        info!("Pusher register: {}", pusher_id);
-        let _ = self.pushers.insert(pusher_id, pusher).await;
+        if self.pushers.insert(pusher_id, pusher).await {
+            METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
+            info!("Pusher register: {}", pusher_id);
+        }
     }
 
-    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group.
-    pub async fn deregister_push(&self, pusher_id: PusherId) {
-        if self.pushers.remove(pusher_id).await.is_some() {
+    /// Deregisters the heartbeat response [`Pusher`] with the given key from the group if
+    /// `sender` registered it.
+    pub async fn deregister_push(
+        &self,
+        pusher_id: PusherId,
+        sender: &Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) {
+        if self.pushers.remove(pusher_id, sender).await {
             info!("Pusher unregister: {}", pusher_id);
             METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         }
