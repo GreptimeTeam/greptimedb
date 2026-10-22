@@ -37,7 +37,7 @@ pub fn extract_new_columns<'a>(
                     .get(col.column_schema.name.as_str())
                     .map(|&index| &new_columns[index])
             }) {
-                super::super::validate_shared_column(*region_id, existing, col)?;
+                crate::engine::validate_shared_column(*region_id, existing, col)?;
             } else {
                 ensure!(
                     col.semantic_type != SemanticType::Field
@@ -81,16 +81,12 @@ mod tests {
         let mut incompatible = column.clone();
         incompatible.semantic_type = SemanticType::Field;
         let region = RegionId::new(1, 1);
-        assert!(
-            super::super::super::validate_shared_column(region, &column, &incompatible).is_err()
-        );
+        assert!(crate::engine::validate_shared_column(region, &column, &incompatible).is_err());
         incompatible.semantic_type = SemanticType::Tag;
         incompatible.column_schema =
             ColumnSchema::new("shared", ConcreteDataType::int64_datatype(), true);
-        assert!(
-            super::super::super::validate_shared_column(region, &column, &incompatible).is_err()
-        );
-        assert!(super::super::super::validate_shared_column(region, &column, &column).is_ok());
+        assert!(crate::engine::validate_shared_column(region, &column, &incompatible).is_err());
+        assert!(crate::engine::validate_shared_column(region, &column, &column).is_ok());
         for existing in [false, true] {
             let physical = if existing {
                 HashMap::from([("shared".into(), column.clone())])

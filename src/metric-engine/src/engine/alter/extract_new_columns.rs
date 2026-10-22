@@ -45,7 +45,7 @@ pub fn extract_new_columns<'a>(
                     .get(column_name)
                     .map(|&index| &new_columns[index])
             }) {
-                super::super::validate_shared_column(*region_id, existing, &col.column_metadata)?;
+                crate::engine::validate_shared_column(*region_id, existing, &col.column_metadata)?;
             } else {
                 ensure!(
                     col.column_metadata.semantic_type != SemanticType::Field
