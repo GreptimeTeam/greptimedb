@@ -15,7 +15,7 @@
 mod extract_new_columns;
 mod validate;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use api::v1::SemanticType;
 use common_query::native_histogram::is_native_histogram_value_type;
@@ -123,7 +123,7 @@ impl MetricEngineInner {
             .await?;
 
         // Finds new columns to add
-        let mut new_column_names = HashSet::new();
+        let mut new_column_indices = HashMap::new();
         let mut new_columns_to_add = vec![];
 
         let index_options = {
@@ -139,7 +139,7 @@ impl MetricEngineInner {
             extract_new_columns(
                 &requests,
                 physical_columns,
-                &mut new_column_names,
+                &mut new_column_indices,
                 &mut new_columns_to_add,
             )?;
 
@@ -190,7 +190,7 @@ impl MetricEngineInner {
             )
         });
 
-        let new_add_columns = new_column_names.iter().map(|name| {
+        let new_add_columns = new_column_indices.keys().map(|name| {
             // Safety: previous steps ensure the physical region exist
             let column_metadata = *physical_schema_map.get(name).unwrap();
             (name.to_string(), column_metadata.clone())

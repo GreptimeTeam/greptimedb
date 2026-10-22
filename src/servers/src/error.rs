@@ -282,14 +282,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "OTLP metric input have incompatible existing tables, please refer to docs for details"
-    ))]
-    OtlpMetricModeIncompatible {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Common Meta error"))]
     CommonMeta {
         #[snafu(implicit)]
@@ -767,8 +759,7 @@ impl ErrorExt for Error {
 
             AddressBind { .. }
             | AlreadyStarted { .. }
-            | InvalidPromRemoteReadQueryResult { .. }
-            | OtlpMetricModeIncompatible { .. } => StatusCode::IllegalState,
+            | InvalidPromRemoteReadQueryResult { .. } => StatusCode::IllegalState,
 
             UnsupportedDataType { .. } | UnsupportedOperation { .. } => StatusCode::Unsupported,
 
