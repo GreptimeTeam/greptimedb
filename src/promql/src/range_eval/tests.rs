@@ -39,8 +39,8 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use super::{
-    CounterReset, FloatWindow, RangeEvaluator, RangeFunction, RangeWindow, WindowKernel,
-    subquery_grid,
+    CounterReset, FloatWindow, RangeEvaluator, RangeFunction, RangeModifier, RangeWindow,
+    WindowKernel, subquery_grid,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::functions::{
@@ -653,6 +653,7 @@ fn random_window(rng: &mut StdRng) -> (Arc<EvalGrid>, RangeWindow) {
             range_ms,
             offset_ms,
             anchor_ms,
+            modifier: None,
         },
     )
 }
@@ -917,6 +918,7 @@ fn an_ordinary_float_chunk_is_appended_in_bulk() {
             range_ms: 20_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
     );
     assert!(evaluator.push(&chunk(&rows, 2, 0, true)).unwrap().is_some());
@@ -959,6 +961,7 @@ fn a_chunk_with_histograms_is_not_appended_in_bulk() {
             range_ms: 20_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::PresentOverTime,
     )
@@ -1099,6 +1102,7 @@ fn a_selected_histogram_keeps_its_start_timestamp() {
                 range_ms: 20_000,
                 offset_ms: 0,
                 anchor_ms: None,
+                modifier: None,
             },
             function,
         )
@@ -1157,6 +1161,7 @@ fn a_computed_histogram_drops_its_start_timestamp() {
             range_ms: 20_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::SumOverTime,
     )
@@ -1208,6 +1213,7 @@ fn a_retained_histogram_is_charged_for_its_buckets() {
                 range_ms: 600_000,
                 offset_ms: 0,
                 anchor_ms: None,
+                modifier: None,
             },
             // A function that counts the histogram, so what the row holds is a float: the two
             // figures then differ in the payload of the retained sample alone, not in what the row
@@ -1259,6 +1265,7 @@ fn an_evicted_histogram_releases_its_payload() {
             range_ms: 20_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::CountOverTime,
     )
@@ -1313,6 +1320,7 @@ fn a_fixed_window_over_histograms_keeps_the_estimate_bounded() {
                 range_ms: 1,
                 offset_ms: 0,
                 anchor_ms: None,
+                modifier: None,
             },
             RangeFunction::CountOverTime,
         )
@@ -1348,6 +1356,7 @@ fn a_batch_spanning_fields_and_the_flush_threshold_matches_the_per_window_path()
         range_ms: 30_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     // Counter-like values, each field resetting at a different point, growing at a different
     // rate, and missing at a different interval. The gaps are what make the fields' windows
@@ -1455,6 +1464,7 @@ fn a_histogram_window_keeps_rate_on_the_per_window_path() {
             range_ms: 30_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::Rate,
     )
@@ -1480,6 +1490,7 @@ fn a_function_without_a_batch_form_stays_on_the_per_window_path() {
             range_ms: 30_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::SumOverTime,
     )
@@ -1494,6 +1505,7 @@ fn empty_input_and_series_without_results() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     probe_evaluator(1, grid(0, 10, 4), window).finish().unwrap();
 
@@ -1541,6 +1553,7 @@ fn a_push_that_completes_nothing_hands_out_no_chunk() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(10, 10, 3), window);
     // The only sample sits inside the first window, so the first point cannot be settled yet: no
@@ -1587,6 +1600,7 @@ fn a_series_that_ends_early_still_closes() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 10, 5), window);
     let first = chunk(&[(0, vec![Some(1.0)]), (10, vec![Some(2.0)])], 1, 0, false);
@@ -1626,6 +1640,7 @@ fn decided_missing_positions_cost_no_rows_and_do_not_delay_the_close() {
         range_ms: 1_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator = RangeEvaluator::try_new(
         &raw_schema(1),
@@ -1681,6 +1696,7 @@ fn the_closing_chunk_is_labelled_like_the_chunks_before_it() {
         range_ms: 20,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator =
         RangeEvaluator::try_new(&raw_schema(1), grid(0, 10, 6), window, RangeFunction::Rate)
@@ -1762,6 +1778,7 @@ fn one_ms() -> RangeWindow {
         range_ms: 1,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     }
 }
 
@@ -1921,6 +1938,7 @@ fn a_sparse_series_folds_like_the_same_data_with_explicit_nulls() {
         range_ms: 3_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let rows = [
         (0, vec![Some(1.0)]),
@@ -1967,6 +1985,7 @@ fn a_window_reads_across_the_gap_between_runs_of_one_series() {
         range_ms: 11,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator =
         RangeEvaluator::try_new(&schema, grid(10, 1, 1), window, RangeFunction::SumOverTime)
@@ -2008,6 +2027,7 @@ fn raw_chunk_boundaries_do_not_change_the_rows() {
         range_ms: 2_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let rows = [
         (0, vec![Some(1.0)]),
@@ -2136,6 +2156,7 @@ fn an_anchored_replay_stays_one_contiguous_piece() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: Some(5),
+        modifier: None,
     };
     for step_invariant in [true, false] {
         let mut evaluator = if step_invariant {
@@ -2202,6 +2223,7 @@ fn rejects_invalid_parameters() {
         range_ms: 0,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(
@@ -2217,6 +2239,7 @@ fn rejects_invalid_parameters() {
         range_ms: 10,
         offset_ms: i64::MAX - 20,
         anchor_ms: None,
+        modifier: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(
@@ -2232,6 +2255,7 @@ fn rejects_invalid_parameters() {
         range_ms: 10,
         offset_ms: 1,
         anchor_ms: Some(i64::MIN),
+        modifier: None,
     };
     assert!(matches!(
         RangeEvaluator::try_new(
@@ -2257,6 +2281,7 @@ fn rejects_invalid_chunk_sequences() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let new = || probe_evaluator(1, grid(0, 10, 4), window);
     let row = |timestamp| (timestamp, vec![Some(1.0)]);
@@ -2295,6 +2320,7 @@ fn offset_overflow_fails_unless_the_sample_is_stale() {
         range_ms: 10,
         offset_ms: 10,
         anchor_ms: None,
+        modifier: None,
     };
     let late = i64::MAX - 5;
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
@@ -2343,6 +2369,7 @@ fn histogram_samples_need_a_function_and_drop_stale_markers() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     assert!(matches!(
         probe_evaluator(1, grid(0, 10, 4), window).push(&piece),
@@ -2369,6 +2396,7 @@ fn retains_only_samples_later_windows_need() {
         range_ms: 50,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 10, 1_000), window);
     let rows: Vec<Row> = (0..10_000).map(|i| (i, vec![Some(1.0)])).collect();
@@ -2389,6 +2417,7 @@ fn reset_index_is_released_with_the_samples_it_reaches_back_to() {
         range_ms: 50,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 10, 1_000), window);
     // A sawtooth that resets every 10 samples.
@@ -2435,6 +2464,7 @@ fn counter_resets_follow_the_window_and_survive_chunking() {
         range_ms: 20_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     // Every chunk starts on a sample an earlier window corrected, so the index has to reach
     // across the chunk boundary.
@@ -2558,6 +2588,7 @@ fn nulls_change_the_reset_positions_of_each_field_independently() {
         range_ms: 100_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
 
     // One entry per kernel call, in field order within each grid point.
@@ -2780,6 +2811,7 @@ fn rejects_input_of_the_other_kind() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let evaluated = SeriesSchema {
         fields: raw_schema(1).fields,
@@ -2878,6 +2910,7 @@ fn range_functions_match_prometheus() {
             range_ms,
             offset_ms,
             anchor_ms,
+            modifier: None,
         };
         let mut expected = vec![vec![None]; points as usize];
         for (timestamp, value) in &expected_points {
@@ -2917,6 +2950,7 @@ fn rejects_double_exponential_smoothing_factors_outside_the_unit_interval() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     for (smoothing, trend) in [(0.0, 0.5), (1.0, 0.5), (0.5, 0.0), (0.5, 1.5)] {
         let evaluator = || {
@@ -2967,6 +3001,7 @@ fn range_functions_drop_metadata_labels() {
         range_ms: 10_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let rows: Vec<Row> = vec![(1_000, vec![Some(1.0)]), (2_000, vec![Some(2.0)])];
     let nameless = MetricName::try_new(None, labels(&["host"])).unwrap();
@@ -2998,6 +3033,7 @@ fn ts_of_extremum_moves_past_a_leading_nan() {
         range_ms: 10_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let rows: Vec<Row> = [(1_000, f64::NAN), (2_000, 5.0), (3_000, 7.0)]
         .map(|(ts, value)| (ts, vec![Some(value)]))
@@ -3030,6 +3066,7 @@ fn waiting_for_a_point_drops_samples_behind_its_window() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 100_000, 2), window);
     for chunk_index in 0..900 {
@@ -3058,6 +3095,7 @@ fn ts_of_last_over_time_reports_zero_for_negative_timestamps() {
         range_ms: 2_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let rows: Vec<Row> = vec![(-1_000, vec![Some(7.0)])];
     for (function, expected) in [
@@ -3087,6 +3125,7 @@ fn quantile_picks_the_signed_zero_go_picks() {
         range_ms: 20_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let (z, n) = (0.0, -0.0);
     let values = [
@@ -3146,6 +3185,7 @@ fn samples_after_the_last_window_are_validated_but_not_retained() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(0, 10, 2), window);
     for chunk_index in 0..900 {
@@ -3160,6 +3200,7 @@ fn samples_after_the_last_window_are_validated_but_not_retained() {
         range_ms: 10,
         offset_ms: 10,
         anchor_ms: None,
+        modifier: None,
     };
     let late = i64::MAX - 5;
     let mut evaluator = probe_evaluator(1, grid(0, 10, 4), window);
@@ -3190,6 +3231,7 @@ fn anchored_predict_linear_regresses_around_each_point() {
             range_ms: 30,
             offset_ms,
             anchor_ms: Some(50),
+            modifier: None,
         };
         let mut evaluator = RangeEvaluator::try_new(
             &raw_schema(1),
@@ -3225,6 +3267,7 @@ fn rejects_a_subquery_grid_longer_than_u64() {
         range_ms: 7,
         offset_ms: -6,
         anchor_ms: None,
+        modifier: None,
     };
     assert!(matches!(
         subquery_grid(outer, window, 1),
@@ -3240,6 +3283,7 @@ fn anchored_window_before_the_series_retains_nothing() {
         range_ms: 10,
         offset_ms: 0,
         anchor_ms: Some(5),
+        modifier: None,
     };
     let mut evaluator = probe_evaluator(1, grid(100, 10, 3), window);
     for chunk_index in 0..100 {
@@ -3293,6 +3337,7 @@ fn absent_over_time_is_absent_over_present_over_time() {
             range_ms,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         };
         let mut present = Vec::new();
         let mut expected = None;
@@ -3448,6 +3493,7 @@ fn histogram_range_functions_match_prometheus() {
             range_ms: case.spec[1].parse().unwrap(),
             offset_ms: case.spec[2].parse().unwrap(),
             anchor_ms: None,
+            modifier: None,
         };
         // One chunk per sample also checks that histograms survive across chunks.
         for split in [false, true] {
@@ -3535,6 +3581,7 @@ fn evaluated_histograms_drop_counter_reset_hints() {
         range_ms: 30,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let mut evaluator =
         RangeEvaluator::try_new(&schema, grid(10, 10, 1), window, RangeFunction::Resets).unwrap();
@@ -3617,6 +3664,7 @@ fn a_valued_prefix_composes_with_an_empty_closing_chunk() {
         range_ms: 2_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let points = Points::from([
         (0, f64::to_bits(1.0)),
@@ -3707,6 +3755,7 @@ fn one_step_window(step_ms: i64) -> RangeWindow {
         range_ms: step_ms,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     }
 }
 
@@ -4183,6 +4232,7 @@ fn a_window_at_a_later_run_reads_the_earlier_run() {
         range_ms: 12_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let outer = grid(11_000, 1_000, 1);
     let mut evaluator =
@@ -4383,11 +4433,13 @@ fn two_composed_evaluators_agree_with_the_dense_reference() {
         range_ms: 3_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let outer_window = RangeWindow {
         range_ms: 2_000,
         offset_ms: 0,
         anchor_ms: None,
+        modifier: None,
     };
     let rows = vec![
         (0, vec![Some(1.0)]),
@@ -4488,5 +4540,126 @@ fn two_composed_evaluators_agree_with_the_dense_reference() {
             .count(),
         expected.iter().filter(|row| row[0].is_some()).count(),
         "the composition lost or invented a value"
+    );
+}
+
+/// The `anchored` and `smoothed` range modifiers evaluated by the Prometheus v3.15.0 engine; see
+/// the header of `modifier_cases.txt`. Each case is pushed as one chunk and as one chunk per
+/// sample, so a smoothed point is only decided once the samples after its window have arrived.
+#[test]
+fn range_modifiers_match_prometheus() {
+    let parse_points = |points: &str| -> Vec<(i64, f64)> {
+        points
+            .split_whitespace()
+            .map(|point| {
+                let (timestamp, bits) = point.split_once(':').unwrap();
+                (
+                    timestamp.parse().unwrap(),
+                    f64::from_bits(u64::from_str_radix(bits, 16).unwrap()),
+                )
+            })
+            .collect()
+    };
+    let (mut checked, mut rejected) = (0, 0);
+    for line in include_str!("modifier_cases.txt").lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split(';');
+        let header: Vec<_> = parts.next().unwrap().split_whitespace().collect();
+        let samples = parse_points(parts.next().unwrap());
+        let result = parts.next().unwrap().trim();
+        let function = range_function(header[0], &[]);
+        let numbers: Vec<i64> = header[2..8].iter().map(|n| n.parse().unwrap()).collect();
+        let [range_ms, offset_ms, start_ms, step_ms, points, lookback_ms] = numbers[..] else {
+            panic!("bad header {line}");
+        };
+        let modifier = match header[1] {
+            "anchored" => RangeModifier::Anchored { lookback_ms },
+            "smoothed" => RangeModifier::Smoothed { lookback_ms },
+            other => panic!("unknown modifier {other}"),
+        };
+        let window = RangeWindow {
+            range_ms,
+            offset_ms,
+            anchor_ms: (header[8] != "-").then(|| header[8].parse().unwrap()),
+            modifier: Some(modifier),
+        };
+        let grid = grid(start_ms, step_ms, points as u64);
+        if result == "error" {
+            assert!(
+                RangeEvaluator::try_new(&raw_schema(1), grid, window, function).is_err(),
+                "{line}"
+            );
+            rejected += 1;
+            continue;
+        }
+        let mut expected = vec![vec![None]; points as usize];
+        for (timestamp, value) in parse_points(result) {
+            expected[((timestamp - start_ms) / step_ms) as usize][0] = Some(value);
+        }
+        let rows: Vec<Row> = samples
+            .iter()
+            .map(|(timestamp, value)| (*timestamp, vec![Some(*value)]))
+            .collect();
+        let one_chunk = vec![chunk(&rows, 1, 0, true)];
+        let per_sample: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| chunk(std::slice::from_ref(row), 1, 0, index + 1 == rows.len()))
+            .collect();
+        for pieces in [one_chunk, per_sample] {
+            let mut evaluator =
+                RangeEvaluator::try_new(&raw_schema(1), Arc::clone(&grid), window, function)
+                    .unwrap();
+            let chunks = collect_chunks(&mut evaluator, &pieces);
+            let output = fold_chunks(&chunks, evaluator.output_schema());
+            assert_series_eq_any_nan(
+                output.as_ref(),
+                &expected,
+                &output_metric(function, 0),
+                line,
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 80 && rejected == 4, "{checked} {rejected}");
+}
+
+/// A smoothed window interpolates its end with the first sample after it, which can arrive in a
+/// later chunk even when the chunk before ends at the point: here that chunk's last row is stale
+/// and dropped, so `delta(m[2s] smoothed)` at 61s must wait for the sample at 63s and interpolate
+/// 3 at the end, as Prometheus does, rather than take the 2 at 59s.
+#[test]
+fn smoothed_waits_for_the_sample_after_a_point_its_chunk_ended_on() {
+    let window = RangeWindow {
+        range_ms: 2_000,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: Some(RangeModifier::Smoothed { lookback_ms: 3_000 }),
+    };
+    let mut evaluator = RangeEvaluator::try_new(
+        &raw_schema(1),
+        grid(61_000, 1_000, 1),
+        window,
+        RangeFunction::Delta,
+    )
+    .unwrap();
+    let first: Vec<Row> = vec![
+        (57_000, vec![Some(1.0)]),
+        (59_000, vec![Some(2.0)]),
+        (61_000, vec![Some(stale())]),
+    ];
+    let pieces = [
+        chunk(&first, 1, 0, false),
+        chunk(&[(63_000, vec![Some(4.0)])], 1, 0, true),
+    ];
+    let chunks = collect_chunks(&mut evaluator, &pieces);
+    let output = fold_chunks(&chunks, evaluator.output_schema());
+    assert_series_eq_any_nan(
+        output.as_ref(),
+        &vec![vec![Some(1.0)]],
+        &output_metric(RangeFunction::Delta, 0),
+        "smoothed delta at 61s",
     );
 }
