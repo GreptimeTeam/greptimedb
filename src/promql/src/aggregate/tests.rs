@@ -395,7 +395,7 @@ fn fields_are_aggregated_independently() {
             })
             .collect()
     };
-    let grid_len = multi.eval_grid.as_ref().unwrap().timestamps().len();
+    let grid_len = multi.eval_grid.as_ref().unwrap().spec().len as usize;
     let q_values: Vec<Option<f64>> = (0..grid_len)
         .map(|i| Some([0.0, 0.25, 0.5, 0.9, 1.0][i % 5]))
         .collect();
@@ -1149,7 +1149,7 @@ fn partials_merge_to_the_serial_result() {
             .collect();
         let names: Vec<&str> = fields.iter().map(String::as_str).collect();
         let schema = schema_with_grid_len(&names, rng.random_range(1..80));
-        let points = schema.eval_grid.as_ref().unwrap().timestamps().len();
+        let points = schema.eval_grid.as_ref().unwrap().spec().len as usize;
         let mut builder = GridSeriesBuilder::try_new(schema.clone()).unwrap();
         let mut series = Vec::new();
         for index in 0..rng.random_range(1..12) {

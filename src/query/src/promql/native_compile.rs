@@ -905,7 +905,7 @@ fn statement_grid(stmt: &EvalStmt) -> Result<Arc<EvalGrid>> {
              {error}"
         ))
     })?;
-    Ok(Arc::new(EvalGrid::try_new(spec).map_err(grid_error)?))
+    Ok(Arc::new(EvalGrid::try_deferred(spec).map_err(grid_error)?))
 }
 
 /// The window length of a range selector, which has to be longer than zero to select anything.

@@ -219,6 +219,21 @@ fn grid_of(node: &NativeNode) -> (i64, i64, u64) {
     (spec.start_ms, spec.step_ms, spec.len)
 }
 
+/// A long valid statement exposes its checked grid without allocating query-sized timestamps.
+#[test]
+fn a_long_statement_grid_is_deferred() {
+    let stmt = EvalStmt {
+        expr: promql_parser::parser::parse("x").unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH + Duration::from_secs(86_400),
+        interval: Duration::from_millis(1),
+        lookback_delta: Duration::from_secs(5),
+    };
+    let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
+
+    assert_eq!(grid_of(tree.root()), (0, 1, 86_400_001));
+}
+
 /// `rate(x[5m])` becomes a window over the raw input, on the statement's grid.
 #[test]
 fn a_rate_over_a_selector_becomes_a_window_over_raw_input() {

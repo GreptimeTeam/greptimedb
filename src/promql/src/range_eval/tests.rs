@@ -279,7 +279,7 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
         .metric
         .clone();
     let width = chunks[0].series.fields.len();
-    let grid_len = schema.eval_grid.as_ref().unwrap().timestamps().len();
+    let grid_len = schema.eval_grid.as_ref().unwrap().spec().len as usize;
     let mut rows: Vec<Option<Vec<Option<GridSample>>>> = (0..grid_len).map(|_| None).collect();
     let mut closing = false;
     let mut previous_end = 0;
@@ -495,6 +495,7 @@ fn window_end(grid: &EvalGrid, window: RangeWindow, eval_ts: i64) -> i64 {
 /// Rows of `rows`, already on the evaluation timeline, inside each grid point's window.
 fn windows_of(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Vec<Range<usize>> {
     grid.timestamps()
+        .unwrap()
         .iter()
         .map(|&eval_ts| {
             let end = window_end(grid, window, eval_ts);
@@ -520,6 +521,7 @@ fn reference(
 ) -> Dense {
     let (kept, windows) = reference_windows(rows, grid, window, drop_stale);
     grid.timestamps()
+        .unwrap()
         .iter()
         .zip(windows)
         .map(|(&eval_ts, rows)| {
@@ -2610,7 +2612,7 @@ fn random_evaluated(
     fields: usize,
     host: u64,
 ) -> (Option<Series>, Vec<Row>) {
-    let mut dense = random_dense(rng, grid.timestamps().len(), fields);
+    let mut dense = random_dense(rng, grid.spec().len as usize, fields);
     for value in dense.iter_mut().flatten().flatten() {
         if rng.random_bool(0.05) {
             *value = stale();
@@ -2626,6 +2628,7 @@ fn random_evaluated(
     }
     let rows = grid
         .timestamps()
+        .unwrap()
         .iter()
         .zip(&dense)
         .filter(|(_, row)| row.iter().any(Option::is_some))
@@ -2750,7 +2753,7 @@ fn subquery_grid_covers_every_step_multiple_in_the_windows() {
         let fold = fold_offset(&outer, window);
         let last_eval = match window.anchor_ms {
             Some(_) => spec.start_ms,
-            None => *outer.timestamps().last().unwrap(),
+            None => *outer.timestamps().unwrap().last().unwrap(),
         };
         let lower = spec.start_ms - fold - window.range_ms;
         let expected: Vec<i64> = ((lower.div_euclid(step) - 1) * step..=last_eval - fold)
@@ -2759,7 +2762,13 @@ fn subquery_grid_covers_every_step_multiple_in_the_windows() {
             .collect();
         let actual = subquery_grid(spec, window, step)
             .unwrap()
-            .map(|grid| EvalGrid::try_new(grid).unwrap().timestamps().to_vec())
+            .map(|grid| {
+                EvalGrid::try_new(grid)
+                    .unwrap()
+                    .timestamps()
+                    .unwrap()
+                    .to_vec()
+            })
             .unwrap_or_default();
         assert_eq!(actual, expected, "seed {seed}");
     }
@@ -3764,17 +3773,12 @@ fn a_million_position_grid_with_two_values_is_one_series_of_two_rows() {
 
     // What the axis does carry is the shared grid: every result of the query addresses rows on it.
     assert_eq!(
-        series
-            .time
-            .grid()
-            .expect("a grid series")
-            .timestamps()
-            .len(),
+        series.time.grid().expect("a grid series").spec().len as usize,
         SPAN as usize,
         "the grid really holds a million positions"
     );
     assert_eq!(
-        series.time.timestamps().len(),
+        series.time.spec().len as usize,
         2,
         "the axis hands out two timestamps, not one per grid position"
     );
@@ -4148,6 +4152,7 @@ fn a_prefix_hands_out_its_rows_before_the_series_ends() {
 fn dense_sum_over_time(rows: &[Row], grid: &EvalGrid, window: RangeWindow) -> Dense {
     assert_eq!(window.offset_ms, 0, "this reference folds no offset");
     grid.timestamps()
+        .unwrap()
         .iter()
         .map(|&eval_ts| {
             let inside: Vec<f64> = rows
@@ -4462,7 +4467,7 @@ fn two_composed_evaluators_agree_with_the_dense_reference() {
         .iter()
         .enumerate()
         .filter_map(|(index, row)| {
-            row[0].map(|value| (inner.timestamps()[index], vec![Some(value)]))
+            row[0].map(|value| (inner.timestamps().unwrap()[index], vec![Some(value)]))
         })
         .collect();
     let expected = dense_sum_over_time(&stage_one_rows, &outer, outer_window);

@@ -163,10 +163,10 @@ impl GridSeriesBuilder {
                 self.schema.fields.len()
             )));
         }
-        if index < self.next || index >= self.grid.timestamps().len() {
+        if index < self.next || index >= self.grid.spec().len as usize {
             return Err(DataFusionError::Execution(format!(
                 "grid series index {index} is not increasing or exceeds grid length {}",
-                self.grid.timestamps().len()
+                self.grid.spec().len as usize
             )));
         }
         self.next = index + 1;
