@@ -159,6 +159,12 @@ impl CopyInCodec for CsvCodec {
                     ),
                     _ => field.as_ref().clone(),
                 },
+                // String columns decode as NULLABLE: the decoder turns a
+                // quoted empty string into NULL, and a NOT NULL field
+                // would make `decoder.flush()` reject the batch before
+                // `flush_batch` can restore it to an empty string. The
+                // target's NOT NULL constraint is enforced there instead.
+                ConcreteDataType::String(_) => Field::new(field.name(), ArrowDataType::Utf8, true),
                 _ => field.as_ref().clone(),
             })
             .collect::<Vec<_>>();
@@ -172,12 +178,12 @@ impl CopyInCodec for CsvCodec {
         if self.escape != self.quote {
             builder = builder.with_escape(self.escape);
         }
-        let string_columns: Vec<usize> = columns
+        let string_columns = columns
             .iter()
             .enumerate()
             .filter(|(_, c)| matches!(c.data_type, ConcreteDataType::String(_)))
-            .map(|(i, _)| i)
-            .collect();
+            .map(|(i, c)| (i, c.clone()))
+            .collect::<Vec<_>>();
         Ok(Box::new(CsvRecordParser {
             decoder: builder.build_decoder(),
             boolean_columns,
@@ -199,7 +205,10 @@ struct CsvRecordParser {
     /// indistinguishable from an unquoted empty field (NULL) after the
     /// decode. A shadow scan of the same bytes records per field whether
     /// it was quoted; [`flush_batch`] then restores quoted empty strings.
-    string_columns: Vec<usize>,
+    /// The payload carries the TARGET nullability of the column so the
+    /// NOT NULL constraint lost in the (always-nullable) decode schema
+    /// can be enforced after restoration.
+    string_columns: Vec<(usize, ColumnSchema)>,
     /// Shadow scan of the raw bytes: one quoted-mask per completed record,
     /// aligned with the decoder's emitted rows.
     masks: std::collections::VecDeque<Vec<bool>>,
@@ -267,19 +276,24 @@ impl CsvRecordParser {
             vectors[index] = Arc::new(BooleanVector::from(values));
         }
         // Restore quoted empty strings: after the decode they are NULL
-        // exactly like unquoted empty fields, which stay NULL.
-        if !self.string_columns.is_empty() {
-            for row_index in 0..batch.num_rows() {
-                let Some(mask) = self.masks.pop_front() else {
-                    return Err(bad_copy_data(
-                        "internal error: quote masks out of sync with decoded rows",
-                    ));
-                };
-                for &index in &self.string_columns {
-                    if mask.get(index).copied().unwrap_or(false)
-                        && vectors[index].get(row_index).is_null()
-                    {
+        // exactly like unquoted empty fields, which stay NULL. Then
+        // enforce the target NOT NULL constraint, which the (always
+        // nullable) decode schema cannot.
+        for row_index in 0..batch.num_rows() {
+            let Some(mask) = self.masks.pop_front() else {
+                return Err(bad_copy_data(
+                    "internal error: quote masks out of sync with decoded rows",
+                ));
+            };
+            for &(index, ref column) in &self.string_columns {
+                if vectors[index].get(row_index).is_null() {
+                    if mask.get(index).copied().unwrap_or(false) {
                         vectors[index] = set_string_at(vectors[index].clone(), row_index, "");
+                    } else if !column.is_nullable() {
+                        return Err(bad_copy_data(format!(
+                            "null value in column \"{}\" violates not-null constraint",
+                            column.name
+                        )));
                     }
                 }
             }
@@ -418,7 +432,13 @@ impl QuoteMaskScanner {
                 }
                 MaskState::QuoteInQuoted => {
                     if b == self.quote && self.escape == self.quote {
-                        idx += 2.min(data.len() - idx);
+                        // Doubled quote (quote doubling is the escape):
+                        // consume only the second quote and stay inside the
+                        // quoted field. Skipping further bytes would also
+                        // swallow a following delimiter or closing quote
+                        // and desynchronize the mask from the decoder.
+                        self.state = MaskState::InQuoted;
+                        idx += 1;
                     } else if b == self.delimiter {
                         self.state = MaskState::FieldStart;
                         idx += 1;
@@ -910,6 +930,81 @@ mod tests {
         assert_eq!(millis(&rows[1]), 1704038400000);
         // Explicit Z: parsed as UTC regardless of the session zone.
         assert_eq!(millis(&rows[2]), 1704067200000);
+    }
+
+    #[test]
+    fn test_csv_doubled_quotes_keep_masks_aligned() {
+        // A doubled quote inside a quoted field must consume only the
+        // escaped quote; the field after it (here a quoted empty string)
+        // must still get its own mask regardless of chunk boundaries.
+        let columns = vec![
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("other", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let payload: Vec<u8> = b"\"a\"\"b\",\"\",2024-01-01 00:00:00\n".to_vec();
+        for chunk in [1usize, 2, 3, 5, 7, 11, 64] {
+            let mut parser = build_csv_codec(CopyOptionSet::default())
+                .unwrap()
+                .create_parser(&columns, "UTC")
+                .unwrap();
+            let mut rows = Vec::new();
+            for c in payload.chunks(chunk) {
+                rows.extend(parser.feed(c).unwrap());
+            }
+            rows.extend(parser.finish().unwrap());
+            assert_eq!(rows.len(), 1, "chunk={chunk}");
+            let string_at = |col: usize| {
+                rows[0].values[col].value_data.as_ref().map(|v| match v {
+                    api::v1::value::ValueData::StringValue(s) => s.clone(),
+                    other => panic!("expected string, got {other:?}"),
+                })
+            };
+            assert_eq!(string_at(0), Some("a\"b".to_string()), "chunk={chunk}");
+            assert_eq!(string_at(1), Some("".to_string()), "chunk={chunk}");
+        }
+    }
+
+    #[test]
+    fn test_csv_quoted_empty_in_not_null_column() {
+        // A quoted empty string is a valid empty STRING for a NOT NULL
+        // column; only an unquoted empty field (NULL) must be rejected.
+        let columns = vec![
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&columns, "UTC")
+            .unwrap();
+        let rows = feed_all(&mut parser, &[b"\"\",2024-01-01 00:00:00\n"]);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0].values[0].value_data,
+            Some(api::v1::value::ValueData::StringValue(ref s)) if s.is_empty()
+        ));
+
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&columns, "UTC")
+            .unwrap();
+        // With the strict decoder protocol the NULL surfaces when the
+        // EOF signal flushes the trailing batch.
+        parser.feed(b",2024-01-01 00:00:00\n").unwrap();
+        let error = parser.finish().unwrap_err();
+        assert!(
+            error.to_string().contains("violates not-null constraint"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

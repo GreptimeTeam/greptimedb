@@ -401,6 +401,67 @@ async fn test_postgres_copy_in_session_timezone_parity() {
     server.shutdown().await.unwrap();
 }
 
+/// A quoted empty string is a valid empty STRING for a NOT NULL column;
+/// only an unquoted empty field (NULL) must be rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_quoted_empty_not_null() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_not_null").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query(
+            "CREATE TABLE not_null_str (note STRING NOT NULL, ts TIMESTAMP, TIME INDEX(ts))",
+        )
+        .await
+        .unwrap();
+
+    // Quoted empty string imports as an empty string, not NULL.
+    let rows = feed_copy_in(
+        &client,
+        "COPY not_null_str (note, ts) FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from_static(b"\"\",2024-01-01 00:00:00\n")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT note, note IS NULL FROM not_null_str")
+        .await
+        .unwrap();
+    let rows: Vec<(Option<String>, bool)> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => {
+                Some((row.get(0).map(str::to_string), row.get(1) == Some("t")))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, vec![(Some("".to_string()), false)]);
+
+    // An unquoted empty field is NULL and must be rejected.
+    let error = feed_copy_in(
+        &client,
+        "COPY not_null_str (note, ts) FROM STDIN WITH (FORMAT csv)",
+        vec![Bytes::from_static(b",2024-01-01 00:00:01\n")],
+    )
+    .await
+    .unwrap_err();
+    let message = error
+        .as_db_error()
+        .map(|d| d.message().to_string())
+        .unwrap_or_else(|| error.to_string());
+    assert!(
+        message.contains("violates not-null constraint"),
+        "unexpected error: {error}"
+    );
+
+    server.shutdown().await.unwrap();
+}
+
 /// COPY OUT -> COPY IN must preserve timestamp instants in non-UTC
 /// sessions: COPY OUT renders timestamps with an explicit session-tz
 /// offset, which the timezone-aware COPY IN decoder honors.
