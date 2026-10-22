@@ -14,9 +14,10 @@
 
 //! Unit-based compaction picks for one TWCS window.
 //!
-//! Both picks group files into *units* and select a contiguous interval of units
-//! in a fixed order, so a pick never splits files that must be rewritten
-//! together.
+//! Picks select a contiguous interval of *units* in a fixed order. Grouping
+//! prefers rewriting related files together, but input limits and fallback
+//! paths may split groups or use single-file units. Separate admission checks
+//! preserve each pick's progress guarantees under the assumptions below.
 //!
 //! - [`pick_active_l1`] reduces the L1 file count of the active window.
 //! - [`pick_small_l1`] reduces small L1 files without rewriting large peers.
