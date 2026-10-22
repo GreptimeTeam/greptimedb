@@ -56,20 +56,21 @@ on:
         description: Do not run integration tests during the build
         type: boolean
         default: true
-      linux_architectures:
-        type: choice
-        description: Linux artifacts (auto builds all for publishing, otherwise none; GitHub releases require all, images require amd64+arm64)
-        default: auto
-        options:
-          - auto
-          - none
-          - amd64
-          - arm64
-          - riscv64
-          - amd64,arm64
-          - amd64,riscv64
-          - arm64,riscv64
-          - all
+      build_linux_amd64_artifacts:
+        type: boolean
+        description: Build linux-amd64 artifacts (publishing always builds all Linux architectures)
+        required: false
+        default: false
+      build_linux_arm64_artifacts:
+        type: boolean
+        description: Build linux-arm64 artifacts (publishing always builds all Linux architectures)
+        required: false
+        default: false
+      build_linux_riscv64_artifacts:
+        type: boolean
+        description: Build linux-riscv64 artifacts (publishing always builds all Linux architectures)
+        required: false
+        default: false
       build_macos_artifacts:
         type: boolean
         description: Build macos artifacts
@@ -154,11 +155,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Validate the selection before allocating any paid runners.
+      # Publishing and automatic releases retain the full Linux build.
       - name: Resolve Linux architectures
         id: linux-architectures
         env:
-          LINUX_ARCHITECTURES: ${{ inputs.linux_architectures }}
+          BUILD_LINUX_AMD64_ARTIFACTS: ${{ inputs.build_linux_amd64_artifacts }}
+          BUILD_LINUX_ARM64_ARTIFACTS: ${{ inputs.build_linux_arm64_artifacts }}
+          BUILD_LINUX_RISCV64_ARTIFACTS: ${{ inputs.build_linux_riscv64_artifacts }}
           PUBLISH_GITHUB_RELEASE: ${{ inputs.publish_github_release }}
           RELEASE_IMAGES: ${{ inputs.release_images }}
         run: bash .github/scripts/release-linux-architectures.sh >> "$GITHUB_OUTPUT"
@@ -637,8 +640,7 @@ jobs:
       needs.allocate-runners.result == 'success' &&
       needs.build-linux-amd64-artifacts.result == 'success' &&
       needs.build-linux-arm64-artifacts.result == 'success' &&
-      (needs.build-linux-riscv64-artifacts.result == 'success' ||
-       (needs.allocate-runners.outputs.build-linux-riscv64 == 'false' && needs.build-linux-riscv64-artifacts.result == 'skipped')) &&
+      needs.build-linux-riscv64-artifacts.result == 'success' &&
       needs.build-macos-artifacts.result == 'success' &&
       needs.build-windows-artifacts.result == 'success' &&
       needs.release-images-to-dockerhub.result == 'success'
@@ -678,8 +680,7 @@ jobs:
           proxy-password: ${{ secrets.PROXY_PASSWORD }}
           dev-mode: false
           upload-to-s3: true
-          # A partial Linux build must not advertise a complete release in S3.
-          update-version-info: ${{ needs.build-linux-riscv64-artifacts.result == 'success' }}
+          update-version-info: true
           push-latest-tag: ${{ needs.allocate-runners.outputs.is-current-version-latest == 'true' && needs.allocate-runners.outputs.is-current-version-stable == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
   publish-github-release:
