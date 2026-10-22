@@ -157,7 +157,6 @@ pub(crate) struct WorkerGroup {
     file_ref_manager: FileReferenceManagerRef,
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
-    /// Lease of this node.
     node_lease: Arc<NodeLease>,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
@@ -1099,7 +1098,6 @@ struct RegionWorkerLoop<S> {
     /// Limiter for the temporary file sweeps, or `None` if the datanode allows
     /// no concurrent GC job.
     sweep_limiter: Option<Arc<Semaphore>>,
-    /// Lease of this node.
     node_lease: Arc<NodeLease>,
 }
 

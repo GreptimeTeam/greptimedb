@@ -336,6 +336,12 @@ impl MitoEngine {
         self.inner.workers.node_lease().renew(deadline);
     }
 
+    /// Moves the clock of the lease checks forward.
+    #[cfg(any(test, feature = "test"))]
+    pub fn advance_lease_clock(&self, duration: std::time::Duration) {
+        self.inner.workers.node_lease().advance_clock(duration);
+    }
+
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
         self.inner.workers.object_store_manager()
     }
