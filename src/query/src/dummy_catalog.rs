@@ -19,16 +19,22 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use common_recordbatch::DfSendableRecordBatchStream;
+use datafusion::execution::context::TaskContext;
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
+
 use api::v1::SemanticType;
 use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
 use catalog::{CatalogManager, CatalogManagerRef};
 use common_query::request::RAW_SERIES_READ_EXTENSION_KEY;
+use common_query::series_frame::{pack_raw_series, unpack_raw_series};
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
 use datafusion::datasource::TableProvider;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
@@ -47,6 +53,99 @@ use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
 use crate::options::{FlowIncrementalMode, FlowQueryExtensions};
+
+/// One ordered frame stream over parallel raw-series scan partitions.
+#[derive(Debug)]
+struct MergedSeriesScanExec {
+    input: Arc<table::table::scan::SeriesScanExec>,
+    properties: Arc<PlanProperties>,
+}
+
+impl MergedSeriesScanExec {
+    fn new(input: Arc<table::table::scan::SeriesScanExec>) -> Self {
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(input.schema()),
+            Partitioning::UnknownPartitioning(1),
+            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
+        ));
+        Self { input, properties }
+    }
+}
+
+impl DisplayAs for MergedSeriesScanExec {
+    fn fmt_as(&self, _format: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "MergedSeriesScanExec: partitions=1")
+    }
+}
+
+impl ExecutionPlan for MergedSeriesScanExec {
+    fn name(&self) -> &str {
+        "MergedSeriesScanExec"
+    }
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+        ) -> datafusion_common::Result<
+            datafusion_common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.input.metrics()
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> datafusion::error::Result<DfSendableRecordBatchStream> {
+        if partition != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "partition {partition} out of bounds for 1"
+            )));
+        }
+        let count = self
+            .input
+            .properties()
+            .output_partitioning()
+            .partition_count();
+        let schema = self.input.series_schema().clone();
+        let streams = (0..count)
+            .map(|p| {
+                let batches = self.input.execute(p, context.clone())?;
+                unpack_raw_series(batches, Some(schema.clone()))
+            })
+            .collect::<datafusion::error::Result<Vec<_>>>()?;
+        let merged = promql::source::merge_ordered_raw_series(streams)
+            .map_err(|e| DataFusionError::External(e.into_inner()))?;
+        pack_raw_series(merged)
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        if !children.is_empty() {
+            return Err(DataFusionError::Plan(
+                "MergedSeriesScanExec is a leaf".into(),
+            ));
+        }
+        Ok(self)
+    }
+    fn reset_state(self: Arc<Self>) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+}
 
 /// Resolve to the given region (specified by [RegionId]) unconditionally.
 #[derive(Clone, Debug)]
@@ -378,9 +477,8 @@ impl DummyTableProvider {
         })?;
         let logical_tags = self.raw_series_logical_tags();
         let ranges = scan_exec.get_partition_ranges();
-        // Use the configured plan target where possible, capped by available ranges. Raw frame
-        // consumers must read each partition separately and merge without coalescing/interleaving;
-        // each series remains within one partition, preserving series contiguity.
+        // Keep scan partitions parallel; MergedSeriesScanExec restores the frame contract
+        // (KeyThenTime and series contiguity) at the single-stream region-read boundary.
         let target = if target_partitions > 0 {
             target_partitions
         } else {
@@ -405,7 +503,7 @@ impl DummyTableProvider {
                     self.engine.name(),
                 ))
             })?;
-        Ok(frames)
+        Ok(Arc::new(MergedSeriesScanExec::new(frames)))
     }
 
     /// Returns this region's own tag columns as the frames' logical labels.
@@ -1311,7 +1409,10 @@ mod tests {
 
     use common_error::ext::BoxedError;
     use common_query::series_frame::{label_decode_spec, unpack_raw_series};
-    use common_recordbatch::adapter::SERIES_SCAN_EXEC_NAME;
+    use datatypes::arrow::array::Float64Array;
+    use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+    use datatypes::series::raw::RawTimestamps;
+    use datatypes::series::samples::{Samples, SeriesFields};
     use datafusion::execution::SessionStateBuilder;
     use datafusion::execution::context::TaskContext;
     use datafusion::physical_plan::ExecutionPlanProperties;
@@ -1331,7 +1432,7 @@ mod tests {
     };
     use store_api::region_request::RegionRequest;
     use store_api::storage::SequenceNumber;
-    use table::table::scan::{REGION_SCAN_EXEC_NAME, SeriesScanExec};
+    use table::table::scan::REGION_SCAN_EXEC_NAME;
 
     /// `Result` here is the crate's one-argument alias, so the engine traits below name theirs.
     type RegionResult<T> = std::result::Result<T, BoxedError>;
@@ -1345,9 +1446,25 @@ mod tests {
         serves_frames: bool,
         distributions: Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
         prepares: Arc<Mutex<Vec<usize>>>,
+        partition_chunks: Arc<Vec<Vec<RawSeriesChunk>>>,
     }
 
     impl FrameRegionEngine {
+        /// The engine as a test builds it, with the chunks each scan partition emits.
+        fn with_partition_chunks(
+            serves_frames: bool,
+            partition_chunks: Vec<Vec<RawSeriesChunk>>,
+        ) -> (
+            Self,
+            RegionMetadataRef,
+            Arc<Mutex<Vec<usize>>>,
+            Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
+        ) {
+            let (mut engine, metadata, prepares, distributions) = Self::new(serves_frames);
+            engine.partition_chunks = Arc::new(partition_chunks);
+            (engine, metadata, prepares, distributions)
+        }
+
         fn new(
             serves_frames: bool,
         ) -> (
@@ -1365,6 +1482,7 @@ mod tests {
                     serves_frames,
                     distributions: distributions.clone(),
                     prepares: prepares.clone(),
+                    partition_chunks: Arc::new(Vec::new()),
                 },
                 metadata,
                 prepares,
@@ -1456,6 +1574,8 @@ mod tests {
         properties: ScannerProperties,
         serves_frames: bool,
         prepares: Arc<Mutex<Vec<usize>>>,
+        /// Chunks each scan partition emits, indexed by partition. Empty unless a test scripts it.
+        partition_chunks: Arc<Vec<Vec<RawSeriesChunk>>>,
     }
 
     impl datafusion::physical_plan::DisplayAs for FrameScanner {
@@ -1517,20 +1637,25 @@ mod tests {
         }
 
         fn raw_series_ordering(&self) -> SeriesOrdering {
-            SeriesOrdering::Contiguous
+            SeriesOrdering::KeyThenTime
         }
 
         fn scan_series_partition(
             &self,
             _ctx: &QueryScanContext,
             _metrics_set: &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet,
-            _partition: usize,
+            partition: usize,
             label_source: &RawLabelSource,
         ) -> RegionResult<Option<SendableRawSeriesStream>> {
             Ok(Some(Box::pin(EmptyRawStream {
                 schema: frame_series_schema(&self.metadata, self.projection.as_ref()),
                 source: label_source.clone(),
                 decode: label_decode_spec(label_source),
+                chunks: self
+                    .partition_chunks
+                    .get(partition)
+                    .cloned()
+                    .unwrap_or_default(),
             })))
         }
 
@@ -1555,6 +1680,7 @@ mod tests {
         schema: Arc<SeriesSchema>,
         source: RawLabelSource,
         decode: Option<LabelDecodeSpec>,
+        chunks: Vec<RawSeriesChunk>,
     }
 
     impl RawSeriesStream for EmptyRawStream {
@@ -1571,7 +1697,7 @@ mod tests {
         }
 
         fn ordering(&self) -> SeriesOrdering {
-            SeriesOrdering::Contiguous
+            SeriesOrdering::KeyThenTime
         }
     }
 
@@ -1579,10 +1705,15 @@ mod tests {
         type Item = RegionResult<RawSeriesChunk>;
 
         fn poll_next(
-            self: std::pin::Pin<&mut Self>,
+            mut self: std::pin::Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Option<Self::Item>> {
-            std::task::Poll::Ready(None)
+            let this = self.as_mut().get_mut();
+            if this.chunks.is_empty() {
+                std::task::Poll::Ready(None)
+            } else {
+                std::task::Poll::Ready(Some(Ok(this.chunks.remove(0))))
+            }
         }
     }
 
@@ -1616,6 +1747,7 @@ mod tests {
                 serves_frames: self.serves_frames
                     && request.distribution == Some(TimeSeriesDistribution::PerSeries),
                 prepares: self.prepares.clone(),
+                partition_chunks: self.partition_chunks.clone(),
             }))
         }
 
@@ -1763,17 +1895,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(plan.name(), SERIES_SCAN_EXEC_NAME);
-        let frames = Arc::clone(&plan);
-        let frames = frames.downcast_ref::<SeriesScanExec>().unwrap();
+        assert_eq!(plan.name(), "MergedSeriesScanExec");
+        let merged = plan.downcast_ref::<MergedSeriesScanExec>().unwrap();
+        let frames = merged.input.as_ref();
         // The conversion requires a prepared scan; the fixture has three ranges/partitions.
         assert_eq!(*prepares.lock().unwrap(), vec![3usize]);
         assert_eq!(
             *distributions.lock().unwrap(),
             vec![Some(TimeSeriesDistribution::PerSeries)]
         );
-        assert!(plan.output_partitioning().partition_count() > 1);
-        assert_eq!(plan.output_partitioning().partition_count(), 3);
+        assert_eq!(
+            frames.properties().output_partitioning().partition_count(),
+            3
+        );
+        assert_eq!(plan.output_partitioning().partition_count(), 1);
         // Fields come from the projection, labels and the metric from the region and its request.
         assert_eq!(
             frames
@@ -1807,7 +1942,7 @@ mod tests {
         );
         assert_eq!(
             metadata.get("greptime.series.ordering").map(String::as_str),
-            Some("contiguous")
+            Some("read_key_then_time")
         );
         assert!(
             metadata["greptime.series.label_decode"].contains("cpu_usage"),
@@ -1833,7 +1968,112 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["value"]
         );
-        assert_eq!(unpacked.ordering(), SeriesOrdering::Contiguous);
+        assert_eq!(unpacked.ordering(), SeriesOrdering::KeyThenTime);
+    }
+
+    /// One chunk of a raw series: `key` names the series, `ts` its sample times, `last` closes it.
+    fn frame_chunk(ts: &[i64], key: &[u8], last: bool) -> RawSeriesChunk {
+        let schema = SeriesSchema {
+            fields: vec![FieldSpec {
+                name: Arc::from("value"),
+            }]
+            .into(),
+            eval_grid: None,
+        };
+        RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from([key, &[0, 0]].concat()),
+            None,
+            RawTimestamps::try_new(ScalarBuffer::from(ts.to_vec())).unwrap(),
+            SeriesFields::one(Samples::from_float(Float64Array::from(
+                ts.iter().map(|time| Some(*time as f64)).collect::<Vec<_>>(),
+            ))),
+            last,
+        )
+        .unwrap()
+    }
+
+    /// The keys and closing flags of a packed frame stream, in the order it emits them.
+    async fn frame_keys(
+        plan: &Arc<dyn ExecutionPlan>,
+    ) -> Vec<(Vec<u8>, bool)> {
+        let context = Arc::new(TaskContext::default());
+        let stream = plan.execute(0, context).unwrap();
+        let unpacked = unpack_raw_series(stream, None).unwrap();
+        let chunks = futures_util::TryStreamExt::try_collect::<Vec<_>>(unpacked)
+            .await
+            .unwrap();
+        chunks
+            .into_iter()
+            .map(|chunk| (chunk.primary_key.to_vec(), chunk.is_last))
+            .collect()
+    }
+
+    /// Partitions that would interleave if simply concatenated are merged into one ordered stream.
+    ///
+    /// Every partition is itself well formed: within it a series is closed before the next key
+    /// starts, which is what `unpack_raw_series` requires of one stream. Partition 0 carries
+    /// `a` in two chunks and then `c`; partition 1 carries `b`. Concatenating the partitions gives
+    /// `a, a, c, b`, which breaks the `KeyThenTime` contract every raw-series consumer requires.
+    /// The single region-read stream must instead be `a, a, b, c`, keeping `a`'s two chunks
+    /// adjacent.
+    #[tokio::test]
+    async fn raw_series_partitions_merge_into_one_ordered_stream() {
+        let region_id = RegionId::new(2048, 1);
+        let chunks = vec![
+            vec![
+                frame_chunk(&[10], b"a", false),
+                frame_chunk(&[11], b"a", true),
+                frame_chunk(&[20], b"c", true),
+            ],
+            vec![frame_chunk(&[15], b"b", true)],
+            Vec::new(),
+        ];
+        let (engine, _, _, _) = FrameRegionEngine::with_partition_chunks(true, chunks);
+        let mut builder = QueryContextBuilder::default();
+        builder = builder.extensions(HashMap::from([(
+            RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+            "cpu_usage".to_string(),
+        )]));
+        let provider = DummyTableProviderFactory
+            .create_table_provider(
+                region_id,
+                Arc::new(engine) as RegionEngineRef,
+                Some(Arc::new(builder.build())),
+            )
+            .await
+            .unwrap();
+        let state = test_session();
+
+        let plan = provider
+            .scan(&state, Some(&vec![2]), &[], None)
+            .await
+            .expect("an eligible region answers a frame read");
+        // The scan keeps its three partitions; the region-read boundary sees one.
+        assert_eq!(
+            plan.downcast_ref::<MergedSeriesScanExec>()
+                .unwrap()
+                .input
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            3
+        );
+        assert_eq!(plan.output_partitioning().partition_count(), 1);
+
+        // The key bytes are the encoded primary key the fixture wrote (`key` + two padding
+        // bytes), so compare the leading byte rather than the whole buffer.
+        let emitted = frame_keys(&plan).await;
+        let shape = emitted
+            .iter()
+            .map(|(key, last)| (key[0], *last))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![(b'a', false), (b'a', true), (b'b', true), (b'c', true)],
+            "the merged stream must be key ordered, keep each series' chunks adjacent, and close \
+             every series exactly once: {emitted:?}"
+        );
     }
 
     #[tokio::test]
