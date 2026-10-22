@@ -31,12 +31,14 @@
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
+use datatypes::series::{MetricName, SeriesOrdering};
 
+use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::BinaryMatching;
 
 /// What one node produces.
@@ -255,8 +257,9 @@ pub struct BoundAggregate {
     pub stage: AggregateStage,
 }
 
-/// An operator that keeps some of the input's samples at each grid point, with their series' labels
-/// and values: which samples it keeps depends on the whole vector at that point, not on one series.
+/// An operator over the whole input vector at each grid point: one that keeps some of the input's
+/// samples with their series' labels and values, orders the series, reports where none is present,
+/// or reads a classic histogram from its bucket series.
 ///
 /// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
 /// field.
@@ -269,6 +272,16 @@ pub enum BoundVectorOp {
     /// `limit_ratio`: the series whose label hash falls in the ratio; it keeps whole series, so it
     /// has no grouping.
     LimitRatio { ratio: f64 },
+    /// `sort`, `sort_desc`, `sort_by_label` and `sort_by_label_desc`: the input's series in another
+    /// order, which only an instant result shows. `sort` and `sort_desc` also drop histogram
+    /// samples, in a range result too.
+    Sort(SortOrder),
+    /// `absent`: `1` under `labels` at every point where the input holds no sample. The labels are
+    /// what the compiler derives from the argument's matchers.
+    Absent { labels: MetricName },
+    /// `histogram_quantile` or `histogram_fraction`: each classic histogram is read from the bucket
+    /// series that share its labels, so this too reads the whole vector at a point.
+    Histogram(HistogramFunction),
 }
 
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.

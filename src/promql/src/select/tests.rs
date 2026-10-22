@@ -294,6 +294,51 @@ fn topk_skips_histogram_samples() {
     assert_eq!(kept[0].metric.name(), Some("b"));
 }
 
+/// `sort` drops histogram samples at every step, as Prometheus' `filterFloats` does, while
+/// `sort_by_label` keeps them.
+#[test]
+fn sort_drops_histogram_samples() {
+    let histogram =
+        OwnedHistogram::parse("0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///");
+    let mixed = |schema: &SeriesSchema, name: &str| {
+        let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+        builder
+            .push_samples(
+                0,
+                &[Some(GridSample::Histogram(Box::new(
+                    FloatHistogram::try_from_view(&histogram.view()).unwrap(),
+                )))],
+            )
+            .unwrap();
+        if schema.eval_grid.as_ref().unwrap().spec().len > 1 {
+            builder
+                .push_samples(1, &[Some(GridSample::Float(2.0))])
+                .unwrap();
+        }
+        builder
+            .finish(metric(&format!("__name__={name}")))
+            .unwrap()
+            .unwrap()
+    };
+
+    let instant = schema(1, 1);
+    let series = vec![
+        mixed(&instant, "h"),
+        build(&instant, metric("__name__=f"), &vec![vec![Some(1.0)]]).unwrap(),
+    ];
+    let sorted = sort_instant(&SortOrder::Asc, &instant, series.clone()).unwrap();
+    assert_eq!(sorted.len(), 1);
+    assert_eq!(sorted[0].metric.name(), Some("f"));
+    let by_name = sort_instant(&SortOrder::ByLabel(names("__name__")), &instant, series).unwrap();
+    assert_eq!(by_name.len(), 2);
+
+    let range = schema(2, 1);
+    let sorted = sort_instant(&SortOrder::Desc, &range, vec![mixed(&range, "h")]).unwrap();
+    assert_eq!(sorted.len(), 1);
+    let positions: Vec<usize> = sorted[0].time.positions().map(|(point, _)| point).collect();
+    assert_eq!(positions, [1]);
+}
+
 /// A selection hands back the sample it selected, start timestamp included.
 ///
 /// `limitk` and `limit_ratio` choose samples rather than compute them, so a histogram that arrives
