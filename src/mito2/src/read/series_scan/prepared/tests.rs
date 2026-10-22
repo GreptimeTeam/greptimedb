@@ -201,8 +201,22 @@ fn scanner_with_format(
     store: ObjectStore,
     format: SelectedFormat,
 ) -> SeriesScan {
+    scanner_with_projection(
+        region,
+        store,
+        format,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    )
+}
+
+fn scanner_with_projection(
+    region: &MitoRegionRef,
+    store: ObjectStore,
+    format: SelectedFormat,
+    projection: Vec<usize>,
+) -> SeriesScan {
     let version = region.version();
-    let mapper = FlatProjectionMapper::all(&version.metadata).unwrap();
+    let mapper = FlatProjectionMapper::new(&version.metadata, projection).unwrap();
     let input = ScanInput::builder(region.access_layer.clone(), mapper)
         .with_files(
             version
@@ -526,5 +540,172 @@ async fn manual_build_covers_unknown_sequences_without_a_compaction_window() {
             .to_string()
             .contains("capacity")
     );
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::field(SemanticType::Field)]
+#[case::tag(SemanticType::Tag)]
+#[tokio::test]
+async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType) {
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_request::{AddColumn, AlterKind, RegionAlterRequest};
+
+    use crate::series_index::{reconcile_series_indexes_with_mode, series_index_channel};
+
+    let (_env, engine, region) = fixture().await;
+    let store = region.series_index_store.clone().unwrap();
+    build(&engine, &region).await;
+    let original = region.series_index_version();
+    let projection = (0..region.version().metadata.column_metadatas.len()).collect::<Vec<_>>();
+    let query = || {
+        scanner_with_projection(
+            &region,
+            store.clone(),
+            SelectedFormat::Columnar,
+            projection.clone(),
+        )
+    };
+    let scan = query();
+    let source = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = rows(
+        &source
+            .read_series(0..source.num_series())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+    );
+    let data_type = if semantic_type == SemanticType::Field {
+        ConcreteDataType::float64_datatype()
+    } else {
+        ConcreteDataType::string_datatype()
+    };
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: datatypes::schema::ColumnSchema::new(
+                                "added", data_type, true,
+                            ),
+                            semantic_type,
+                            column_id: 4,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    // Even a projection containing only the original fields must reject stale sidecars.
+    let scan = query();
+    let error = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .output_msg()
+            .contains(if semantic_type == SemanticType::Field {
+                "missing scan fields"
+            } else {
+                "missing scan tags"
+            }),
+        "{error}"
+    );
+    let (purger, _receiver) = series_index_channel(store.clone());
+    let error = reconcile_series_indexes_with_mode(
+        0,
+        store.clone(),
+        region.clone(),
+        Duration::from_secs(100),
+        0,
+        purger,
+        false,
+        false,
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("capacity"));
+    assert!(Arc::ptr_eq(&original, &region.series_index_version()));
+
+    build(&engine, &region).await;
+    let rebuilt = region.series_index_version();
+    for (id, old) in &original.samples {
+        let new = &rebuilt.samples[id];
+        assert_eq!(
+            semantic_type == SemanticType::Tag,
+            old.entry().artifact.generation == new.entry().artifact.generation
+        );
+        if semantic_type == SemanticType::Field {
+            let reader = ColumnarSamplesFormat::default()
+                .reader(store.clone(), new.clone())
+                .await
+                .unwrap();
+            let batches = reader
+                .read(crate::series_index::format::SamplesReadRequest {
+                    projection: vec!["added".to_string()],
+                    ..Default::default()
+                })
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert!(!batches.is_empty());
+            for batch in batches {
+                assert_eq!(batch.num_rows(), batch.column(0).null_count());
+            }
+        }
+    }
+    assert_eq!(
+        semantic_type == SemanticType::Field,
+        original.series_indexes.keys().collect::<HashSet<_>>()
+            == rebuilt.series_indexes.keys().collect::<HashSet<_>>()
+    );
+    let scan = query();
+    let source = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &labels(scan.metadata()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let actual = source
+        .read_series(0..source.num_series())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(expected, rows(&actual));
+
+    build(&engine, &region).await;
+    let unchanged = region.series_index_version();
+    assert!(
+        rebuilt.series_indexes.keys().collect::<HashSet<_>>()
+            == unchanged.series_indexes.keys().collect::<HashSet<_>>()
+    );
+    for (id, old) in &rebuilt.samples {
+        assert_eq!(old.entry(), unchanged.samples[id].entry());
+    }
     engine.stop().await.unwrap();
 }

@@ -28,6 +28,7 @@ use crate::metrics::{SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_TOTA
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::version::VersionRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::bucket::{
     group_files_into_series_buckets, plan_series_indexes_with_mode, rounded_bucket_width,
 };
@@ -36,6 +37,7 @@ use crate::series_index::catalog::{
     RangeIndexCatalog, SeriesIndexCatalog, delete_catalogs, range_catalog_path,
     series_catalog_path, store_catalog,
 };
+use crate::series_index::format;
 use crate::series_index::purger::IndexFilePurger;
 use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
 
@@ -285,6 +287,15 @@ async fn build_index_version(
                 .await
                 .context(crate::error::OpenDalSnafu)?;
         }
+        // Manual builds must repair schema changes even when SST coverage is unchanged.
+        if manual
+            && reusable
+            && selected_format == ArtifactFormat::ColumnarSeries
+            && let Some(backend) = &formats.index
+        {
+            let reader = backend.reader(store.clone(), handle.clone()).await?;
+            reusable = format::validate_series_schema(&reader.schema(), &version.metadata).is_ok();
+        }
         if !reusable {
             unusable.insert(entry.index_uuid);
         }
@@ -295,14 +306,19 @@ async fn build_index_version(
             if !visible.contains(id) || handle.entry().artifact.format != backend.format() {
                 continue;
             }
-            let mut exists = true;
+            let mut reusable = true;
             for object in &handle.entry().artifact.objects {
-                exists &= store
+                reusable &= store
                     .exists(&object.path)
                     .await
                     .context(crate::error::OpenDalSnafu)?;
             }
-            if exists {
+            if manual && reusable && backend.format() == ArtifactFormat::ColumnarSamples {
+                let reader = backend.reader(store.clone(), handle.clone()).await?;
+                reusable =
+                    format::validate_sample_schema(&reader.schema(), &version.metadata).is_ok();
+            }
+            if reusable {
                 reusable_samples.insert(*id);
             }
         }

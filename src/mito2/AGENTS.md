@@ -73,7 +73,7 @@ filtered `RecordBatch` stream.
   including nullable Float64 fields and preserved sequence/delete rows. Its wire
   contract is `docs/formats/mito-samples.md`; time/ID bounds may overlap across
   leaves and parts. Both columnar backends share cancellation-safe output ownership
-  in `series_index/artifact_writer.rs`. Format readers do not apply query visibility; the prepared-source adapter applies visibility and the existing merge/dedup pipeline. Manual reconciliation covers all snapshot SSTs regardless of maintenance eligibility, but retains the soft disk limit.
+  in `series_index/artifact_writer.rs`. Format readers do not apply query visibility; the prepared-source adapter applies visibility and the existing merge/dedup pipeline. Manual reconciliation covers all snapshot SSTs regardless of maintenance eligibility, but retains the soft disk limit. Manual builds validate columnar sample and tag schemas before reuse.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.
 - **WAL/memtable encoding** (`wal/`, `memtable/`): breaks replay if changed incompatibly.
 

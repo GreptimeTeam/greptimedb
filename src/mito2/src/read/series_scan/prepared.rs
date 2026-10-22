@@ -30,9 +30,8 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::buffer::{Buffer, OffsetBuffer};
 use datatypes::arrow::compute::{cast, filter_record_batch};
-use datatypes::arrow::datatypes::{Field, SchemaRef, UInt32Type};
+use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::prelude::DataType;
 use datatypes::series::SeriesOrdering;
 use datatypes::value::ValueRef;
 use futures::TryStreamExt;
@@ -58,10 +57,10 @@ use crate::series_index::MetricSeriesId;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::ColumnarSeriesFormat;
 use crate::series_index::format::{
-    SamplesFormat, SamplesFormatReader, SamplesReadRequest, SeriesIndexFormat, SeriesReadRequest,
+    self, SamplesFormat, SamplesFormatReader, SamplesReadRequest, SeriesIndexFormat,
+    SeriesReadRequest,
 };
 use crate::series_index::samples::ColumnarSamplesFormat;
-use crate::sst::PARQUET_FIELD_ID_KEY;
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -235,7 +234,7 @@ impl ColumnarPreparedSource {
             let reader = ColumnarSamplesFormat::default()
                 .reader(index.store.clone(), handle.clone())
                 .await?;
-            validate_sample_schema(&reader.schema(), &context)?;
+            format::validate_sample_schema(&reader.schema(), metadata)?;
             samples.push(Arc::from(reader));
         }
         let reservation =
@@ -249,33 +248,18 @@ impl ColumnarPreparedSource {
                 )
                 .await?;
             let schema = reader.schema();
+            format::validate_series_schema(&schema, metadata)?;
             let mut tags = schema
                 .fields()
                 .iter()
                 .skip(3)
                 .enumerate()
                 .map(|(i, field)| {
-                    let id = field_id(field)?;
-                    let column = metadata
-                        .column_by_id(id)
-                        .ok_or_else(|| invalid("series tag absent from scan schema"))?;
-                    if column.semantic_type != SemanticType::Tag
-                        || column.column_schema.name != *field.name()
-                    {
-                        return Err(invalid("series tag schema changed; rebuild series indexes"));
-                    }
+                    let id = format::field_id(field)?;
                     Ok((i + 3, id, field.name().clone()))
                 })
                 .collect::<Result<Vec<_>>>()?;
             tags.sort_unstable_by(|a, b| a.2.cmp(&b.2));
-            let stored: HashSet<_> = tags.iter().map(|(_, id, _)| *id).collect();
-            if metadata.primary_key_columns().any(|c| {
-                !ReservedColumnId::is_reserved(c.column_id) && !stored.contains(&c.column_id)
-            }) {
-                return Err(invalid(
-                    "series index is missing scan tags; rebuild series indexes",
-                ));
-            }
             let mut filters = Vec::new();
             if let Some(predicate) = input.predicate_group().predicate() {
                 for expr in predicate.exprs() {
@@ -460,46 +444,6 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             SeriesOrdering::KeyThenTime,
         ))
     }
-}
-
-fn field_id(field: &Field) -> Result<u32> {
-    field
-        .metadata()
-        .get(PARQUET_FIELD_ID_KEY)
-        .and_then(|id| id.parse().ok())
-        .ok_or_else(|| invalid(format!("missing column ID for {}", field.name())))
-}
-
-fn validate_sample_schema(schema: &SchemaRef, context: &StreamContext) -> Result<()> {
-    let metadata = context.input.region_metadata();
-    let mut ids = HashSet::new();
-    for field in schema
-        .fields()
-        .iter()
-        .skip(2)
-        .filter(|f| f.name() != "__sequence" && f.name() != "__op_type")
-    {
-        let id = field_id(field)?;
-        let column = metadata
-            .column_by_id(id)
-            .ok_or_else(|| invalid("sample column absent from scan schema"))?;
-        if column.column_schema.name != *field.name()
-            || column.column_schema.data_type.as_arrow_type() != *field.data_type()
-        {
-            return Err(invalid("samples schema changed; rebuild series indexes"));
-        }
-        ids.insert(id);
-    }
-    if metadata
-        .column_metadatas
-        .iter()
-        .any(|c| c.semantic_type != SemanticType::Tag && !ids.contains(&c.column_id))
-    {
-        return Err(invalid(
-            "samples are missing scan fields; rebuild series indexes",
-        ));
-    }
-    Ok(())
 }
 
 fn sample_to_flat(
