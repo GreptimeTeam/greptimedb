@@ -537,6 +537,9 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
             "abs",
             "with 0 argument(s), where it takes its vector",
         ),
+        // A date function written without an argument is valid PromQL that reads the evaluation
+        // time; there is no input to map, so it is left to the ordinary path.
+        (eval_stmt("hour()"), "hour", "reads the evaluation time"),
     ];
 
     for (stmt, name, expected) in cases {
@@ -1212,6 +1215,15 @@ fn the_supported_math_functions_map_to_their_kernels() {
         ("clamp(x, 0, 1)", "clamp 0 1"),
         ("clamp_min(x, 0)", "clamp_min 0"),
         ("clamp_max(x, 1)", "clamp_max 1"),
+        // Date functions over a vector read its values as Unix seconds.
+        ("day_of_month(x)", "day_of_month"),
+        ("day_of_week(x)", "day_of_week"),
+        ("day_of_year(x)", "day_of_year"),
+        ("days_in_month(x)", "days_in_month"),
+        ("hour(x)", "hour"),
+        ("minute(x)", "minute"),
+        ("month(x)", "month"),
+        ("year(x)", "year"),
     ];
 
     for (query, op) in cases {

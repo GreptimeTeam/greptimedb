@@ -17,6 +17,7 @@
 //! Under development. Index files are currently stored on the local filesystem.
 
 pub(crate) mod artifact;
+mod artifact_writer;
 mod bucket;
 mod builder;
 mod catalog;
@@ -30,6 +31,11 @@ pub(crate) mod format;
 mod format_tests;
 mod maintenance;
 mod purger;
+#[allow(
+    dead_code,
+    reason = "Samples are an opt-in backend; query integration is deferred."
+)]
+pub(crate) mod samples;
 mod searcher;
 mod task;
 #[cfg(test)]
