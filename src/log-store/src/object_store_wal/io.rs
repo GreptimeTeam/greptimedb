@@ -177,7 +177,8 @@ impl ObjectStoreIo {
     /// a task of its own and in the order the object store returns them, so
     /// the listing goes on while the caller consumes the objects listed so
     /// far. A listing that fails, however it fails, ends the stream with an
-    /// error; dropping the stream stops the listing.
+    /// error, before any object it listed that the caller has not taken yet;
+    /// dropping the stream stops the listing.
     pub(crate) fn list_ahead(&self) -> BoxStream<'static, Result<ListedObject>> {
         let io = self.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -191,18 +192,30 @@ impl ObjectStoreIo {
             }
             Ok::<_, object_store::Error>(())
         }));
+        let mut listing = Some(listing);
         let path = self.object_prefix.clone();
         Box::pin(try_stream! {
-            while let Some(object) = rx.recv().await {
+            loop {
+                let object = rx.recv().await;
+                // A finished listing is settled before any object it listed
+                // is yielded, so its failure goes first.
+                if let Some(listing) =
+                    listing.take_if(|listing| object.is_none() || listing.is_finished())
+                {
+                    listing
+                        .await
+                        .unwrap_or_else(|error| {
+                            let stopped = "the listing task did not complete";
+                            Err(object_store::Error::new(ErrorKind::Unexpected, stopped)
+                                .set_source(error))
+                        })
+                        .context(WalObjectStoreSnafu { operation: "list", path: &path })?;
+                }
+                let Some(object) = object else {
+                    break;
+                };
                 yield object;
             }
-            listing
-                .await
-                .unwrap_or_else(|error| {
-                    let stopped = "the listing task did not complete";
-                    Err(object_store::Error::new(ErrorKind::Unexpected, stopped).set_source(error))
-                })
-                .context(WalObjectStoreSnafu { operation: "list", path })?;
         })
     }
 
