@@ -1859,6 +1859,55 @@ fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     plan.inputs().into_iter().find_map(find_fused_series)
 }
 
+#[tokio::test]
+async fn native_fused_binary_has_two_independent_scans() {
+    let plan = build_native_fused_plan("some_metric + some_metric", true).await;
+    let fused = find_fused_series(&plan).expect("binary query uses native route");
+    assert_eq!(2, fused.fused_inputs().len());
+}
+
+#[tokio::test]
+async fn native_fused_binary_matchers_are_per_scan() {
+    let plan = build_native_fused_plan(
+        "some_metric{tag_0=\"a\"} + on(tag_0) some_metric{tag_0=\"b\"}",
+        true,
+    )
+    .await;
+    let fused = find_fused_series(&plan).expect("native binary fused route");
+    assert_eq!(2, fused.fused_inputs().len());
+    let scans = fused
+        .fused_inputs()
+        .iter()
+        .map(|input| match &input.input {
+            LogicalPlan::TableScan(scan) => scan,
+            other => panic!("expected TableScan, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(2, scans[0].filters.len());
+    assert_eq!(2, scans[1].filters.len());
+    let left = scans[0]
+        .filters
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let right = scans[1]
+        .filters
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    assert!(left.contains("a"), "{left}");
+    assert!(right.contains("b"), "{right}");
+    assert_ne!(left, right);
+}
+
+#[tokio::test]
+async fn native_fused_binary_flag_off_has_no_fused_node() {
+    let plan = build_native_fused_plan("some_metric + some_metric", false).await;
+    assert!(find_fused_series(&plan).is_none());
+}
+
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
 #[tokio::test]
 async fn native_fused_rate_plans_to_a_fused_series_node() {
@@ -2377,12 +2426,15 @@ async fn native_fused_whole_vector_operation_falls_back() {
 
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
-    let plan = build_native_fused_plan("sum(rate(some_metric[5m]))", true).await;
+    // A set operator combines two vectors' series rather than their values, which no node of the
+    // tree does, so this is a shape the compiler names and declines.
+    let query = "some_metric and on(tag_0) some_metric";
+    let plan = build_native_fused_plan(query, true).await;
 
     let display = plan.display_indent().to_string();
     assert!(!display.contains("FusedSeries"), "{display}");
     // Falling back is not an approximation of the existing plan: it is the existing plan.
-    let without_flag = build_native_fused_plan("sum(rate(some_metric[5m]))", false).await;
+    let without_flag = build_native_fused_plan(query, false).await;
     assert_eq!(display, without_flag.display_indent().to_string());
 }
 

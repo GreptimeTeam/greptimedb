@@ -23,7 +23,7 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use promql::native::plan::reads_across_series;
+use promql::native::plan::{NativeExpr, NativeNode};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -243,23 +243,39 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
-                // A region builds this node from the region scan itself: the conversion takes that
+                // A region builds this node from the region scans themselves: the conversion takes a
                 // scan's raw-series entrypoint and cannot look through anything in between, so a
-                // node whose input is not that scan has nothing to read where it would be placed
-                // and stays where it was planned.
-                if !matches!(fused.inputs().as_slice(), [LogicalPlan::TableScan(_)]) {
+                // node with an input that is not such a scan has nothing to read where it would be
+                // placed and stays where it was planned. Every input also has to read the same
+                // table: two tables need not share a region, and a region can only evaluate the tree
+                // over the scans it can build for itself.
+                let inputs = fused.inputs();
+                let mut table = None;
+                for input in &inputs {
+                    let LogicalPlan::TableScan(scan) = input else {
+                        return Commutativity::NonCommutative;
+                    };
+                    if table.is_some_and(|name| name != &scan.table_name) {
+                        return Commutativity::NonCommutative;
+                    }
+                    table = Some(&scan.table_name);
+                }
+                // The region asks each scan for the series of one named metric, so a node with an
+                // input that binds no name cannot be built there at all.
+                if fused
+                    .fused_inputs()
+                    .iter()
+                    .any(|input| input.metric_name.is_none())
+                {
                     return Commutativity::NonCommutative;
                 }
-                // The region asks the scan for the series of one named metric, so a node that binds
-                // no name cannot be built there at all.
-                if fused.binding().metric_name.is_none() {
-                    return Commutativity::NonCommutative;
-                }
-                // A region evaluates the tree over whatever series its own scan returns, so this
-                // is only answerable when every node of the tree reads one series at a time. An
-                // aggregate or a binary operation would fold or pair across series, and one region
-                // holds only part of them.
-                if reads_across_series(fused.tree().root()) {
+                // A region evaluates the tree over whatever series its own scans return. A window,
+                // a map and an instant read one series at a time, so one region's share of a series
+                // is everything they need of it. An aggregate folds a label set's series together
+                // and would fold one region's half of the group, so it stays where it was planned.
+                // A binary operation pairs series by label, which a region can answer for every
+                // pair whose two sides it holds; see the caveat below.
+                if folds_across_series(fused.tree().root()) {
                     return Commutativity::NonCommutative;
                 }
 
@@ -271,6 +287,17 @@ impl Categorizer {
                 // every partition column of the table is one of the binding's tag columns, so
                 // the partition key is a function of the label set and a series cannot straddle
                 // regions.
+                //
+                // A binary operation adds one more way to be in this position: it pairs two series
+                // by their labels, and the two sides of one pair need not reach one region - a
+                // table partitioned by a column the match does not name puts `a{kind="a"}` and
+                // `a{kind="b"}` with the same `host` in different regions, and the region holding
+                // one of them finds no partner and drops the match. One region holds every series
+                // both scans can return, so the pair is there. The admission above does not reach
+                // this: each side's series can stay whole in its own region while the labels the
+                // operation pairs on differ inside the partition column. The proof that would
+                // cover it - that both sides of every pair are read from the same source - is
+                // owed by the route that prepares those inputs, not by this categorizer.
                 Commutativity::Commutative
             }
             name if name == SeriesNormalize::name()
@@ -379,6 +406,33 @@ impl Categorizer {
     }
 }
 
+/// Whether `tree` folds one label set's series into a single value.
+///
+/// An aggregate folds every series of a group together, so a region that holds part of the group
+/// would answer the fold of its own half and the union of the parts would be a wrong query answered
+/// silently. Everything else the native compiler emits reads one series at a time: an instant
+/// selection, a window and a point-wise map each select, fold or map the samples of the series they
+/// were handed. A binary operation pairs series rather than folding them, so it is not a fold here;
+/// what a region can pair is the subject of the caveat at the placement decision. A vector operation
+/// reads the whole vector at a grid point, so it folds across series the way an aggregate does.
+fn folds_across_series(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. } => folds_across_series(input),
+        // A binary operation pairs the two sides rather than folding either of them, so what
+        // decides is whether a side folds its own input.
+        NativeExpr::Binary { left, right, .. } => {
+            folds_across_series(left) || folds_across_series(right)
+        }
+        NativeExpr::Aggregate { .. } => true,
+        // `sort`, `absent`, `topk` and `histogram_quantile` reorder or read every series of the
+        // vector at a grid point, so one region's share of the series cannot answer them.
+        NativeExpr::Vector { .. } => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -398,7 +452,7 @@ mod tests {
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, FusedSeriesInput};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
@@ -485,12 +539,15 @@ mod tests {
         )
         .unwrap();
         let binding = FusedSeriesBinding {
-            series_schema,
             grid: statement_grid(&stmt).unwrap(),
+        };
+        let inputs = vec![FusedSeriesInput {
+            series_schema,
             metric_name: metric_name.map(Arc::from),
             time_index: "ts".to_string(),
             tags: Vec::new(),
-        };
+            input,
+        }];
         let output_schema: DFSchemaRef = Arc::new(
             DFSchema::new_with_metadata(
                 vec![
@@ -518,7 +575,7 @@ mod tests {
                     Arc::from("some_metric"),
                     tree,
                     binding,
-                    input,
+                    inputs,
                     output_schema,
                 )
                 .unwrap(),
@@ -738,7 +795,7 @@ mod tests {
                 grid: statement_grid(&native_statement()).unwrap(),
             })),
         };
-        assert!(reads_across_series(&aggregate));
+        assert!(folds_across_series(&aggregate));
 
         // The same walk over what the compiler emits stays per-series.
         let single_selector = compile(
@@ -750,7 +807,7 @@ mod tests {
             SeriesOrdering::KeyThenTime,
         )
         .unwrap();
-        assert!(!reads_across_series(single_selector.root()));
+        assert!(!folds_across_series(single_selector.root()));
     }
 
     /// The encoding gate is what kept the node on the frontend, and it only exists for a plan that

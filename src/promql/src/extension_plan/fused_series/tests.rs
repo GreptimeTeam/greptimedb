@@ -69,17 +69,19 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
 
 use super::{
-    FusedSeries, FusedSeriesBinding, LabelSets, OutputColumn, POLL_BUDGET, label_set,
-    occupied_runs, series_to_record_batch,
+    FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesInput, LabelSets, OutputColumn,
+    POLL_BUDGET, label_set, occupied_runs, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
+use crate::native::metrics::NodePath;
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundWindow, Grouping,
     NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::native::runs::absorb_rebuilds;
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The query every tree here is compiled from.
 const PROMQL: &str = "rate(x[5m])";
@@ -179,6 +181,70 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
 /// The tree `rate(x[5m])` compiles to over one field.
 fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
+}
+
+fn binary_tree(left_schema: Arc<SeriesSchema>, right_schema: Arc<SeriesSchema>) -> NativeTree {
+    let grid = grid();
+    let left_eval = Arc::new(SeriesSchema {
+        fields: left_schema.fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let right_eval = Arc::new(SeriesSchema {
+        fields: right_schema.fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let output = crate::vector_match::binary_output_schema(&left_eval, &right_eval).unwrap();
+    let raw_left = Arc::clone(&left_schema);
+    let raw_right = Arc::clone(&right_schema);
+    let left = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: NativeType::Samples(Arc::clone(&raw_left)),
+                    ordering: SeriesOrdering::KeyThenTime,
+                }),
+                output: NativeType::Samples(raw_left),
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: NativeType::Samples(left_eval),
+    };
+    let right = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    output: NativeType::Samples(Arc::clone(&raw_right)),
+                    ordering: SeriesOrdering::KeyThenTime,
+                }),
+                output: NativeType::Samples(raw_right),
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: NativeType::Samples(right_eval),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op: BinaryOp::Add,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .unwrap()
 }
 
 /// An instant selection feeding a range window.
@@ -359,23 +425,41 @@ fn instant_tree() -> NativeTree {
 /// What the tree's input was compiled against, for the input schema and output tags given.
 fn binding_of(
     tree: &NativeTree,
-    series_schema: Arc<SeriesSchema>,
-    tags: Vec<String>,
+    _series_schema: Arc<SeriesSchema>,
+    _tags: Vec<String>,
 ) -> FusedSeriesBinding {
     FusedSeriesBinding {
-        series_schema,
         grid: tree
             .root()
             .output
             .samples()
-            .expect("this tree produces samples")
+            .unwrap()
             .eval_grid
             .clone()
-            .expect("this tree's output is evaluated on a grid"),
+            .unwrap(),
+    }
+}
+fn one_input(tree: &NativeTree, plan: LogicalPlan) -> Vec<FusedSeriesInput> {
+    one_input_tags(tree, plan, vec![HOST.to_string(), NAME.to_string()])
+}
+fn one_input_tags(
+    tree: &NativeTree,
+    plan: LogicalPlan,
+    tags: Vec<String>,
+) -> Vec<FusedSeriesInput> {
+    let mut found = Vec::new();
+    crate::native::metrics::walk(tree.root(), &mut |node, _| {
+        if let NativeExpr::Input(input) = &node.expr {
+            found.push(Arc::clone(input.output.samples().unwrap()));
+        }
+    });
+    vec![FusedSeriesInput {
+        series_schema: found.remove(0),
         metric_name: Some(Arc::from(METRIC)),
         time_index: TIME.to_string(),
         tags,
-    }
+        input: plan,
+    }]
 }
 
 /// What the tree's input was compiled against, read off the tree itself.
@@ -626,9 +710,9 @@ fn fused(tree: NativeTree) -> FusedSeries {
     let binding = binding(&tree);
     FusedSeries::try_new(
         Arc::from(PROMQL),
-        tree,
+        tree.clone(),
         binding,
-        input_plan(frame_schema()),
+        one_input(&tree, input_plan(frame_schema())),
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -639,7 +723,11 @@ fn plan_of(
     node: FusedSeries,
     input: Arc<dyn ExecutionPlan>,
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-    node.to_execution_plan(input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)
+    node.to_execution_plan(vec![(
+        input,
+        RawLabelSource::Explicit,
+        SeriesOrdering::Contiguous,
+    )])
 }
 
 /// The physical node of `tree` over `input`.
@@ -850,9 +938,13 @@ fn zone_node() -> FusedSeries {
     );
     FusedSeries::try_new(
         Arc::from(PROMQL),
-        tree,
+        tree.clone(),
         binding,
-        input_plan(frame_schema()),
+        one_input_tags(
+            &tree,
+            input_plan(frame_schema()),
+            vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
+        ),
         zone_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -871,9 +963,13 @@ fn instant_node() -> FusedSeries {
     );
     FusedSeries::try_new(
         Arc::from(PROMQL),
-        tree,
+        tree.clone(),
         binding,
-        input_plan(frame_schema()),
+        one_input_tags(
+            &tree,
+            input_plan(frame_schema()),
+            vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
+        ),
         zone_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -1216,6 +1312,166 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
     assert_eq!(1, count(&metrics, "native.root.completed_series"));
 }
 
+#[tokio::test]
+async fn two_input_binary_exec_routes_each_raw_stream_to_its_tree_path() {
+    let left_schema = raw_schema();
+    let right_schema = raw_schema();
+    let tree = binary_tree(Arc::clone(&left_schema), Arc::clone(&right_schema));
+    let output = Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(NAME, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let _node = FusedSeries::try_new(
+        Arc::from("a + on(host) b"),
+        tree.clone(),
+        FusedSeriesBinding { grid: grid() },
+        vec![
+            FusedSeriesInput {
+                series_schema: left_schema.clone(),
+                metric_name: Some(Arc::from("a")),
+                time_index: TIME.into(),
+                tags: vec![HOST.into(), NAME.into()],
+                input: input_plan(frame_schema()),
+            },
+            FusedSeriesInput {
+                series_schema: right_schema.clone(),
+                metric_name: Some(Arc::from("b")),
+                time_index: TIME.into(),
+                tags: vec![HOST.into(), NAME.into()],
+                input: input_plan(frame_schema()),
+            },
+        ],
+        output.clone().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let physical = FusedSeriesExec::try_new(
+        Arc::from("a + on(host) b"),
+        vec![
+            (
+                memory_exec(frames(&[series_chunk("job", &[(GRID_START, 10.0)], true)])),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+                NodePath::root().left().input(),
+                left_schema,
+            ),
+            (
+                memory_exec(frames(&[series_chunk("job", &[(GRID_START, 7.0)], true)])),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+                NodePath::root().right().input(),
+                right_schema,
+            ),
+        ],
+        Arc::new(tree),
+        output,
+        TIME.into(),
+        vec![HOST.into(), NAME.into()],
+    )
+    .unwrap();
+    let batches = collect(Arc::new(physical), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let rows = rows(&batches);
+    assert_eq!(1, rows.len());
+    assert_eq!(GRID_START, rows[0].0);
+    assert_eq!(Some(17.0), rows[0].1);
+    assert_eq!(Some("job".to_string()), rows[0].2);
+}
+
+#[tokio::test]
+async fn two_inputs_match_across_every_partition_of_each_scan() {
+    let left_schema = raw_schema();
+    let right_schema = raw_schema();
+    let tree = binary_tree(Arc::clone(&left_schema), Arc::clone(&right_schema));
+    let output = output_schema();
+    let node = FusedSeries::try_new(
+        Arc::from("a + on(host) b"),
+        tree.clone(),
+        FusedSeriesBinding { grid: grid() },
+        vec![
+            FusedSeriesInput {
+                series_schema: left_schema.clone(),
+                metric_name: Some(Arc::from("a")),
+                time_index: TIME.into(),
+                tags: vec![HOST.into(), NAME.into()],
+                input: input_plan(frame_schema()),
+            },
+            FusedSeriesInput {
+                series_schema: right_schema.clone(),
+                metric_name: Some(Arc::from("b")),
+                time_index: TIME.into(),
+                tags: vec![HOST.into(), NAME.into()],
+                input: input_plan(frame_schema()),
+            },
+        ],
+        output
+            .to_dfschema_ref()
+            .expect("the output schema is valid"),
+    )
+    .expect("the two-input binding matches the tree");
+    // The two scans need not even agree on how many partitions they have: what pairs their series is
+    // the label, not the partition index, so the counts only decide how much each scan reads at once.
+    let left_rows = series_samples(1.0);
+    let right_rows = series_samples(2.0);
+    let left = memory_exec_partitioned(vec![
+        frames(&[series_chunk("h1", &left_rows, true)]),
+        frames(&[series_chunk("h2", &left_rows, true)]),
+    ]);
+    let right = memory_exec_partitioned(vec![
+        frames(&[series_chunk("h2", &right_rows, true)]),
+        frames(&[series_chunk("h1", &right_rows, true)]),
+        Vec::new(),
+    ]);
+    let physical = node
+        .to_execution_plan(vec![
+            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .expect("the two-input physical plan builds");
+    assert_eq!(
+        1,
+        physical
+            .properties()
+            .output_partitioning()
+            .partition_count()
+    );
+    let batches = collect(Arc::clone(&physical), SessionContext::default().task_ctx())
+        .await
+        .expect("the sole output partition executes");
+    let actual = rows(&batches);
+    // A grid of its own, and the sample of each side that sits exactly on each of its points.
+    let grid_stamps = grid_timestamps();
+    let expected = grid_stamps
+        .iter()
+        .map(|&stamp| {
+            let left = left_rows
+                .iter()
+                .find_map(|(time, value)| (*time == stamp).then_some(*value))
+                .expect("the left samples cover every grid point");
+            let right = right_rows
+                .iter()
+                .find_map(|(time, value)| (*time == stamp).then_some(*value))
+                .expect("the right samples cover every grid point");
+            (stamp, Some(left + right))
+        })
+        .collect::<Vec<_>>();
+    for host in ["h1", "h2"] {
+        let series = actual
+            .iter()
+            .filter(|row| row.2.as_deref() == Some(host))
+            .map(|row| (row.0, row.1))
+            .collect::<Vec<_>>();
+        assert_eq!(expected, series, "the complete summed series for {host}");
+    }
+    assert_eq!(2 * GRID_LEN as usize, actual.len());
+}
+
 /// A tree the runtime does not execute is refused when the execution plan is built.
 ///
 /// The runtime folds the supported `Complete` kinds now, so the tree below asks for one it still
@@ -1240,15 +1496,12 @@ fn a_tree_bound_to_another_grid_is_rejected() {
     let tree = rate_tree();
     let other_grid =
         Arc::new(EvalGrid::try_new(GridSpec::try_new(0, GRID_STEP, GRID_LEN).unwrap()).unwrap());
-    let binding = FusedSeriesBinding {
-        grid: other_grid,
-        ..binding(&tree)
-    };
+    let binding = FusedSeriesBinding { grid: other_grid };
     let error = FusedSeries::try_new(
         Arc::from(PROMQL),
-        tree,
+        tree.clone(),
         binding,
-        input_plan(frame_schema()),
+        one_input(&tree, input_plan(frame_schema())),
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect_err("the tree is not evaluated on the declared grid");
@@ -1271,15 +1524,12 @@ fn a_separately_allocated_grid_with_an_equal_spec_is_accepted() {
         !Arc::ptr_eq(&equal, &binding(&tree).grid),
         "the two grids are separate allocations"
     );
-    let binding = FusedSeriesBinding {
-        grid: equal,
-        ..binding(&tree)
-    };
-    FusedSeries::try_new(
+    let binding = FusedSeriesBinding { grid: equal };
+    let _node = FusedSeries::try_new(
         Arc::from(PROMQL),
-        tree,
+        tree.clone(),
         binding,
-        input_plan(frame_schema()),
+        one_input(&tree, input_plan(frame_schema())),
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("an equal grid spec is the same grid");
@@ -1471,7 +1721,7 @@ fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
     )));
     let error = plan(rate_tree(), empty).expect_err("there is no partition to run");
     assert!(
-        error.to_string().contains("input has no partitions"),
+        error.to_string().contains("has no partitions"),
         "refused for another reason: {error}"
     );
     // The only count refused is zero: two partitions build and answer, which is what the
@@ -2124,9 +2374,9 @@ fn two_field_node() -> FusedSeries {
     );
     FusedSeries::try_new(
         Arc::from(PROMQL),
-        tree,
+        tree.clone(),
         binding,
-        input_plan(frame_schema_of(&two_field_schema())),
+        one_input(&tree, input_plan(frame_schema_of(&two_field_schema()))),
         two_field_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -2773,9 +3023,13 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
         }]),
         eval_grid: None,
     });
-    let right = binding_of(&tree, other_schema, left.tags.clone());
-    assert_ne!(left, right);
-    assert_ne!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
+    let right = binding_of(
+        &tree,
+        other_schema,
+        vec![HOST.to_string(), NAME.to_string()],
+    );
+    assert_eq!(left, right);
+    assert_eq!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
 
     let left_node = fused(tree.clone());
     let nullability_changed = Arc::new(Schema::new(vec![
@@ -2790,9 +3044,9 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
     ]));
     let right_node = FusedSeries::try_new(
         Arc::from(PROMQL),
-        tree,
+        tree.clone(),
         binding(&rate_tree()),
-        input_plan(frame_schema()),
+        one_input(&tree, input_plan(frame_schema())),
         nullability_changed.to_dfschema_ref().unwrap(),
     )
     .unwrap();
