@@ -279,6 +279,30 @@ fn a_map_cannot_consume_raw_samples() {
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
 }
 
+#[test]
+fn timestamp_requires_evaluated_vector_and_preserves_its_layout() {
+    let evaluated_input = window_over(input(), None);
+    let node = NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(evaluated_input.clone()),
+        },
+        output: evaluated_input.output.clone(),
+    };
+    assert!(node.validate().is_ok());
+    let raw = NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(input()),
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    assert!(
+        raw.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("evaluated vector")
+    );
+}
+
 /// A scalar is one value per grid point, not a vector, so there are no fields to map.
 #[test]
 fn a_map_cannot_consume_a_scalar() {
@@ -392,6 +416,8 @@ fn an_instant_selection_cannot_change_the_field_count() {
             op: BoundInstant {
                 lookback_ms: 300_000,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -417,6 +443,8 @@ fn an_instant_selection_reads_raw_samples() {
             op: BoundInstant {
                 lookback_ms: 300_000,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -440,6 +468,8 @@ fn an_instant_selection_cannot_consume_state() {
             op: BoundInstant {
                 lookback_ms: 300_000,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -492,6 +522,8 @@ fn an_instant_selection_cannot_read_interleaved_input() {
             op: BoundInstant {
                 lookback_ms: 300_000,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&out),
             },
         },

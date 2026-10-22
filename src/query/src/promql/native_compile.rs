@@ -284,6 +284,45 @@ fn compile_expr(context: &Context, expr: &PromExpr) -> Result<NativeNode> {
     }
 }
 
+fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNode> {
+    if args.len() != 1 {
+        return Err(not_implemented(&format!(
+            "timestamp with {} argument(s), expected 1",
+            args.len()
+        )));
+    }
+    let argument = unparen(&args[0]);
+    if argument.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "timestamp argument `{argument}` is not a vector"
+        )));
+    }
+    if let PromExpr::VectorSelector(selector) = argument {
+        if context.input.fields.len() != 1 {
+            return Err(not_implemented(
+                "timestamp() over a multi-value input is not supported natively",
+            ));
+        }
+        return instant_selection_timestamp(context, selector, true);
+    }
+    let input = compile_expr(context, argument)?;
+    let NativeType::Samples(schema) = &input.output else {
+        unreachable!("timestamp argument was checked to be a vector")
+    };
+    if schema.fields.len() != 1 {
+        return Err(not_implemented(
+            "timestamp() over a multi-value input is not supported natively",
+        ));
+    }
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(input),
+        },
+        output,
+    })
+}
+
 /// Binds `value` as a constant scalar on the grid of the expression being compiled.
 ///
 /// The grid is the context's rather than the constant's own: a constant has no timestamps, so the
@@ -587,6 +626,9 @@ fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
 /// is still visible.
 fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     let Call { func, args } = call;
+    if func.name == "timestamp" {
+        return timestamp_call(context, &args.args);
+    }
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
     }
@@ -997,29 +1039,24 @@ fn subquery_window(
 /// The lookback, the offset and the grid are the whole of an instant selection: it reports the last
 /// sample at or before each grid point, within the statement's lookback.
 fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<NativeNode> {
-    // An `@` anchor is bound on a range window, which carries `anchor_ms`; an instant selection has
-    // no such field, so the anchor has nowhere to go. Refusing it is the only alternative to
-    // dropping it, which would silently select around every grid point instead of one anchor.
-    if selector.at.is_some() {
-        return Err(not_implemented(&format!(
-            "the `@`-anchored selector `{selector}`, whose anchor the instant selection node has \
-             no field for: an instant selection binds a lookback, an offset and a grid, while \
-             anchoring is bound on a range window, as in `rate(x[5m] @ 1234)`"
-        )));
-    }
+    instant_selection_timestamp(context, selector, false)
+}
+
+fn instant_selection_timestamp(
+    context: &Context,
+    selector: &VectorSelector,
+    timestamp: bool,
+) -> Result<NativeNode> {
     let lookback_ms = lookback_millis(context.stmt.lookback_delta.as_millis())?;
     let offset_ms = selector_offset_ms(&selector.offset)?;
+    let at_ms = selector_anchor_ms(&selector.at, context.stmt)?;
+    // Selectors nested in subqueries evaluate on the context grid, not necessarily the statement grid.
     let output_grid = Arc::clone(&context.grid);
-
-    // An instant selection reports one value per input field, so the layout is the input's.
     let output = NativeType::Samples(Arc::new(SeriesSchema {
         fields: Arc::clone(&context.input.fields),
         eval_grid: Some(Arc::clone(&output_grid)),
     }));
-
-    // One allocation shared by the binding and the node's output, as in the window shape.
     let raw = NativeType::Samples(Arc::clone(&context.input));
-
     Ok(NativeNode {
         expr: NativeExpr::Instant {
             input: Box::new(NativeNode {
@@ -1032,6 +1069,8 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
             op: BoundInstant {
                 lookback_ms,
                 offset_ms,
+                at_ms,
+                timestamp,
                 output_grid,
             },
         },

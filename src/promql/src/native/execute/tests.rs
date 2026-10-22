@@ -229,6 +229,8 @@ fn instant(
             op: BoundInstant {
                 lookback_ms,
                 offset_ms,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&output_grid),
             },
         },
@@ -485,6 +487,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         instant: None,
         window: None,
         map: None,
+        timestamp: None,
         binary: None,
         aggregate: None,
         broadcast: None,
@@ -505,6 +508,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
         instant: None,
         window: None,
         map: None,
+        timestamp: None,
         binary: Some(BinaryRuntime::new(
             Arc::new(binary_matching(BinaryOp::Add)),
             [Arc::clone(schema), Arc::clone(schema)],

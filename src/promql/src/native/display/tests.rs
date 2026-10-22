@@ -254,6 +254,8 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
             op: BoundInstant {
                 lookback_ms: 300_000,
                 offset_ms: 60_000,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -464,4 +466,28 @@ fn a_vector_operation_names_its_binding() {
         .unwrap();
         assert_eq!(tree.to_string().lines().nth(1), Some(line));
     }
+}
+
+#[test]
+fn instant_at_and_timestamp_are_displayed() {
+    let out = grid(0, 60_000, 4);
+    let instant = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(raw_input()),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: Some(1_234),
+                timestamp: true,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(out),
+    };
+    assert!(
+        NativeTree::try_new(instant)
+            .unwrap()
+            .to_string()
+            .contains("@ 1234ms timestamp")
+    );
 }
