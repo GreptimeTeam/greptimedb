@@ -2633,6 +2633,26 @@ fn a_subquery_with_an_empty_child_grid_is_refused() {
     );
 }
 
+/// A sampled child endpoint can fit even when the unrounded read-window endpoint does not.
+#[test]
+fn a_subquery_accepts_an_in_range_sampled_endpoint() {
+    let mut stmt = eval_stmt("rate(x[1s:1s] offset -1ms)");
+    let endpoint = UNIX_EPOCH + Duration::from_millis(i64::MAX as u64);
+    stmt.start = endpoint;
+    stmt.end = endpoint;
+    stmt.interval = Duration::from_millis(1);
+
+    let tree = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
+        .expect("the in-range sampled endpoint should compile");
+    let (_, op) = root_window(&tree);
+    let spec = op.input_grid.as_ref().unwrap().spec();
+    assert_eq!(
+        (spec.start_ms, spec.step_ms, spec.len),
+        (9_223_372_036_854_775_000, 1_000, 1),
+        "the child grid should contain the last in-range 1-second sample"
+    );
+}
+
 /// An anchored fold offset that cannot be represented as i64 is a plan error.
 #[test]
 fn a_subquery_with_an_overflowing_fold_offset_is_refused() {
