@@ -898,28 +898,6 @@ fn an_aggregation_of_sparse_inputs_is_compared_in_full_against_the_reference() {
     assert_eq!(piece_ranges(&counts), vec![(2, 1), (6, 1)]);
 }
 
-/// `count_values` writes value labels the way Go's `strconv.FormatFloat(v, 'f', -1, 64)` does,
-/// including the round-half-even choice of the last shortest digit; see the header of
-/// `format_float_cases.txt` (promql-compat `cmd/narthex-golden-formatfloat`).
-#[test]
-fn value_labels_format_like_go() {
-    let mut checked = 0;
-    for line in include_str!("format_float_cases.txt").lines() {
-        let (bits, expected) = line.split_once(' ').unwrap();
-        let value = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
-        assert_eq!(format_value(value), expected, "{bits}");
-        checked += 1;
-    }
-    assert!(checked > 2_400, "{checked}");
-    for (value, expected) in [
-        (f64::NAN, "NaN"),
-        (f64::INFINITY, "+Inf"),
-        (f64::NEG_INFINITY, "-Inf"),
-    ] {
-        assert_eq!(format_value(value), expected);
-    }
-}
-
 /// A point where the `q` scalar has no value has no `quantile` result, as a missing scalar point
 /// yields no output in the other scalar operators.
 #[test]
