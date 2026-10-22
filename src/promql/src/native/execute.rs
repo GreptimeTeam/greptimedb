@@ -2194,6 +2194,8 @@ impl NodeRuntime {
     /// closes it: a consumer above reads "nothing more here" from that chunk rather than from another
     /// one arriving.
     fn compute_aggregate(&mut self, path: &NodePath) -> Result<()> {
+        let metrics = Arc::clone(&self.buffer.metrics);
+        let _timer = metrics.timer();
         let groups = self
             .aggregate
             .as_ref()

@@ -93,6 +93,7 @@ pub struct FloatAggregator {
     labels: Vec<Arc<str>>,
     group_index: HashMap<LabelKey, usize>,
     groups: Vec<Group>,
+    retained: usize,
 }
 
 impl FloatAggregator {
@@ -118,7 +119,7 @@ impl FloatAggregator {
         let label_storage =
             grouping_bytes(grouping).saturating_add(labels_capacity_bytes(grouping));
         budget(label_storage)?;
-        let mut owned_labels = Vec::new();
+        let mut owned_labels: Vec<Arc<str>> = Vec::new();
         owned_labels
             .try_reserve_exact(labels.len())
             .map_err(|error| {
@@ -127,6 +128,12 @@ impl FloatAggregator {
                 ))
             })?;
         owned_labels.extend(labels.iter().map(|label| Arc::from(*label)));
+        let retained = owned_labels
+            .capacity()
+            .saturating_mul(size_of::<Arc<str>>())
+            .saturating_add(owned_labels.iter().fold(0usize, |bytes, label| {
+                bytes.saturating_add(label.len() + 2 * size_of::<usize>())
+            }));
         Ok(Self {
             schema: schema.clone(),
             op,
@@ -134,6 +141,7 @@ impl FloatAggregator {
             labels: owned_labels,
             group_index: HashMap::new(),
             groups: Vec::new(),
+            retained,
         })
     }
 
@@ -176,9 +184,13 @@ impl FloatAggregator {
             .saturating_add(key_bytes);
         budget(existing_bytes.saturating_add(workspace_bytes))?;
         let key = label_key(&metric);
+        let key_retained = key
+            .capacity()
+            .saturating_mul(size_of::<(Arc<str>, Arc<str>)>());
         let new_group = !self.group_index.contains_key(&key);
         let group_capacity = self.groups.capacity();
         let map_capacity = self.group_index.capacity();
+        let old_map_backing = hash_map_backing_bytes(map_capacity);
         if new_group {
             let next_group_capacity = if self.groups.len() == group_capacity {
                 group_capacity.saturating_mul(2).max(4)
@@ -225,14 +237,29 @@ impl FloatAggregator {
                 index
             }
         };
+        if new_group {
+            self.retained = self
+                .retained
+                .saturating_add(metric_bytes(&metric))
+                .saturating_add(key_retained)
+                .saturating_add(
+                    self.groups
+                        .capacity()
+                        .saturating_sub(group_capacity)
+                        .saturating_mul(size_of::<Group>()),
+                )
+                .saturating_add(
+                    hash_map_backing_bytes(self.group_index.capacity())
+                        .saturating_sub(old_map_backing),
+                );
+        }
         drop(labels);
         drop(metric);
-        let retained = self.state_bytes();
-        self.groups[index].accumulate(
+        self.retained = self.groups[index].accumulate(
             series,
             self.op,
             &mut budget,
-            retained,
+            self.retained,
             self.schema.fields.len(),
         )?;
         Ok(())
@@ -245,6 +272,11 @@ impl FloatAggregator {
 
     /// Bytes reserved for this fold, using bounded allowances for its maps and group payloads.
     pub(crate) fn state_bytes(&self) -> usize {
+        self.retained
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recounted_state_bytes(&self) -> usize {
         let groups = self.groups.iter().fold(0usize, |total, group| {
             total
                 .saturating_add(metric_bytes(&group.metric))
@@ -872,7 +904,7 @@ impl Group {
         budget: &mut impl FnMut(usize) -> Result<()>,
         mut retained: usize,
         width: usize,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let pending_capacity_bytes = BLOCK_POINTS.saturating_mul(size_of::<(usize, f64)>());
         budget(retained.saturating_add(pending_capacity_bytes))?;
         let mut pending = Vec::with_capacity(BLOCK_POINTS);
@@ -909,7 +941,7 @@ impl Group {
                 retained,
             )?;
         }
-        Ok(())
+        Ok(retained)
     }
 
     /// Applies one field's samples within a block, so a block costs one lookup per field run.

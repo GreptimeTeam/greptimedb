@@ -495,6 +495,74 @@ fn fields_are_aggregated_independently() {
 }
 
 #[test]
+fn incremental_retained_bytes_match_full_recount_after_updates() {
+    let schema = schema_with_grid_len(&["value", "other"], 256);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["zone", "rack"]))
+            .unwrap();
+    let updates = [
+        input(
+            &schema,
+            metric("m", &[("zone", "a"), ("rack", "1")]),
+            0,
+            &[vec![Some(1.0)], vec![Some(2.0)]],
+        ),
+        input(
+            &schema,
+            metric("m", &[("zone", "a"), ("rack", "1")]),
+            64,
+            &[vec![Some(3.0)], vec![Some(4.0)]],
+        ),
+        input(
+            &schema,
+            metric("m", &[("zone", "a"), ("rack", "1")]),
+            0,
+            &[vec![Some(5.0)], vec![Some(6.0)]],
+        ),
+        input(
+            &schema,
+            metric("m", &[("zone", "b"), ("rack", "2")]),
+            128,
+            &[vec![Some(7.0)], vec![Some(8.0)]],
+        ),
+    ];
+    for (index, series) in updates.iter().enumerate() {
+        let previous = aggregator.state_bytes();
+        aggregator.update(series).unwrap();
+        assert_eq!(
+            aggregator.state_bytes(),
+            aggregator.recounted_state_bytes(),
+            "update {index}"
+        );
+        if index == 2 {
+            assert_eq!(aggregator.state_bytes(), previous);
+        }
+    }
+}
+
+#[test]
+fn incremental_retained_bytes_match_full_recount_for_many_groups() {
+    let schema = schema(&["value"]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&["id"])).unwrap();
+    for id in 0..512 {
+        let id = id.to_string();
+        let series = input(
+            &schema,
+            metric("m", &[("id", &id)]),
+            id.parse::<usize>().unwrap() % 64,
+            &[vec![Some(1.0)]],
+        );
+        aggregator.update(&series).unwrap();
+        assert_eq!(
+            aggregator.state_bytes(),
+            aggregator.recounted_state_bytes(),
+            "group {id}"
+        );
+    }
+}
+
+#[test]
 fn budgeted_and_unbudgeted_float_aggregation_match_for_all_supported_kinds() {
     let schema = schema(&["value"]);
     let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0), Some(3.0)]]);
