@@ -46,7 +46,8 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
 - **Datanode process fence**: before the handler chain, the leader's heartbeat
   session checks a datanode request's non-zero `node_epoch` against the highest
   one recorded under `__datanode_epoch`, read and raised through the leader
-  cache. A lower epoch gets a reply without running the chain; epoch 0
+  cache. A lower epoch gets a reply without running the chain, and the check
+  runs again before an accepted request's reply is sent; epoch 0
   (handshakes, older datanodes) is not checked. A datanode stream registers
   its pusher on its first request that passes, not on the handshake; pushers
   carry the epoch, and a lower one cannot replace a higher one.
