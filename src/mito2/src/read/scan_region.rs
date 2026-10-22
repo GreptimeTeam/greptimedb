@@ -14,6 +14,8 @@
 
 //! Scans a region according to the scan request.
 
+mod count;
+
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -246,6 +248,7 @@ pub(crate) struct ScanRegion {
     scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
+    experimental_metadata_count: bool,
     /// Whether to ignore range indexes during scans.
     ignore_range_index: bool,
     /// Whether to ignore inverted index.
@@ -284,6 +287,7 @@ impl ScanRegion {
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_tracker: None,
             experimental_series_scan_v2: false,
+            experimental_metadata_count: false,
             ignore_range_index: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
@@ -333,6 +337,12 @@ impl ScanRegion {
     #[must_use]
     pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
         self.experimental_series_scan_v2 = enabled;
+        self
+    }
+
+    /// Enables optional exact-count preparation for hinted scalar count scans.
+    pub(crate) fn with_experimental_metadata_count(mut self, enabled: bool) -> Self {
+        self.experimental_metadata_count = enabled;
         self
     }
 
@@ -625,7 +635,11 @@ impl ScanRegion {
         } else {
             input
         };
-        Ok(input.build())
+        let mut input = input.build();
+        if self.experimental_metadata_count && self.request.metadata_count_hint {
+            input.exact_num_rows = count::prepare(&input, &self.request).await;
+        }
+        Ok(input)
     }
 
     /// Builds the deduplicated root column ids required by the projection and
@@ -908,6 +922,8 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 
 /// Common input for different scanners.
 pub struct ScanInput {
+    /// Count proven against this read view and the complete static predicate.
+    pub(crate) exact_num_rows: Option<usize>,
     /// Pinned series-index snapshot and its storage, when configured.
     pub(crate) series_index: Option<SeriesIndexReadContext>,
     /// Whether to ignore range indexes while retaining series-index candidate discovery.
@@ -1006,6 +1022,7 @@ impl ScanInput {
     ) -> ScanInputBuilder {
         ScanInputBuilder {
             input: ScanInput {
+                exact_num_rows: None,
                 series_index: None,
                 ignore_range_index: false,
                 access_layer,

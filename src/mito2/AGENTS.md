@@ -67,6 +67,9 @@ memory tracker. Direct scanner callers default to an unbounded operator pool.
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
   follower replay. Keep it backward compatible.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+  `FileMeta.num_rows_is_logical` is a file-local guarantee emitted only after
+  deduplication and deletion filtering; query coverage and cross-source visibility
+  are checked separately in `read/scan_region/count.rs`.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may

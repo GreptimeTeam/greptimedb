@@ -1,0 +1,20 @@
+{
+  "region_id": 4294967297,
+  "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+  "time_range": [
+    {
+      "value": 0,
+      "unit": "Millisecond"
+    },
+    {
+      "value": 6000,
+      "unit": "Millisecond"
+    }
+  ],
+  "level": 1,
+  "file_size": 1024,
+  "available_indexes": [],
+  "index_file_size": 0,
+  "sequence": null,
+  "partition_expr": null
+}
