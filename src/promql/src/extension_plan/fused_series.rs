@@ -1028,8 +1028,12 @@ fn series_to_record_batch(
     // traversal that visits exactly those.
     let timestamps = match chunk.range() {
         Some(range) => range.timestamps(),
-        None => ScalarBuffer::from(series.time.timestamps().into_owned()),
-    };
+        None => series
+            .time
+            .timestamps()
+            .map(|timestamps| ScalarBuffer::from(timestamps.into_owned())),
+    }
+    .map_err(|error| DataFusionError::Execution(error.to_string()))?;
     let rows = timestamps.len();
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(classification.len());
     for (position, column) in classification.iter().enumerate() {

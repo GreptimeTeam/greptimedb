@@ -1700,7 +1700,7 @@ fn a_chunk_of_several_runs_converts_its_own_rows_only() {
         .downcast_ref::<Float64Array>()
         .expect("the field column is Float64");
     assert_eq!(3, batch.num_rows(), "only the carried rows are rows");
-    let grid_stamps = grid.timestamps();
+    let grid_stamps = grid.timestamps().expect("the grid timestamps build");
     assert_eq!(
         vec![grid_stamps[0], grid_stamps[1], grid_stamps[4]],
         stamps.values()[..3].to_vec(),
