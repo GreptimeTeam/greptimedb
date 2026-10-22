@@ -23,6 +23,7 @@ mod go_math;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use broadcast::validate_scalar;
 pub use broadcast::{
     ScalarFunction, ScalarSeriesOperand, map_arithmetic_series, map_compare_series,
     map_scalar_function,

@@ -6559,6 +6559,54 @@ fn an_aggregate_drops_every_label_and_adds_its_group_per_point() {
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
+/// Every supported `Complete` kind reaches its matching float kernel through the native runtime.
+#[test]
+fn complete_aggregate_kinds_fold_two_values() {
+    let cases = [
+        (AggregateKind::Sum, 4.0),
+        (AggregateKind::Count, 2.0),
+        (AggregateKind::Avg, 2.0),
+        (AggregateKind::Min, 1.0),
+        (AggregateKind::Max, 3.0),
+        (AggregateKind::Group, 1.0),
+        (AggregateKind::Stddev, 1.0),
+        (AggregateKind::Stdvar, 1.0),
+    ];
+
+    for (kind, expected) in cases {
+        let grid = grid(0, 60_000, 1);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+            },
+        ))
+        .unwrap();
+        let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+        for value in [1.0, 3.0] {
+            execution
+                .push_evaluated(evaluated_chunk_of(
+                    &schema,
+                    metric(),
+                    0,
+                    vec![Some(value)],
+                    true,
+                ))
+                .unwrap();
+        }
+
+        let output = execution.finish().unwrap();
+        assert_eq!(
+            groups_of(&output),
+            vec![unlabelled(vec![(0, Some(expected))])],
+            "{kind:?} did not compute its native complete result"
+        );
+    }
+}
+
 /// The same series, delivered in two chunks, fold to what the whole series folds to.
 #[test]
 fn an_aggregate_folds_a_series_split_across_chunks_like_a_whole_one() {
@@ -6857,7 +6905,7 @@ fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
     let kind_tree = NativeTree::try_new(aggregate(
         evaluated_input(grid()),
         BoundAggregate {
-            kind: AggregateKind::Min,
+            kind: AggregateKind::Quantile { quantile: 0.5 },
             group: Grouping::By(Arc::new([])),
             stage: AggregateStage::Complete,
         },
@@ -6885,7 +6933,7 @@ fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
         .unwrap()
     };
 
-    for (found, tree) in [("Min", kind_tree), ("Partial", partial_tree)] {
+    for (found, tree) in [("Quantile", kind_tree), ("Partial", partial_tree)] {
         let error = match NativeExecutionState::try_new(
             &tree,
             pool(),

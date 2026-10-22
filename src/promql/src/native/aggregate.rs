@@ -35,7 +35,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{Samples, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
-use crate::aggregate::{AggregateOp, FloatAccumulator, Grouping};
+use crate::aggregate::{AggregateOp, FloatAggregator, Grouping};
 use crate::evaluated::EvaluatedChunk;
 use crate::map::validate_float_series;
 use crate::native::execute::{NodeBuffer, evaluated_bytes};
@@ -52,12 +52,9 @@ pub(crate) struct AggregateRuntime {
     /// addressed on. A `Complete` aggregate neither adds nor drops a field, and it evaluates on its
     /// input's grid, so one schema describes both sides.
     schema: Arc<SeriesSchema>,
-    /// How its groups are identified, kept in this node's own storage because the kernel borrows a
-    /// slice of `&str` that cannot outlive the strings it points at.
-    grouping: GroupingLabels,
     /// The fold. `None` once [`Self::compute`] has taken it, which is also what says the node has
     /// nothing left to fold into.
-    accumulator: Option<FloatAccumulator>,
+    accumulator: Option<FloatAggregator>,
     /// Whether the fold has been finished and its series handed over. A node computes once: a second
     /// pull finds the series it queued rather than a fold that ran again.
     ///
@@ -69,26 +66,14 @@ pub(crate) struct AggregateRuntime {
 impl AggregateRuntime {
     /// What this node computes, for a rejection that has to say what it refused.
     ///
-    /// It names the kind and the grouping as this node holds them, which is what a reader needs to
-    /// tell the aggregate a message is about from another one in the same tree.
+    /// It names the kind this node computes, which distinguishes it from another node in the tree.
     fn describe(&self) -> String {
-        let labels: Vec<&str> = self
-            .grouping
-            .labels
-            .iter()
-            .map(|label| label.as_ref())
-            .collect();
-        let grouping = match (labels.is_empty(), self.grouping.by) {
-            (true, _) => String::new(),
-            (false, true) => format!(" by({})", labels.join(",")),
-            (false, false) => format!(" without({})", labels.join(",")),
-        };
-        format!("{:?}{grouping}", self.op.kind)
+        format!("{:?}", self.op.kind)
     }
 
-    /// The states of a `Complete` `sum` over `schema`.
+    /// The states of a `Complete` aggregate over `schema`.
     ///
-    /// A stage other than `Complete` and a kind other than `Sum` are refused here, before a single
+    /// A stage other than `Complete` and a kind without a supported kernel are refused here, before a single
     /// chunk is folded: a node this runtime cannot compute must not start, because a partial answer
     /// would be one the caller never asked for. The rejection names what was found, so a reader can
     /// tell a tree this runtime cannot run from one it cannot run correctly.
@@ -103,24 +88,33 @@ impl AggregateRuntime {
         }
         let kind = match op.kind {
             AggregateKind::Sum => AggregateOp::Sum,
+            AggregateKind::Count => AggregateOp::Count,
+            AggregateKind::Avg => AggregateOp::Avg,
+            AggregateKind::Min => AggregateOp::Min,
+            AggregateKind::Max => AggregateOp::Max,
+            AggregateKind::Group => AggregateOp::Group,
+            AggregateKind::Stddev => AggregateOp::Stddev,
+            AggregateKind::Stdvar => AggregateOp::Stdvar,
             other => {
                 return Err(DataFusionError::NotImplemented(format!(
-                    "the native runtime does not execute the `{other:?}` aggregate yet: only `Sum` \
-                     is computed here"
+                    "the native runtime does not execute the `{other:?}` aggregate yet: only the supported `Complete` aggregate kinds are computed here"
                 )));
             }
         };
-        let grouping = GroupingLabels::new(&op.group);
-        // The grouping is checked once, here, rather than at each fold: `by` on a value field needs
-        // per-point labels and an adapter this node does not have, and a tree that asked for one is
-        // refused before it reads a chunk.
-        let names: Vec<&str> = grouping.labels.iter().map(|label| label.as_ref()).collect();
-        FloatAccumulator::validate_grouping(&schema, grouping.borrow(&names))?;
+        let names: Vec<&str> = match &op.group {
+            BoundGrouping::By(labels) | BoundGrouping::Without(labels) => {
+                labels.iter().map(|label| label.as_ref()).collect()
+            }
+        };
+        let grouping = match &op.group {
+            BoundGrouping::By(_) => Grouping::By(&names),
+            BoundGrouping::Without(_) => Grouping::Without(&names),
+        };
+        let accumulator = FloatAggregator::try_new(&schema, kind, grouping)?;
         Ok(Self {
-            grouping,
             op,
             schema,
-            accumulator: Some(FloatAccumulator::new(kind)),
+            accumulator: Some(accumulator),
             computed: false,
         })
     }
@@ -145,7 +139,7 @@ impl AggregateRuntime {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.accumulator
             .as_ref()
-            .map_or(0, FloatAccumulator::state_bytes)
+            .map_or(0, FloatAggregator::state_bytes)
     }
 
     /// Folds one chunk into its group.
@@ -159,18 +153,9 @@ impl AggregateRuntime {
         // chunk of another field count or another grid would be folded into the wrong places.
         validate_float_series(&self.schema, &chunk.series)
             .map_err(|error| folded_chunk(path, &self.describe(), error))?;
-        // The kernel takes a borrowed slice of names, so the names are lent to it for this fold and
-        // the strings themselves stay in the grouping this node owns.
-        let names: Vec<&str> = self
-            .grouping
-            .labels
-            .iter()
-            .map(|label| label.as_ref())
-            .collect();
-        let grouping = self.grouping.borrow(&names);
         let accumulator = self.accumulator.as_mut().ok_or_else(|| no_fold(path))?;
         // The chunk goes out of scope here, so this node holds none of what it read.
-        accumulator.accumulate(&chunk.series, grouping)
+        accumulator.update(&chunk.series)
     }
 
     /// Finishes the fold and returns one series per group, or `None` if the fold already ran.
@@ -207,48 +192,13 @@ impl AggregateRuntime {
                 .state_bytes()
                 .saturating_add(aggregate_output_bytes(groups, points, fields)),
         )?;
-        let output = accumulator.finish(&self.schema)?;
+        let output = accumulator.finish()?;
         self.computed = true;
         // The states and the one builder are gone with the finish, so what this node holds is the
         // series it returns; the caller queues each of them, and the reservation settles on the
         // queue as it does for a binary result.
         buffer.resize(aggregate_output_bytes(output.len(), points, fields))?;
         Ok(Some(output))
-    }
-}
-
-/// The labels an aggregate's groups are identified by, in this module's own storage.
-///
-/// [`Grouping`] borrows a slice of `&str`, which cannot be kept beside the strings it points at in
-/// one value, so the node keeps the labels and lends them to the kernel at each fold.
-struct GroupingLabels {
-    /// Whether the labels are the ones a group keeps (`by`) or the ones it drops (`without`).
-    by: bool,
-    /// The labels themselves: group keys under `by`, the dropped ones under `without`.
-    labels: Vec<Arc<str>>,
-}
-
-impl GroupingLabels {
-    fn new(group: &BoundGrouping) -> Self {
-        match group {
-            BoundGrouping::By(labels) => Self {
-                by: true,
-                labels: labels.to_vec(),
-            },
-            BoundGrouping::Without(labels) => Self {
-                by: false,
-                labels: labels.to_vec(),
-            },
-        }
-    }
-
-    /// The grouping the kernel takes, over names lent from `self.labels`.
-    fn borrow<'a>(&self, names: &'a [&'a str]) -> Grouping<'a> {
-        if self.by {
-            Grouping::By(names)
-        } else {
-            Grouping::Without(names)
-        }
     }
 }
 
