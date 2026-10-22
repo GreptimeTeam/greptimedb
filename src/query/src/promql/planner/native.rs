@@ -34,12 +34,14 @@ use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{Extension, LogicalPlan, TableScanBuilder};
+use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
+use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
-use promql::native::plan::reads_across_series;
+use promql::extension_plan::{FusedSeries, FusedSeriesBinding, FusedSeriesInput};
+use promql::native::plan::{NativeExpr, reads_across_series};
+use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
@@ -48,8 +50,9 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 
+use crate::parser::{EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME};
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
-use crate::promql::native_compile::{compile, statement_grid};
+use crate::promql::native_compile::{compile_selectors, statement_grid};
 use crate::promql::planner::PromPlanner;
 
 /// The query-context key that turns the native fused-series route on for one query.
@@ -119,216 +122,353 @@ impl PromPlanner {
             return Ok(None);
         }
 
-        // A tree reads exactly one raw input, and the scan below the node is that one selector's,
-        // so a shape that names no selector or more than one is not offered at all.
-        let Some(selector) = single_selector(prom_expr) else {
-            return Ok(None);
+        let selectors = {
+            let mut values = Vec::new();
+            collect_selectors(prom_expr, &mut values);
+            values
         };
-
-        // Resolve the selector the way the existing planner does, and take what is left as the
-        // rows it selects. The scan below the node is the selector's own scan, unfiltered, so a
-        // matcher that survives preprocessing selects fewer rows here than the scan reads.
-        let matchers = self.preprocess_label_matchers(&selector.matchers, &selector.name)?;
-        if !matchers.matchers.is_empty() {
-            return Ok(None);
-        }
-        // An `__field__` matcher narrows the field columns the existing planner builds its scan
-        // with; folding every field of the table instead would evaluate a different window.
-        if self.ctx.field_column_matcher.is_some() {
-            return Ok(None);
-        }
-        // A metric without a table reads as an empty metric, which the existing planner plans.
-        if self.setup_context().await?.is_some() {
-            return Ok(None);
-        }
-
-        let Some(table_name) = self.ctx.table_name.clone() else {
-            return Ok(None);
-        };
-        let Some(time_index) = self.ctx.time_index_column.clone() else {
-            return Ok(None);
-        };
-        let fields = self.ctx.field_columns.clone();
-        let tags = self.ctx.tag_columns.clone();
-        // A series with no field has nothing to fold, and the tree's input would be an empty
-        // schema, which no window can read.
-        if fields.is_empty() {
-            return Ok(None);
-        }
-
-        // The selector's own table scan, built by the same method the existing path uses: the
-        // physical planner turns it into the region scan the node reads, and building a scan here
-        // instead would let the two paths disagree about the columns they read.
-        let table_ref = self.table_ref()?;
-        let mut input = self.create_table_scan_plan(table_ref.clone()).await?;
-        let logical_scan = metric_scan_and_table_id(&input);
-        let has_verified_metric_rewrite = logical_scan.is_some();
-        let scan = match logical_scan {
-            Some((mut scan, predicate)) => {
-                // Preserve logical field order and the table restriction on the direct physical scan.
-                let source_schema = scan.source.schema();
-                let Some(mut ordered_projection) = fields
-                    .iter()
-                    .map(|field| source_schema.index_of(field).ok())
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return Ok(None);
-                };
-                let original_projection = scan.projection.as_ref();
-                let selected_indices = original_projection
-                    .cloned()
-                    .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
-                for index in selected_indices {
-                    let is_field = fields
-                        .iter()
-                        .any(|field| field == source_schema.field(index).name());
-                    if !is_field && !ordered_projection.contains(&index) {
-                        ordered_projection.push(index);
-                    }
-                }
-                scan.filters.push(predicate);
-                scan = TableScanBuilder::from(scan)
-                    .with_projection(Some(ordered_projection))
-                    .build()
-                    .context(DataFusionPlanningSnafu)?;
-                input = LogicalPlan::TableScan(scan.clone());
-                scan
-            }
-            None => match &input {
-                LogicalPlan::TableScan(scan) => scan.clone(),
-                _ => return Ok(None),
-            },
-        };
-        let table = self.table_from_source(&scan.source)?;
-        let table_meta = &table.table_info().meta;
-        // An engine without a raw-series scanner has no frame to give this node, and by the time
-        // the physical planner asks, the logical plan is already this node: the refusal there is a
-        // planning error, not a fallback. So the engine is checked here, where the existing plan is
-        // still the answer. A file-engine table is the concrete case: its scanner is a
-        // `SinglePartitionScanner`, which leaves `raw_series_schema` at the default `None`.
-        if !supports_native_raw_series(&table_meta.engine)
-            || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
-        {
-            return Ok(None);
-        }
-        // The region's raw-series preflight refuses these, and the physical layer turns that refusal into an error, so decline this route here instead.
-        let time_index_type = table_meta
-            .schema
-            .timestamp_column()
-            .map(|column| &column.data_type);
-        if time_index_type
-            != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
-            || table_meta
-                .options
-                .extra_options
-                .get(store_api::mito_engine_options::APPEND_MODE_KEY)
-                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-        {
-            return Ok(None);
-        }
-        // FusedSeries evaluates each region independently, so partition keys must identify a series.
-        if !table
-            .table_info()
-            .meta
-            .partition_column_names()
-            .all(|column| tags.iter().any(|tag| tag == column))
-        {
-            return Ok(None);
-        }
-        // The legacy selector converts an offset the same way; sharing that conversion keeps the
-        // two scan paths from disagreeing about an extreme duration.
-        let offset = Self::offset_millis(&selector.offset);
-        let (saved_start, saved_end, saved_range) = (self.ctx.start, self.ctx.end, self.ctx.range);
-        self.ctx.range = selector_range_millis(prom_expr);
-        // Keep the fused scan's bounds identical to the legacy selector scan, including @ and offset.
-        let time_filter = (|| {
-            let anchored = self.at_modifier_offset(&selector.at, &selector.offset)?;
-            if anchored.is_some() {
-                self.ctx.end = saved_start;
-            }
-            self.build_time_index_filter(anchored.unwrap_or(offset), input.schema())
-        })();
-        self.ctx.start = saved_start;
-        self.ctx.end = saved_end;
-        self.ctx.range = saved_range;
-        let time_filter = time_filter?;
-        if let Some(filter) = time_filter {
-            let LogicalPlan::TableScan(scan) = &mut input else {
-                unreachable!();
-            };
-            scan.filters.push(filter);
-        }
-        // A window over a native histogram yields a histogram, which the output schema below
-        // cannot declare; the existing path evaluates those with its own kernels.
-        if Self::field_columns_contain_native_histogram(input.schema(), &fields) {
-            return Ok(None);
-        }
-        // The region's raw series preflight serves a field only when it is numeric or a native
-        // histogram, and the physical layer turns that refusal into a planning error because the
-        // logical plan is already fixed by then. A table whose selected fields are, say, a string
-        // and a boolean therefore has to be declined here, while the existing plan is still the
-        // fallback - `stringsfield` over such a table answered normally before this route existed.
-        if !Self::field_columns_are_raw_series_servable(input.schema(), &fields) {
+        if selectors.is_empty() {
             return Ok(None);
         }
         let Some(stmt) = self.native_statement(prom_expr) else {
             return Ok(None);
         };
         let Ok(grid) = statement_grid(&stmt) else {
-            // The statement's grid is not one a tree can be evaluated on, so there is no grid to
-            // address the node's output by.
             return Ok(None);
         };
-
-        let series_schema = Arc::new(SeriesSchema {
-            fields: fields
-                .iter()
-                .map(|name| FieldSpec {
-                    name: Arc::from(name.as_str()),
-                })
-                .collect::<Vec<_>>()
-                .into(),
-            eval_grid: None,
-        });
-        let tree = match compile(&stmt, Arc::clone(&series_schema), NATIVE_ORDERING) {
-            Ok(tree) => tree,
-            // The compiler refusing a shape is this route declining it: the existing planner gets
-            // the query exactly as it would have without this flag.
-            Err(DataFusionError::NotImplemented(_)) => return Ok(None),
-            Err(error) => return Err(error).context(DataFusionPlanningSnafu),
-        };
-        // A vector operation (`sort`, `absent`, `topk`, `histogram_quantile`, ...) reads the whole
-        // vector at each grid point rather than one series at a time, so it cannot be evaluated by
-        // one executor per scan partition. Declining here is the only place that still works: once
-        // the `FusedSeries` node exists the logical plan is fixed, and the categorizer merely
-        // declining to push it down would leave a node the physical layer must build anyway.
-        if reads_across_series(tree.root()) {
+        let original_context = self.ctx.clone();
+        let mut prepared: Vec<FusedSeriesInput> = Vec::new();
+        for selector in &selectors {
+            self.ctx = original_context.clone();
+            let matchers = match self.preprocess_label_matchers(&selector.matchers, &selector.name)
+            {
+                Ok(m) => m,
+                Err(_) => return Ok(None),
+            };
+            if self.setup_context().await?.is_some() {
+                return Ok(None);
+            }
+            let (Some(metric), Some(time)) = (
+                self.ctx.table_name.clone(),
+                self.ctx.time_index_column.clone(),
+            ) else {
+                return Ok(None);
+            };
+            let tags = self.ctx.tag_columns.clone();
+            let fields = self.ctx.field_columns.clone();
+            // A `__field__` matcher narrows the field set in a projection the existing planner
+            // builds, and the raw series scan below this node has no equivalent: it reports every
+            // field the scan carries. Binding all of them would fold fields the query excluded, so
+            // the route is declined until the field selector is reused here.
+            if self.ctx.field_column_matcher.is_some() || fields.is_empty() {
+                return Ok(None);
+            }
+            // The selector's own table scan, built by the same method the existing path uses:
+            // the physical planner turns it into the region scan the node reads, and building a
+            // scan here instead would let the two paths disagree about the columns they read.
+            let table_ref = self.table_ref()?;
+            let mut input = self.create_table_scan_plan(table_ref).await?;
+            let logical_scan = metric_scan_and_table_id(&input);
+            let has_verified_metric_rewrite = logical_scan.is_some();
+            let scan = match logical_scan {
+                Some((mut scan, predicate)) => {
+                    // Preserve logical field order and the table restriction on the direct
+                    // physical scan.
+                    let source_schema = scan.source.schema();
+                    let Some(mut ordered_projection) = fields
+                        .iter()
+                        .map(|field| source_schema.index_of(field).ok())
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        return Ok(None);
+                    };
+                    let original_projection = scan.projection.as_ref();
+                    let selected_indices = original_projection
+                        .cloned()
+                        .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
+                    for index in selected_indices {
+                        let is_field = fields
+                            .iter()
+                            .any(|field| field == source_schema.field(index).name());
+                        if !is_field && !ordered_projection.contains(&index) {
+                            ordered_projection.push(index);
+                        }
+                    }
+                    scan.filters.push(predicate);
+                    scan = TableScanBuilder::from(scan)
+                        .with_projection(Some(ordered_projection))
+                        .build()
+                        .context(DataFusionPlanningSnafu)?;
+                    input = LogicalPlan::TableScan(scan.clone());
+                    scan
+                }
+                None => match &input {
+                    LogicalPlan::TableScan(scan) => scan.clone(),
+                    _ => return Ok(None),
+                },
+            };
+            let table = self.table_from_source(&scan.source)?;
+            let table_meta = &table.table_info().meta;
+            // An engine without a raw-series scanner has no frame to give this node, and by the
+            // time the physical planner asks, the logical plan is already this node: the refusal
+            // there is a planning error, not a fallback. So the engine is checked here, where the
+            // existing plan is still the answer. A file-engine table is the concrete case: its
+            // scanner is a `SinglePartitionScanner`, which leaves `raw_series_schema` at the
+            // default `None`. A metric-engine table is served only through the logical rewrite
+            // recognised above, which is what makes its series the table's own.
+            if !supports_native_raw_series(&table_meta.engine)
+                || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
+            {
+                return Ok(None);
+            }
+            // The region's raw-series preflight refuses these, and the physical layer turns that
+            // refusal into an error, so decline this route here instead.
+            let time_index_type = table_meta
+                .schema
+                .timestamp_column()
+                .map(|column| &column.data_type);
+            if time_index_type
+                != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
+                || table_meta
+                    .options
+                    .extra_options
+                    .get(store_api::mito_engine_options::APPEND_MODE_KEY)
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+            {
+                return Ok(None);
+            }
+            // FusedSeries evaluates each region independently, so partition keys must identify a
+            // series.
+            if !table
+                .table_info()
+                .meta
+                .partition_column_names()
+                .all(|column| tags.iter().any(|tag| tag == column))
+            {
+                return Ok(None);
+            }
+            // A window over a native histogram yields a histogram, which the output schema below
+            // cannot declare; the existing path evaluates those with its own kernels.
+            if Self::field_columns_contain_native_histogram(input.schema(), &fields) {
+                return Ok(None);
+            }
+            // The region's raw series preflight serves a field only when it is numeric or a native
+            // histogram, and the physical layer turns that refusal into a planning error because
+            // the logical plan is already fixed by then. A table whose selected fields are, say, a
+            // string and a boolean therefore has to be declined here, while the existing plan is
+            // still the fallback - `stringsfield` over such a table answered normally before this
+            // route existed.
+            if !Self::field_columns_are_raw_series_servable(input.schema(), &fields) {
+                return Ok(None);
+            }
+            let series_schema = Arc::new(SeriesSchema {
+                fields: fields
+                    .iter()
+                    .map(|name| FieldSpec {
+                        name: Arc::from(name.as_str()),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                eval_grid: None,
+            });
+            // The row filter is the selector's own: the time range is added after compiling,
+            // because only the compiler knows whether this occurrence reads a window or one
+            // instant.
+            let mut filters = Self::matchers_to_expr(matchers, input.schema())?;
+            if let LogicalPlan::TableScan(table_scan) = &mut input {
+                table_scan.filters.append(&mut filters);
+            } else {
+                return Ok(None);
+            }
+            prepared.push(FusedSeriesInput {
+                series_schema,
+                metric_name: Some(Arc::from(metric)),
+                time_index: time,
+                tags,
+                input,
+            });
+        }
+        self.ctx = original_context;
+        if prepared
+            .windows(2)
+            .any(|w| w[0].time_index != w[1].time_index || w[0].tags != w[1].tags)
+        {
             return Ok(None);
         }
-
-        let binding = FusedSeriesBinding {
-            series_schema,
-            // The tree's own output is evaluated on the statement's grid, and the binding names
-            // the same one, so a chunk's absolute positions are read on the grid it was computed
-            // on.
-            grid,
-            metric_name: Some(Arc::from(table_name.as_str())),
-            time_index: time_index.clone(),
-            tags: tags.clone(),
+        // The compiler binds one input per selector in the same pre-order `collect_selectors`
+        // walks, so position i of both lists is the same occurrence. This is the guard that the
+        // two walks agree: a mismatch is a compiler defect, not a query this route can plan.
+        let identities: Vec<(Option<String>, Matchers, i64, Option<i64>)> = selectors
+            .iter()
+            .map(|selector| {
+                let offset_ms = selector
+                    .offset
+                    .as_ref()
+                    .map(|o| match o {
+                        promql_parser::parser::Offset::Pos(d) => d.as_millis() as i64,
+                        promql_parser::parser::Offset::Neg(d) => -(d.as_millis() as i64),
+                    })
+                    .unwrap_or_default();
+                Ok((
+                    selector.name.clone(),
+                    selector.matchers.clone(),
+                    offset_ms,
+                    self.at_ref_time(&selector.at, &selector.offset)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bind_index = std::cell::Cell::new(0usize);
+        let compiled = match compile_selectors(
+            &stmt,
+            &|req| {
+                let i = bind_index.get();
+                bind_index.set(i + 1);
+                let (Some(prepared_input), Some(identity)) = (prepared.get(i), identities.get(i))
+                else {
+                    return Err(DataFusionError::Internal(
+                        "a selector was bound that the planner did not prepare".into(),
+                    ));
+                };
+                if *identity
+                    != (
+                        req.metric.clone(),
+                        req.matchers.clone(),
+                        req.offset_ms,
+                        req.at_ms,
+                    )
+                {
+                    return Err(DataFusionError::Internal(
+                        "the compiler and the planner walk the selectors differently".into(),
+                    ));
+                }
+                Ok(Arc::clone(&prepared_input.series_schema))
+            },
+            NATIVE_ORDERING,
+        ) {
+            Ok(v) => v,
+            // The compiler refusing a shape is this route declining it.
+            Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+            Err(e) => return Err(e).context(DataFusionPlanningSnafu),
         };
-        let output_schema = fused_output_schema(&fields, &tags, &time_index)?;
+        // An aggregate or a vector operation (`sort`, `absent`, `topk`, `histogram_quantile`, ...)
+        // reads the whole vector at each grid point rather than one series at a time, so it cannot
+        // be evaluated by one executor per scan partition. Declining here is the only place that
+        // still works: once the `FusedSeries` node exists the logical plan is fixed, and the
+        // categorizer merely declining to push it down would leave a node the physical layer must
+        // build anyway. A binary operation pairs one series with another and reads each of them
+        // point-wise, so a tree rooted in one keeps the route: its operands are the independent
+        // scans prepared above.
+        //
+        // TEMPORARY: the exception below is stated over the root alone, while the classifier it
+        // narrows is a whole-tree walk. The two have to be reconciled with the per-operand
+        // point-wise check the shared gate will own, so this narrowing is the first stage's anchor
+        // rather than the shape to keep.
+        if !matches!(compiled.tree.root().expr, NativeExpr::Binary { .. })
+            && reads_across_series(compiled.tree.root())
+        {
+            return Ok(None);
+        }
+        if compiled.inputs.len() != prepared.len() {
+            return Err(DataFusionError::Internal(
+                "the compiled tree reads a different number of inputs than the planner prepared"
+                    .into(),
+            ))
+            .context(DataFusionPlanningSnafu);
+        }
+        let mut inputs = Vec::with_capacity(prepared.len());
+        for (index, (compiled_input, mut input)) in compiled.inputs.iter().zip(prepared).enumerate()
+        {
+            // The range this selector reads is the compiler's own: a window and an instant differ
+            // in which side of the lookback or range their scan starts on, and an anchor can move
+            // the whole range outside the statement's.
+            let (start, end, inclusive) = compiled_input
+                .requirement
+                .raw_scan_bounds()
+                .context(DataFusionPlanningSnafu)?;
+            let time = input.time_index.clone();
+            let mut scan = input.input;
+            let filter = scan_time_filter(start, end, inclusive, scan.schema(), &time)?;
+            if let (LogicalPlan::TableScan(table_scan), Some(filter)) = (&mut scan, filter) {
+                table_scan.filters.push(filter);
+            } else if !matches!(scan, LogicalPlan::TableScan(_)) {
+                return Err(DataFusionError::Internal(format!(
+                    "the input at {index} is not the table scan this route prepared"
+                )))
+                .context(DataFusionPlanningSnafu);
+            }
+            input.input = scan;
+            inputs.push(input);
+        }
+        let root_fields = compiled
+            .tree
+            .root()
+            .output
+            .samples()
+            .ok_or_else(|| DataFusionError::Internal("native tree root has no samples".into()))
+            .context(DataFusionPlanningSnafu)?
+            .fields
+            .iter()
+            .map(|f| f.name.to_string())
+            .collect::<Vec<_>>();
+        if root_fields.iter().any(|field| {
+            !inputs.iter().any(|input| {
+                input
+                    .series_schema
+                    .fields
+                    .iter()
+                    .any(|f| f.name.as_ref() == field)
+            })
+        }) {
+            return Ok(None);
+        }
+        let time = inputs[0].time_index.clone();
+        let tags = inputs[0].tags.clone();
+        let output_schema = fused_output_schema(&root_fields, &tags, &time)?;
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
-            tree,
-            binding,
-            input,
+            compiled.tree,
+            FusedSeriesBinding { grid },
+            inputs,
             output_schema,
         )
         .context(DataFusionPlanningSnafu)?;
-
         Ok(Some(LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         })))
+    }
+
+    /// Offers an `EXPLAIN` statement's body to the native compiler, and wraps the plan it makes.
+    ///
+    /// `TQL EXPLAIN (…) <query>` is the statement whose root extension wraps the query, and the
+    /// explanation a reader gets should be of the plan that query runs. Only the two plain
+    /// explanations are handled: `ANALYZE`, which runs the plan and reports its metrics, and
+    /// `EXPLAIN VERBOSE` are left to the existing path, so this adds nothing to what those report.
+    pub(super) async fn try_plan_native_fused_explain(
+        &mut self,
+        prom_expr: &PromExpr,
+    ) -> Result<Option<LogicalPlan>> {
+        let PromExpr::Extension(extension) = prom_expr else {
+            return Ok(None);
+        };
+        let explain = match extension.expr.name() {
+            EXPLAIN_NODE_NAME => false,
+            EXPLAIN_VERBOSE_NODE_NAME => true,
+            _ => return Ok(None),
+        };
+        let children = extension.expr.children();
+        let [body] = children else {
+            return Ok(None);
+        };
+        let Some(plan) = self.try_plan_native_fused(body).await? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            LogicalPlanBuilder::from(plan)
+                .explain(explain, false)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?,
+        ))
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -352,6 +492,87 @@ impl PromPlanner {
             lookback_delta: Duration::from_millis(self.ctx.lookback_delta as u64),
         })
     }
+}
+
+/// The time-range filter a selector's scan reads, from the bounds its compiled requirement names.
+///
+/// The lower edge is exclusive unless the requirement says otherwise, which is how a window and a
+/// positive lookback read; an inclusive edge is what a zero lookback instant selection has. The
+/// bound is expressed in the scan's own timestamp unit, and a bound that unit cannot represent is
+/// left out rather than widened: the other side still prunes, and the evaluator applies the exact
+/// rule either way.
+fn scan_time_filter(
+    start: i64,
+    end: i64,
+    inclusive: bool,
+    schema: &DFSchema,
+    time_column: &str,
+) -> Result<Option<DfExpr>> {
+    use datafusion::scalar::ScalarValue;
+    let Some(index) = schema.index_of_column_by_name(None, time_column) else {
+        return Ok(None);
+    };
+    let unit = match &schema.field(index).data_type() {
+        arrow::datatypes::DataType::Timestamp(unit, _) => *unit,
+        _ => return Ok(None),
+    };
+    let native = |milliseconds: i128| match unit {
+        arrow::datatypes::TimeUnit::Second => milliseconds.div_euclid(1_000),
+        arrow::datatypes::TimeUnit::Millisecond => milliseconds,
+        arrow::datatypes::TimeUnit::Microsecond => milliseconds * 1_000,
+        arrow::datatypes::TimeUnit::Nanosecond => milliseconds * 1_000_000,
+    };
+    let literal = |milliseconds: i128| -> Option<DfExpr> {
+        let value = i64::try_from(native(milliseconds)).ok()?;
+        Some(DfExpr::Literal(
+            match unit {
+                arrow::datatypes::TimeUnit::Second => {
+                    ScalarValue::TimestampSecond(Some(value), None)
+                }
+                arrow::datatypes::TimeUnit::Millisecond => {
+                    ScalarValue::TimestampMillisecond(Some(value), None)
+                }
+                arrow::datatypes::TimeUnit::Microsecond => {
+                    ScalarValue::TimestampMicrosecond(Some(value), None)
+                }
+                arrow::datatypes::TimeUnit::Nanosecond => {
+                    ScalarValue::TimestampNanosecond(Some(value), None)
+                }
+            },
+            None,
+        ))
+    };
+    let column = DfExpr::Column(datafusion::common::Column::from_name(time_column));
+    let lower = literal(i128::from(start)).map(|literal| {
+        if inclusive {
+            column.clone().gt_eq(literal)
+        } else if unit == arrow::datatypes::TimeUnit::Millisecond {
+            // An exclusive edge on a millisecond axis is the next representable instant, which is
+            // how the existing selector filter states it.
+            literal_or_next(start).map_or_else(
+                || column.clone().gt(literal.clone()),
+                |next| column.clone().gt_eq(next),
+            )
+        } else {
+            column.clone().gt(literal)
+        }
+    });
+    let upper = literal(i128::from(end)).map(|literal| column.clone().lt_eq(literal));
+    Ok(match (lower, upper) {
+        (Some(lower), Some(upper)) => Some(lower.and(upper)),
+        (Some(one), None) | (None, Some(one)) => Some(one),
+        (None, None) => None,
+    })
+}
+
+/// The literal one millisecond after `start`, for an exclusive lower edge on a millisecond axis.
+fn literal_or_next(start: i64) -> Option<DfExpr> {
+    use datafusion::scalar::ScalarValue;
+    let next = start.checked_add(1)?;
+    Some(DfExpr::Literal(
+        ScalarValue::TimestampMillisecond(Some(next), None),
+        None,
+    ))
 }
 
 /// The columns a [`FusedSeries`] node produces.
@@ -394,22 +615,43 @@ fn fused_output_schema(
     ))
 }
 
-/// The one selector `expr` folds, if it names exactly one.
+/// Every selector `expr` reads, in the order the compiler binds them.
 ///
-/// The walk follows the grammar the native compiler accepts — a call, a range selector, a selector
-/// and parentheses — and stops at every other shape, because a shape the compiler cannot compile
-/// needs no selector resolved. Two distinct selectors are not one input, and a tree built over the
-/// wrong one of them would evaluate a window the query did not write.
-fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
+/// The order is the compiler's own: it compiles a node's operands in the order they were written, so
+/// this walk goes into the same children in the same order. The list is then matched position by
+/// position against the compiled inputs, which is what makes a walk that visits a different set the
+/// signal that the two disagree rather than a silent mismatch of selector to scan.
+fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) {
     match expr {
-        PromExpr::MatrixSelector(matrix) => Some(matrix.range.as_millis() as i64),
-        PromExpr::Paren(paren) => selector_range_millis(&paren.expr),
-        PromExpr::Call(call) => call
-            .args
-            .args
-            .iter()
-            .find_map(|arg| selector_range_millis(arg)),
-        _ => None,
+        PromExpr::VectorSelector(selector) => out.push(selector),
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(vs),
+        PromExpr::Paren(ParenExpr { expr }) => collect_selectors(expr, out),
+        // Left before right, because a non-commutative operator means what that order says.
+        PromExpr::Binary(binary) => {
+            collect_selectors(&binary.lhs, out);
+            collect_selectors(&binary.rhs, out);
+        }
+        // The compiler folds a negation into a multiplication whose operand comes second, but the
+        // selector is the only thing this walk collects, so the order inside one subtree does not
+        // depend on where the constant sits.
+        PromExpr::Unary(unary) => collect_selectors(&unary.expr, out),
+        PromExpr::Call(call) => {
+            // A label rewrite adds a label the node's output schema cannot declare: that schema is
+            // built from the table's own tags, so folding `label_replace`/`label_join` in would
+            // silently drop the destination label the existing plan projects.
+            if matches!(call.func.name, "label_replace" | "label_join") {
+                return;
+            }
+            for arg in &call.args.args {
+                collect_selectors(arg, out);
+            }
+        }
+        // An aggregate's parameter is a constant, so only its input holds a selector.
+        PromExpr::Aggregate(aggregate) => collect_selectors(&aggregate.expr, out),
+        // A subquery evaluates its own expression on a grid of its own, and the compiler binds that
+        // expression's selectors before the window above them.
+        PromExpr::Subquery(subquery) => collect_selectors(&subquery.expr, out),
+        _ => {}
     }
 }
 
@@ -453,35 +695,6 @@ fn metric_scan_and_table_id(
         return None;
     };
     Some((scan.clone(), filter.predicate.clone()))
-}
-
-fn single_selector(expr: &PromExpr) -> Option<&VectorSelector> {
-    let mut selectors = Vec::new();
-    collect_selectors(expr, &mut selectors);
-    match selectors.as_slice() {
-        [only] => Some(only),
-        _ => None,
-    }
-}
-
-fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) {
-    match expr {
-        PromExpr::VectorSelector(selector) => out.push(selector),
-        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(vs),
-        PromExpr::Paren(ParenExpr { expr }) => collect_selectors(expr, out),
-        PromExpr::Call(call) => {
-            // A label rewrite adds a label the node's output schema cannot declare: that schema is
-            // built from the table's own tags, so folding `label_replace`/`label_join` in would
-            // silently drop the destination label the existing plan projects.
-            if matches!(call.func.name, "label_replace" | "label_join") {
-                return;
-            }
-            for arg in &call.args.args {
-                collect_selectors(arg, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
