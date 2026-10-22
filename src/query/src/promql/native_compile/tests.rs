@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
@@ -3126,11 +3126,25 @@ fn large_subquery_child_grids_compile_deferred() {
     assert_eq!(grid.2, range_ms);
 }
 
+/// The largest millisecond endpoint the platform can represent as a `SystemTime`.
+///
+/// The tests below need an endpoint close enough to `i64::MAX` milliseconds that a one-second
+/// rounding or a one-millisecond offset crosses the representable range. Unix-like platforms can
+/// hold that instant; Windows represents `SystemTime` as a 64-bit count of 100-nanosecond
+/// intervals since 1601, so the same instant does not fit and `UNIX_EPOCH + duration` panics. The
+/// behaviour under test is about arithmetic on the millisecond value, not about the platform's
+/// clock range, so a platform that cannot represent the instant skips instead of failing.
+fn extreme_millisecond_endpoint() -> Option<SystemTime> {
+    UNIX_EPOCH.checked_add(Duration::from_millis(i64::MAX as u64))
+}
+
 /// A sampled child endpoint can fit even when the unrounded read-window endpoint does not.
 #[test]
 fn a_subquery_accepts_an_in_range_sampled_endpoint() {
+    let Some(endpoint) = extreme_millisecond_endpoint() else {
+        return;
+    };
     let mut stmt = eval_stmt("rate(x[1s:1s] offset -1ms)");
-    let endpoint = UNIX_EPOCH + Duration::from_millis(i64::MAX as u64);
     stmt.start = endpoint;
     stmt.end = endpoint;
     stmt.interval = Duration::from_millis(1);
@@ -3149,6 +3163,9 @@ fn a_subquery_accepts_an_in_range_sampled_endpoint() {
 /// An anchored fold offset that cannot be represented as i64 is a plan error.
 #[test]
 fn a_subquery_with_an_overflowing_fold_offset_is_refused() {
+    let Some(endpoint) = extreme_millisecond_endpoint() else {
+        return;
+    };
     let mut stmt = eval_stmt("rate(x[5m:1m] @ 0)");
     let PromExpr::Call(call) = &mut stmt.expr else {
         unreachable!("query parses to a call");
@@ -3156,9 +3173,7 @@ fn a_subquery_with_an_overflowing_fold_offset_is_refused() {
     let PromExpr::Subquery(subquery) = &mut *call.args.args[0] else {
         unreachable!("call argument parses to a subquery");
     };
-    subquery.at = Some(AtModifier::At(
-        UNIX_EPOCH + Duration::from_millis(i64::MAX as u64),
-    ));
+    subquery.at = Some(AtModifier::At(endpoint));
     subquery.offset = Some(Offset::Neg(Duration::from_millis(1)));
 
     let error = compile(&stmt, raw_schema(), SeriesOrdering::KeyThenTime)
