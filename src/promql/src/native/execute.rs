@@ -3692,9 +3692,10 @@ impl NativeExecutor {
 
 /// Maps one chunk with `ops`, keeping its axis and its closing.
 ///
-/// Mapping is point-wise over valued positions, so a chunk whose values survive keeps exactly the
-/// rows it came with: a position no field fills is not a row of any chunk, and mapping does not
-/// invent one. `None` means the operation emptied every position, which yields no chunk at all
+/// Mapping is point-wise over valued positions: a float chunk keeps the rows it came with, and a
+/// chunk holding native histograms loses the rows only histograms filled, as math skips them; a
+/// position no field fills is not a row of any chunk, and mapping does not invent one. `None` means
+/// the operation emptied every position, which yields no chunk at all
 /// unless this chunk closed its series: a closing chunk is still handed over, holding no position,
 /// because a consumer tells "nothing more here" from "no more input" by that chunk alone.
 fn map_chunk(
@@ -3706,7 +3707,8 @@ fn map_chunk(
     for &op in ops {
         series = match map_math(schema, &series, op)? {
             Some(mapped) => mapped,
-            // `clamp` with `max < min` is the empty vector: every position it held was decided and
+            // `clamp` with `max < min` is the empty vector, and math skips native histograms, so a
+            // series without a float value has none left: every position it held was decided and
             // holds no value now, so there is no row to hand over.
             None => {
                 return if chunk.is_last {
