@@ -909,6 +909,25 @@ async fn build_test_table_provider_with_partition_columns(
     num_field: usize,
     partition_key_indices: Vec<usize>,
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        table_name_tuples,
+        num_tag,
+        num_field,
+        partition_key_indices,
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .await
+}
+
+async fn build_test_table_provider_with_options(
+    table_name_tuples: &[(String, String)],
+    num_tag: usize,
+    num_field: usize,
+    partition_key_indices: Vec<usize>,
+    timestamp_type: ConcreteDataType,
+    append_mode: bool,
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (schema_name, table_name) in table_name_tuples {
         let mut columns = vec![];
@@ -920,12 +939,8 @@ async fn build_test_table_provider_with_partition_columns(
             ));
         }
         columns.push(
-            ColumnSchema::new(
-                "timestamp".to_string(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
+            ColumnSchema::new("timestamp".to_string(), timestamp_type.clone(), false)
+                .with_time_index(true),
         );
         for i in 0..num_field {
             columns.push(ColumnSchema::new(
@@ -941,6 +956,17 @@ async fn build_test_table_provider_with_partition_columns(
             .partition_key_indices(partition_key_indices.clone())
             .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
             .next_column_id(1024)
+            .options(table::requests::TableOptions {
+                extra_options: if append_mode {
+                    HashMap::from([(
+                        store_api::mito_engine_options::APPEND_MODE_KEY.to_string(),
+                        "true".to_string(),
+                    )])
+                } else {
+                    HashMap::new()
+                },
+                ..Default::default()
+            })
             .build()
             .unwrap();
         let table_info = TableInfoBuilder::default()
@@ -1712,6 +1738,70 @@ async fn native_fused_time_partitioned_table_falls_back() {
     let display = plan.display_indent().to_string();
     assert!(!display.contains("FusedSeries"), "{display}");
     assert!(display.contains("PromRangeManipulate"), "{display}");
+}
+
+#[tokio::test]
+async fn native_fused_non_millisecond_time_index_falls_back() {
+    let table_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_microsecond_datatype(),
+        false,
+    )
+    .await;
+    let native =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
+    let fallback_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_microsecond_datatype(),
+        false,
+    )
+    .await;
+    let without_flag =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", false, fallback_provider)
+            .await;
+    assert!(!native.display_indent().to_string().contains("FusedSeries"));
+    assert_eq!(
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string()
+    );
+}
+
+#[tokio::test]
+async fn native_fused_append_mode_table_falls_back() {
+    let table_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        true,
+    )
+    .await;
+    let native =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
+    let fallback_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        true,
+    )
+    .await;
+    let without_flag =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", false, fallback_provider)
+            .await;
+    assert!(!native.display_indent().to_string().contains("FusedSeries"));
+    assert_eq!(
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string()
+    );
 }
 
 #[tokio::test]

@@ -166,6 +166,22 @@ impl PromPlanner {
             return Ok(None);
         };
         let table = self.table_from_source(&scan.source)?;
+        let table_meta = &table.table_info().meta;
+        // The region's raw-series preflight refuses these, and the physical layer turns that refusal into an error, so decline this route here instead.
+        let time_index_type = table_meta
+            .schema
+            .timestamp_column()
+            .map(|column| &column.data_type);
+        if time_index_type
+            != Some(&datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype())
+            || table_meta
+                .options
+                .extra_options
+                .get(store_api::mito_engine_options::APPEND_MODE_KEY)
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        {
+            return Ok(None);
+        }
         // FusedSeries evaluates each region independently, so partition keys must identify a series.
         if !table
             .table_info()
