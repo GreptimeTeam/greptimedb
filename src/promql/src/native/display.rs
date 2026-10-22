@@ -28,7 +28,7 @@ use datatypes::series::time::EvalGrid;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundSelect, BoundWindow, Grouping, NativeExpr, NativeNode,
+    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode,
     NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
@@ -102,14 +102,14 @@ fn describe(node: &NativeNode) -> String {
             let ops: Vec<String> = op.ops.iter().map(math_op).collect();
             ops.join(", ")
         }
-        NativeExpr::Select { op, .. } => match op {
-            BoundSelect::TopK { k, top, group } => format!(
+        NativeExpr::Vector { op, .. } => match op {
+            BoundVectorOp::TopK { k, top, group } => format!(
                 "{} {k} {}",
                 if *top { "topk" } else { "bottomk" },
                 grouping(group)
             ),
-            BoundSelect::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
-            BoundSelect::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
+            BoundVectorOp::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
+            BoundVectorOp::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
         },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} {}",
@@ -272,7 +272,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Window { .. } => "Window",
         NativeExpr::Map { .. } => "Map",
         NativeExpr::Aggregate { .. } => "Aggregate",
-        NativeExpr::Select { .. } => "Select",
+        NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
     }
 }

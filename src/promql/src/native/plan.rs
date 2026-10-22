@@ -228,7 +228,7 @@ pub struct BoundAggregate {
 /// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
 /// field.
 #[derive(Clone, Debug, PartialEq)]
-pub enum BoundSelect {
+pub enum BoundVectorOp {
     /// `topk` (`top`) or `bottomk`: the `k` largest or smallest values of each group.
     TopK { k: f64, top: bool, group: Grouping },
     /// `limitk`: the first `k` series of each group that hold a sample, in input order.
@@ -265,10 +265,10 @@ pub enum NativeExpr {
         input: Box<NativeNode>,
         op: BoundAggregate,
     },
-    /// A selection of samples out of the whole input vector.
-    Select {
+    /// An operation over the whole input vector at each grid point.
+    Vector {
         input: Box<NativeNode>,
-        op: BoundSelect,
+        op: BoundVectorOp,
     },
     /// A binary operation between two inputs, with its matching rules.
     ///
@@ -411,19 +411,19 @@ impl NativeNode {
                 ensure_same_fields(&input.output, &self.output, "a map")?;
                 ensure_grid(&self.output, input_grid, "a map")?;
             }
-            NativeExpr::Select { input, .. } => {
+            NativeExpr::Vector { input, .. } => {
                 input.validate()?;
-                // A selection hands on samples of its input unchanged, so it consumes and produces
+                // A vector operation keeps the input's fields and grid, so it consumes and produces
                 // the same evaluated vector.
                 let Some((_, input_grid)) = evaluated_vector(&input.output) else {
                     return Err(invalid(&format!(
-                        "a selection consumes an evaluated vector, not {}",
+                        "a vector operation consumes an evaluated vector, not {}",
                         input.output.describe()
                     )));
                 };
-                ensure_samples(&self.output, "a selection")?;
-                ensure_same_fields(&input.output, &self.output, "a selection")?;
-                ensure_grid(&self.output, input_grid, "a selection")?;
+                ensure_samples(&self.output, "a vector operation")?;
+                ensure_same_fields(&input.output, &self.output, "a vector operation")?;
+                ensure_grid(&self.output, input_grid, "a vector operation")?;
             }
             NativeExpr::Aggregate { input, op } => {
                 input.validate()?;

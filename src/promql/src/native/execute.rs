@@ -40,7 +40,7 @@
 //! operands and runs the matching kernel once the input has ended, because the operation pairs two
 //! whole vectors point by point and nothing is decided for a point until both sides are complete.
 //! The chunks of one logical series are assembled into the single series the kernel matches before it
-//! runs, so a series that arrived in many chunks is one candidate, not one per chunk. A selection
+//! runs, so a series that arrived in many chunks is one candidate, not one per chunk. A vector operation
 //! (`topk`, `limitk`, `limit_ratio`) reads its one input the same way, because which samples it
 //! keeps at a point depends on every series present there.
 //!
@@ -99,7 +99,7 @@ use crate::map::{MathOp, drop_metric_name, map_math};
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{NodeMetrics, NodePath};
 use crate::native::plan::{
-    BoundInstant, BoundSelect, Grouping, NativeExpr, NativeNode, NativeTree,
+    BoundInstant, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
 };
 use crate::range_eval::RangeEvaluator;
 use crate::select;
@@ -385,7 +385,7 @@ enum NodeTag {
     /// Matches two evaluated vectors and applies one operation to every matched pair of series.
     Binary,
     /// Keeps some samples of its whole input vector at each grid point.
-    Select,
+    Vector,
 }
 
 impl NodeTag {
@@ -397,7 +397,7 @@ impl NodeTag {
             Self::Window => "window",
             Self::Map => "map",
             Self::Binary => "binary",
-            Self::Select => "selection",
+            Self::Vector => "vector operation",
         }
     }
 }
@@ -1252,7 +1252,7 @@ impl InstantRuntime {
 }
 
 /// An input a node reads whole before it computes -- one operand of a binary node, or the input of a
-/// selection -- chunk by chunk, until it ends.
+/// vector operation -- chunk by chunk, until it ends.
 ///
 /// What is kept is the series each chunk carries, not a concatenation of them: a chunk is retained
 /// as it arrives and nothing is copied on the way in, because the chunks of a series can share an
@@ -1591,22 +1591,22 @@ fn side_name(index: usize) -> &'static str {
 enum Reader<'a> {
     /// The operand at `side` of the binary node at `path`.
     Operand { path: &'a NodePath, side: usize },
-    /// The input of the selection at the path.
-    Select(&'a NodePath),
+    /// The input of the vector operation at the path.
+    Vector(&'a NodePath),
 }
 
 impl Reader<'_> {
     fn owner(self) -> String {
         match self {
             Self::Operand { path, .. } => format!("the binary node at {path}"),
-            Self::Select(path) => format!("the selection at {path}"),
+            Self::Vector(path) => format!("the vector operation at {path}"),
         }
     }
 
     fn input(self) -> String {
         match self {
             Self::Operand { side, .. } => format!("its {} operand", side_name(side)),
-            Self::Select(_) => "its input".to_string(),
+            Self::Vector(_) => "its input".to_string(),
         }
     }
 }
@@ -1776,14 +1776,14 @@ impl BinaryRuntime {
     }
 }
 
-/// What a selection node holds: its whole input until it ends.
+/// What a vector node holds: its whole input until it ends.
 ///
 /// Which samples `topk` or `limitk` keeps at a point depends on every series present there, so,
 /// like a binary node, this node retains every chunk its input hands over, assembles the chunks of
 /// each logical series, and runs its kernel once, after the input has ended. The results are queued
 /// in the node's own output queue and handed over from there.
-struct SelectRuntime {
-    op: BoundSelect,
+struct VectorRuntime {
+    op: BoundVectorOp,
     /// The layout of the input, which is also what the node produces.
     schema: Arc<SeriesSchema>,
     input: RetainedInput,
@@ -1794,8 +1794,8 @@ struct SelectRuntime {
     computed: bool,
 }
 
-impl SelectRuntime {
-    fn new(op: BoundSelect, schema: Arc<SeriesSchema>) -> Self {
+impl VectorRuntime {
+    fn new(op: BoundVectorOp, schema: Arc<SeriesSchema>) -> Self {
         Self {
             op,
             schema,
@@ -1809,20 +1809,20 @@ impl SelectRuntime {
     /// already ran.
     ///
     /// The reservation covers the retained chunks, the assembled series and a rough estimate of the kernel's workspace and of the series it rebuilds
-    /// ([`selection_workspace_bytes`]). The kernels do not report their workspace as they allocate,
+    /// ([`vector_workspace_bytes`]). The kernels do not report their workspace as they allocate,
     /// so the estimate is reserved once, before the kernel runs.
     fn compute(&mut self, path: &NodePath, buffer: &mut NodeBuffer) -> Result<Option<Vec<Series>>> {
         if self.computed {
             return Ok(None);
         }
-        self.input.ensure_closed(Reader::Select(path))?;
+        self.input.ensure_closed(Reader::Vector(path))?;
         let retained = self.input.held;
         let assembly = self
             .input
             .assembly_bytes(&self.schema)
-            .ok_or_else(|| select_overflow(path))?;
+            .ok_or_else(|| vector_overflow(path))?;
         buffer.grow(assembly)?;
-        let assembled = match self.input.assemble(&self.schema, Reader::Select(path)) {
+        let assembled = match self.input.assemble(&self.schema, Reader::Vector(path)) {
             Ok(assembled) => assembled,
             Err(error) => {
                 buffer.resize(retained)?;
@@ -1845,14 +1845,11 @@ impl SelectRuntime {
         } else {
             assembled
         };
-        buffer.grow(selection_workspace_bytes(
-            &assembled,
-            self.schema.fields.len(),
-        ))?;
+        buffer.grow(vector_workspace_bytes(&assembled, self.schema.fields.len()))?;
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            select_series(&self.op, &self.schema, &assembled)?
+            vector_series(&self.op, &self.schema, &assembled)?
         };
         drop(assembled);
         self.input.release();
@@ -1861,17 +1858,17 @@ impl SelectRuntime {
     }
 }
 
-/// The error for a selection whose reservation does not fit an address space.
-fn select_overflow(path: &NodePath) -> DataFusionError {
+/// The error for a vector operation whose reservation does not fit an address space.
+fn vector_overflow(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!(
-        "the input of the selection at {path} does not fit one address space: the bytes it would \
+        "the input of the vector operation at {path} does not fit one address space: the bytes it would \
          reserve overflow"
     ))
 }
 
 /// Runs the kernel `op` binds over the whole input.
-fn select_series(
-    op: &BoundSelect,
+fn vector_series(
+    op: &BoundVectorOp,
     schema: &SeriesSchema,
     series: &[Series],
 ) -> Result<Vec<Series>> {
@@ -1880,15 +1877,15 @@ fn select_series(
         Grouping::Without(labels) => select::Grouping::Without(labels.to_vec()),
     };
     match op {
-        BoundSelect::TopK { k, top, group } => {
+        BoundVectorOp::TopK { k, top, group } => {
             select::topk(*k, *top, &grouping(group), schema, series)
         }
-        BoundSelect::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, series),
-        BoundSelect::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, series),
+        BoundVectorOp::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, series),
+        BoundVectorOp::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, series),
     }
 }
 
-/// A rough estimate of what a selection kernel allocates over `series`, beside the input it reads.
+/// A rough estimate of what a vector kernel allocates over `series`, beside the input it reads.
 ///
 /// Per row, the `(point, row)` a kept sample is recorded as, the candidate it is ranked as and the
 /// value each field rebuilds it into; per series, its place in the label order and its group, its
@@ -1896,7 +1893,7 @@ fn select_series(
 /// the histograms `limitk` and `limit_ratio` copy into their results, at the widest histogram of
 /// each field. Like [`merge_workspace_bytes`] it is not an allocation bound: vector slack and the
 /// hash table's own layout are not measured.
-fn selection_workspace_bytes(series: &[Series], fields: usize) -> usize {
+fn vector_workspace_bytes(series: &[Series], fields: usize) -> usize {
     let row = std::mem::size_of::<(usize, usize)>()
         + std::mem::size_of::<(usize, usize, f64)>()
         + fields * std::mem::size_of::<f64>();
@@ -2072,7 +2069,7 @@ struct NodeRuntime {
     /// The chunks this node holds for its consumer, each with the estimate it was queued with.
     ///
     /// An input node's queue is filled by the caller, a window's by the chunks it computed while
-    /// flushing its collected input, and a binary or selection node's by the results its kernel
+    /// flushing its collected input, and a binary or vector node's by the results its kernel
     /// produced; no node
     /// uses it for both. A chunk is measured once, as it enters, and the figure it was queued with
     /// is given back as it leaves, so neither the queue nor the handover walks it.
@@ -2087,8 +2084,8 @@ struct NodeRuntime {
     map: Option<MapRuntime>,
     /// What a binary node holds.
     binary: Option<BinaryRuntime>,
-    /// What a selection node holds.
-    select: Option<SelectRuntime>,
+    /// What a vector node holds.
+    vector: Option<VectorRuntime>,
     /// The layout the caller's chunks of an input node are checked against.
     ///
     /// A tree with a binary node reads two inputs, and each of them is bound to its own layout, so
@@ -2138,7 +2135,7 @@ impl NodeRuntime {
     /// Hands over the next queued chunk, if there is one, giving back what it was queued with.
     ///
     /// It is the one way a chunk leaves this node's queue: an input node hands over what the caller
-    /// queued, and a binary or selection node hands over what its kernel produced. `values` is how
+    /// queued, and a binary or vector node hands over what its kernel produced. `values` is how
     /// that node counts the values it hands over, because the two do not count the same thing: an
     /// input's figure has always been its positions, while a kernel's result holds one value per
     /// field and a field may have none at a position it decided.
@@ -2340,43 +2337,43 @@ impl NodeRuntime {
         self.queue_results(output)
     }
 
-    /// Retains one chunk of a selection's input, reserved for before it is retained, as
+    /// Retains one chunk of a vector node's input, reserved for before it is retained, as
     /// [`Self::retain_binary`] retains an operand's.
-    fn retain_select(&mut self, path: &NodePath, chunk: NativeChunk) -> Result<()> {
+    fn retain_vector(&mut self, path: &NodePath, chunk: NativeChunk) -> Result<()> {
         let NativeChunk::Evaluated(chunk) = chunk else {
             return Err(DataFusionError::Execution(format!(
-                "the selection at {path} consumes evaluated chunks, not raw samples"
+                "the vector operation at {path} consumes evaluated chunks, not raw samples"
             )));
         };
-        let select = self.select.as_mut().ok_or_else(|| no_select(path))?;
+        let vector = self.vector.as_mut().ok_or_else(|| no_vector(path))?;
         // What a bound tree says the input produces is not proof of what a chunk carries, so the
         // chunk is checked against the layout before it is retained.
-        validate_binary_operand(select.schema.as_ref(), std::slice::from_ref(&chunk.series))
+        validate_binary_operand(vector.schema.as_ref(), std::slice::from_ref(&chunk.series))
             .map_err(|error| {
                 DataFusionError::Execution(format!(
-                    "the selection at {path} rejected its input: {error}"
+                    "the vector operation at {path} rejected its input: {error}"
                 ))
             })?;
-        let pending = select.input.pending(&chunk);
+        let pending = vector.input.pending(&chunk);
         let positions = chunk.series.time.len();
         self.buffer.grow(pending)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         {
             let _timer = metrics.timer();
-            let select = self.select.as_mut().ok_or_else(|| no_select(path))?;
-            select.input.retain(chunk, Reader::Select(path))?;
-            let retained = select.input.held;
+            let vector = self.vector.as_mut().ok_or_else(|| no_vector(path))?;
+            vector.input.retain(chunk, Reader::Vector(path))?;
+            let retained = vector.input.held;
             self.buffer.resize(retained)?;
         }
         metrics.record_input(1, positions);
         Ok(())
     }
 
-    /// Runs this node's selection kernel and queues the series it kept.
-    fn compute_select(&mut self, path: &NodePath) -> Result<()> {
+    /// Runs this node's vector kernel and queues the series it kept.
+    fn compute_vector(&mut self, path: &NodePath) -> Result<()> {
         let output = {
-            let select = self.select.as_mut().ok_or_else(|| no_select(path))?;
-            select.compute(path, &mut self.buffer)?
+            let vector = self.vector.as_mut().ok_or_else(|| no_vector(path))?;
+            vector.compute(path, &mut self.buffer)?
         };
         let Some(output) = output else {
             return Ok(());
@@ -2606,7 +2603,7 @@ impl NodeRuntime {
         self.window = None;
         self.instant = None;
         self.binary = None;
-        self.select = None;
+        self.vector = None;
         self.source_schema = None;
         self.emitted = None;
         self.merge = None;
@@ -2695,7 +2692,7 @@ impl NativeExecutionState {
                 // types than the kernel takes, so the shape is checked where the operands' layouts
                 // are read.
                 NativeExpr::Binary { .. } => NodeTag::Binary,
-                NativeExpr::Select { .. } => NodeTag::Select,
+                NativeExpr::Vector { .. } => NodeTag::Vector,
                 // The kinds below are legal in a bound tree, and `validate` stays the authority on
                 // that; this runtime simply does not execute them yet. Rejected before a single
                 // chunk is read: a tree the runtime cannot execute must not start, because a
@@ -2711,7 +2708,7 @@ impl NativeExecutionState {
                 window: None,
                 map: None,
                 binary: None,
-                select: None,
+                vector: None,
                 source_schema: None,
                 emitted: None,
                 merge: None,
@@ -2797,18 +2794,18 @@ impl NativeExecutionState {
                     // produced at points that do not collide; the kernel groups and merges them
                     // itself, which is why this node keeps no ledger of what it handed out.
                 }
-                NativeExpr::Select { op, .. } => {
+                NativeExpr::Vector { op, .. } => {
                     let schema = node.output.samples().cloned().ok_or_else(|| {
                         DataFusionError::Execution(format!(
-                            "the selection at {path} does not produce samples"
+                            "the vector operation at {path} does not produce samples"
                         ))
                     })?;
                     // `topk`, `bottomk` and `limitk` rank one value per sample, so their kernels
                     // take one field; `limit_ratio` keeps whole series and takes any number.
-                    if !matches!(op, BoundSelect::LimitRatio { .. }) && schema.fields.len() != 1 {
-                        return Err(not_implemented("multi-field Select", &path));
+                    if !matches!(op, BoundVectorOp::LimitRatio { .. }) && schema.fields.len() != 1 {
+                        return Err(not_implemented("multi-field Vector", &path));
                     }
-                    runtime.select = Some(SelectRuntime::new(op.clone(), schema));
+                    runtime.vector = Some(VectorRuntime::new(op.clone(), schema));
                     // A selection keeps the labels of the series it keeps, so it keeps no ledger of
                     // what it handed out.
                 }
@@ -2827,7 +2824,7 @@ impl NativeExecutionState {
                 NativeExpr::Instant { input, .. }
                 | NativeExpr::Window { input, .. }
                 | NativeExpr::Map { input, .. }
-                | NativeExpr::Select { input, .. } => {
+                | NativeExpr::Vector { input, .. } => {
                     pending.push((input.as_ref(), path.input()));
                     true
                 }
@@ -2894,7 +2891,7 @@ impl NativeExecutionState {
                         // them until the input ends -- so its flag is false whatever theirs are.
                         holds_shared[index] = false;
                     }
-                    NodeTag::Select => {
+                    NodeTag::Vector => {
                         // A selection keeps samples of the series it read, so pieces of one label
                         // set stay pieces: they hold disjoint points, so ranking them apart picks
                         // what ranking the merged series would, and what is above treats them as
@@ -2902,14 +2899,14 @@ impl NativeExecutionState {
                         // order, so it merges the pieces first and hands over whole series.
                         let limitk = matches!(
                             expr,
-                            NativeExpr::Select {
-                                op: BoundSelect::LimitK { .. },
+                            NativeExpr::Vector {
+                                op: BoundVectorOp::LimitK { .. },
                                 ..
                             }
                         );
                         if limitk && input_holds_shared {
-                            if let Some(select) = runtimes[index].select.as_mut() {
-                                select.merge_input = true;
+                            if let Some(vector) = runtimes[index].vector.as_mut() {
+                                vector.merge_input = true;
                             }
                             holds_shared[index] = false;
                         } else {
@@ -3092,9 +3089,9 @@ impl NativeExecutionState {
     /// Reports a stream that ended inside a series, without closing any node.
     ///
     /// Closing is destructive -- a window's evaluator takes itself apart -- and the binary and
-    /// selection nodes still have to compute after this check, so what is read here is only the
+    /// vector nodes still have to compute after this check, so what is read here is only the
     /// state that follows what each node was handed: an input node reports the series it handed
-    /// over without the chunk that ends it, and a binary or selection node reports an input that is
+    /// over without the chunk that ends it, and a binary or vector node reports an input that is
     /// still open. A truncation is therefore refused before a kernel allocates its workspace, rather
     /// than after one has already been computed on half a vector.
     fn unclosed(&self) -> Result<()> {
@@ -3107,8 +3104,8 @@ impl NativeExecutionState {
             if let Some(binary) = &runtime.binary {
                 binary.closed(path)?;
             }
-            if let Some(select) = &runtime.select {
-                select.input.ensure_closed(Reader::Select(path))?;
+            if let Some(vector) = &runtime.vector {
+                vector.input.ensure_closed(Reader::Vector(path))?;
             }
         }
         Ok(())
@@ -3230,7 +3227,7 @@ impl NativeExecutor {
     /// is materialised on their edge -- except below a window that collects its input, which holds
     /// that input until [`Self::finish`]. A binary node is the other exception: it pairs two whole
     /// vectors point by point, so it retains every chunk each operand hands over and reports `None`
-    /// until [`Self::finish`] ends the input, which is when it computes its result. A selection does
+    /// until [`Self::finish`] ends the input, which is when it computes its result. A vector node does
     /// the same with its one input.
     ///
     /// A chunk's `is_last` says the series whose data it carries ended. It does not say its label
@@ -3413,11 +3410,11 @@ impl NativeExecutor {
             NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
                 .input
                 .is_none_or(|child| self.settled(child)),
-            NodeTag::Select => {
+            NodeTag::Vector => {
                 runtime
-                    .select
+                    .vector
                     .as_ref()
-                    .is_some_and(|select| select.computed)
+                    .is_some_and(|vector| vector.computed)
                     && self.state.nodes[index]
                         .input
                         .is_none_or(|child| self.settled(child))
@@ -3589,20 +3586,20 @@ impl NativeExecutor {
                 // does, so its values are counted rather than read as its positions.
                 runtime.pop_queued(evaluated_values)
             }
-            NodeTag::Select => {
+            NodeTag::Vector => {
                 let child = input.ok_or_else(|| missing_input(tag))?;
                 // Which samples are kept at a point is not decided until the whole input has
                 // arrived, so the input is read to the end before anything is handed over.
                 while let Some(chunk) = self.pull(child)? {
                     let path = &self.state.paths[index];
-                    self.state.runtimes[index].retain_select(path, chunk)?;
+                    self.state.runtimes[index].retain_vector(path, chunk)?;
                 }
                 if !self.inputs_finished || !self.settled(child) {
                     return Ok(None);
                 }
                 let path = &self.state.paths[index];
                 let runtime = &mut self.state.runtimes[index];
-                runtime.compute_select(path)?;
+                runtime.compute_vector(path)?;
                 runtime.pop_queued(evaluated_values)
             }
         }
@@ -3898,8 +3895,8 @@ fn no_binary(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!("the node at {path} holds no binary operation"))
 }
 
-fn no_select(path: &NodePath) -> DataFusionError {
-    DataFusionError::Execution(format!("the node at {path} holds no selection"))
+fn no_vector(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!("the node at {path} holds no vector operation"))
 }
 
 /// The error for a reservation the platform cannot express.
