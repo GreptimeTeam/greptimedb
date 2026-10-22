@@ -31,12 +31,13 @@
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
+use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::BinaryMatching;
 
 /// What one node produces.
@@ -269,6 +270,13 @@ pub enum BoundVectorOp {
     /// `limit_ratio`: the series whose label hash falls in the ratio; it keeps whole series, so it
     /// has no grouping.
     LimitRatio { ratio: f64 },
+    /// `sort`, `sort_desc`, `sort_by_label` and `sort_by_label_desc`: the input's series in another
+    /// order, which only an instant result shows. `sort` and `sort_desc` also drop histogram
+    /// samples, in a range result too.
+    Sort(SortOrder),
+    /// `absent`: `1` under `labels` at every point where the input holds no sample. The labels are
+    /// what the compiler derives from the argument's matchers.
+    Absent { labels: MetricName },
 }
 
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.

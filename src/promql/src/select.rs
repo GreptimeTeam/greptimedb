@@ -424,20 +424,30 @@ pub fn absent_labels(matchers: &[LabelMatcher]) -> Result<MetricName> {
     MetricName::try_new(None, labels).map_err(external)
 }
 
-/// Orders the series of an instant result. A range result is returned unchanged: Prometheus
-/// does not sort matrices.
+/// Orders the series of an instant result. A range result keeps its order: Prometheus does not
+/// sort matrices.
+///
+/// `sort` and `sort_desc` drop histogram samples, in a range result too: Prometheus filters them
+/// out at every step (`filterFloats`) before it sorts. The label sorts keep every sample.
 pub fn sort_instant(
     order: &SortOrder,
     schema: &SeriesSchema,
     mut series: Vec<Series>,
 ) -> Result<Vec<Series>> {
     let points = grid_points(schema, &series)?;
+    if matches!(order, SortOrder::Asc | SortOrder::Desc) {
+        single_field(schema, "sort")?;
+        let mut floats = Vec::with_capacity(series.len());
+        for item in series {
+            floats.extend(float_samples(schema, item)?);
+        }
+        series = floats;
+    }
     if points != 1 {
         return Ok(series);
     }
     match order {
         SortOrder::Asc | SortOrder::Desc => {
-            single_field(schema, "sort")?;
             let mut keyed = Vec::with_capacity(series.len());
             for item in series {
                 let value = value_at(&item, 0)?;
@@ -474,6 +484,28 @@ pub fn sort_instant(
             Ok(series)
         }
     }
+}
+
+/// `series` without its histogram samples, `None` when nothing else is left. One field, as `sort`
+/// reads.
+fn float_samples(schema: &SeriesSchema, series: Series) -> Result<Option<Series>> {
+    let field = &series.fields.as_slice()[0];
+    if !field
+        .iter()
+        .any(|sample| matches!(sample, SampleRef::Histogram(_)))
+    {
+        return Ok(Some(series));
+    }
+    let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone()))?;
+    let mut cursor = field.cursor();
+    for (point, row) in series.time.positions() {
+        let value = match cursor.at(row).expect("the axis and the fields are aligned") {
+            SampleRef::Float(value) => Some(value),
+            SampleRef::Missing | SampleRef::Histogram(_) => None,
+        };
+        builder.push(point, &[value])?;
+    }
+    builder.finish(series.metric)
 }
 
 /// Go's `math.NaN()` bit pattern, which Prometheus returns for an undefined scalar.

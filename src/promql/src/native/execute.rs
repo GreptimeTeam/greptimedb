@@ -116,7 +116,7 @@ use crate::native::plan::{
     NativeType,
 };
 use crate::range_eval::RangeEvaluator;
-use crate::select;
+use crate::select::{self, SortOrder};
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels,
     binary_vectors_with_reservation, validate_binary_operand,
@@ -1869,13 +1869,12 @@ impl VectorRuntime {
         } else {
             assembled
         };
-        buffer.grow(vector_workspace_bytes(&assembled, self.schema.fields.len()))?;
+        buffer.grow(vector_workspace_bytes(&self.op, &self.schema, &assembled))?;
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            vector_series(&self.op, &self.schema, &assembled)?
+            vector_series(&self.op, &self.schema, assembled)?
         };
-        drop(assembled);
         self.input.release();
         self.computed = true;
         Ok(Some(output))
@@ -1894,7 +1893,7 @@ fn vector_overflow(path: &NodePath) -> DataFusionError {
 fn vector_series(
     op: &BoundVectorOp,
     schema: &SeriesSchema,
-    series: &[Series],
+    series: Vec<Series>,
 ) -> Result<Vec<Series>> {
     let grouping = |group: &Grouping| match group {
         Grouping::By(labels) => select::Grouping::By(labels.to_vec()),
@@ -1902,22 +1901,62 @@ fn vector_series(
     };
     match op {
         BoundVectorOp::TopK { k, top, group } => {
-            select::topk(*k, *top, &grouping(group), schema, series)
+            select::topk(*k, *top, &grouping(group), schema, &series)
         }
-        BoundVectorOp::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, series),
-        BoundVectorOp::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, series),
+        BoundVectorOp::LimitK { k, group } => select::limitk(*k, &grouping(group), schema, &series),
+        BoundVectorOp::LimitRatio { ratio } => select::limit_ratio(*ratio, schema, &series),
+        // A sort hands back the series it was given, rebuilding only those `sort` and `sort_desc`
+        // drop histogram samples from.
+        BoundVectorOp::Sort(order) => select::sort_instant(order, schema, series),
+        BoundVectorOp::Absent { labels } => Ok(select::absent(schema, &series, labels.clone())?
+            .into_iter()
+            .collect()),
     }
 }
 
-/// A rough estimate of what a vector kernel allocates over `series`, beside the input it reads.
+/// A rough estimate of what the vector operation `op` allocates over `series`, beside the input it reads.
+/// Like [`merge_workspace_bytes`] it is not an allocation bound: vector slack and the hash table's
+/// own layout are not measured.
 ///
-/// Per row, the `(point, row)` a kept sample is recorded as, the candidate it is ranked as and the
-/// value each field rebuilds it into; per series, its place in the label order and its group, its
-/// label pairs in the group key, its cursor and the series and field descriptors of its result; and
-/// the histograms `limitk` and `limit_ratio` copy into their results, at the widest histogram of
-/// each field. Like [`merge_workspace_bytes`] it is not an allocation bound: vector slack and the
-/// hash table's own layout are not measured.
-fn vector_workspace_bytes(series: &[Series], fields: usize) -> usize {
+/// - `topk`, `bottomk`, `limitk` and `limit_ratio`, per row: the `(point, row)` a kept sample is
+///   recorded as, the candidate it is ranked as and the value each field rebuilds it into; per
+///   series: its place in the label order and its group, its label pairs in the group key, its
+///   cursor and the series and field descriptors of its result; and the histograms `limitk` and
+///   `limit_ratio` copy into their results, at the widest histogram of each field.
+/// - A sort: the value each series is keyed by, and the floats `sort` and `sort_desc` rebuild a
+///   series into when it holds histograms; the label sorts move the series they were given.
+/// - `absent`: a presence flag and a result value per grid point and field.
+fn vector_workspace_bytes(op: &BoundVectorOp, schema: &SeriesSchema, series: &[Series]) -> usize {
+    let fields = schema.fields.len();
+    match op {
+        BoundVectorOp::Sort(order) => {
+            let rebuilds = matches!(order, SortOrder::Asc | SortOrder::Desc);
+            return series.iter().fold(0usize, |total, item| {
+                let floats = if rebuilds
+                    && item
+                        .fields
+                        .iter()
+                        .any(|field| histogram_row_bytes(field).is_some())
+                {
+                    item.time.len().saturating_mul(std::mem::size_of::<f64>())
+                } else {
+                    0
+                };
+                total
+                    .saturating_add(std::mem::size_of::<(f64, Series)>())
+                    .saturating_add(floats)
+            });
+        }
+        BoundVectorOp::Absent { .. } => {
+            let points = schema.eval_grid.as_ref().map_or(0, |grid| {
+                usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
+            });
+            return points.saturating_mul(fields.saturating_mul(1 + std::mem::size_of::<f64>()));
+        }
+        BoundVectorOp::TopK { .. }
+        | BoundVectorOp::LimitK { .. }
+        | BoundVectorOp::LimitRatio { .. } => {}
+    }
     let row = std::mem::size_of::<(usize, usize)>()
         + std::mem::size_of::<(usize, usize, f64)>()
         + fields * std::mem::size_of::<f64>();
@@ -2178,6 +2217,10 @@ struct NodeRuntime {
     /// uses it for both. A chunk is measured once, as it enters, and the figure it was queued with
     /// is given back as it leaves, so neither the queue nor the handover walks it.
     queued: VecDeque<(NativeChunk, usize)>,
+    /// The histogram tables queued results share with each other, charged to the queue as a whole
+    /// rather than to one result: a table stays alive while any result referencing it is queued,
+    /// so its charge is given back when the queue empties, not when the first result leaves.
+    queued_tables: usize,
     /// What an instant node holds: the chunks of the series it is selecting, and, while it gathers
     /// that series, the workspace the gather reserved for. `None` for every other kind of node.
     instant: Option<InstantRuntime>,
@@ -2263,6 +2306,7 @@ impl NodeRuntime {
             // hold it.
             let _timer = metrics.timer();
             self.buffer.shrink(bytes)?;
+            self.release_queued_tables()?;
         }
         metrics.record_output(1, values(&chunk));
         // An evaluated chunk is addressed on its grid, so its decided positions are grid points; a
@@ -2505,7 +2549,7 @@ impl NodeRuntime {
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output)
+        self.queue_results(output, false)
     }
 
     /// Retains one chunk of a vector node's input, reserved for before it is retained, as
@@ -2542,29 +2586,44 @@ impl NodeRuntime {
 
     /// Runs this node's vector kernel and queues the series it kept.
     fn compute_vector(&mut self, path: &NodePath) -> Result<()> {
-        let output = {
+        let (output, shares_input) = {
             let vector = self.vector.as_mut().ok_or_else(|| no_vector(path))?;
-            vector.compute(path, &mut self.buffer)?
+            let shares_input = matches!(vector.op, BoundVectorOp::Sort(_));
+            (vector.compute(path, &mut self.buffer)?, shares_input)
         };
         let Some(output) = output else {
             return Ok(());
         };
-        self.queue_results(output)
+        self.queue_results(output, shares_input)
     }
 
     /// Queues the series a kernel that reads its whole input produced, and settles the reservation
     /// on the queue.
-    fn queue_results(&mut self, output: Vec<Series>) -> Result<()> {
+    ///
+    /// `shares_input` says the series are the assembled input itself, as a sort hands it back: a
+    /// field there is one slice per input chunk of buffers and histogram tables the chunks shared,
+    /// so each series is measured the way the input was ([`operand_chunk_bytes`]) rather than by
+    /// the allocations its slices belong to, which would count a buffer once per chunk. The tables
+    /// are billed once, to the queue ([`NodeRuntime::queued_tables`]), since several results can
+    /// keep one alive.
+    fn queue_results(&mut self, output: Vec<Series>, shares_input: bool) -> Result<()> {
+        let mut tables = HashSet::new();
         // The results are queued the way a node that produces a chunk per input queues what it
         // hands on: the queue is the one source of chunk order and of the bytes queued chunks hold.
         let mut closed = 0usize;
         for series in output {
             // The kernel decided every point of a result series at once, so the one chunk it is
             // handed over as closes it.
+            let shared = shares_input.then(|| {
+                let (fresh, table_bytes) = unbilled_tables(&series, &tables);
+                tables.extend(fresh);
+                self.queued_tables = self.queued_tables.saturating_add(table_bytes);
+                operand_chunk_bytes(&series)
+            });
             let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
             // The result is already admitted, within the workspace reserved for the kernel. What the
             // queue keeps is the estimate of the chunk that holds it.
-            let bytes = chunk.bytes();
+            let bytes = shared.unwrap_or_else(|| chunk.bytes());
             self.queued.push_back((chunk, bytes));
             closed += 1;
         }
@@ -2578,7 +2637,9 @@ impl NodeRuntime {
         let queued = self
             .queued
             .iter()
-            .fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
+            .fold(self.queued_tables, |total, (_, bytes)| {
+                total.saturating_add(*bytes)
+            });
         self.buffer.resize(queued)
     }
 
@@ -2740,7 +2801,17 @@ impl NodeRuntime {
             return Ok(None);
         };
         self.buffer.shrink(bytes)?;
+        self.release_queued_tables()?;
         Ok(Some(chunk))
+    }
+
+    /// Gives back the shared tables' charge once no queued result references them.
+    fn release_queued_tables(&mut self) -> Result<()> {
+        if self.queued.is_empty() && self.queued_tables > 0 {
+            self.buffer
+                .shrink(std::mem::take(&mut self.queued_tables))?;
+        }
+        Ok(())
     }
 
     /// Records what this node hands out under its output label set.
@@ -2785,6 +2856,7 @@ impl NodeRuntime {
         self.open_source_series = false;
         self.queued.clear();
         self.queued.shrink_to_fit();
+        self.queued_tables = 0;
         // The reservation is returned once, below, for everything this node still held.
         self.buffer.release();
     }
@@ -2879,6 +2951,7 @@ impl NativeExecutionState {
             let mut runtime = NodeRuntime {
                 buffer,
                 queued: VecDeque::new(),
+                queued_tables: 0,
                 instant: None,
                 window: None,
                 map: None,
@@ -2988,14 +3061,21 @@ impl NativeExecutionState {
                             "the vector operation at {path} does not produce samples"
                         ))
                     })?;
-                    // `topk`, `bottomk` and `limitk` rank one value per sample, so their kernels
-                    // take one field; `limit_ratio` keeps whole series and takes any number.
-                    if !matches!(op, BoundVectorOp::LimitRatio { .. }) && schema.fields.len() != 1 {
+                    // `topk`, `bottomk`, `limitk` and the value sorts read one value per sample,
+                    // so their kernels take one field; the others keep or test whole samples and
+                    // take any number.
+                    let one_field = matches!(
+                        op,
+                        BoundVectorOp::TopK { .. }
+                            | BoundVectorOp::LimitK { .. }
+                            | BoundVectorOp::Sort(SortOrder::Asc | SortOrder::Desc)
+                    );
+                    if one_field && schema.fields.len() != 1 {
                         return Err(not_implemented("multi-field Vector", &path));
                     }
                     runtime.vector = Some(VectorRuntime::new(op.clone(), schema));
-                    // A selection keeps the labels of the series it keeps, so it keeps no ledger of
-                    // what it handed out.
+                    // A vector operation keeps the labels of the series it reads, or answers under
+                    // label sets of its own, so it keeps no ledger of what it handed out.
                 }
                 NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => {
                     // A scalar holds nothing: what its consumer reads is the constant the node was
@@ -3118,26 +3198,25 @@ impl NativeExecutionState {
                         };
                     }
                     NodeTag::Vector => {
-                        // A selection keeps samples of the series it read, so pieces of one label
+                        // Most vector operations keep samples of the series they read, so pieces of one label
                         // set stay pieces: they hold disjoint points, so ranking them apart picks
                         // what ranking the merged series would, and what is above treats them as
-                        // it treats a map's. `limitk` is the exception: it counts series in input
-                        // order, so it merges the pieces first and hands over whole series.
-                        let limitk = matches!(
-                            expr,
-                            NativeExpr::Vector {
-                                op: BoundVectorOp::LimitK { .. },
-                                ..
-                            }
-                        );
-                        if limitk && input_holds_shared {
-                            if let Some(vector) = runtimes[index].vector.as_mut() {
-                                vector.merge_input = true;
-                            }
-                            holds_shared[index] = false;
-                        } else {
-                            holds_shared[index] = input_holds_shared;
+                        // it treats a map's. `absent` answers with one series under the labels it
+                        // was bound to, and `limitk` counts series in input order, so it merges the
+                        // pieces first and hands over whole series.
+                        let op = match expr {
+                            NativeExpr::Vector { op, .. } => Some(op),
+                            _ => None,
+                        };
+                        let limitk = matches!(op, Some(BoundVectorOp::LimitK { .. }));
+                        if limitk
+                            && input_holds_shared
+                            && let Some(vector) = runtimes[index].vector.as_mut()
+                        {
+                            vector.merge_input = true;
                         }
+                        let whole = limitk || matches!(op, Some(BoundVectorOp::Absent { .. }));
+                        holds_shared[index] = input_holds_shared && !whole;
                     }
                     NodeTag::Window => {
                         let (drops_metric_name, input_schema) = match expr {
