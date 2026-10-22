@@ -120,7 +120,7 @@ const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
 /// Only a plan that *is* that scan, and asks for all of it, qualifies. A frame leaf answers with a
 /// frame where the row leaf would have answered with rows, so every operator above the scan would
 /// read a frame as rows, and a pushed-down fetch would be dropped by a leaf that returns every
-/// chunk of every series. Anything else therefore keeps the ordinary read it would have had.
+/// chunk of every series. Such raw-series requests are rejected at the read boundary.
 fn raw_series_metric_name(request: &QueryRequest) -> Option<String> {
     if request.read_kind != RegionReadKind::RawSeries {
         return None;
@@ -142,6 +142,33 @@ fn raw_series_metric_name(request: &QueryRequest) -> Option<String> {
 /// the empty value the region's table provider reads as "no metric", so naming the key in a header
 /// cannot opt a read into frames, and a raw read sets it to the metric derived from its own plan
 /// rather than to a caller-supplied name.
+fn sanitize_remote_read_context(mut ctx: QueryContext) -> QueryContext {
+    ctx.set_extension(RAW_SERIES_READ_EXTENSION_KEY, "");
+    ctx
+}
+
+fn validate_raw_series_request(request: &QueryRequest) -> Result<()> {
+    if request.read_kind != RegionReadKind::RawSeries {
+        return Ok(());
+    }
+    ensure!(
+        matches!(&request.plan, LogicalPlan::TableScan(_)),
+        UnexpectedSnafu {
+            violated: "RawSeries read requires a bare TableScan plan",
+        }
+    );
+    let LogicalPlan::TableScan(scan) = &request.plan else {
+        unreachable!("plan was checked to be a TableScan");
+    };
+    ensure!(
+        scan.fetch.is_none(),
+        UnexpectedSnafu {
+            violated: "RawSeries read does not support fetch",
+        }
+    );
+    Ok(())
+}
+
 fn apply_raw_series_read_key(mut ctx: QueryContext, request: &QueryRequest) -> QueryContext {
     ctx.set_extension(
         RAW_SERIES_READ_EXTENSION_KEY,
@@ -336,6 +363,10 @@ impl RegionServer {
             None
         };
 
+        // Remote reads are always row reads; discard any caller-supplied frame opt-in before
+        // constructing the catalog, decoder, or physical providers.
+        let query_ctx = Arc::new(sanitize_remote_read_context(query_ctx.as_ref().clone()));
+
         let region_id = RegionId::from_u64(request.region_id);
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.clone(),
@@ -391,6 +422,7 @@ impl RegionServer {
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        validate_raw_series_request(&request)?;
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
@@ -3090,29 +3122,19 @@ mod tests {
     }
 
     #[test]
-    fn raw_series_read_key_ignores_a_header_when_the_plan_is_not_just_a_scan() {
-        use datafusion_expr::LogicalPlanBuilder;
-
+    fn remote_read_sanitizes_spoofed_raw_series_extension() {
         let spoofed = QueryContextBuilder::default()
             .extensions(HashMap::from([(
                 RAW_SERIES_READ_EXTENSION_KEY.to_string(),
                 "spoofed_metric".to_string(),
             )]))
             .build();
-        let projected = LogicalPlanBuilder::from(scan_plan("cpu"))
-            .project(vec![datafusion_expr::col("v")])
-            .unwrap()
-            .build()
-            .unwrap();
-        let ctx = apply_raw_series_read_key(
-            spoofed,
-            &query_request(projected, RegionReadKind::RawSeries),
-        );
+        let ctx = sanitize_remote_read_context(spoofed);
         assert_eq!(ctx.extension(RAW_SERIES_READ_EXTENSION_KEY), Some(""));
     }
 
     #[test]
-    fn raw_series_metric_declines_a_plan_that_is_not_just_the_scan() {
+    fn raw_series_request_rejects_a_plan_that_is_not_just_the_scan() {
         use datafusion_expr::LogicalPlanBuilder;
 
         let scan = scan_plan("cpu");
@@ -3121,26 +3143,19 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        // Anything above the scan would read a frame where it expects rows, so the read stays
-        // ordinary rather than answering with a frame it cannot deliver.
-        assert_eq!(
-            raw_series_metric_name(&query_request(projected, RegionReadKind::RawSeries)),
-            None
-        );
+        let request = query_request(projected, RegionReadKind::RawSeries);
+        assert!(validate_raw_series_request(&request).is_err());
     }
 
     #[test]
-    fn raw_series_metric_declines_a_scan_that_already_limits_its_rows() {
-        // A pushed-down fetch asks for part of the scan; a frame leaf returns every chunk of every
-        // series, so this read keeps the rows that honour the limit.
+    fn raw_series_request_rejects_a_scan_that_already_limits_its_rows() {
+        // A pushed-down fetch cannot be honoured by a frame leaf and is rejected.
         let mut limited = scan_plan("cpu");
         let LogicalPlan::TableScan(scan) = &mut limited else {
             panic!("the fixture is a table scan");
         };
         scan.fetch = Some(1);
-        assert_eq!(
-            raw_series_metric_name(&query_request(limited, RegionReadKind::RawSeries)),
-            None
-        );
+        let request = query_request(limited, RegionReadKind::RawSeries);
+        assert!(validate_raw_series_request(&request).is_err());
     }
 }
