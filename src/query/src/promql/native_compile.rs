@@ -633,7 +633,7 @@ fn window_call(
         }
         PromExpr::Subquery(subquery) => subquery_window(context, name, function, subquery),
         other => Err(not_implemented(&format!(
-            "a call to `{name}` whose range selector is `{other}`, where it has to be a range \
+            "a call to `{name}` whose matrix is `{other}`, where it has to be a range \
              selector like `x[5m]` or a subquery like `x[5m:1m]`"
         ))),
     }
