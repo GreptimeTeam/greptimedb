@@ -209,47 +209,55 @@ impl RegionRequest {
     }
 }
 
+/// Converts one insert, treating absent rows as a no-op like vector inserts.
+pub fn make_region_put(
+    request: api::v1::region::InsertRequest,
+) -> Option<(RegionId, RegionPutRequest)> {
+    request.rows.map(|rows| {
+        (
+            request.region_id.into(),
+            RegionPutRequest {
+                rows,
+                hint: None,
+                skip_wal: request.skip_wal,
+                partition_expr_version: request.partition_expr_version.map(|version| version.value),
+            },
+        )
+    })
+}
+
 fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let requests = inserts
+    Ok(inserts
         .requests
         .into_iter()
-        .filter_map(|r| {
-            let region_id = r.region_id.into();
-            r.rows.map(|rows| {
-                (
-                    region_id,
-                    RegionRequest::Put(RegionPutRequest {
-                        rows,
-                        hint: None,
-                        skip_wal: r.skip_wal,
-                        partition_expr_version: r.partition_expr_version.map(|v| v.value),
-                    }),
-                )
-            })
-        })
-        .collect();
-    Ok(requests)
+        .filter_map(make_region_put)
+        .map(|(region_id, request)| (region_id, RegionRequest::Put(request)))
+        .collect())
+}
+
+/// Converts one delete, treating absent rows as a no-op like vector deletes.
+pub fn make_region_delete(
+    request: api::v1::region::DeleteRequest,
+) -> Option<(RegionId, RegionDeleteRequest)> {
+    request.rows.map(|rows| {
+        (
+            request.region_id.into(),
+            RegionDeleteRequest {
+                rows,
+                hint: None,
+                partition_expr_version: request.partition_expr_version.map(|version| version.value),
+            },
+        )
+    })
 }
 
 fn make_region_deletes(deletes: DeleteRequests) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let requests = deletes
+    Ok(deletes
         .requests
         .into_iter()
-        .filter_map(|r| {
-            let region_id = r.region_id.into();
-            r.rows.map(|rows| {
-                (
-                    region_id,
-                    RegionRequest::Delete(RegionDeleteRequest {
-                        rows,
-                        hint: None,
-                        partition_expr_version: r.partition_expr_version.map(|v| v.value),
-                    }),
-                )
-            })
-        })
-        .collect();
-    Ok(requests)
+        .filter_map(make_region_delete)
+        .map(|(region_id, request)| (region_id, RegionRequest::Delete(request)))
+        .collect())
 }
 
 fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateRequest)> {
