@@ -82,9 +82,37 @@ async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstanc
     );
 
     execute_sql(&instance, "INSERT INTO sparse_tags VALUES ('b', 2000, 3.0)").await;
+    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_tags')").await;
+    let error = try_execute_sql(
+        &instance,
+        "ALTER TABLE sparse_tags ADD COLUMN zone STRING DEFAULT 'east' PRIMARY KEY",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.output_msg().contains("non-NULL defaults"),
+        "{error:?}"
+    );
+
+    // The rejected ALTER must leave both table and region metadata unchanged.
     execute_sql(
         &instance,
         "ALTER TABLE sparse_tags ADD COLUMN zone STRING PRIMARY KEY",
+    )
+    .await;
+    let error = try_execute_sql(
+        &instance,
+        "ALTER TABLE sparse_tags MODIFY COLUMN zone SET DEFAULT 'east'",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.output_msg().contains("non-NULL defaults"),
+        "{error:?}"
+    );
+    execute_sql(
+        &instance,
+        "ALTER TABLE sparse_tags MODIFY COLUMN zone SET DEFAULT NULL",
     )
     .await;
     execute_sql(
@@ -96,6 +124,56 @@ async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstanc
     assert_eq!(
         output.data.pretty_print().await,
         "+----------+\n| count(*) |\n+----------+\n| 3        |\n+----------+"
+    );
+    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_tags')").await;
+    for compact in [false, true] {
+        if compact {
+            execute_sql(
+                &instance,
+                "ADMIN COMPACT_TABLE('sparse_tags', 'strict_window', 'window=3600')",
+            )
+            .await;
+        }
+        let output = execute_sql(
+            &instance,
+            "SELECT host, zone FROM sparse_tags ORDER BY host",
+        )
+        .await;
+        assert_eq!(
+            output.data.pretty_print().await,
+            "+------+------+\n| host | zone |\n+------+------+\n| a    |      |\n| b    |      |\n| c    | east |\n+------+------+"
+        );
+    }
+
+    // A default present from creation requires no backfill; explicit NULL must remain NULL.
+    execute_sql(&instance,
+        "CREATE TABLE sparse_initial_default (host STRING DEFAULT 'api' PRIMARY KEY, ts TIMESTAMP TIME INDEX)
+         WITH ('primary_key_encoding'='sparse')").await;
+    execute_sql(
+        &instance,
+        "INSERT INTO sparse_initial_default (ts) VALUES (1000)",
+    )
+    .await;
+    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_initial_default')").await;
+    execute_sql(
+        &instance,
+        "INSERT INTO sparse_initial_default VALUES (NULL, 2000)",
+    )
+    .await;
+    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_initial_default')").await;
+    execute_sql(
+        &instance,
+        "ADMIN COMPACT_TABLE('sparse_initial_default', 'strict_window', 'window=3600')",
+    )
+    .await;
+    let output = execute_sql(
+        &instance,
+        "SELECT host FROM sparse_initial_default ORDER BY ts",
+    )
+    .await;
+    assert_eq!(
+        output.data.pretty_print().await,
+        "+------+\n| host |\n+------+\n| api  |\n|      |\n+------+"
     );
 }
 

@@ -917,11 +917,15 @@ fn write_attributes(
                 )
             }
         };
-        if key == OTLP_AGGREGATION_TEMPORALITY_LABEL {
+        // OTLP attribute keys may include __name__, but Prometheus metric identity comes from
+        // the OTLP metric name. Reject collisions after translation and scope prefixing.
+        // https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/#metric-metadata-1
+        if key == OTLP_AGGREGATION_TEMPORALITY_LABEL || key == crate::prom_store::METRIC_NAME_LABEL
+        {
             return Err(error::InvalidOtlpMetricInputSnafu {
                 reason: format!(
                     "OTLP attribute `{}` resolves to reserved label `{}`",
-                    attr.key, OTLP_AGGREGATION_TEMPORALITY_LABEL
+                    attr.key, key
                 ),
             }
             .build());
@@ -1480,14 +1484,15 @@ fn encode_summary(
 mod tests {
     use api::v1::ColumnDataType;
     use common_query::prelude::set_default_prefix;
-    use otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue;
     use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, InstrumentationScope};
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::summary_data_point::ValueAtQuantile;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
         AggregationTemporality, HistogramDataPoint, NumberDataPoint, SummaryDataPoint,
     };
     use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
+    use session::protocol_ctx::OtlpMetricTranslationStrategy;
 
     use super::*;
 
@@ -1728,6 +1733,100 @@ mod tests {
         process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
         assert_eq!(attr_value(&attrs, "job"), None);
         assert_eq!(attr_value(&attrs, "instance").as_deref(), Some("inst-1"));
+    }
+
+    #[test]
+    fn test_reject_metric_name_attribute() {
+        set_default_prefix(None).unwrap();
+        for (strategy, is_legacy, key) in [
+            (
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithSuffixes,
+                false,
+                "__name__",
+            ),
+            (
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithoutSuffixes,
+                false,
+                "__name__",
+            ),
+            (
+                OtlpMetricTranslationStrategy::NoUtf8EscapingWithSuffixes,
+                false,
+                "__name__",
+            ),
+            (
+                OtlpMetricTranslationStrategy::NoTranslation,
+                false,
+                "__name__",
+            ),
+            (
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithSuffixes,
+                false,
+                "..name..",
+            ),
+            (
+                OtlpMetricTranslationStrategy::NoTranslation,
+                true,
+                "__NAME__",
+            ),
+        ] {
+            for source in [
+                AttributeType::Resource,
+                AttributeType::Scope,
+                AttributeType::DataPoint,
+            ] {
+                let mut request = gauge_request(vec![], "source_metric");
+                let resource = &mut request.resource_metrics[0];
+                let scope = &mut resource.scope_metrics[0];
+                let Some(metric::Data::Gauge(gauge)) = scope.metrics[0].data.as_mut() else {
+                    unreachable!();
+                };
+                gauge.data_points[0].exemplars.push(Exemplar {
+                    value: Some(exemplar::Value::AsDouble(0.25)),
+                    time_unix_nano: 1_000_000,
+                    ..Default::default()
+                });
+                let attributes = vec![keyvalue(key, "wrong_metric")];
+                match source {
+                    AttributeType::Resource => {
+                        resource.resource.as_mut().unwrap().attributes = attributes;
+                    }
+                    AttributeType::Scope => {
+                        scope.scope = Some(InstrumentationScope {
+                            attributes,
+                            ..Default::default()
+                        });
+                    }
+                    AttributeType::DataPoint => gauge.data_points[0].attributes = attributes,
+                    AttributeType::Legacy => unreachable!(),
+                }
+                let mut ctx = OtlpMetricCtx {
+                    metric_translation_strategy: strategy,
+                    is_legacy,
+                    promote_all_resource_attrs: true,
+                    promote_scope_attrs: true,
+                    ..Default::default()
+                };
+                let result = to_grpc_insert_requests(request, &mut ctx);
+                if source == AttributeType::Scope && !is_legacy {
+                    let conversion = result.unwrap();
+                    assert_eq!(1, conversion.exemplar_rows);
+                    assert!(
+                        column_names(&conversion.requests, "source_metric")
+                            .contains(&"otel_scope___name__".to_string())
+                    );
+                } else {
+                    let error::Error::InvalidOtlpMetricInput { reason, .. } = result.unwrap_err()
+                    else {
+                        panic!("expected reserved metric name rejection");
+                    };
+                    assert_eq!(
+                        reason,
+                        format!("OTLP attribute `{key}` resolves to reserved label `__name__`")
+                    );
+                }
+            }
+        }
     }
 
     #[test]

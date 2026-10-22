@@ -34,12 +34,12 @@ use mito_codec::row_converter::{
 };
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef, validate_sparse_tag_default};
 use store_api::storage::ColumnId;
 
 use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
-    NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
+    InvalidMetadataSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
@@ -95,6 +95,17 @@ impl FlatCompatBatch {
         compaction: bool,
     ) -> Result<Option<Self>> {
         let actual = read_format.metadata();
+        if actual.is_ordinary_sparse() {
+            for column in mapper.metadata().primary_key_columns() {
+                if actual.column_by_id(column.column_id).is_none() {
+                    validate_sparse_tag_default(
+                        &column.column_schema.name,
+                        column.column_schema.default_constraint(),
+                    )
+                    .context(InvalidMetadataSnafu)?;
+                }
+            }
+        }
         let actual_schema = flat_projected_columns(
             actual,
             read_format.format_projection(),
@@ -1164,6 +1175,75 @@ mod tests {
         for input in [dictionary_key, binary_key] {
             let result = compat.compat(&input).unwrap();
             assert_eq!(result.as_ref(), input.as_ref());
+        }
+    }
+
+    #[test]
+    fn test_sparse_tag_default_backfill_rejected() {
+        use datatypes::schema::ColumnDefaultConstraint;
+
+        let mut actual = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Dense);
+        actual.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let actual = Arc::new(actual);
+        for default in [
+            None,
+            Some(ColumnDefaultConstraint::null_value()),
+            Some(ColumnDefaultConstraint::Value(Value::from("east"))),
+        ] {
+            let mut builder = RegionMetadataBuilder::from_existing((*actual).clone());
+            let mut primary_key = actual.primary_key.clone();
+            primary_key.push(4);
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "new_tag",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    )
+                    .with_default_constraint(default.clone())
+                    .unwrap(),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 4,
+                })
+                .primary_key(primary_key);
+            let expected = Arc::new(builder.build().unwrap());
+            let non_null = matches!(
+                default,
+                Some(ColumnDefaultConstraint::Value(Value::String(_)))
+            );
+            for compaction in [false, true] {
+                // Also reject when the query does not project the added tag.
+                for projection in [vec![0, 1, 2, 3, 4], vec![2]] {
+                    let mapper = FlatProjectionMapper::new(&expected, projection).unwrap();
+                    let read_format = FlatReadFormat::new(
+                        actual.clone(),
+                        ReadColumns::new([0, 1, 2, 3]),
+                        None,
+                        "test",
+                        compaction,
+                    )
+                    .unwrap();
+                    let result = FlatCompatBatch::try_new(&mapper, &read_format, compaction);
+                    if non_null {
+                        let error = result.err().unwrap();
+                        assert!(format!("{error:?}").contains("non-NULL defaults"));
+                    } else {
+                        assert!(result.is_ok());
+                    }
+                }
+
+                // An SST already containing the tag needs no backfill, even with a non-NULL default.
+                let mapper = FlatProjectionMapper::all(&expected).unwrap();
+                let read_format = FlatReadFormat::new(
+                    expected.clone(),
+                    ReadColumns::new([0, 1, 2, 3, 4]),
+                    None,
+                    "test",
+                    compaction,
+                )
+                .unwrap();
+                assert!(FlatCompatBatch::try_new(&mapper, &read_format, compaction).is_ok());
+            }
         }
     }
 
