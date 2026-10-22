@@ -15,9 +15,14 @@
 //! Object store access for WAL objects: a deterministic key layout and
 //! conditional creates that make a retry of the same object a no-op.
 
+use async_stream::try_stream;
 use bytes::Bytes;
-use object_store::{ErrorKind, ObjectStore};
+use futures::TryStreamExt;
+use futures::stream::BoxStream;
+use object_store::{Entry, ErrorKind, ObjectStore};
 use snafu::{OptionExt, ResultExt, ensure};
+use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::{
     CorruptedWalObjectSnafu, InvalidWalObjectStoreSnafu, Result, WalObjectConflictSnafu,
@@ -48,6 +53,7 @@ pub(crate) struct ListedObject {
 }
 
 /// Reads and writes the WAL objects under one prefix.
+#[derive(Clone)]
 pub(crate) struct ObjectStoreIo {
     store: ObjectStore,
     object_prefix: String,
@@ -160,18 +166,44 @@ impl ObjectStoreIo {
                 path: self.object_prefix.clone(),
             })?;
         let mut objects = entries
-            .into_iter()
-            .filter_map(|entry| {
-                self.parse_object_seq(entry.path())
-                    .map(|object_seq| ListedObject {
-                        object_seq,
-                        path: entry.path().to_string(),
-                        size: entry.metadata().content_length(),
-                    })
-            })
+            .iter()
+            .filter_map(|entry| self.listed_object(entry))
             .collect::<Vec<_>>();
         objects.sort_unstable_by_key(|object| object.object_seq);
         Ok(objects)
+    }
+
+    /// Lists the objects under the prefix like [`list`](Self::list), but from
+    /// a task of its own and in the order the object store returns them, so
+    /// the listing goes on while the caller consumes the objects listed so
+    /// far. A listing that fails, however it fails, ends the stream with an
+    /// error; dropping the stream stops the listing.
+    pub(crate) fn list_ahead(&self) -> BoxStream<'static, Result<ListedObject>> {
+        let io = self.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let listing = AbortOnDropHandle::new(common_runtime::spawn_global(async move {
+            let mut lister = io.store.lister(&io.object_prefix).await?;
+            while let Some(entry) = lister.try_next().await? {
+                if let Some(object) = io.listed_object(&entry) {
+                    // The receiver is gone only once the stream was dropped.
+                    let _ = tx.send(object);
+                }
+            }
+            Ok::<_, object_store::Error>(())
+        }));
+        let path = self.object_prefix.clone();
+        Box::pin(try_stream! {
+            while let Some(object) = rx.recv().await {
+                yield object;
+            }
+            listing
+                .await
+                .unwrap_or_else(|error| {
+                    let stopped = "the listing task did not complete";
+                    Err(object_store::Error::new(ErrorKind::Unexpected, stopped).set_source(error))
+                })
+                .context(WalObjectStoreSnafu { operation: "list", path })?;
+        })
     }
 
     pub(crate) fn object_path(&self, object_seq: u64) -> String {
@@ -191,6 +223,15 @@ impl ObjectStoreIo {
         } else {
             format!("{}, bucket {name:?}, root {:?}", info.scheme(), info.root())
         }
+    }
+
+    fn listed_object(&self, entry: &Entry) -> Option<ListedObject> {
+        self.parse_object_seq(entry.path())
+            .map(|object_seq| ListedObject {
+                object_seq,
+                path: entry.path().to_string(),
+                size: entry.metadata().content_length(),
+            })
     }
 
     fn parse_object_seq(&self, path: &str) -> Option<u64> {
@@ -511,6 +552,34 @@ mod tests {
             matches!(error, Error::WalObjectStore { operation: "read", ref path, .. } if path == &io.object_path(7)),
             "unexpected error: {error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_io_list_ahead_yields_the_objects_list_returns() {
+        let io = memory_io();
+        assert!(
+            io.list_ahead()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        io.store
+            .write(
+                "datanodes/1/epochs/2/objects/not-a-sequence.wal",
+                "malformed",
+            )
+            .await
+            .unwrap();
+        for object_seq in [10, 2, 1] {
+            io.put_if_absent(object_seq, Bytes::from(object_seq.to_string()))
+                .await
+                .unwrap();
+        }
+        let mut listed = io.list_ahead().try_collect::<Vec<_>>().await.unwrap();
+        listed.sort_unstable_by_key(|object| object.object_seq);
+        assert_eq!(io.list().await.unwrap(), listed);
     }
 
     #[tokio::test]
