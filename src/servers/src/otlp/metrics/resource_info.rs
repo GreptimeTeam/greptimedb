@@ -217,12 +217,29 @@ mod tests {
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
         );
 
+        let mut reordered = attrs.clone();
+        reordered.reverse();
+        data.observe_times(&reordered, [200, 75]);
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(
+            data.rows.values().next().unwrap().values().next(),
+            Some(&200)
+        );
+
         data.observe_times(&[kv("host.id", "h-2")], [10]);
         assert_eq!(data.rows.len(), 2);
 
         let mut empty = ResourceInfoData::default();
         empty.observe_times(&[kv("os.type", "linux")], [100]);
         assert!(empty.into_row_insert_requests().unwrap().is_none());
+    }
+
+    #[test]
+    fn observe_without_accepted_points_does_not_emit_rows() {
+        let mut data = ResourceInfoData::default();
+        data.observe_times(&[kv("service.name", "api")], []);
+        assert!(data.is_empty());
+        assert!(data.into_row_insert_requests().unwrap().is_none());
     }
 
     /// Earlier windows would keep their metric rows but lose their entities.
