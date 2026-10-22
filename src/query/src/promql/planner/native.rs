@@ -162,9 +162,19 @@ impl PromPlanner {
         // filter, a projection or a `__tsid` rewrite in between produces a different physical
         // child, and the physical layer cannot reach through it. Declining here, while the logical
         // plan is still this method's to choose, is what keeps such a query on the existing path.
-        let LogicalPlan::TableScan(_) = &input else {
+        let LogicalPlan::TableScan(scan) = &input else {
             return Ok(None);
         };
+        let table = self.table_from_source(&scan.source)?;
+        // FusedSeries evaluates each region independently, so partition keys must identify a series.
+        if !table
+            .table_info()
+            .meta
+            .partition_column_names()
+            .all(|column| tags.iter().any(|tag| tag == column))
+        {
+            return Ok(None);
+        }
         let offset = selector
             .offset
             .as_ref()
@@ -351,5 +361,47 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use session::context::QueryContextBuilder;
+
+    use super::{NATIVE_PROMQL_EXTENSION_KEY, native_promql_requested};
+
+    #[test]
+    fn native_promql_requested_is_false_when_extension_is_absent() {
+        let query_ctx = Arc::new(QueryContextBuilder::default().build());
+
+        assert!(!native_promql_requested(&query_ctx));
+    }
+
+    #[test]
+    fn native_promql_requested_accepts_true_case_insensitively() {
+        for value in ["true", "TRUE", "TrUe"] {
+            let query_ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), value.to_string())
+                    .build(),
+            );
+
+            assert!(native_promql_requested(&query_ctx), "value: {value}");
+        }
+    }
+
+    #[test]
+    fn native_promql_requested_rejects_false_and_unrecognized_values() {
+        for value in ["false", "FALSE", "yes", "1", " true ", ""] {
+            let query_ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), value.to_string())
+                    .build(),
+            );
+
+            assert!(!native_promql_requested(&query_ctx), "value: {value:?}");
+        }
     }
 }

@@ -899,6 +899,16 @@ async fn build_test_table_provider(
     num_tag: usize,
     num_field: usize,
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_partition_columns(table_name_tuples, num_tag, num_field, vec![])
+        .await
+}
+
+async fn build_test_table_provider_with_partition_columns(
+    table_name_tuples: &[(String, String)],
+    num_tag: usize,
+    num_field: usize,
+    partition_key_indices: Vec<usize>,
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (schema_name, table_name) in table_name_tuples {
         let mut columns = vec![];
@@ -928,6 +938,7 @@ async fn build_test_table_provider(
         let table_meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices((0..num_tag).collect())
+            .partition_key_indices(partition_key_indices.clone())
             .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
             .next_column_id(1024)
             .build()
@@ -1626,13 +1637,21 @@ async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str)
 /// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
 /// to a raw series schema of one field.
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
-    let eval_stmt = build_eval_stmt(query);
     let table_provider = build_test_table_provider(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
         1,
     )
     .await;
+    build_native_fused_plan_with_provider(query, native_fused, table_provider).await
+}
+
+async fn build_native_fused_plan_with_provider(
+    query: &str,
+    native_fused: bool,
+    table_provider: DfTableSourceProvider,
+) -> LogicalPlan {
+    let eval_stmt = build_eval_stmt(query);
     PromPlanner::stmt_to_plan_with_annotations(
         table_provider,
         &eval_stmt,
@@ -1669,6 +1688,36 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     // The node carries the query a reader wrote, not the shape it compiled to.
     let fused = find_fused_series(&plan).expect("the plan holds a native node");
     assert_eq!("rate(some_metric[5m])", fused.promql());
+}
+
+#[tokio::test]
+async fn native_fused_time_partitioned_table_falls_back() {
+    let table_provider = build_test_table_provider_with_partition_columns(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![1], // timestamp
+    )
+    .await;
+    let plan =
+        build_native_fused_plan_with_provider("rate(some_metric[2m])", true, table_provider).await;
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("FusedSeries"), "{display}");
+    assert!(display.contains("PromRangeManipulate"), "{display}");
+}
+
+#[tokio::test]
+async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
+    let table_provider = build_test_table_provider_with_partition_columns(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![0], // tag_0
+    )
+    .await;
+    let plan =
+        build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
+    assert!(plan.display_indent().to_string().contains("FusedSeries"));
 }
 
 /// The flag on and a shape the compiler refuses: the existing planner plans it unchanged.
