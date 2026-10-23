@@ -115,4 +115,26 @@ WHERE region_id = 0 ORDER BY min_ts LIMIT 1;
 SELECT min_ts FROM information_schema.ssts_manifest
 ORDER BY min_ts LIMIT 0;
 
+-- COUNT-only output still applies predicates on columns absent from the output.
+SELECT COUNT(*) AS files
+FROM information_schema.ssts_manifest
+WHERE table_id > 0
+  AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+  AND max_ts < '1970-01-01T00:00:00.004Z'::TIMESTAMP_NS;
+
+-- Standalone executes these aggregates normally; distributed mode may merge
+-- remote states. Both preserve COUNT/SUM and FILTER semantics.
+SELECT COUNT(*) AS files, COUNT(1) AS files_one,
+  SUM(file_size) > 0 AS has_bytes,
+  COUNT(*) FILTER (WHERE file_size >= 1) AS nonempty_files,
+  COUNT(*) FILTER (WHERE file_size = 0) AS zero_files,
+  SUM(file_size) FILTER (WHERE file_size = 0) AS zero_bytes
+FROM information_schema.ssts_manifest
+WHERE table_id > 0 AND region_id > 0
+  AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+  AND max_ts < '1970-01-01T00:00:00.004Z'::TIMESTAMP_NS;
+
+SELECT COUNT(*) AS files, COUNT(1) AS files_one, SUM(file_size) AS bytes
+FROM information_schema.ssts_manifest WHERE region_id = 0;
+
 DROP TABLE sst_case;
