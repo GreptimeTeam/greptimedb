@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use catalog::RegisterTableRequest;
 use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
 use common_base::Plugins;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE, MITO_ENGINE};
 use common_query::native_histogram::{
     CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, build_histogram_array,
 };
@@ -894,6 +894,18 @@ async fn optimize_and_create_physical_plan(
     (optimized, physical)
 }
 
+/// The engine a fixture gets when the test does not care where the scan is served.
+///
+/// `TableMeta::empty()` leaves it blank, and the existing plan assertions are written against that
+/// blank engine; naming it here keeps the native-route fixtures explicit instead.
+const DEFAULT_ENGINE: &str = "";
+
+/// The engine the native route accepts, because its scanner serves raw series frames.
+///
+/// It also decides whether a tag column is dictionary encoded, so a fixture that sets it sees
+/// `Dictionary(UInt32, Utf8)` where a blank-engine fixture sees `Utf8`.
+const NATIVE_ENGINE: &str = MITO_ENGINE;
+
 async fn build_test_table_provider(
     table_name_tuples: &[(String, String)],
     num_tag: usize,
@@ -917,6 +929,7 @@ async fn build_test_table_provider_with_partition_columns(
         ConcreteDataType::timestamp_millisecond_datatype(),
         false,
         ConcreteDataType::float64_datatype(),
+        DEFAULT_ENGINE,
     )
     .await
 }
@@ -933,6 +946,22 @@ async fn build_test_table_provider_with_field_type(
         ConcreteDataType::timestamp_millisecond_datatype(),
         false,
         field_type,
+        DEFAULT_ENGINE,
+    )
+    .await
+}
+
+/// A one-tag, one-field fixture on the engine the native route accepts.
+async fn native_engine_provider(partition_key_indices: Vec<usize>) -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        partition_key_indices,
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
     )
     .await
 }
@@ -945,6 +974,7 @@ async fn build_test_table_provider_with_options(
     timestamp_type: ConcreteDataType,
     append_mode: bool,
     field_type: ConcreteDataType,
+    engine: &str,
 ) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (schema_name, table_name) in table_name_tuples {
@@ -970,6 +1000,7 @@ async fn build_test_table_provider_with_options(
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
             .schema(schema)
+            .engine(engine.to_string())
             .primary_key_indices((0..num_tag).collect())
             .partition_key_indices(partition_key_indices.clone())
             .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
@@ -1681,10 +1712,15 @@ async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str)
 /// time index `timestamp`, one field `field_0` — which is the shape the selector context resolves
 /// to a raw series schema of one field.
 async fn build_native_fused_plan(query: &str, native_fused: bool) -> LogicalPlan {
-    let table_provider = build_test_table_provider(
+    let table_provider = build_test_table_provider_with_options(
         &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
         1,
         1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
     )
     .await;
     build_native_fused_plan_with_provider(query, native_fused, table_provider).await
@@ -1744,18 +1780,20 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
 
 #[tokio::test]
 async fn native_fused_time_partitioned_table_falls_back() {
-    let table_provider = build_test_table_provider_with_partition_columns(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![1], // timestamp
-    )
-    .await;
-    let plan =
+    let table_provider = native_engine_provider(vec![1]).await;
+    let native =
         build_native_fused_plan_with_provider("rate(some_metric[2m])", true, table_provider).await;
-    let display = plan.display_indent().to_string();
+    let fallback_provider = native_engine_provider(vec![1]).await;
+    let without_flag =
+        build_native_fused_plan_with_provider("rate(some_metric[2m])", false, fallback_provider)
+            .await;
+    let display = native.display_indent().to_string();
     assert!(!display.contains("FusedSeries"), "{display}");
-    assert!(display.contains("PromRangeManipulate"), "{display}");
+    assert_eq!(
+        display,
+        without_flag.display_indent().to_string(),
+        "a time-partitioned table must keep the existing plan, not an approximation of it"
+    );
 }
 
 #[tokio::test]
@@ -1768,6 +1806,7 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
         ConcreteDataType::timestamp_microsecond_datatype(),
         false,
         ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
     )
     .await;
     let native =
@@ -1780,6 +1819,7 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
         ConcreteDataType::timestamp_microsecond_datatype(),
         false,
         ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
     )
     .await;
     let without_flag =
@@ -1802,6 +1842,7 @@ async fn native_fused_append_mode_table_falls_back() {
         ConcreteDataType::timestamp_millisecond_datatype(),
         true,
         ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
     )
     .await;
     let native =
@@ -1814,6 +1855,7 @@ async fn native_fused_append_mode_table_falls_back() {
         ConcreteDataType::timestamp_millisecond_datatype(),
         true,
         ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
     )
     .await;
     let without_flag =
@@ -1828,19 +1870,64 @@ async fn native_fused_append_mode_table_falls_back() {
 
 #[tokio::test]
 async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
-    let table_provider = build_test_table_provider_with_partition_columns(
-        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-        1,
-        1,
-        vec![0], // tag_0
-    )
-    .await;
+    let table_provider = native_engine_provider(vec![0]).await;
     let plan =
         build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
     assert!(plan.display_indent().to_string().contains("FusedSeries"));
 }
 
 /// The flag on and a shape the compiler refuses: the existing planner plans it unchanged.
+/// A table whose engine has no raw-series scanner keeps the existing plan.
+///
+/// A file-engine table answers an ordinary read with a `SinglePartitionScanner`, whose
+/// `raw_series_schema` is the trait's default `None`. Offering the native route to such a table
+/// would build the node and then fail in physical planning, because the logical plan is fixed by
+/// then; declining here is what keeps the query answering.
+#[tokio::test]
+async fn native_fused_engine_without_raw_series_falls_back() {
+    let native = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        true,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            FILE_ENGINE,
+        )
+        .await,
+    )
+    .await;
+    let without_flag = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        false,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            FILE_ENGINE,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "a file-engine table must not reach the native route"
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string(),
+        "a file-engine table must keep the existing plan"
+    );
+}
+
 /// A value field the region's raw scan cannot serve keeps the existing plan.
 ///
 /// The preflight serves numeric columns and native histograms only, and the physical layer turns
@@ -1881,9 +1968,15 @@ async fn native_fused_non_numeric_field_falls_back() {
 async fn native_fused_whole_vector_operation_falls_back() {
     for query in ["sort(some_metric)", "absent(some_metric)"] {
         let native = build_native_fused_plan(query, true).await;
+        let without_flag = build_native_fused_plan(query, false).await;
         assert!(
             find_fused_series(&native).is_none(),
             "`{query}` reads the whole vector and must not be placed region-side"
+        );
+        assert_eq!(
+            native.display_indent().to_string(),
+            without_flag.display_indent().to_string(),
+            "`{query}` must keep the existing plan, not an approximation of it"
         );
     }
 }
