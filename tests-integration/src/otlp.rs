@@ -1576,6 +1576,79 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_schema_failure_isolation() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        for metric_fails in [false, true] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_partial")
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let ctx = QueryContext::arc();
+            let (failed, retained) = if metric_fails {
+                ("exemplar_partial_total", "metrics_exemplars")
+            } else {
+                ("metrics_exemplars", "exemplar_partial_total")
+            };
+            instance
+                .do_query(
+                    &format!(
+                        "CREATE TABLE {failed} (ts TIMESTAMP TIME INDEX, greptime_value STRING)"
+                    ),
+                    ctx.clone(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+            let mut request = build_sum_request(
+                "exemplar.partial",
+                AggregationTemporality::Cumulative,
+                &[(10, 1)],
+            );
+            let Some(metric::Data::Sum(sum)) =
+                &mut request.resource_metrics[0].scope_metrics[0].metrics[0].data
+            else {
+                unreachable!()
+            };
+            sum.data_points[0].exemplars.push(Exemplar {
+                time_unix_nano: 10_123_456_789,
+                value: Some(exemplar::Value::AsDouble(0.75)),
+                ..Default::default()
+            });
+            let result = instance.metrics(request, ctx.clone()).await;
+            if metric_fails {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.accepted_data_points, 0);
+                assert_eq!(outcome.rejected_data_points, 1);
+                assert_trace_v2_query(
+                    instance,
+                    "SELECT COUNT(*)=0 FROM information_schema.tables \
+                     WHERE table_name='metrics_exemplars'",
+                    ctx,
+                )
+                .await
+                .unwrap();
+                continue;
+            }
+            assert!(result.is_err());
+            let output = instance
+                .do_query(&format!("SELECT COUNT(*) FROM {retained}"), ctx)
+                .await
+                .remove(0)
+                .unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                unreachable!()
+            };
+            let rows = RecordBatches::try_collect(stream)
+                .await
+                .unwrap()
+                .pretty_print()
+                .unwrap();
+            assert!(rows.contains("| 1        |"), "{retained}: {rows}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     pub async fn test_otlp_on_standalone() {
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_otlp")
             .build()
@@ -2527,7 +2600,9 @@ WITH(
                     let auth::PermissionTableTargets::Resolved(targets) = targets else {
                         panic!("metric destinations must be resolved");
                     };
-                    let denied = targets.iter().any(|t| t.table == "restricted_metric");
+                    let denied = targets.iter().any(|t| {
+                        matches!(t.table.as_str(), "restricted_metric" | "metrics_exemplars")
+                    });
                     self.calls
                         .lock()
                         .unwrap()
@@ -2586,6 +2661,30 @@ WITH(
                 );
             }
         }
+        let mut metric = gauge_metric("allowed_metric", &[(60_000_000_000, 7.0, None)]);
+        let Some(metric::Data::Gauge(gauge)) = metric.data.as_mut() else {
+            unreachable!()
+        };
+        gauge.data_points[0].exemplars.push(
+            otel_arrow_rust::proto::opentelemetry::metrics::v1::Exemplar {
+                time_unix_nano: 1,
+                value: Some(
+                    otel_arrow_rust::proto::opentelemetry::metrics::v1::exemplar::Value::AsDouble(
+                        0.5,
+                    ),
+                ),
+                ..Default::default()
+            },
+        );
+        let err = instance
+            .metrics(metric_request(vec![metric]), ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::PermissionDenied);
+        assert_eq!(
+            std::mem::take(&mut *checker.calls.lock().unwrap()),
+            vec![vec!["allowed_metric", "metrics_exemplars"]]
+        );
         assert_trace_v2_query(
             instance,
             "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='allowed_metric'",
