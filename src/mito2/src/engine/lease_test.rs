@@ -70,7 +70,20 @@ fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
         .unwrap();
 }
 
-/// Writes rows `start..start + 3`.
+/// Returns a request that writes rows `start..start + 3`.
+fn put_request(schema: &[ColumnSchema], start: usize) -> RegionRequest {
+    let rows = Rows {
+        schema: schema.to_vec(),
+        rows: build_rows(start, start + 3),
+    };
+    RegionRequest::Put(RegionPutRequest {
+        rows,
+        hint: None,
+        partition_expr_version: None,
+        skip_wal: false,
+    })
+}
+
 fn put(
     engine: &MitoEngine,
     region_id: RegionId,
@@ -78,27 +91,19 @@ fn put(
     start: usize,
 ) -> JoinHandle<Result<RegionResponse, BoxedError>> {
     let engine = engine.clone();
-    let rows = Rows {
-        schema: schema.to_vec(),
-        rows: build_rows(start, start + 3),
-    };
-    let request = RegionRequest::Put(RegionPutRequest {
-        rows,
-        hint: None,
-        partition_expr_version: None,
-        skip_wal: false,
-    });
+    let request = put_request(schema, start);
     tokio::spawn(async move { engine.handle_request(region_id, request).await })
 }
 
-/// Writes rows `0..3` and waits until the write is held after its WAL append.
-async fn put_and_hold(
+/// Sends `request` to [REGION_ID] and waits until it is held after its WAL append.
+async fn hold(
     listener: &WriteWalListener,
     engine: &MitoEngine,
-    schema: &[ColumnSchema],
+    request: RegionRequest,
 ) -> JoinHandle<Result<RegionResponse, BoxedError>> {
     listener.pause_next();
-    let mut write = put(engine, REGION_ID, schema, 0);
+    let engine = engine.clone();
+    let mut write = tokio::spawn(async move { engine.handle_request(REGION_ID, request).await });
     tokio::select! {
         () = listener.wait_appended() => {}
         result = &mut write => panic!("the write finished before its WAL append: {result:?}"),
@@ -148,7 +153,7 @@ async fn test_lease_expires_while_writing_wal(factory: Option<LogStoreFactory>) 
     let deadline = Instant::now() + LEASE;
     grant(&engine, RegionRole::Leader, deadline);
 
-    let write = put_and_hold(&listener, &engine, &schema).await;
+    let write = hold(&listener, &engine, put_request(&schema, 0)).await;
     engine.freeze_lease_clock(deadline);
     listener.resume();
     assert_retryable(write.await.unwrap(), unacknowledged);
@@ -161,6 +166,22 @@ async fn test_lease_expires_while_writing_wal(factory: Option<LogStoreFactory>) 
         lease_expired,
     );
     assert_eq!(3, count_rows(&engine).await);
+
+    // The same holds for a bulk insert.
+    let deadline = deadline + LEASE;
+    grant(&engine, RegionRole::Leader, deadline);
+    let bulk_insert = RegionRequest::BulkInserts(build_bulk_insert_request(REGION_ID, 3));
+    let write = hold(&listener, &engine, bulk_insert).await;
+    let committed_sequence = || {
+        let region = engine.get_region(REGION_ID).unwrap();
+        region.version_control.current().committed_sequence
+    };
+    let sequence = committed_sequence();
+    engine.freeze_lease_clock(deadline);
+    listener.resume();
+    assert_retryable(write.await.unwrap(), unacknowledged);
+    assert_eq!(6, count_rows(&engine).await);
+    assert!(committed_sequence() > sequence);
 }
 
 #[tokio::test]
@@ -171,7 +192,7 @@ async fn test_lease_renewed_while_writing_wal() {
     let deadline = Instant::now() + LEASE;
     grant(&engine, RegionRole::Leader, deadline);
 
-    let write = put_and_hold(&listener, &engine, &schema).await;
+    let write = hold(&listener, &engine, put_request(&schema, 0)).await;
     // The grant keeps the region writable rather than staging, and still extends the deadline.
     grant(&engine, RegionRole::StagingLeader, deadline + LEASE);
     engine.freeze_lease_clock(deadline);
@@ -190,7 +211,7 @@ async fn test_downgrade_while_writing_wal(#[case] lease_expires: bool) {
     let deadline = Instant::now() + LEASE;
     grant(&engine, RegionRole::Leader, deadline);
 
-    let write = put_and_hold(&listener, &engine, &schema).await;
+    let write = hold(&listener, &engine, put_request(&schema, 0)).await;
     // The metasrv renews the lease as DowngradingLeader once the route marks the region as
     // downgrading. A write already in the WAL is acknowledged, but only within the Leader
     // deadline, which such grants do not extend.
