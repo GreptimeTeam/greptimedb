@@ -47,7 +47,8 @@ fn parse_show_create(show_create: &str) -> Result<Vec<AlterTableOption>> {
 
 /// Fetches table options from the context
 pub async fn fetch_table_options(db: &MySqlPool, sql: &str) -> Result<Vec<AlterTableOption>> {
-    let fetched_rows = sqlx::query(sql)
+    // Safety: the SQL is built by fuzz validators from generated identifiers only.
+    let fetched_rows = sqlx::query(sqlx::AssertSqlSafe(sql))
         .fetch_all(db)
         .await
         .context(error::ExecuteQuerySnafu { sql })?;

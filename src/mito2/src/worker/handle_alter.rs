@@ -36,6 +36,7 @@ use store_api::storage::RegionId;
 use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
+use crate::memtable::ensure_json2_uses_flat_format;
 use crate::region::MitoRegionRef;
 use crate::region::options::CompactionOptions::Twcs;
 use crate::region::options::{RegionOptions, TwcsOptions};
@@ -195,12 +196,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         };
-        // Persist the metadata to region's manifest.
         let options = new_options.as_ref().unwrap_or(&version.options);
+        if let Err(e) = ensure_json2_uses_flat_format(&new_meta, options) {
+            sender.send(Err(e));
+            return;
+        }
         if let Err(e) = options.validate_column_compression(&new_meta) {
             sender.send(Err(e));
             return;
         }
+        // Persist the metadata to region's manifest.
         let change = RegionChange {
             metadata: new_meta,
             sst_format: options.sst_format.unwrap_or_default(),

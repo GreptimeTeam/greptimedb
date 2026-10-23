@@ -82,7 +82,7 @@
 | `pending_rows_batcher.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per table worker. |
 | `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
-| `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
+| `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs and traces are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
 | `pending_rows_batcher.logical_table.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.logical_table.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.logical_table.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by Prom and OTLP metrics. |
@@ -174,7 +174,7 @@
 | `storage.http_client.timeout` | String | `30s` | The total request timeout, applied from when the request starts connecting until the response body has finished.<br/>Also considered a total deadline. |
 | `storage.http_client.pool_idle_timeout` | String | `90s` | The timeout for idle sockets being kept-alive. |
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
-| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
+| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.<br/>The default configuration lists `mito` and `file`; `metric` is always registered, so naming<br/>it only supplies its options rather than enabling the engine. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
 | `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the available CPU cores, rounded up. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |
@@ -358,7 +358,7 @@
 | `pending_rows_batcher.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per table worker. |
 | `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
-| `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
+| `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs and traces are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
 | `pending_rows_batcher.logical_table.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.logical_table.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.logical_table.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by Prom and OTLP metrics. |
@@ -650,7 +650,7 @@
 | `storage.http_client.timeout` | String | `30s` | The total request timeout, applied from when the request starts connecting until the response body has finished.<br/>Also considered a total deadline. |
 | `storage.http_client.pool_idle_timeout` | String | `90s` | The timeout for idle sockets being kept-alive. |
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
-| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
+| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.<br/>The default configuration lists `mito` and `file`; `metric` is always registered, so naming<br/>it only supplies its options rather than enabling the engine. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
 | `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the available CPU cores, rounded up. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |

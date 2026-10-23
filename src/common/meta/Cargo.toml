@@ -81,6 +81,7 @@ serde_with.workspace = true
 snafu.workspace = true
 sqlx = { workspace = true, features = [
     "mysql",
+    "mysql-rsa",
     "chrono",
 ], optional = true }
 store-api.workspace = true

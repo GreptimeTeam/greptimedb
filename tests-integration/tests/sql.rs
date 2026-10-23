@@ -198,7 +198,8 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         "test",
         "writeonly_user",
         |query| async move {
-            sqlx::query_scalar::<_, bool>(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(query.as_str()))
                 .fetch_one(actor_query_pool)
                 .await
                 .unwrap_or(false)
@@ -563,7 +564,8 @@ pub async fn test_postgres_auth(store_type: StorageType) {
         "postgres_auth_actor",
         "writeonly_user",
         |query| async move {
-            sqlx::query_scalar::<_, bool>(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(query.as_str()))
                 .fetch_one(actor_query_pool)
                 .await
                 .unwrap_or(false)
@@ -784,7 +786,8 @@ pub async fn test_mysql_slow_query(store_type: StorageType) {
 
     let row = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Ok(Some(row)) = sqlx::query(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            if let Ok(Some(row)) = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(slow_query)
                 .fetch_optional(&pool)
                 .await
@@ -1142,7 +1145,8 @@ pub async fn test_postgres_slow_query(store_type: StorageType) {
 
     let row = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Ok(Some(row)) = sqlx::query(&query)
+            // Safety: the SQL is built from test-local identifiers only.
+            if let Ok(Some(row)) = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(slow_query)
                 .fetch_optional(&pool)
                 .await

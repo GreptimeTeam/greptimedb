@@ -223,17 +223,21 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
             }
             .fail();
         }
-        if hint
-            .path
-            .first()
-            .is_some_and(|x| x == JSON2_REMAINDER_FIELD_NAME)
-        {
-            return InvalidJson2SettingsSnafu {
-                reason: format!(
-                    "JSON2 type hint path cannot be rooted at reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
-                ),
+        for part in &hint.path {
+            if part.is_empty() {
+                return InvalidJson2SettingsSnafu {
+                    reason: "JSON2 type hint path segments must not be empty",
+                }
+                .fail();
             }
-            .fail();
+            if part == JSON2_REMAINDER_FIELD_NAME {
+                return InvalidJson2SettingsSnafu {
+                    reason: format!(
+                        "JSON2 type hint path cannot contain reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
+                    ),
+                }
+                .fail();
+            }
         }
         let data_type = match &hint.data_type {
             ConcreteDataType::Boolean(_)
@@ -863,6 +867,41 @@ mod tests {
     }
 
     #[test]
+    fn test_json_settings_path_validation() {
+        for (path, expected_valid) in [
+            (vec![""], false),
+            (vec!["", "nested"], false),
+            (vec!["nested", ""], false),
+            (vec!["nested", "", "leaf"], false),
+            (vec!["nested", JSON2_REMAINDER_FIELD_NAME], false),
+            (vec!["nested", JSON2_REMAINDER_FIELD_NAME, "leaf"], false),
+            (vec!["nested", "leaf"], true),
+            (vec![], false),
+            (vec![JSON2_REMAINDER_FIELD_NAME], false),
+            (vec![JSON2_REMAINDER_FIELD_NAME, "leaf"], false),
+        ] {
+            for inverted_index in [false, true] {
+                let hint = JsonTypeHint {
+                    path: path.iter().map(|part| (*part).to_string()).collect(),
+                    data_type: ConcreteDataType::string_datatype(),
+                    inverted_index,
+                };
+                let serialized = json!({"type_hints": [hint.clone()]});
+                assert_eq!(
+                    JsonSettings::try_new(vec![hint], None).is_ok(),
+                    expected_valid,
+                    "path: {path:?}, inverted_index: {inverted_index}"
+                );
+                assert_eq!(
+                    serde_json::from_value::<JsonSettings>(serialized).is_ok(),
+                    expected_valid,
+                    "path: {path:?}, inverted_index: {inverted_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_json_settings_reject_invalid_type_hints() {
         for type_hints in [
             json!([{"path": [], "type": {"Int64": {}}, "nullable": true, "inverted_index": false}]),
@@ -889,7 +928,7 @@ mod tests {
                 )],
                 None,
             )
-            .is_ok()
+            .is_err()
         );
         assert!(
             JsonSettings::try_new(
