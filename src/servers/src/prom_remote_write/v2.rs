@@ -125,6 +125,8 @@ pub(crate) struct RemoteWriteV2WriteRequests {
     pub histograms: ContextReq,
     pub sample_count: u64,
     pub histogram_count: u64,
+    pub exemplars: crate::exemplar::ExemplarRequests,
+    pub exemplar_count: u64,
     /// Per-table semantic metadata from the series' inline `Metadata`, folded
     /// into table options at auto-create time.
     pub semantic_index: SemanticIndexes,
@@ -335,6 +337,8 @@ fn convert_remote_write_v2(
     let mut label_names = HashSet::new();
     let mut sample_count_total = 0;
     let mut histogram_count_total = 0;
+    let mut exemplar_count_total = 0;
+    let mut exemplars = crate::exemplar::ExemplarRequests::new();
     let mut labels_refs = Vec::new();
     let mut metadata = Metadata::default();
     let mut scratch = LeafScratch::default();
@@ -343,8 +347,13 @@ fn convert_remote_write_v2(
     for series in request.timeseries {
         let counts = scan_series(series, &mut labels_refs, &mut metadata)
             .context(error::DecodePromRemoteRequestSnafu)?;
+        budget.reserve(
+            counts
+                .exemplars
+                .checked_mul(2 * std::mem::size_of::<Exemplar>()),
+        )?;
 
-        if counts.samples == 0 && counts.histograms == 0 {
+        if counts.samples == 0 && counts.histograms == 0 && counts.exemplars == 0 {
             decode_series_leaves(series, None, Vec::new(), 0, &mut scratch)?;
             continue;
         }
@@ -359,39 +368,52 @@ fn convert_remote_write_v2(
         }))?;
         let (prom_ctx, table_name, tags) =
             resolve_series_labels(&request.symbols, &labels_refs, &mut label_names)?;
-        ensure_no_internal_histogram_labels(&tags)?;
-        budget.reserve(
-            request
-                .symbols
-                .get(metadata.unit_ref as usize)
-                .map_or(Some(0), |unit| unit.len().checked_mul(4)),
-        )?;
-        record_series_metadata(
-            &mut semantic_index,
-            &request.symbols,
-            &metadata,
-            &prom_ctx,
-            &table_name,
-        )?;
-        let has_other_value_type = if counts.samples > 0 {
-            counts.histograms > 0
-                || histogram_tables
+        let inherited = if counts.exemplars > 0 {
+            crate::exemplar::labels(
+                tags.iter()
+                    .map(|(key, value)| ((*key).to_string(), value.clone())),
+                false,
+                validate_label_name,
+            )?
+        } else {
+            Default::default()
+        };
+        let exemplar_metric = table_name.clone();
+        let exemplar_schema = prom_ctx.schema.clone();
+        if counts.samples > 0 || counts.histograms > 0 {
+            ensure_no_internal_histogram_labels(&tags)?;
+            budget.reserve(
+                request
+                    .symbols
+                    .get(metadata.unit_ref as usize)
+                    .map_or(Some(0), |unit| unit.len().checked_mul(4)),
+            )?;
+            record_series_metadata(
+                &mut semantic_index,
+                &request.symbols,
+                &metadata,
+                &prom_ctx,
+                &table_name,
+            )?;
+            let has_other_value_type = if counts.samples > 0 {
+                counts.histograms > 0
+                    || histogram_tables
+                        .get(&prom_ctx)
+                        .is_some_and(|tables| tables.contains_key(&table_name))
+            } else {
+                sample_tables
                     .get(&prom_ctx)
                     .is_some_and(|tables| tables.contains_key(&table_name))
-        } else {
-            sample_tables
-                .get(&prom_ctx)
-                .is_some_and(|tables| tables.contains_key(&table_name))
-        };
-        ensure!(
-            !has_other_value_type,
-            error::InvalidPromRemoteRequestSnafu {
-                msg: format!(
-                    "remote write v2 metric `{table_name}` contains both samples and native histograms"
-                ),
-            }
-        );
-
+            };
+            ensure!(
+                !has_other_value_type,
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "remote write v2 metric `{table_name}` contains both samples and native histograms"
+                    ),
+                }
+            );
+        }
         let column_count =
             tags.len()
                 .checked_add(2)
@@ -450,29 +472,96 @@ fn convert_remote_write_v2(
         })())?;
         let (writer, row_count) = if counts.samples > 0 {
             (
-                SeriesWriter::Samples(get_or_create_table_data(
+                Some(SeriesWriter::Samples(get_or_create_table_data(
                     &mut sample_tables,
                     prom_ctx,
                     table_name,
                     column_count,
                     counts.samples,
-                )),
+                ))),
                 counts.samples,
             )
-        } else {
+        } else if counts.histograms > 0 {
             (
-                SeriesWriter::Histograms(get_or_create_table_data(
+                Some(SeriesWriter::Histograms(get_or_create_table_data(
                     &mut histogram_tables,
                     prom_ctx,
                     table_name,
                     column_count,
                     counts.histograms,
-                )),
+                ))),
                 counts.histograms,
             )
+        } else {
+            (None, 0)
         };
 
-        decode_series_leaves(series, Some(writer), tags, row_count, &mut scratch)?;
+        decode_series_leaves(series, writer, tags, row_count, &mut scratch)?;
+        for exemplar in scratch.exemplars.drain(..) {
+            ensure!(
+                exemplar.labels_refs.len() % 2 == 0,
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: "exemplar label references must contain name/value pairs",
+                }
+            );
+            let exemplar_label_bytes =
+                exemplar
+                    .labels_refs
+                    .iter()
+                    .try_fold(0usize, |bytes, index| {
+                        bytes.checked_add(
+                            request.symbols.get(*index as usize).map_or(0, |s| s.len()),
+                        )
+                    });
+            // Symbol references can expand into repeated owned labels for every exemplar.
+            budget.reserve((|| {
+                label_bytes?
+                    .checked_add(exemplar_label_bytes?)?
+                    .checked_mul(4)?
+                    .checked_add(
+                        labels_refs
+                            .len()
+                            .checked_add(exemplar.labels_refs.len())?
+                            .checked_mul(128)?,
+                    )?
+                    .checked_add(2 * std::mem::size_of::<crate::exemplar::Exemplar>())
+            })())?;
+            let labels = exemplar
+                .labels_refs
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| {
+                    Ok((
+                        symbol_ref(&request.symbols, pair[0], "exemplar label")?.to_string(),
+                        symbol_ref(&request.symbols, pair[1], "exemplar value")?.to_string(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let observation: Result<_> = (|| {
+                Ok(crate::exemplar::Exemplar {
+                    metric: exemplar_metric.clone(),
+                    series_labels: inherited.clone(),
+                    timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
+                    value: exemplar.value,
+                    labels: crate::exemplar::labels(labels, true, validate_label_name)?,
+                })
+            })();
+            let observation = match observation {
+                Ok(observation) => observation,
+                Err(_) => {
+                    crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                        .with_label_values(&["prometheus_v2"])
+                        .inc();
+                    continue;
+                }
+            };
+            exemplars
+                .entry(exemplar_schema.clone())
+                .or_default()
+                .push(observation);
+            exemplar_count_total = checked_total(exemplar_count_total, 1, "exemplar")?;
+        }
         sample_count_total = checked_total(sample_count_total, counts.samples, "sample")?;
         histogram_count_total =
             checked_total(histogram_count_total, counts.histograms, "histogram")?;
@@ -483,6 +572,8 @@ fn convert_remote_write_v2(
         histograms: into_context_req(histogram_tables),
         sample_count: sample_count_total,
         histogram_count: histogram_count_total,
+        exemplar_count: exemplar_count_total,
+        exemplars,
         semantic_index,
         memory_guard: Arc::new(budget.guard),
     })
@@ -555,6 +646,7 @@ fn metric_type_value(wire_type: i32) -> Option<&'static str> {
 
 #[derive(Default)]
 struct SeriesCounts {
+    exemplars: usize,
     samples: usize,
     histograms: usize,
 }
@@ -598,6 +690,10 @@ fn scan_series(
             }
             TIME_SERIES_EXEMPLARS_TAG => {
                 take_length_delimited(wire_type, &mut buf)?;
+                counts.exemplars = counts
+                    .exemplars
+                    .checked_add(1)
+                    .ok_or_else(|| DecodeError::new("exemplar count overflow"))?;
             }
             TIME_SERIES_METADATA_TAG => {
                 message::merge(wire_type, metadata, &mut buf, DecodeContext::default()).map_err(
@@ -619,6 +715,7 @@ struct LeafScratch {
     sample: Sample,
     histogram: Histogram,
     exemplar: Exemplar,
+    exemplars: Vec<Exemplar>,
 }
 
 enum SeriesWriter<'a> {
@@ -635,6 +732,7 @@ fn decode_series_leaves(
 ) -> Result<()> {
     let mut sample_row_template = None;
     let mut histogram_row_template = None;
+    scratch.exemplars.clear();
 
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf).context(error::DecodePromRemoteRequestSnafu)?;
@@ -781,6 +879,9 @@ fn decode_series_leaves(
                     error
                 })
                 .context(error::DecodePromRemoteRequestSnafu)?;
+                scratch
+                    .exemplars
+                    .push(std::mem::take(&mut scratch.exemplar));
             }
             TIME_SERIES_METADATA_TAG => {
                 take_length_delimited(wire_type, &mut buf)
@@ -1357,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fused_decoder_ignores_exemplar_symbol_refs() {
+    fn test_fused_decoder_rejects_invalid_exemplar_symbol_refs() {
         let request = Request {
             symbols: vec![
                 String::new(),
@@ -1375,7 +1476,61 @@ mod tests {
             }],
         };
 
-        assert_eq!(decode_test_request(request).unwrap().sample_count, 1);
+        assert!(decode_test_request(request).is_err());
+    }
+
+    #[test]
+    fn test_invalid_exemplars_preserve_samples_and_counts() {
+        let valid = Exemplar {
+            labels_refs: vec![3, 4],
+            timestamp: 1,
+            value: 0.5,
+        };
+        for invalid in [
+            Exemplar {
+                labels_refs: vec![3, 4, 3, 4],
+                ..valid.clone()
+            },
+            Exemplar {
+                labels_refs: vec![3, 5],
+                ..valid.clone()
+            },
+            Exemplar {
+                timestamp: i64::MAX,
+                ..valid.clone()
+            },
+        ] {
+            for retain_valid in [false, true] {
+                let mut observations = vec![invalid.clone()];
+                if retain_valid {
+                    observations.extend([valid.clone(), invalid.clone(), valid.clone()]);
+                }
+                let request = Request {
+                    symbols: vec![
+                        "".into(),
+                        METRIC_NAME_LABEL.into(),
+                        "metric".into(),
+                        "trace_id".into(),
+                        "abc".into(),
+                        "x".repeat(128),
+                    ],
+                    timeseries: vec![TimeSeries {
+                        labels_refs: vec![1, 2],
+                        samples: vec![Sample::default()],
+                        exemplars: observations,
+                        ..Default::default()
+                    }],
+                };
+                let converted = decode_test_request(request).unwrap();
+                assert_eq!(converted.sample_count, 1);
+                let expected = if retain_valid { 2 } else { 0 };
+                assert_eq!(converted.exemplar_count, expected);
+                assert_eq!(
+                    converted.exemplars.values().map(Vec::len).sum::<usize>(),
+                    expected as usize
+                );
+            }
+        }
     }
 
     #[test]
@@ -1632,6 +1787,38 @@ mod tests {
         assert_eq!(limiter.used_bytes(), 0);
         let mut budget = ConversionBudget::new(&limiter, 0).unwrap();
         assert!(budget.reserve(usize::MAX.checked_mul(2)).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_conversion_reserves_repeated_labels() {
+        let limiter = ServerMemoryLimiter::new(128 * 1024, OnExhaustedPolicy::Fail);
+        let label = "x".repeat(4096);
+        let mut request =
+            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("host", &label)]);
+        request.timeseries[0].samples.clear();
+        request.timeseries[0].exemplars = vec![Exemplar::default(); 128];
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        assert!(matches!(
+            decode_remote_write_v2(false, body, &limiter, 0).await,
+            Err(error::Error::MemoryLimitExceeded { .. })
+        ));
+        assert_eq!(limiter.used_bytes(), 0);
+
+        request.timeseries[0].exemplars.truncate(1);
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        let decoded = decode_remote_write_v2(false, body, &limiter, 0)
+            .await
+            .unwrap();
+        assert_eq!(decoded.exemplar_count, 1);
+        assert!(limiter.used_bytes() >= label.len() as u64);
+        let progress =
+            session::write_progress::WriteProgress::with_reservation(decoded.memory_guard.clone());
+        drop(decoded);
+        assert!(limiter.used_bytes() >= label.len() as u64);
+        drop(progress);
+        assert_eq!(limiter.used_bytes(), 0);
     }
 
     #[tokio::test]
@@ -2225,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn test_into_context_req_converts_histograms_and_ignores_exemplars() {
+    fn test_into_context_req_preserves_histogram_exemplars() {
         let request = Request {
             symbols: vec![
                 "".to_string(),
@@ -2256,6 +2443,8 @@ mod tests {
 
         assert_eq!(ctx_req.sample_count, 1);
         assert_eq!(ctx_req.histogram_count, 1);
+        assert_eq!(ctx_req.exemplar_count, 1);
+        assert_eq!(ctx_req.exemplars[&None][0].metric, "histogram_metric");
         assert_eq!(ctx_req.samples.all_req().count(), 1);
         assert_eq!(ctx_req.histograms.all_req().count(), 1);
     }

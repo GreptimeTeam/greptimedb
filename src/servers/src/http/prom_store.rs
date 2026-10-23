@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod exemplar;
+
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
@@ -208,6 +210,7 @@ async fn remote_write_v1(
     // borrowing `col_indexes` dies inside `as_insert_requests`. Nothing below
     // references the buffer, so it need not span the write — the same goes for
     // the decode guards charged against the aggregate memory quota.
+    let exemplars = std::mem::take(&mut decoded.exemplars);
     let req = if processor.use_pipeline {
         drop(decoded);
         processor.exec_pipeline().await?
@@ -217,7 +220,25 @@ async fn remote_write_v1(
         req
     };
     drop(decode_guards);
-    let batches = into_prom_write_batches(req, query_ctx);
+    let batches = into_prom_write_batches(req, query_ctx.clone());
+    if !exemplars.is_empty() {
+        let outcome = exemplar::write(
+            prom_store_handler,
+            pending_rows_batcher,
+            prom_store_with_metric_engine,
+            batches,
+            Vec::new(),
+            exemplars,
+            query_ctx,
+        )
+        .await;
+        record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, outcome.written[0]);
+        record_remote_write_exemplars(&db, REMOTE_WRITE_V1_VERSION, outcome.written[2]);
+        if let Some(error) = outcome.error {
+            return Err(error);
+        }
+        return Ok((StatusCode::NO_CONTENT, write_cost_header_map(outcome.cost)).into_response());
+    }
 
     let outcome = match write_prometheus_rows_with_progress(
         prom_store_handler,
@@ -266,7 +287,7 @@ async fn remote_write_v2(
 
     // Pipeline processing is not supported for remote write v2 yet. Ignore the
     // optional pipeline parameter and ingest samples directly.
-    let _ = pipeline_info;
+    let has_pipeline = pipeline_info.pipeline_name.is_some();
 
     let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
@@ -276,15 +297,34 @@ async fn remote_write_v2(
             Ok(req) => req,
             Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
         };
+    if has_pipeline && req.exemplar_count > 0 {
+        return Ok(remote_write_v2_error_response(
+            error::NotSupportedSnafu {
+                feat: "pipelines with exemplars",
+            }
+            .build(),
+            0,
+            0,
+            0,
+        ));
+    }
     // The v2 per-series metadata upgrades the written tables' semantic options
     // (metric type/unit, declared quality) at auto-create time.
     if let Some(index) = req.semantic_index.encode(&query_ctx.current_schema()) {
         query_ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
     }
+    if req.exemplar_count > 0 {
+        let counter = crate::metrics::PROM_STORE_REMOTE_WRITE_EXEMPLARS
+            .with_label_values(&[&db, REMOTE_WRITE_V2_VERSION]);
+        query_ctx.set_write_progress(Arc::new(
+            session::write_progress::WriteProgress::with_reservation(req.memory_guard.clone())
+                .with_observer(move |rows| counter.inc_by(rows)),
+        ));
+    }
     let query_ctx = Arc::new(query_ctx);
     let (sample_count, histogram_count) = (req.sample_count, req.histogram_count);
     let mut sample_batches = into_prom_write_batches(req.samples, query_ctx.clone());
-    let mut histogram_batches = into_prom_write_batches(req.histograms, query_ctx);
+    let mut histogram_batches = into_prom_write_batches(req.histograms, query_ctx.clone());
     for (batches, histogram) in [(&mut sample_batches, false), (&mut histogram_batches, true)] {
         let counter = if histogram {
             crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
@@ -302,6 +342,34 @@ async fn remote_write_v2(
             fork.set_write_progress(Arc::new(progress));
             *ctx = Arc::new(fork);
         }
+    }
+    if req.exemplar_count > 0 {
+        let outcome = exemplar::write(
+            prom_store_handler,
+            pending_rows_batcher,
+            prom_store_with_metric_engine,
+            sample_batches,
+            histogram_batches,
+            req.exemplars,
+            query_ctx,
+        )
+        .await;
+        if let Some(error) = outcome.error {
+            return Ok(remote_write_v2_error_response(
+                error,
+                outcome.written[0],
+                outcome.written[1],
+                outcome.written[2],
+            ));
+        }
+        let mut headers = write_cost_header_map(outcome.cost);
+        append_remote_write_v2_written_headers(
+            &mut headers,
+            outcome.written[0],
+            outcome.written[1],
+            outcome.written[2],
+        );
+        return Ok((StatusCode::NO_CONTENT, headers).into_response());
     }
     let outcome = match write_prometheus_v2_rows_with_progress(
         prom_store_handler,
@@ -697,6 +765,14 @@ fn record_remote_write_samples(db: &str, version: &str, rows: u64) {
     crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
         .with_label_values(&[db, version])
         .inc_by(rows);
+}
+
+fn record_remote_write_exemplars(db: &str, version: &str, rows: u64) {
+    if rows != 0 {
+        crate::metrics::PROM_STORE_REMOTE_WRITE_EXEMPLARS
+            .with_label_values(&[db, version])
+            .inc_by(rows);
+    }
 }
 
 fn remote_write_v2_error_response(
