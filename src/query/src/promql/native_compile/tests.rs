@@ -23,7 +23,7 @@ use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
@@ -2390,7 +2390,7 @@ fn the_batch_acceptance_queries_compile() {
 /// `values` is one sample per timestamp, and a `None` is a position whose sample is missing rather
 /// than a value: the two are not the same thing, and a broadcast has to keep the difference.
 fn raw_x(timestamps: &[i64], values: Vec<Option<f64>>, is_last: bool) -> RawSeriesChunk {
-    let metric = MetricName::try_new(Some("x".into()), vec![]).expect("a metric name");
+    let metric = SeriesLabels::try_new(Some("x".into()), vec![]).expect("a metric name");
     RawSeriesChunk::try_new(
         &raw_schema(),
         Buffer::from_slice_ref(b"series-a"),
@@ -3757,7 +3757,7 @@ fn whole_vector_functions_bind_a_vector_operation() {
 fn agg_raw_chunk(
     schema: &SeriesSchema,
     key: &[u8],
-    metric: MetricName,
+    metric: SeriesLabels,
     timestamps: &[i64],
     values: &[f64],
 ) -> RawSeriesChunk {
@@ -3768,7 +3768,7 @@ fn agg_raw_chunk(
 fn agg_raw_chunk_with_last(
     schema: &SeriesSchema,
     key: &[u8],
-    metric: MetricName,
+    metric: SeriesLabels,
     timestamps: &[i64],
     values: &[f64],
     is_last: bool,
@@ -3785,8 +3785,8 @@ fn agg_raw_chunk_with_last(
 }
 
 /// `name` with the labels in `tags`, in the order given.
-fn agg_metric(name: &str, tags: &[(&str, &str)]) -> MetricName {
-    MetricName::try_new(
+fn agg_metric(name: &str, tags: &[(&str, &str)]) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(name.into()),
         tags.iter()
             .map(|(name, value)| Label {

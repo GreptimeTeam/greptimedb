@@ -22,7 +22,7 @@ use datatypes::series::samples::{
     FieldSpec, HistogramSamples, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -70,10 +70,10 @@ fn schema(fields: usize, grid: &Arc<EvalGrid>) -> SeriesSchema {
     }
 }
 
-fn metric(labels: &Labels) -> MetricName {
+fn metric(labels: &Labels) -> SeriesLabels {
     let mut labels = labels.clone();
     let name = labels.remove("__name__").map(Arc::from);
-    MetricName::try_new(
+    SeriesLabels::try_new(
         name,
         labels
             .into_iter()
@@ -86,7 +86,7 @@ fn metric(labels: &Labels) -> MetricName {
     .unwrap()
 }
 
-fn labels_of(metric: &MetricName) -> Labels {
+fn labels_of(metric: &SeriesLabels) -> Labels {
     let mut labels: Labels = metric
         .tags()
         .iter()

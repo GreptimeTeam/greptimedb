@@ -64,8 +64,8 @@ fn schema_with_grid_len(fields: &[&str], len: u64) -> Arc<SeriesSchema> {
     })
 }
 
-fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
-    MetricName::try_new(
+fn metric(name: &str, labels: &[(&str, &str)]) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(name.into()),
         labels
             .iter()
@@ -81,7 +81,7 @@ fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
 /// Each field is split at a different offset into chunks with nonzero Arrow offsets.
 fn input(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     start: usize,
     fields: &[Vec<Option<f64>>],
 ) -> Series {
@@ -423,7 +423,7 @@ fn fields_are_aggregated_independently() {
         .collect();
     let q = input(
         &schema(&["scalar"]),
-        MetricName::try_new(None, Vec::new()).unwrap(),
+        SeriesLabels::try_new(None, Vec::new()).unwrap(),
         0,
         &[q_values],
     );
@@ -878,7 +878,7 @@ fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
             })
             .collect::<Vec<_>>()
     };
-    let job = MetricName::try_new(None, metric("m", &[("job", "x")]).tags().to_vec()).unwrap();
+    let job = SeriesLabels::try_new(None, metric("m", &[("job", "x")]).tags().to_vec()).unwrap();
     assert_eq!(
         labels(Grouping::By(&["host", "job"])),
         [(job.clone(), vec![Some(3.0)])]
@@ -892,13 +892,13 @@ fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
     assert_eq!(by_name.len(), 2);
     assert_eq!(
         by_name[0].0,
-        MetricName::try_new(Some("a".into()), vec![]).unwrap()
+        SeriesLabels::try_new(Some("a".into()), vec![]).unwrap()
     );
     let unnamed = [
         input(&schema, metric("", &[]), 0, &[vec![Some(1.0)]]),
         input(
             &schema,
-            MetricName::try_new(None, vec![]).unwrap(),
+            SeriesLabels::try_new(None, vec![]).unwrap(),
             0,
             &[vec![Some(2.0)]],
         ),
@@ -915,7 +915,10 @@ fn grouping_labels_follow_prometheus_and_treat_empty_values_as_absent() {
     let none = labels(Grouping::By(&[]));
     assert_eq!(
         none,
-        [(MetricName::try_new(None, vec![]).unwrap(), vec![Some(3.0)])]
+        [(
+            SeriesLabels::try_new(None, vec![]).unwrap(),
+            vec![Some(3.0)]
+        )]
     );
 }
 
@@ -982,7 +985,7 @@ fn grouping_keeps_type_and_unit_labels() {
     };
     assert_eq!(
         labels(Grouping::Without(&["job"])),
-        MetricName::try_new(
+        SeriesLabels::try_new(
             None,
             metric("a", &[("__type__", "gauge"), ("__unit__", "seconds")])
                 .tags()
@@ -992,7 +995,7 @@ fn grouping_keeps_type_and_unit_labels() {
     );
     assert_eq!(
         labels(Grouping::By(&["__unit__"])),
-        MetricName::try_new(
+        SeriesLabels::try_new(
             None,
             metric("a", &[("__unit__", "seconds")]).tags().to_vec()
         )
@@ -1240,7 +1243,7 @@ fn quantile_without_q_at_a_point_has_no_result() {
     ];
     let q = input(
         &schema,
-        MetricName::try_new(None, Vec::new()).unwrap(),
+        SeriesLabels::try_new(None, Vec::new()).unwrap(),
         10,
         &[vec![Some(0.5), None, Some(0.5)]],
     );
@@ -1312,7 +1315,7 @@ fn quantile_over_one_point_members_reads_each_member_at_its_point() {
         .collect();
     let q = input(
         &schema,
-        MetricName::try_new(None, Vec::new()).unwrap(),
+        SeriesLabels::try_new(None, Vec::new()).unwrap(),
         0,
         &[vec![Some(0.5); 128]],
     );

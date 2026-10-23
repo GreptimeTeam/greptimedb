@@ -29,7 +29,7 @@ use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
 use datatypes::arrow::buffer::ScalarBuffer;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{MetricName, SeriesOrdering};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
@@ -87,7 +87,7 @@ fn chunk(time: &[i64], values: &[f64], last: bool) -> RawSeriesChunk {
     RawSeriesChunk::try_new(
         &raw_schema(),
         datatypes::arrow::buffer::Buffer::from(vec![1, 2, 3]),
-        Some(MetricName::try_new(None, vec![]).unwrap()),
+        Some(SeriesLabels::try_new(None, vec![]).unwrap()),
         RawTimestamps::try_new(ScalarBuffer::from(time.to_vec())).unwrap(),
         SeriesFields::one(Samples::from_float(Float64Array::from(values.to_vec()))),
         last,
@@ -263,7 +263,7 @@ fn dropping_pending_stream_releases_source_chunks_and_memory() {
     let pending_chunk = RawSeriesChunk::try_new(
         &raw_schema(),
         datatypes::arrow::buffer::Buffer::from(vec![1]),
-        Some(MetricName::try_new(None, vec![]).unwrap()),
+        Some(SeriesLabels::try_new(None, vec![]).unwrap()),
         RawTimestamps::try_new(ScalarBuffer::from(vec![10])).unwrap(),
         SeriesFields::one(samples),
         false,
@@ -344,7 +344,7 @@ fn dense_large_chunk_uses_segment_count_not_row_count_for_descriptors() {
     let dense_chunk = RawSeriesChunk::try_new(
         &raw_schema(),
         datatypes::arrow::buffer::Buffer::from(vec![1]),
-        Some(MetricName::try_new(None, vec![]).unwrap()),
+        Some(SeriesLabels::try_new(None, vec![]).unwrap()),
         RawTimestamps::try_new(ScalarBuffer::from(timestamps)).unwrap(),
         SeriesFields::one(Samples::from_float(values)),
         true,

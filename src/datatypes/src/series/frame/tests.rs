@@ -28,7 +28,7 @@ use crate::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchB
 use crate::series::samples::{
     DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
 };
-use crate::series::{Label, MetricName};
+use crate::series::{Label, SeriesLabels};
 
 fn test_schema(names: &[&str]) -> SeriesSchema {
     SeriesSchema {
@@ -43,8 +43,8 @@ fn test_schema(names: &[&str]) -> SeriesSchema {
     }
 }
 
-fn metric(name: Option<&str>, labels: &[(&str, &str)]) -> MetricName {
-    MetricName::try_new(
+fn metric(name: Option<&str>, labels: &[(&str, &str)]) -> SeriesLabels {
+    SeriesLabels::try_new(
         name.map(Arc::from),
         labels
             .iter()
@@ -60,7 +60,7 @@ fn metric(name: Option<&str>, labels: &[(&str, &str)]) -> MetricName {
 fn float_chunk(
     schema: &SeriesSchema,
     key: &[u8],
-    metric: Option<MetricName>,
+    metric: Option<SeriesLabels>,
     times: Vec<i64>,
     values: Vec<Option<f64>>,
     is_last: bool,

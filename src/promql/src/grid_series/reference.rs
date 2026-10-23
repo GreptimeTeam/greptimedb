@@ -26,7 +26,7 @@ use datatypes::series::samples::{
     HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use rand::Rng;
 
 use crate::histogram_eval::float_histogram::FloatHistogram;
@@ -62,7 +62,7 @@ pub(crate) fn expand(series: &Series) -> Dense {
 }
 
 /// Asserts `actual` is the trimmed form of `expected`, with identical value bits and metric.
-pub(crate) fn assert_series_eq(actual: Option<&Series>, expected: &Dense, metric: &MetricName) {
+pub(crate) fn assert_series_eq(actual: Option<&Series>, expected: &Dense, metric: &SeriesLabels) {
     assert_series_matches(actual, expected, metric, f64::to_bits, "");
 }
 
@@ -72,7 +72,7 @@ pub(crate) fn assert_series_eq(actual: Option<&Series>, expected: &Dense, metric
 pub(crate) fn assert_series_eq_any_nan(
     actual: Option<&Series>,
     expected: &Dense,
-    metric: &MetricName,
+    metric: &SeriesLabels,
     context: &str,
 ) {
     let any_nan = |value: f64| {
@@ -88,7 +88,7 @@ pub(crate) fn assert_series_eq_any_nan(
 fn assert_series_matches(
     actual: Option<&Series>,
     expected: &Dense,
-    metric: &MetricName,
+    metric: &SeriesLabels,
     bits_of: fn(f64) -> u64,
     context: &str,
 ) {
@@ -199,7 +199,7 @@ pub(crate) fn piece_ranges(pieces: &[Series]) -> Vec<(usize, usize)> {
 /// A result carries only the positions that hold a value, so its rows may form several runs: the
 /// comparison expands it over the grid and checks it covers exactly the valued positions. `None`
 /// means no row survived, which is only right when `expected` holds no value either.
-pub(crate) fn assert_result_eq(actual: Option<&Series>, expected: &Dense, metric: &MetricName) {
+pub(crate) fn assert_result_eq(actual: Option<&Series>, expected: &Dense, metric: &SeriesLabels) {
     match actual {
         Some(actual) => assert_pieces_eq(std::slice::from_ref(actual), expected, metric),
         None => assert_pieces_eq(&[], expected, metric),
@@ -208,7 +208,7 @@ pub(crate) fn assert_result_eq(actual: Option<&Series>, expected: &Dense, metric
 
 /// Asserts `pieces` are the pieces of `expected`: they reproduce it, and together they cover
 /// exactly the positions that hold a value, none of them twice.
-pub(crate) fn assert_pieces_eq(pieces: &[Series], expected: &Dense, metric: &MetricName) {
+pub(crate) fn assert_pieces_eq(pieces: &[Series], expected: &Dense, metric: &SeriesLabels) {
     for piece in pieces {
         assert_eq!(&piece.metric, metric, "a piece changed the metric");
     }
@@ -386,10 +386,10 @@ pub(crate) fn golden_cases(text: &str) -> Vec<GoldenCase> {
     cases
 }
 
-pub(crate) fn metric_of(labels: &Labels) -> MetricName {
+pub(crate) fn metric_of(labels: &Labels) -> SeriesLabels {
     let mut labels = labels.clone();
     let name = labels.remove("__name__").map(Arc::from);
-    MetricName::try_new(
+    SeriesLabels::try_new(
         name,
         labels
             .into_iter()
@@ -402,7 +402,7 @@ pub(crate) fn metric_of(labels: &Labels) -> MetricName {
     .unwrap()
 }
 
-pub(crate) fn labels_of(metric: &MetricName) -> Labels {
+pub(crate) fn labels_of(metric: &SeriesLabels) -> Labels {
     let mut labels: Labels = metric
         .tags()
         .iter()

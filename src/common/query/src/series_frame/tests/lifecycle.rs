@@ -25,7 +25,7 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, SeriesFields, SeriesSchema,
 };
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use futures_util::{Stream, StreamExt};
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
@@ -167,7 +167,7 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
         &schema,
         Buffer::from(vec![0xaa_u8, 0x10, 0xbb]),
         Some(
-            MetricName::try_new(
+            SeriesLabels::try_new(
                 Some(Arc::from("cpu")),
                 vec![Label {
                     name: Arc::from("host"),
@@ -361,7 +361,7 @@ async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners()
             .into(),
         eval_grid: None,
     });
-    let metric = MetricName::try_new(
+    let metric = SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![Label {
             name: Arc::from("host"),

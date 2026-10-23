@@ -22,7 +22,7 @@ use datatypes::series::samples::{
     SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -47,8 +47,8 @@ fn grid_schema(fields: usize, grid_len: u64) -> Arc<SeriesSchema> {
     })
 }
 
-fn metric(host: usize) -> MetricName {
-    MetricName::try_new(
+fn metric(host: usize) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![Label {
             name: Arc::from("host"),

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{SampleRef, Series, SeriesFields, SeriesSchema};
 
@@ -162,7 +162,7 @@ pub fn select_instants(
 /// ignores an offset next to `@` here, while `info()` applies it.
 pub fn timestamp_of_selection(
     schema: &Arc<SeriesSchema>,
-    metric: &MetricName,
+    metric: &SeriesLabels,
     time: &RawTimestamps,
     fields: &SeriesFields,
     indices: &[u64],
@@ -186,7 +186,7 @@ pub fn timestamp_of_selection(
 /// Takes the same selection as [`timestamp_of_selection`].
 pub fn info_sample_times(
     schema: &Arc<SeriesSchema>,
-    metric: &MetricName,
+    metric: &SeriesLabels,
     time: &RawTimestamps,
     fields: &SeriesFields,
     indices: &[u64],
@@ -254,7 +254,7 @@ pub fn timestamp_of_evaluated(
 /// have fails.
 fn project_selection(
     schema: &Arc<SeriesSchema>,
-    metric: MetricName,
+    metric: SeriesLabels,
     time: &RawTimestamps,
     fields: &SeriesFields,
     indices: &[u64],

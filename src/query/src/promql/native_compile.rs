@@ -132,7 +132,7 @@ use std::time::Duration;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
-use datatypes::series::{MetricName, SeriesOrdering};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 use promql::histogram_eval::HistogramFunction;
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::map_label::LabelRewrite;
@@ -853,7 +853,7 @@ fn vector_op<'a>(
 ///
 /// `__field__`, `__schema__` and `__database__` choose what is read rather than match a label, so
 /// they are not labels of the answer, as in the existing planner.
-fn absent_labels_of(expr: &PromExpr) -> Result<MetricName> {
+fn absent_labels_of(expr: &PromExpr) -> Result<SeriesLabels> {
     let PromExpr::VectorSelector(selector) = unparen(expr) else {
         return absent_labels(&[]);
     };
