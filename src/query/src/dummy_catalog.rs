@@ -1409,19 +1409,17 @@ mod tests {
 
     use common_error::ext::BoxedError;
     use common_query::series_frame::{label_decode_spec, unpack_raw_series};
-    use datatypes::arrow::array::Float64Array;
-    use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
-    use datatypes::series::raw::RawTimestamps;
-    use datatypes::series::samples::{Samples, SeriesFields};
     use datafusion::execution::SessionStateBuilder;
     use datafusion::execution::context::TaskContext;
     use datafusion::physical_plan::ExecutionPlanProperties;
+    use datatypes::arrow::array::Float64Array;
+    use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::frame::LabelDecodeSpec;
-    use datatypes::series::raw::RawSeriesChunk;
-    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+    use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_engine::{
         PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RawSeriesStream,
@@ -1436,6 +1434,13 @@ mod tests {
 
     /// `Result` here is the crate's one-argument alias, so the engine traits below name theirs.
     type RegionResult<T> = std::result::Result<T, BoxedError>;
+
+    type FrameRegionSetup = (
+        FrameRegionEngine,
+        RegionMetadataRef,
+        Arc<Mutex<Vec<usize>>>,
+        Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
+    );
 
     /// A region whose scan either can or cannot serve raw series frames.
     ///
@@ -1454,25 +1459,13 @@ mod tests {
         fn with_partition_chunks(
             serves_frames: bool,
             partition_chunks: Vec<Vec<RawSeriesChunk>>,
-        ) -> (
-            Self,
-            RegionMetadataRef,
-            Arc<Mutex<Vec<usize>>>,
-            Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
-        ) {
+        ) -> FrameRegionSetup {
             let (mut engine, metadata, prepares, distributions) = Self::new(serves_frames);
             engine.partition_chunks = Arc::new(partition_chunks);
             (engine, metadata, prepares, distributions)
         }
 
-        fn new(
-            serves_frames: bool,
-        ) -> (
-            Self,
-            RegionMetadataRef,
-            Arc<Mutex<Vec<usize>>>,
-            Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
-        ) {
+        fn new(serves_frames: bool) -> FrameRegionSetup {
             let metadata = Arc::new(frame_region_metadata());
             let prepares = Arc::new(Mutex::new(Vec::new()));
             let distributions = Arc::new(Mutex::new(Vec::new()));
@@ -1994,9 +1987,7 @@ mod tests {
     }
 
     /// The keys and closing flags of a packed frame stream, in the order it emits them.
-    async fn frame_keys(
-        plan: &Arc<dyn ExecutionPlan>,
-    ) -> Vec<(Vec<u8>, bool)> {
+    async fn frame_keys(plan: &Arc<dyn ExecutionPlan>) -> Vec<(Vec<u8>, bool)> {
         let context = Arc::new(TaskContext::default());
         let stream = plan.execute(0, context).unwrap();
         let unpacked = unpack_raw_series(stream, None).unwrap();
