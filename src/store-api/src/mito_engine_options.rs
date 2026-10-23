@@ -178,7 +178,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
             MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD,
             MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD,
             MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES,
-            // We don't allow to create a mito table with sparse primary key encoding directly.
+            crate::metric_engine_consts::PRIMARY_KEY_ENCODING,
             APPEND_MODE_KEY,
             MERGE_MODE_KEY,
             SST_FORMAT_KEY,

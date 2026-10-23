@@ -55,7 +55,7 @@ use crate::metadata::{
     ColumnMetadata, ConvertTimeRangesSnafu, DecodeProtoSnafu, FlightCodecSnafu,
     InvalidIndexOptionSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
     InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
-    RegionMetadata, Result, UnexpectedSnafu,
+    RegionMetadata, Result, SqlCommonSnafu, UnexpectedSnafu, validate_sparse_tag_default,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
@@ -1020,11 +1020,45 @@ impl AlterKind {
                     .try_for_each(|name| Self::validate_column_existence(name, metadata))?;
             }
             AlterKind::SetDefaults { columns } => {
-                columns
-                    .iter()
-                    .try_for_each(|col| Self::validate_column_existence(&col.name, metadata))?;
+                for col in columns {
+                    let existing = metadata.column_by_name(&col.name).with_context(|| {
+                        InvalidRegionRequestSnafu {
+                            region_id: metadata.region_id,
+                            err: format!("column {} not found", col.name),
+                        }
+                    })?;
+                    if metadata.is_ordinary_sparse() && existing.semantic_type == SemanticType::Tag
+                    {
+                        let default = common_sql::convert::deserialize_default_constraint(
+                            &col.default_constraint,
+                            &col.name,
+                            &existing.column_schema.data_type,
+                        )
+                        .context(SqlCommonSnafu)?;
+                        if default.as_ref() != existing.column_schema.default_constraint() {
+                            validate_sparse_tag_default(&col.name, default.as_ref())?;
+                        }
+                    }
+                }
             }
             AlterKind::SyncColumns { column_metadatas } => {
+                if metadata.is_ordinary_sparse() {
+                    for column in column_metadatas
+                        .iter()
+                        .filter(|c| c.semantic_type == SemanticType::Tag)
+                    {
+                        let existing_default = metadata
+                            .column_by_id(column.column_id)
+                            .filter(|c| c.semantic_type == SemanticType::Tag)
+                            .and_then(|c| c.column_schema.default_constraint());
+                        if column.column_schema.default_constraint() != existing_default {
+                            validate_sparse_tag_default(
+                                &column.column_schema.name,
+                                column.column_schema.default_constraint(),
+                            )?;
+                        }
+                    }
+                }
                 let new_primary_keys = column_metadatas
                     .iter()
                     .filter(|c| c.semantic_type == SemanticType::Tag)
@@ -1375,6 +1409,13 @@ impl AddColumn {
                     ),
                 }
             );
+        } else if metadata.is_ordinary_sparse()
+            && self.column_metadata.semantic_type == SemanticType::Tag
+        {
+            validate_sparse_tag_default(
+                &self.column_metadata.column_schema.name,
+                self.column_metadata.column_schema.default_constraint(),
+            )?;
         }
 
         if let Some(existing_column) = metadata.column_by_id(self.column_metadata.column_id) {
@@ -2650,6 +2691,107 @@ mod tests {
             JsonMetadata::new(settings),
         )));
         column_schema
+    }
+
+    #[test]
+    fn test_sparse_tag_default_alter_validation() {
+        use datatypes::schema::ColumnDefaultConstraint;
+        use datatypes::value::Value;
+
+        use crate::codec::PrimaryKeyEncoding;
+
+        for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+            let mut metadata = new_metadata();
+            metadata.primary_key_encoding = encoding;
+            for default in [
+                None,
+                Some(ColumnDefaultConstraint::null_value()),
+                Some(ColumnDefaultConstraint::Value(Value::from("east"))),
+            ] {
+                for semantic_type in [SemanticType::Tag, SemanticType::Field] {
+                    let column = ColumnMetadata {
+                        column_schema: ColumnSchema::new(
+                            "new_column",
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        )
+                        .with_default_constraint(default.clone())
+                        .unwrap(),
+                        semantic_type,
+                        column_id: 5,
+                    };
+                    let mut synced = metadata.column_metadatas.clone();
+                    synced.push(column.clone());
+                    let existing_name = if semantic_type == SemanticType::Tag {
+                        "tag_0"
+                    } else {
+                        "field_0"
+                    };
+                    // SET DEFAULT carries a serialized SQL expression, unlike column metadata.
+                    let sql_value = if matches!(
+                        default,
+                        Some(ColumnDefaultConstraint::Value(Value::String(_)))
+                    ) {
+                        serde_json::json!({"SingleQuotedString": "east"})
+                    } else {
+                        serde_json::json!("Null")
+                    };
+                    let set_default = AlterKind::SetDefaults {
+                        columns: vec![SetDefault {
+                            name: existing_name.to_string(),
+                            default_constraint: serde_json::to_vec(&serde_json::json!({
+                                "Value": {"value": sql_value, "span": {
+                                    "start": {"line": 0, "column": 0},
+                                    "end": {"line": 0, "column": 0}
+                                }}
+                            }))
+                            .unwrap(),
+                        }],
+                    };
+                    let expected_ok = encoding == PrimaryKeyEncoding::Dense
+                        || semantic_type == SemanticType::Field
+                        || !matches!(
+                            default,
+                            Some(ColumnDefaultConstraint::Value(Value::String(_)))
+                        );
+                    for kind in [
+                        AlterKind::AddColumns {
+                            columns: vec![AddColumn {
+                                column_metadata: column,
+                                location: None,
+                            }],
+                        },
+                        AlterKind::SyncColumns {
+                            column_metadatas: synced,
+                        },
+                        set_default,
+                    ] {
+                        let result = kind.validate(&metadata);
+                        assert_eq!(result.is_ok(), expected_ok, "{kind:?}: {result:?}");
+                    }
+                }
+            }
+
+            // Defaults present at creation remain valid, including idempotent schema sync.
+            let mut columns = metadata.column_metadatas.clone();
+            columns[1].column_schema = columns[1]
+                .column_schema
+                .clone()
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from("east"))))
+                .unwrap();
+            let mut builder = RegionMetadataBuilder::from_existing(metadata);
+            builder
+                .alter(AlterKind::SyncColumns {
+                    column_metadatas: columns.clone(),
+                })
+                .unwrap();
+            let metadata = builder.build().unwrap();
+            AlterKind::SyncColumns {
+                column_metadatas: columns,
+            }
+            .validate(&metadata)
+            .unwrap();
+        }
     }
 
     #[test]
