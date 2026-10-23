@@ -335,6 +335,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid node scheduling key: {}", key))]
+    InvalidNodeSchedulingKey {
+        #[snafu(implicit)]
+        location: Location,
+        key: String,
+    },
+
     #[snafu(display("Failed to parse lease key from utf8"))]
     LeaseKeyFromUtf8 {
         #[snafu(source)]
@@ -1217,6 +1224,7 @@ impl ErrorExt for Error {
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
             | Error::InvalidInactiveRegionKey { .. }
+            | Error::InvalidNodeSchedulingKey { .. }
             | Error::ParseNum { .. }
             | Error::ParseBool { .. }
             | Error::ParseAddr { .. }

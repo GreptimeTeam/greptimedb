@@ -571,7 +571,7 @@ impl CompactionScheduler {
             max_parallelism,
         );
         status.merge_waiter(waiter);
-        self.dispatch_compaction_planning(plan_id, request, compact_options, time_range);
+        self.dispatch_compaction_planning(plan_id, request, compact_options, time_range, trigger);
         self.listener.on_compaction_scheduled(region_id);
         Ok(true)
     }
@@ -617,7 +617,13 @@ impl CompactionScheduler {
         // was fetched above.
         let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking_with_trigger(plan_id, CompactionTrigger::Manual);
-        self.dispatch_compaction_planning(plan_id, request, options, time_range);
+        self.dispatch_compaction_planning(
+            plan_id,
+            request,
+            options,
+            time_range,
+            CompactionTrigger::Manual,
+        );
         debug!(
             "Successfully scheduled manual compaction planning for region id: {}",
             region_id
@@ -703,6 +709,7 @@ impl CompactionScheduler {
             request,
             compact_request::Options::Regular(Default::default()),
             None,
+            CompactionTrigger::Automatic,
         );
         debug!(
             "Successfully scheduled next compaction planning for region id: {}",
