@@ -17,6 +17,7 @@ mod function_plans;
 mod island;
 mod matching_filters;
 pub(crate) mod native;
+pub use native::NATIVE_PROMQL_EXTENSION_KEY;
 
 mod set_operator;
 
@@ -2421,9 +2422,20 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        let plan = self
-            .prom_root_expr_to_plan(&children[0], query_engine_state)
-            .await?;
+        let native_plan = match expr.name() {
+            ANALYZE_NODE_NAME
+            | ANALYZE_VERBOSE_NODE_NAME
+            | EXPLAIN_NODE_NAME
+            | EXPLAIN_VERBOSE_NODE_NAME => self.try_plan_native_fused(&children[0]).await?,
+            _ => None,
+        };
+        let plan = match native_plan {
+            Some(plan) => plan,
+            None => {
+                self.prom_root_expr_to_plan(&children[0], query_engine_state)
+                    .await?
+            }
+        };
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
         // if `analyze` is true, runs the actual plan and produces
