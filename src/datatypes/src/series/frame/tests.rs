@@ -115,7 +115,7 @@ fn histogram_batch_with_sum(sum: f64) -> Arc<crate::series::histogram::Histogram
 }
 
 fn hist_schema_frame_field(schema: &SeriesSchema) -> DataType {
-    raw_series_frame_schema(schema, RawLabelMode::Key)
+    series_frame_schema(schema, FrameLabelMode::Key, Some(&dense_description()))
         .unwrap()
         .field(3)
         .data_type()
@@ -253,13 +253,16 @@ fn assert_float_bits(actual: &Samples, expected: &[Option<f64>]) {
 /// single-chunk wrapper: every batch the walk produces, then the final flush.
 fn pack_chunk_with_budget(
     schema: &SeriesSchema,
-    mode: RawLabelMode,
+    mode: FrameLabelMode,
     chunk: &RawSeriesChunk,
     max_rows: usize,
     max_bytes: usize,
 ) -> crate::error::Result<Vec<RecordBatch>> {
-    let mut builder = RawSeriesFrameBuilder::try_new(schema, mode, max_rows, max_bytes)?;
-    let mut cursor = RawSeriesChunkCursor::try_new(schema, mode, chunk.clone())?;
+    // Only a key frame declares a label decode description; explicit frames carry their labels.
+    let decode = (mode == FrameLabelMode::Key).then(dense_description);
+    let mut builder =
+        SeriesFrameBuilder::try_new(schema, mode, decode.as_ref(), max_rows, max_bytes)?;
+    let mut cursor = SeriesFrameCursor::try_new_raw(schema, mode, chunk.clone())?;
     let mut batches = Vec::new();
     while let Some(batch) = cursor.append_to(&mut builder)? {
         batches.push(batch);
@@ -273,12 +276,12 @@ fn pack_chunk_with_budget(
 /// Advances one owned chunk through an existing builder. A partially filled buffer stays buffered
 /// instead of becoming a batch of its own, which is what makes cross-chunk grouping observable.
 fn append_chunk(
-    builder: &mut RawSeriesFrameBuilder,
+    builder: &mut SeriesFrameBuilder,
     schema: &SeriesSchema,
-    mode: RawLabelMode,
+    mode: FrameLabelMode,
     chunk: &RawSeriesChunk,
 ) -> crate::error::Result<Vec<RecordBatch>> {
-    let mut cursor = RawSeriesChunkCursor::try_new(schema, mode, chunk.clone())?;
+    let mut cursor = SeriesFrameCursor::try_new_raw(schema, mode, chunk.clone())?;
     let mut batches = Vec::new();
     while let Some(batch) = cursor.append_to(builder)? {
         batches.push(batch);
@@ -289,13 +292,14 @@ fn append_chunk(
 /// Decodes every batch with one reused decoder, so repeated calls exercise the cached schema.
 fn decode_batches(
     schema: &SeriesSchema,
-    mode: RawLabelMode,
+    mode: FrameLabelMode,
     batches: &[RecordBatch],
 ) -> Vec<RawSeriesChunk> {
-    let decoder = RawSeriesFrameDecoder::try_new(schema, mode).unwrap();
+    let decode = (mode == FrameLabelMode::Key).then(dense_description);
+    let decoder = SeriesFrameDecoder::try_new(schema, mode, decode.as_ref()).unwrap();
     batches
         .iter()
-        .flat_map(|batch| decoder.decode(batch).unwrap())
+        .flat_map(|batch| decoder.decode_raw(batch).unwrap())
         .collect()
 }
 
@@ -376,16 +380,22 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
     // paths below stay observable; the default budget coalesces the same rows later on.
     let frames = pack_chunk_with_budget(
         &schema,
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
         &chunk,
         1,
-        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )
     .unwrap();
     assert_eq!(frames.len(), 64);
     let mut decoded_chunks = Vec::with_capacity(frames.len());
     for frame in &frames {
-        let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, frame).unwrap();
+        let decoded = unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            frame,
+        )
+        .unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].time.len(), 1);
         decoded_chunks.push(decoded.into_iter().next().unwrap());
@@ -419,10 +429,16 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
 
     // The default budget groups the same 64 rows into one multirow batch; every row still decodes
     // to its own slice of the shared table with bit-exact values.
-    let coalesced = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    let coalesced = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
     assert_eq!(coalesced.len(), 1);
     assert_eq!(coalesced[0].num_rows(), 64);
-    let coalesced_rows = decode_batches(&schema, RawLabelMode::Key, &coalesced);
+    let coalesced_rows = decode_batches(&schema, FrameLabelMode::Key, &coalesced);
     assert_eq!(coalesced_rows.len(), 64);
     for (position, row) in coalesced_rows.iter().enumerate() {
         assert_eq!(row.primary_key.as_slice(), &[0x42]);
@@ -478,8 +494,9 @@ fn raw_frame_field_names_bind_payloads_to_their_schema() {
     ])
     .unwrap();
 
-    for mode in [RawLabelMode::Key, RawLabelMode::Explicit] {
-        let metric = (mode == RawLabelMode::Explicit).then(|| metric(Some("host"), &[]));
+    for mode in [FrameLabelMode::Key, FrameLabelMode::Explicit] {
+        let decode = (mode == FrameLabelMode::Key).then(dense_description);
+        let metric = (mode == FrameLabelMode::Explicit).then(|| metric(Some("host"), &[]));
         let chunk = RawSeriesChunk::try_new(
             &schema,
             Buffer::from(vec![0xaa_u8]),
@@ -489,7 +506,7 @@ fn raw_frame_field_names_bind_payloads_to_their_schema() {
             true,
         )
         .unwrap();
-        let batch = &pack_raw_series_chunk(&schema, mode, &chunk).unwrap()[0];
+        let batch = &pack_raw_series_chunk(&schema, mode, decode.as_ref(), &chunk).unwrap()[0];
         let payloads = batch
             .column(3)
             .as_any()
@@ -504,7 +521,7 @@ fn raw_frame_field_names_bind_payloads_to_their_schema() {
             ["cpu_usage", "cpu_idle"]
         );
 
-        let decoded = unpack_raw_series_frame(&schema, mode, batch).unwrap();
+        let decoded = unpack_raw_series_frame(&schema, mode, decode.as_ref(), batch).unwrap();
         assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa]);
         assert!(decoded[0].is_last);
         let times = decoded[0].time.as_buffer();
@@ -513,19 +530,35 @@ fn raw_frame_field_names_bind_payloads_to_their_schema() {
         assert_float_bits(decoded[0].fields.get(1).unwrap(), &[Some(10.0), Some(20.0)]);
 
         assert!(
-            unpack_raw_series_frame(&test_schema(&["cpu_idle", "cpu_usage"]), mode, batch).is_err()
+            unpack_raw_series_frame(
+                &test_schema(&["cpu_idle", "cpu_usage"]),
+                mode,
+                decode.as_ref(),
+                batch
+            )
+            .is_err()
         );
         assert!(
-            unpack_raw_series_frame(&test_schema(&["cpu_usage", "cpu_busy"]), mode, batch).is_err()
+            unpack_raw_series_frame(
+                &test_schema(&["cpu_usage", "cpu_busy"]),
+                mode,
+                decode.as_ref(),
+                batch
+            )
+            .is_err()
         );
     }
 }
 
+/// A key frame declares the label decode description that makes its `read_key` readable, so its
+/// metadata carries that text; an explicit frame declares none, and its `read_key` column is
+/// nullable because an evaluated explicit row carries no storage key at all.
 #[test]
 fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     let schema = test_schema(&["value"]);
-    let key_schema = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
-    let explicit_schema = raw_series_frame_schema(&schema, RawLabelMode::Explicit).unwrap();
+    let key_schema =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+    let explicit_schema = raw_series_frame_schema(&schema, FrameLabelMode::Explicit).unwrap();
     let payload = DataType::Struct(
         vec![
             Field::new(
@@ -560,10 +593,16 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
         .into(),
     );
     let mut expected_key_metadata = std::collections::HashMap::new();
-    expected_key_metadata.insert("greptime.series.layout".to_string(), "v1".to_string());
+    expected_key_metadata.insert("greptime.series.layout".to_string(), "v2".to_string());
     expected_key_metadata.insert("greptime.series.content".to_string(), "raw".to_string());
     expected_key_metadata.insert("greptime.series.labels".to_string(), "key".to_string());
     expected_key_metadata.insert("greptime.series.time".to_string(), "timestamps".to_string());
+    // A key frame also declares the description that decodes its labels. Its exact text is pinned by
+    // the metadata fixture, so it is spelled here by the same serializer the writer uses.
+    expected_key_metadata.insert(
+        LABEL_DECODE.to_string(),
+        serde_json::to_string(&dense_description()).unwrap(),
+    );
     let expected_key = Schema::new_with_metadata(
         vec![
             Field::new("read_key", DataType::Binary, false),
@@ -589,7 +628,10 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
         expected_key_metadata,
     );
     assert_eq!(key_schema.as_ref(), &expected_key);
+    // An explicit frame still has the key column, but only a raw explicit row carries a key: an
+    // evaluated one has none, so the column is nullable here while a key frame's is required.
     let mut explicit_fields = expected_key.fields().iter().cloned().collect::<Vec<_>>();
+    explicit_fields[0] = Field::new("read_key", DataType::Binary, true).into();
     explicit_fields.push(Field::new("name", DataType::Utf8, true).into());
     explicit_fields.push(
         Field::new(
@@ -611,6 +653,8 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     );
     let mut explicit_metadata = expected_key.metadata().clone();
     explicit_metadata.insert("greptime.series.labels".to_string(), "explicit".to_string());
+    // An explicit frame carries complete labels, so it declares no decode description.
+    explicit_metadata.remove(LABEL_DECODE);
     let expected_explicit = Schema::new_with_metadata(explicit_fields, explicit_metadata);
     assert_eq!(explicit_schema.as_ref(), &expected_explicit);
 
@@ -625,9 +669,21 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
         values.to_vec(),
         true,
     );
-    let packed = pack_raw_series_chunk(&schema, RawLabelMode::Key, &native).unwrap();
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &native,
+    )
+    .unwrap();
     assert_eq!(packed.len(), 1);
-    let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, &packed[0]).unwrap();
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &packed[0],
+    )
+    .unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].primary_key.as_slice(), &[0, 0xff, 0, 0x80]);
     assert!(decoded[0].metric.is_none());
@@ -648,20 +704,45 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
         vec![Some(1.25)],
         false,
     );
-    let packed = pack_raw_series_chunk(&schema, RawLabelMode::Explicit, &explicit).unwrap();
-    let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Explicit, &packed[0]).unwrap();
+    let packed = pack_raw_series_chunk(&schema, FrameLabelMode::Explicit, None, &explicit).unwrap();
+    let decoded =
+        unpack_raw_series_frame(&schema, FrameLabelMode::Explicit, None, &packed[0]).unwrap();
     assert_eq!(decoded[0].primary_key.as_slice(), &[0x80, 0, 0xff]);
     assert!(!decoded[0].is_last);
     let labels = decoded[0].metric.as_ref().unwrap();
     assert_eq!(labels.name(), None);
     assert_eq!(labels.get("rack"), Some(""));
     assert_eq!(labels.get("zone"), Some("west"));
-    assert!(pack_raw_series_chunk(&schema, RawLabelMode::Key, &explicit).is_err());
-    assert!(pack_raw_series_chunk(&schema, RawLabelMode::Explicit, &native).is_err());
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &packed[0]).is_err());
+    assert!(
+        pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &explicit
+        )
+        .is_err()
+    );
+    assert!(pack_raw_series_chunk(&schema, FrameLabelMode::Explicit, None, &native).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &packed[0]
+        )
+        .is_err()
+    );
 
-    let key_packed = pack_raw_series_chunk(&schema, RawLabelMode::Key, &native).unwrap();
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Explicit, &key_packed[0]).is_err());
+    let key_packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &native,
+    )
+    .unwrap();
+    assert!(
+        unpack_raw_series_frame(&schema, FrameLabelMode::Explicit, None, &key_packed[0]).is_err()
+    );
     for name in [None, Some(""), Some("cpu")] {
         let named = float_chunk(
             &schema,
@@ -671,9 +752,10 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
             vec![Some(2.0)],
             false,
         );
-        let encoded = pack_raw_series_chunk(&schema, RawLabelMode::Explicit, &named).unwrap();
+        let encoded =
+            pack_raw_series_chunk(&schema, FrameLabelMode::Explicit, None, &named).unwrap();
         let restored =
-            unpack_raw_series_frame(&schema, RawLabelMode::Explicit, &encoded[0]).unwrap();
+            unpack_raw_series_frame(&schema, FrameLabelMode::Explicit, None, &encoded[0]).unwrap();
         assert_eq!(restored[0].metric.as_ref().unwrap().name(), name);
         assert_eq!(restored[0].metric.as_ref().unwrap().get("empty"), Some(""));
     }
@@ -714,7 +796,13 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
     .unwrap();
     // Variable field boundaries now group every aligned interval into one multirow batch instead
     // of one batch per boundary, so decode the actual rows that batch carries.
-    let frames = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    let frames = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].num_rows(), 4);
     let mut observed_times = Vec::new();
@@ -722,7 +810,13 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
     let mut observed_second = Vec::new();
     let mut observed_keys = Vec::new();
     let mut observed_markers = Vec::new();
-    let rows = unpack_raw_series_frame(&schema, RawLabelMode::Key, &frames[0]).unwrap();
+    let rows = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &frames[0],
+    )
+    .unwrap();
     assert_eq!(rows.len(), 4);
     for (row_index, row) in rows.iter().enumerate() {
         assert_eq!(row.is_last, row_index == rows.len() - 1);
@@ -795,12 +889,22 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
         true,
     )
     .unwrap();
-    let aligned_frames =
-        pack_raw_series_chunk(&aligned_schema, RawLabelMode::Key, &aligned_chunk).unwrap();
+    let aligned_frames = pack_raw_series_chunk(
+        &aligned_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &aligned_chunk,
+    )
+    .unwrap();
     assert_eq!(aligned_frames.len(), 1);
     assert_eq!(aligned_frames[0].num_rows(), 3);
-    let aligned_rows =
-        unpack_raw_series_frame(&aligned_schema, RawLabelMode::Key, &aligned_frames[0]).unwrap();
+    let aligned_rows = unpack_raw_series_frame(
+        &aligned_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &aligned_frames[0],
+    )
+    .unwrap();
     assert_eq!(aligned_rows.len(), 3);
     let mut interval_lengths = Vec::new();
     let mut aligned_times = Vec::new();
@@ -896,12 +1000,23 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
     )
     .unwrap();
     distinct_rows.push(
-        pack_raw_series_chunk(&alternate_schema, RawLabelMode::Key, &alternate)
-            .unwrap()
-            .remove(0),
+        pack_raw_series_chunk(
+            &alternate_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &alternate,
+        )
+        .unwrap()
+        .remove(0),
     );
     let multirow = concat_batches(&frames[0].schema(), &distinct_rows).unwrap();
-    let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, &multirow).unwrap();
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &multirow,
+    )
+    .unwrap();
     assert_eq!(decoded.len(), 5);
     assert_eq!(
         decoded.iter().map(|row| row.is_last).collect::<Vec<_>>(),
@@ -929,7 +1044,13 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
         Some(&[0xed][..]),
     ]));
     let sliced = arrow::record_batch::RecordBatch::try_new(sliced.schema(), altered).unwrap();
-    let sliced_rows = unpack_raw_series_frame(&schema, RawLabelMode::Key, &sliced).unwrap();
+    let sliced_rows = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &sliced,
+    )
+    .unwrap();
     assert_eq!(
         sliced_rows
             .iter()
@@ -975,10 +1096,24 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
         false,
     )
     .unwrap();
-    let not_last_frames = pack_raw_series_chunk(&schema, RawLabelMode::Key, &not_last).unwrap();
+    let not_last_frames = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &not_last,
+    )
+    .unwrap();
     let markers = not_last_frames
         .iter()
-        .flat_map(|frame| unpack_raw_series_frame(&schema, RawLabelMode::Key, frame).unwrap())
+        .flat_map(|frame| {
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                frame,
+            )
+            .unwrap()
+        })
         .map(|row| row.is_last)
         .collect::<Vec<_>>();
     assert_eq!(markers, [false; 4]);
@@ -1036,8 +1171,20 @@ fn histogram_payload_and_present_all_null_representation_survive() {
         false,
     )
     .unwrap();
-    let frame = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
-    let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, &frame[0]).unwrap();
+    let frame = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &frame[0],
+    )
+    .unwrap();
     let DenseSamplesRef::Histogram(histograms) = decoded[0].fields.get(0).unwrap().dense().unwrap()
     else {
         panic!("histogram representation was normalized");
@@ -1088,10 +1235,20 @@ fn histogram_payload_and_present_all_null_representation_survive() {
         false,
     )
     .unwrap();
-    let mixed_frame =
-        pack_raw_series_chunk(&mixed_schema, RawLabelMode::Key, &mixed_chunk).unwrap();
-    let mixed_decoded =
-        unpack_raw_series_frame(&mixed_schema, RawLabelMode::Key, &mixed_frame[0]).unwrap();
+    let mixed_frame = pack_raw_series_chunk(
+        &mixed_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &mixed_chunk,
+    )
+    .unwrap();
+    let mixed_decoded = unpack_raw_series_frame(
+        &mixed_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &mixed_frame[0],
+    )
+    .unwrap();
     let DenseSamplesRef::Mixed(mixed) = mixed_decoded[0].fields.get(0).unwrap().dense().unwrap()
     else {
         panic!("all-null mixed representation was normalized");
@@ -1103,6 +1260,9 @@ fn histogram_payload_and_present_all_null_representation_survive() {
     );
 }
 
+/// The encoder's own declarations are refused when they contradict the frame, and the schema with
+/// no fields is refused; an evaluation grid, by contrast, now describes a legal evaluated frame
+/// instead of making the schema unusable here.
 #[test]
 fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
     let schema = test_schema(&["value"]);
@@ -1115,13 +1275,41 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
             .unwrap(),
         )),
     };
-    assert!(raw_series_frame_schema(&grid_schema, RawLabelMode::Key).is_err());
-    let empty_schema = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
+    // A schema with an evaluation grid describes evaluated samples, which is a legal frame in this
+    // family: the raw-only constructor still refuses it, while the one constructor accepts it as an
+    // evaluated frame that declares its grid and addresses time by grid spans.
+    assert!(raw_series_frame_schema(&grid_schema, FrameLabelMode::Explicit).is_err());
+    let evaluated = series_frame_schema(&grid_schema, FrameLabelMode::Explicit, None).unwrap();
+    assert_eq!(
+        evaluated.metadata().get(CONTENT).map(String::as_str),
+        Some("evaluated")
+    );
+    assert_eq!(
+        evaluated.metadata().get(TIME).map(String::as_str),
+        Some("grid_spans")
+    );
+    assert!(evaluated.metadata().get(GRID).is_some());
+    // An evaluated frame names its series by label, so a key identity stays refused.
+    assert!(
+        series_frame_schema(
+            &grid_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description())
+        )
+        .is_err()
+    );
+    let empty_schema =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
     let empty = arrow::record_batch::RecordBatch::new_empty(empty_schema.clone());
     assert!(
-        unpack_raw_series_frame(&schema, RawLabelMode::Key, &empty)
-            .unwrap()
-            .is_empty()
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty
+        )
+        .unwrap()
+        .is_empty()
     );
     let wrong =
         arrow::record_batch::RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
@@ -1129,12 +1317,22 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
             DataType::Utf8,
             false,
         )])));
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &wrong).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &wrong
+        )
+        .is_err()
+    );
     let no_fields = SeriesSchema {
         fields: Arc::from([]),
         eval_grid: None,
     };
-    assert!(raw_series_frame_schema(&no_fields, RawLabelMode::Key).is_err());
+    assert!(
+        series_frame_schema(&no_fields, FrameLabelMode::Key, Some(&dense_description())).is_err()
+    );
 
     let mut metadata = empty_schema.metadata().clone();
     metadata.insert(
@@ -1146,14 +1344,35 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
         metadata,
     ));
     let empty_bad = arrow::record_batch::RecordBatch::new_empty(contaminated);
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &empty_bad).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty_bad
+        )
+        .is_err()
+    );
 
     let chunk = float_chunk(&schema, &[1], None, vec![1], vec![Some(2.0)], false);
-    assert!(pack_raw_series_chunk(&grid_schema, RawLabelMode::Key, &chunk).is_err());
+    assert!(
+        pack_raw_series_chunk(
+            &grid_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk
+        )
+        .is_err()
+    );
 
-    let valid = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk)
-        .unwrap()
-        .remove(0);
+    let valid = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap()
+    .remove(0);
     let mut extra_metadata = valid.schema().metadata().clone();
     extra_metadata.insert("application.note".to_string(), "ignored".to_string());
     let unrelated = arrow::record_batch::RecordBatch::try_new(
@@ -1165,9 +1384,14 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
     )
     .unwrap();
     assert_eq!(
-        unpack_raw_series_frame(&schema, RawLabelMode::Key, &unrelated)
-            .unwrap()
-            .len(),
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &unrelated
+        )
+        .unwrap()
+        .len(),
         1
     );
 
@@ -1181,10 +1405,23 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
         valid.columns().to_vec(),
     )
     .unwrap();
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &wrong).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &wrong
+        )
+        .is_err()
+    );
 
+    // A raw frame must not declare an evaluation grid: `greptime.series.grid` belongs to an
+    // evaluated frame only.
     let mut grid_metadata = valid.schema().metadata().clone();
-    grid_metadata.insert("greptime.series.grid.start".to_string(), "0".to_string());
+    grid_metadata.insert(
+        "greptime.series.grid".to_string(),
+        "{\"start_ms\":0,\"step_ms\":1,\"len\":3}".to_string(),
+    );
     let contaminated = arrow::record_batch::RecordBatch::try_new(
         Arc::new(Schema::new_with_metadata(
             valid.schema().fields().clone(),
@@ -1193,13 +1430,32 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
         valid.columns().to_vec(),
     )
     .unwrap();
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &contaminated).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &contaminated
+        )
+        .is_err()
+    );
+
+    // A reserved key this revision does not know is refused when the declarations are parsed,
+    // rather than travelling along as dead metadata or being silently ignored.
+    let mut unknown_key_metadata = valid.schema().metadata().clone();
+    unknown_key_metadata.insert("greptime.series.grid.start".to_string(), "0".to_string());
+    let unregistered =
+        Schema::new_with_metadata(valid.schema().fields().clone(), unknown_key_metadata);
+    assert!(series_frame_label_decode(&unregistered).is_err());
+    assert!(SeriesFrameDeclaration::parse(&unregistered).is_err());
 
     for metadata_case in ["wrong_layout", "wrong_labels", "wrong_time"] {
         let mut metadata = valid.schema().metadata().clone();
         match metadata_case {
             "wrong_layout" => {
-                metadata.insert("greptime.series.layout".to_string(), "v2".to_string());
+                // `v2` is the only layout this revision reads, so the previously unreadable `v1`
+                // is what a wrong layout is spelled as now.
+                metadata.insert("greptime.series.layout".to_string(), "v1".to_string());
             }
             "wrong_labels" => {
                 metadata.insert("greptime.series.labels".to_string(), "explicit".to_string());
@@ -1216,7 +1472,15 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
             valid.columns().to_vec(),
         )
         .unwrap();
-        assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &malformed).is_err());
+        assert!(
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                &malformed
+            )
+            .is_err()
+        );
     }
 }
 
@@ -1227,12 +1491,25 @@ fn rejects_invalid_timestamps_and_empty_raw_payloads() {
 
     let schema = test_schema(&["value"]);
     let chunk = float_chunk(&schema, &[1], None, vec![1], vec![Some(2.0)], false);
-    let valid = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk)
-        .unwrap()
-        .remove(0);
+    let valid = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap()
+    .remove(0);
     for bad_timestamps in [vec![], vec![1, 1], vec![2, 1]] {
         let malformed = with_timestamp_values(&valid, bad_timestamps);
-        assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &malformed).is_err());
+        assert!(
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                &malformed
+            )
+            .is_err()
+        );
     }
     let mut empty_columns = valid.columns().to_vec();
     let empty_time = with_timestamp_values(&valid, vec![]);
@@ -1267,7 +1544,15 @@ fn rejects_invalid_timestamps_and_empty_raw_payloads() {
     empty_columns[3] = Arc::new(empty_fields);
     let empty_time_and_payload =
         arrow::record_batch::RecordBatch::try_new(valid.schema(), empty_columns).unwrap();
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &empty_time_and_payload).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty_time_and_payload
+        )
+        .is_err()
+    );
 
     let two_samples = float_chunk(
         &schema,
@@ -1277,12 +1562,25 @@ fn rejects_invalid_timestamps_and_empty_raw_payloads() {
         vec![Some(2.0), Some(3.0)],
         false,
     );
-    let valid_two_samples = pack_raw_series_chunk(&schema, RawLabelMode::Key, &two_samples)
-        .unwrap()
-        .remove(0);
+    let valid_two_samples = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &two_samples,
+    )
+    .unwrap()
+    .remove(0);
     for bad_timestamps in [vec![1, 1], vec![2, 1]] {
         let malformed = with_timestamp_values(&valid_two_samples, bad_timestamps);
-        assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &malformed).is_err());
+        assert!(
+            unpack_raw_series_frame(
+                &schema,
+                FrameLabelMode::Key,
+                Some(&dense_description()),
+                &malformed
+            )
+            .is_err()
+        );
     }
 
     let mut empty_payload_columns = valid.columns().to_vec();
@@ -1322,7 +1620,15 @@ fn rejects_invalid_timestamps_and_empty_raw_payloads() {
     empty_payload_columns[3] = Arc::new(empty_fields);
     let empty_payload =
         arrow::record_batch::RecordBatch::try_new(valid.schema(), empty_payload_columns).unwrap();
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &empty_payload).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &empty_payload
+        )
+        .is_err()
+    );
 
     let mut columns = valid.columns().to_vec();
     columns[3] = Arc::new(StructArray::new_null(
@@ -1348,7 +1654,15 @@ fn rejects_invalid_timestamps_and_empty_raw_payloads() {
     let invalid_later_row = arrow::record_batch::RecordBatch::try_new(valid.schema(), bad).unwrap();
     let later_invalid =
         concat_batches(&valid.schema(), &[valid.clone(), invalid_later_row]).unwrap();
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &later_invalid).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &later_invalid
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1362,9 +1676,14 @@ fn rejects_invalid_explicit_labels() {
         vec![Some(1.0)],
         false,
     );
-    let explicit = pack_raw_series_chunk(&explicit_schema, RawLabelMode::Explicit, &explicit_chunk)
-        .unwrap()
-        .remove(0);
+    let explicit = pack_raw_series_chunk(
+        &explicit_schema,
+        FrameLabelMode::Explicit,
+        None,
+        &explicit_chunk,
+    )
+    .unwrap()
+    .remove(0);
     let name = explicit
         .column(4)
         .as_any()
@@ -1427,7 +1746,10 @@ fn rejects_invalid_explicit_labels() {
     duplicate_labels[5] = Arc::new(duplicate_list);
     let duplicate =
         arrow::record_batch::RecordBatch::try_new(explicit.schema(), duplicate_labels).unwrap();
-    assert!(unpack_raw_series_frame(&explicit_schema, RawLabelMode::Explicit, &duplicate).is_err());
+    assert!(
+        unpack_raw_series_frame(&explicit_schema, FrameLabelMode::Explicit, None, &duplicate)
+            .is_err()
+    );
 
     let mut reserved_labels = explicit.columns().to_vec();
     let reserved_items = StructArray::try_new(
@@ -1458,7 +1780,10 @@ fn rejects_invalid_explicit_labels() {
     reserved_labels[5] = Arc::new(reserved_list);
     let reserved =
         arrow::record_batch::RecordBatch::try_new(explicit.schema(), reserved_labels).unwrap();
-    assert!(unpack_raw_series_frame(&explicit_schema, RawLabelMode::Explicit, &reserved).is_err());
+    assert!(
+        unpack_raw_series_frame(&explicit_schema, FrameLabelMode::Explicit, None, &reserved)
+            .is_err()
+    );
 }
 
 #[test]
@@ -1466,7 +1791,8 @@ fn rejects_malformed_histogram_and_payload_encodings() {
     let hist_schema = test_schema(&["hist"]);
     let valid_hist = pack_raw_series_chunk(
         &hist_schema,
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
         &RawSeriesChunk::try_new(
             &hist_schema,
             Buffer::from(vec![1_u8]),
@@ -1553,8 +1879,13 @@ fn rejects_malformed_histogram_and_payload_encodings() {
     let absent_hist =
         arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), absent_hist_columns)
             .unwrap();
-    let decoded_absent_hist =
-        unpack_raw_series_frame(&hist_schema, RawLabelMode::Key, &absent_hist).unwrap();
+    let decoded_absent_hist = unpack_raw_series_frame(
+        &hist_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &absent_hist,
+    )
+    .unwrap();
     assert!(
         matches!(decoded_absent_hist[0].fields.get(0).unwrap().sample(0), SampleRef::Float(v) if v == 1.25)
     );
@@ -1606,7 +1937,15 @@ fn rejects_malformed_histogram_and_payload_encodings() {
     let absent_both =
         arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), absent_both_columns)
             .unwrap();
-    assert!(unpack_raw_series_frame(&hist_schema, RawLabelMode::Key, &absent_both).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &absent_both
+        )
+        .is_err()
+    );
 
     let DataType::List(index_item) = null_hist.fields()[0].data_type() else {
         panic!("expected histogram indices list");
@@ -1636,7 +1975,15 @@ fn rejects_malformed_histogram_and_payload_encodings() {
     bad_parent_columns[3] = Arc::new(bad_fields);
     let present_bad_parent =
         arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), bad_parent_columns).unwrap();
-    assert!(unpack_raw_series_frame(&hist_schema, RawLabelMode::Key, &present_bad_parent).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &present_bad_parent
+        )
+        .is_err()
+    );
 
     let valid_float = ListArray::try_new(
         match payload.fields()[0].data_type() {
@@ -1677,7 +2024,15 @@ fn rejects_malformed_histogram_and_payload_encodings() {
     overlap_columns[3] = Arc::new(overlap_fields);
     let overlap =
         arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), overlap_columns).unwrap();
-    assert!(unpack_raw_series_frame(&hist_schema, RawLabelMode::Key, &overlap).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &overlap
+        )
+        .is_err()
+    );
 
     let short_indices = ListArray::try_new(
         index_item.clone(),
@@ -1704,7 +2059,15 @@ fn rejects_malformed_histogram_and_payload_encodings() {
     short_columns[3] = Arc::new(short_fields);
     let short_indices =
         arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), short_columns).unwrap();
-    assert!(unpack_raw_series_frame(&hist_schema, RawLabelMode::Key, &short_indices).is_err());
+    assert!(
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &short_indices
+        )
+        .is_err()
+    );
 
     let malformed_histogram = || {
         let mut columns = valid_hist.columns().to_vec();
@@ -1779,7 +2142,13 @@ fn rejects_malformed_histogram_and_payload_encodings() {
         arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), columns).unwrap()
     };
     assert!(
-        unpack_raw_series_frame(&hist_schema, RawLabelMode::Key, &malformed_histogram()).is_err()
+        unpack_raw_series_frame(
+            &hist_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &malformed_histogram()
+        )
+        .is_err()
     );
 
     let mut hidden_float = valid_hist.columns().to_vec();
@@ -1820,8 +2189,13 @@ fn rejects_malformed_histogram_and_payload_encodings() {
     hidden_float[3] = Arc::new(fields);
     let absent_float =
         arrow::record_batch::RecordBatch::try_new(valid_hist.schema(), hidden_float).unwrap();
-    let decoded_absent_float =
-        unpack_raw_series_frame(&hist_schema, RawLabelMode::Key, &absent_float).unwrap();
+    let decoded_absent_float = unpack_raw_series_frame(
+        &hist_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &absent_float,
+    )
+    .unwrap();
     assert_histogram(
         match decoded_absent_float[0].fields.get(0).unwrap().sample(0) {
             SampleRef::Histogram(histogram) => histogram,
@@ -1849,8 +2223,20 @@ fn decoded_key_and_payload_slices_keep_buffers_alive() {
             true,
         )
         .unwrap();
-        let frames = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
-        let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, &frames[0]).unwrap();
+        let frames = pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &chunk,
+        )
+        .unwrap();
+        let decoded = unpack_raw_series_frame(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &frames[0],
+        )
+        .unwrap();
         (owner, chunk, frames, decoded)
     };
     let batch = frames[0].clone();
@@ -2090,10 +2476,10 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
     // observable: the default budget could coalesce several rows and copy their payloads.
     let frames = pack_chunk_with_budget(
         &schema,
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
         &chunk,
         1,
-        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )
     .unwrap();
     assert_eq!(frames.len(), 1);
@@ -2200,7 +2586,13 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
                 .as_ptr()
         );
     }
-    let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, packed).unwrap();
+    let decoded = unpack_raw_series_frame(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        packed,
+    )
+    .unwrap();
     let DenseSamplesRef::Mixed(decoded_mixed) = decoded[0].fields.get(0).unwrap().dense().unwrap()
     else {
         panic!("mixed representation was normalized");
@@ -2369,7 +2761,15 @@ fn malformed_pack_input_is_revalidated_before_encoding() {
         fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(3.0)]))),
         ..chunk
     };
-    assert!(pack_raw_series_chunk(&schema, RawLabelMode::Key, &invalid).is_err());
+    assert!(
+        pack_raw_series_chunk(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            &invalid
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2476,21 +2876,23 @@ fn cross_chunk_rows_coalesce_into_one_multirow_batch() {
         vec![Some(3.0), Some(4.0), None],
         true,
     );
-    assert_eq!(RawSeriesFrameBuilder::DEFAULT_MAX_ROWS, 256);
-    assert_eq!(RawSeriesFrameBuilder::DEFAULT_MAX_BYTES, 1 << 20);
-    let expected = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
+    assert_eq!(SeriesFrameBuilder::DEFAULT_MAX_ROWS, 256);
+    assert_eq!(SeriesFrameBuilder::DEFAULT_MAX_BYTES, 1 << 20);
+    let expected =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
 
-    let mut builder = RawSeriesFrameBuilder::try_new(
+    let mut builder = SeriesFrameBuilder::try_new(
         &schema,
-        RawLabelMode::Key,
-        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
-        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )
     .unwrap();
     assert_eq!(builder.schema(), &expected);
 
-    let mut batches = append_chunk(&mut builder, &schema, RawLabelMode::Key, &first).unwrap();
-    batches.extend(append_chunk(&mut builder, &schema, RawLabelMode::Key, &second).unwrap());
+    let mut batches = append_chunk(&mut builder, &schema, FrameLabelMode::Key, &first).unwrap();
+    batches.extend(append_chunk(&mut builder, &schema, FrameLabelMode::Key, &second).unwrap());
     if let Some(batch) = builder.flush().unwrap() {
         batches.push(batch);
     }
@@ -2510,7 +2912,7 @@ fn cross_chunk_rows_coalesce_into_one_multirow_batch() {
         ["read_key", "is_last", "time", "fields"]
     );
     for (key, value) in [
-        ("greptime.series.layout", "v1"),
+        ("greptime.series.layout", "v2"),
         ("greptime.series.content", "raw"),
         ("greptime.series.labels", "key"),
         ("greptime.series.time", "timestamps"),
@@ -2578,7 +2980,7 @@ fn cross_chunk_rows_coalesce_into_one_multirow_batch() {
     assert_eq!(float_values.value(2).to_bits(), 3.0_f64.to_bits());
     assert_eq!(float_values.value(3).to_bits(), 4.0_f64.to_bits());
 
-    let decoded = decode_batches(&schema, RawLabelMode::Key, &batches);
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &batches);
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa]);
     assert!(!decoded[0].is_last);
@@ -2614,17 +3016,18 @@ fn raw_frame_builder_emits_at_the_row_budget_without_another_cursor() {
     ];
 
     for max_rows in [2usize, 3] {
-        let mut builder = RawSeriesFrameBuilder::try_new(
+        let mut builder = SeriesFrameBuilder::try_new(
             &schema,
-            RawLabelMode::Key,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
             max_rows,
-            RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+            SeriesFrameBuilder::DEFAULT_MAX_BYTES,
         )
         .unwrap();
         let mut emitted_at = None;
         let mut batches = Vec::new();
         for (index, chunk) in chunks.iter().enumerate() {
-            let produced = append_chunk(&mut builder, &schema, RawLabelMode::Key, chunk).unwrap();
+            let produced = append_chunk(&mut builder, &schema, FrameLabelMode::Key, chunk).unwrap();
             assert!(produced.len() <= 1, "one cursor emits at most one batch");
             if let Some(batch) = produced.first() {
                 assert!(
@@ -2660,7 +3063,7 @@ fn raw_frame_builder_emits_at_the_row_budget_without_another_cursor() {
                 .collect::<Vec<_>>()
         );
 
-        let decoded = decode_batches(&schema, RawLabelMode::Key, &batches);
+        let decoded = decode_batches(&schema, FrameLabelMode::Key, &batches);
         assert_eq!(decoded.len(), 3);
         assert_eq!(
             decoded
@@ -2681,30 +3084,42 @@ fn raw_frame_builder_rejects_zero_budgets_and_bounds_offsets() {
     let schema = test_schema(&["value"]);
     // Zero in either budget is not a legal configuration; the literals take the parameter's type.
     assert!(
-        RawSeriesFrameBuilder::try_new(
+        SeriesFrameBuilder::try_new(
             &schema,
-            RawLabelMode::Key,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
             0,
-            RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+            SeriesFrameBuilder::DEFAULT_MAX_BYTES,
         )
         .is_err()
     );
     assert!(
-        RawSeriesFrameBuilder::try_new(
+        SeriesFrameBuilder::try_new(
             &schema,
-            RawLabelMode::Key,
-            RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            SeriesFrameBuilder::DEFAULT_MAX_ROWS,
             0,
         )
         .is_err()
     );
-    assert!(RawSeriesFrameBuilder::try_new(&schema, RawLabelMode::Key, 0, 0).is_err());
     assert!(
-        RawSeriesFrameBuilder::try_new(
+        SeriesFrameBuilder::try_new(
             &schema,
-            RawLabelMode::Key,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+            0,
+            0
+        )
+        .is_err()
+    );
+    assert!(
+        SeriesFrameBuilder::try_new(
+            &schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
             1,
-            RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+            SeriesFrameBuilder::DEFAULT_MAX_BYTES,
         )
         .is_ok()
     );
@@ -2740,9 +3155,9 @@ fn byte_budget_emits_legal_oversized_rows_without_dropping_them() {
     // batch instead of being dropped or merged.
     let batches = pack_chunk_with_budget(
         &schema,
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
         &chunk,
-        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
         1,
     )
     .unwrap();
@@ -2754,7 +3169,7 @@ fn byte_budget_emits_legal_oversized_rows_without_dropping_them() {
         "an oversized row is emitted alone, never dropped"
     );
 
-    let decoded = decode_batches(&schema, RawLabelMode::Key, &batches);
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &batches);
     assert_eq!(decoded.len(), 3);
     for (position, row) in decoded.iter().enumerate() {
         assert_eq!(row.primary_key.as_slice(), &[0x9a]);
@@ -2776,24 +3191,25 @@ fn byte_budget_flushes_before_exceeding_and_retries_the_pending_row() {
     let mut measured = Vec::with_capacity(chunks.len());
     for chunk in &chunks {
         let mut cursor =
-            RawSeriesChunkCursor::try_new(&schema, RawLabelMode::Key, chunk.clone()).unwrap();
+            SeriesFrameCursor::try_new_raw(&schema, FrameLabelMode::Key, chunk.clone()).unwrap();
         measured.push(cursor.next_row().unwrap().unwrap().bytes);
     }
     let budget = measured[0] + measured[1] - 1;
 
-    let mut builder = RawSeriesFrameBuilder::try_new(
+    let mut builder = SeriesFrameBuilder::try_new(
         &schema,
-        RawLabelMode::Key,
-        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
         budget,
     )
     .unwrap();
     let mut first =
-        RawSeriesChunkCursor::try_new(&schema, RawLabelMode::Key, chunks[0].clone()).unwrap();
+        SeriesFrameCursor::try_new_raw(&schema, FrameLabelMode::Key, chunks[0].clone()).unwrap();
     assert!(first.append_to(&mut builder).unwrap().is_none());
 
     let mut second =
-        RawSeriesChunkCursor::try_new(&schema, RawLabelMode::Key, chunks[1].clone()).unwrap();
+        SeriesFrameCursor::try_new_raw(&schema, FrameLabelMode::Key, chunks[1].clone()).unwrap();
     let emitted = second.append_to(&mut builder).unwrap().unwrap();
     assert_eq!(emitted.num_rows(), 1, "the first row is flushed alone");
     // The second row stays pending across the flush and is retried, never dropped.
@@ -2801,7 +3217,7 @@ fn byte_budget_flushes_before_exceeding_and_retries_the_pending_row() {
     let remainder = builder.flush().unwrap().unwrap();
     assert_eq!(remainder.num_rows(), 1);
 
-    let decoded = decode_batches(&schema, RawLabelMode::Key, &[emitted, remainder]);
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &[emitted, remainder]);
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].primary_key.as_slice(), &[1]);
     assert_eq!(decoded[1].primary_key.as_slice(), &[2]);
@@ -2816,10 +3232,11 @@ fn byte_budget_flushes_before_exceeding_and_retries_the_pending_row() {
 
     // A requested byte bound is clamped to the representable cumulative offset range, and that
     // range is rejected before any child array is allocated.
-    let clamped = RawSeriesFrameBuilder::try_new(
+    let clamped = SeriesFrameBuilder::try_new(
         &schema,
-        RawLabelMode::Key,
-        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
         usize::MAX,
     )
     .unwrap();
@@ -2848,7 +3265,13 @@ fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
     .unwrap();
 
     // The public wrapper groups two independent rows into one multirow batch.
-    let packed = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
     assert_eq!(packed.len(), 1);
     assert_eq!(packed[0].num_rows(), 2);
 
@@ -2880,7 +3303,11 @@ fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
         .unwrap();
     assert_eq!(concatenated.len(), 4);
 
-    let decoded = decode_batches(&schema, RawLabelMode::Key, std::slice::from_ref(&packed[0]));
+    let decoded = decode_batches(
+        &schema,
+        FrameLabelMode::Key,
+        std::slice::from_ref(&packed[0]),
+    );
     assert_row_local_histogram_rows(&decoded);
 
     // A real Arrow IPC round trip keeps the schema, the whole tables, the null index entries and
@@ -2907,17 +3334,19 @@ fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
             .value(1),
         0
     );
-    let restored_rows = decode_batches(&schema, RawLabelMode::Key, &restored);
+    let restored_rows = decode_batches(&schema, FrameLabelMode::Key, &restored);
     assert_row_local_histogram_rows(&restored_rows);
 }
 
 #[test]
 fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     let schema = test_schema(&["value"]);
-    let expected = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
+    let expected =
+        series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
     let first = pack_raw_series_chunk(
         &schema,
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
         &float_chunk(
             &schema,
             &[1],
@@ -2931,14 +3360,17 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     .remove(0);
     let second = pack_raw_series_chunk(
         &schema,
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
         &float_chunk(&schema, &[2], None, vec![3], vec![Some(3.0)], true),
     )
     .unwrap()
     .remove(0);
 
-    let key_decoder = RawSeriesFrameDecoder::try_new(&schema, RawLabelMode::Key).unwrap();
-    let decoded = key_decoder.decode(&first).unwrap();
+    let key_decoder =
+        SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Key, Some(&dense_description()))
+            .unwrap();
+    let decoded = key_decoder.decode_raw(&first).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].primary_key.as_slice(), &[1]);
     assert_eq!(
@@ -2948,7 +3380,7 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
         [1, 2]
     );
     // The same decoder accepts a later valid batch before the malformed ones below.
-    let decoded = key_decoder.decode(&second).unwrap();
+    let decoded = key_decoder.decode_raw(&second).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].primary_key.as_slice(), &[2]);
     assert!(decoded[0].is_last);
@@ -2964,11 +3396,12 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
         second.columns().to_vec(),
     )
     .unwrap();
-    assert_eq!(key_decoder.decode(&unrelated).unwrap().len(), 1);
+    assert_eq!(key_decoder.decode_raw(&unrelated).unwrap().len(), 1);
 
     // Reserved metadata and evolved fields are rejected, including by a zero-row batch.
     for (key, value) in [
-        ("greptime.series.layout", "v2"),
+        // `v2` is the layout this decoder expects, so the unreadable `v1` is the wrong one.
+        ("greptime.series.layout", "v1"),
         ("greptime.series.content", "evaluated"),
         ("greptime.series.labels", "explicit"),
         ("greptime.series.time", "grid"),
@@ -2984,28 +3417,34 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
         )
         .unwrap();
         assert!(
-            key_decoder.decode(&contaminated).is_err(),
+            key_decoder.decode_raw(&contaminated).is_err(),
             "{key} must be rejected"
         );
     }
     let evolved_schema = test_schema(&["other"]);
     let evolved = pack_raw_series_chunk(
         &evolved_schema,
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
         &float_chunk(&evolved_schema, &[3], None, vec![4], vec![Some(4.0)], false),
     )
     .unwrap()
     .remove(0);
-    assert!(key_decoder.decode(&evolved).is_err());
+    assert!(key_decoder.decode_raw(&evolved).is_err());
     let empty_evolved = arrow::record_batch::RecordBatch::new_empty(
-        raw_series_frame_schema(&evolved_schema, RawLabelMode::Key).unwrap(),
+        series_frame_schema(
+            &evolved_schema,
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+        )
+        .unwrap(),
     );
-    assert!(key_decoder.decode(&empty_evolved).is_err());
+    assert!(key_decoder.decode_raw(&empty_evolved).is_err());
     // Rejections leave the cached schema usable, and a valid zero-row batch stays valid.
-    assert_eq!(key_decoder.decode(&first).unwrap().len(), 1);
+    assert_eq!(key_decoder.decode_raw(&first).unwrap().len(), 1);
     assert!(
         key_decoder
-            .decode(&arrow::record_batch::RecordBatch::new_empty(
+            .decode_raw(&arrow::record_batch::RecordBatch::new_empty(
                 expected.clone()
             ))
             .unwrap()
@@ -3013,10 +3452,12 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     );
 
     // Explicit mode reuses one decoder for a present but nameless metric and a named one.
-    let explicit_decoder = RawSeriesFrameDecoder::try_new(&schema, RawLabelMode::Explicit).unwrap();
+    let explicit_decoder =
+        SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None).unwrap();
     let nameless = pack_raw_series_chunk(
         &schema,
-        RawLabelMode::Explicit,
+        FrameLabelMode::Explicit,
+        None,
         &float_chunk(
             &schema,
             &[7],
@@ -3030,7 +3471,8 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     .remove(0);
     let named = pack_raw_series_chunk(
         &schema,
-        RawLabelMode::Explicit,
+        FrameLabelMode::Explicit,
+        None,
         &float_chunk(
             &schema,
             &[8],
@@ -3042,12 +3484,12 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     )
     .unwrap()
     .remove(0);
-    let decoded = explicit_decoder.decode(&nameless).unwrap();
+    let decoded = explicit_decoder.decode_raw(&nameless).unwrap();
     let labels = decoded[0].metric.as_ref().unwrap();
     assert_eq!(labels.name(), None);
     assert_eq!(labels.get("zone"), Some("west"));
     assert_eq!(
-        explicit_decoder.decode(&named).unwrap()[0]
+        explicit_decoder.decode_raw(&named).unwrap()[0]
             .metric
             .as_ref()
             .unwrap()
@@ -3055,8 +3497,8 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
         Some("cpu")
     );
     // Label modes are not interchangeable.
-    assert!(explicit_decoder.decode(&first).is_err());
-    assert!(key_decoder.decode(&nameless).is_err());
+    assert!(explicit_decoder.decode_raw(&first).is_err());
+    assert!(key_decoder.decode_raw(&nameless).is_err());
 }
 
 /// A dense description carrying the ordered key columns and the logical tags the decoder reads.
@@ -3087,22 +3529,26 @@ fn dense_description() -> LabelDecodeSpec {
 #[test]
 fn label_decode_description_roundtrips_through_schema_metadata() {
     let description = dense_description();
-    let key = raw_series_frame_schema_with_label_decode(
+    let key = series_frame_schema(
         &test_schema(&["value"]),
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
         Some(&description),
     )
     .unwrap();
     assert_eq!(
-        raw_series_frame_label_decode(&key).unwrap(),
+        series_frame_label_decode(&key).unwrap(),
         Some(description.clone())
     );
-    // The description is metadata-only: the column contract is untouched.
-    assert_eq!(
-        key.fields(),
-        raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key)
-            .unwrap()
-            .fields()
+    // The description is metadata-only: the column contract is untouched, so only the
+    // `greptime.series.label_decode` text differs from a frame declaring another description.
+    let mut other = dense_description();
+    other.encoding = LabelDecodeEncoding::Sparse;
+    let other =
+        series_frame_schema(&test_schema(&["value"]), FrameLabelMode::Key, Some(&other)).unwrap();
+    assert_eq!(key.fields(), other.fields());
+    assert_ne!(
+        key.metadata().get(LABEL_DECODE),
+        other.metadata().get(LABEL_DECODE)
     );
     assert_eq!(key.metadata().get(LABELS).map(String::as_str), Some("key"));
 }
@@ -3110,20 +3556,19 @@ fn label_decode_description_roundtrips_through_schema_metadata() {
 #[test]
 fn explicit_frames_declare_no_label_decode_description() {
     let schema = test_schema(&["value"]);
-    let explicit =
-        raw_series_frame_schema_with_label_decode(&schema, RawLabelMode::Explicit, None).unwrap();
+    let explicit = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
     assert!(explicit.metadata().get(LABEL_DECODE).is_none());
-    assert_eq!(raw_series_frame_label_decode(&explicit).unwrap(), None);
+    assert_eq!(series_frame_label_decode(&explicit).unwrap(), None);
     // A key frame without a description, or an explicit frame with one, is rejected instead of
     // being written as a frame the consumer cannot decode.
     assert!(
-        raw_series_frame_schema_with_label_decode(&schema, RawLabelMode::Key, None).is_err(),
+        series_frame_schema(&schema, FrameLabelMode::Key, None).is_err(),
         "key-encoded frames must describe their labels"
     );
     assert!(
-        raw_series_frame_schema_with_label_decode(
+        series_frame_schema(
             &schema,
-            RawLabelMode::Explicit,
+            FrameLabelMode::Explicit,
             Some(&dense_description())
         )
         .is_err(),
@@ -3133,14 +3578,19 @@ fn explicit_frames_declare_no_label_decode_description() {
 
 /// The raw frame's own columns with exactly the supplied metadata map.
 fn schema_with_metadata(metadata: Vec<(String, String)>) -> Schema {
-    let layout = raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key).unwrap();
+    let layout = series_frame_schema(
+        &test_schema(&["value"]),
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+    )
+    .unwrap();
     Schema::new_with_metadata(layout.fields().clone(), metadata.into_iter().collect())
 }
 
 /// The four metadata entries every raw frame declares, with the given label mode.
 fn base_metadata(labels: &str) -> Vec<(String, String)> {
     [
-        ("greptime.series.layout", "v1"),
+        ("greptime.series.layout", "v2"),
         ("greptime.series.content", "raw"),
         ("greptime.series.labels", labels),
         ("greptime.series.time", "timestamps"),
@@ -3150,8 +3600,14 @@ fn base_metadata(labels: &str) -> Vec<(String, String)> {
     .collect()
 }
 
+/// A description the reader would refuse cannot be written into a frame.
+///
+/// The three shapes below are each a self-contradictory binding: a duplicate key column, a logical
+/// tag naming a column the primary key does not list, and a tag listed twice. Writing one would
+/// produce a frame no consumer could decode, so the producer is where it is refused. A frame that
+/// arrives already carrying one is a different case, and the decoder rejects those on read.
 #[test]
-fn label_decode_description_rejects_inconsistent_bindings() {
+fn label_decode_description_rejects_inconsistent_bindings_on_write() {
     let schema = test_schema(&["value"]);
     let mut cases = Vec::new();
 
@@ -3169,20 +3625,13 @@ fn label_decode_description_rejects_inconsistent_bindings() {
     cases.push(("duplicate logical tag", duplicate_tag));
 
     for (label, description) in cases {
-        // Writing is faithful: the description records what the producer declares. Reading is
-        // where a description this revision cannot honour is rejected, so a producer cannot turn a
-        // bad binding into a frame a consumer would decode under silently.
-        let frame = raw_series_frame_schema_with_label_decode(
-            &schema,
-            RawLabelMode::Key,
-            Some(&description),
-        )
-        .unwrap_or_else(|error| panic!("{label}: {error}"));
-        // The writer records what the producer declares, so the rejection has to come from the
-        // reader; one assertion covers it, since the frame it reads is the text just written.
+        // Both directions reject: a frame is worth writing only if it can be read back, so an
+        // inconsistent description is refused at the producer instead of being written faithfully
+        // and refused only once it reaches a consumer who cannot fix it. The case that must still
+        // reach the wire is a hand-built frame, which the fixture below covers.
         assert!(
-            raw_series_frame_label_decode(&frame).is_err(),
-            "{label}: an inconsistent description is rejected when read"
+            series_frame_schema(&schema, FrameLabelMode::Key, Some(&description)).is_err(),
+            "{label}: an inconsistent description is rejected when written"
         );
     }
 }
@@ -3198,7 +3647,7 @@ fn label_decode_rejects_a_frame_without_a_label_mode() {
         .filter(|(key, _)| key != LABELS)
         .collect();
     assert!(
-        raw_series_frame_label_decode(&schema_with_metadata(without_mode)).is_err(),
+        series_frame_label_decode(&schema_with_metadata(without_mode)).is_err(),
         "a frame without a label mode has no label layout to describe"
     );
 }
@@ -3216,11 +3665,16 @@ fn raw_series_label_decode_metadata_fixture() {
     }
 
     let cases: Vec<Case> = serde_json::from_str(include_str!(
-        "../../../../../tests/compatibility/wire/raw_series_label_decode/v1_metadata.json"
+        "../../../../../tests/compatibility/wire/raw_series_label_decode/v2_metadata.json"
     ))
     .unwrap();
     for case in cases {
-        let layout = raw_series_frame_schema(&test_schema(&["value"]), RawLabelMode::Key).unwrap();
+        let layout = series_frame_schema(
+            &test_schema(&["value"]),
+            FrameLabelMode::Key,
+            Some(&dense_description()),
+        )
+        .unwrap();
         let metadata = case
             .metadata
             .iter()
@@ -3229,12 +3683,12 @@ fn raw_series_label_decode_metadata_fixture() {
         let frame_schema = Schema::new_with_metadata(layout.fields().clone(), metadata);
         match case.encoding.as_deref() {
             None => assert!(
-                raw_series_frame_label_decode(&frame_schema).is_err(),
+                series_frame_label_decode(&frame_schema).is_err(),
                 "{}: must be rejected",
                 case.name
             ),
             Some(expected) => {
-                let decode = raw_series_frame_label_decode(&frame_schema)
+                let decode = series_frame_label_decode(&frame_schema)
                     .unwrap_or_else(|error| panic!("{}: {error}", case.name))
                     .unwrap_or_else(|| panic!("{}: no description", case.name));
                 let encoding = match decode.encoding {
@@ -3279,9 +3733,9 @@ fn raw_series_label_decode_metadata_fixture() {
                 if expected == "dense" {
                     // The fixture text is the encoder's own output, byte for byte: re-encoding the
                     // description it decodes to must reproduce it exactly.
-                    let roundtrip = raw_series_frame_schema_with_label_decode(
+                    let roundtrip = series_frame_schema(
                         &test_schema(&["value"]),
-                        RawLabelMode::Key,
+                        FrameLabelMode::Key,
                         Some(&decode),
                     )
                     .unwrap();
@@ -3309,9 +3763,9 @@ fn label_decode_description_carries_a_timestamp_typed_tag_column() {
         column_id: 2,
         name: "observed".to_string(),
     });
-    let frame = raw_series_frame_schema_with_label_decode(
+    let frame = series_frame_schema(
         &test_schema(&["value"]),
-        RawLabelMode::Key,
+        FrameLabelMode::Key,
         Some(&description),
     )
     .unwrap();
@@ -3321,7 +3775,7 @@ fn label_decode_description_carries_a_timestamp_typed_tag_column() {
         text.contains("\"physical_type\":{\"Timestamp\":{\"Millisecond\":null}}"),
         "the encoder wrote a timestamp type: {text}"
     );
-    let recovered = raw_series_frame_label_decode(&frame).unwrap().unwrap();
+    let recovered = series_frame_label_decode(&frame).unwrap().unwrap();
     assert_eq!(recovered, description);
     assert_eq!(
         recovered.primary_key[1].physical_type,
@@ -3354,9 +3808,9 @@ fn label_decode_text_is_independent_of_the_callers_tag_order() {
     descending.primary_key.reverse();
 
     let write = |description: &LabelDecodeSpec| {
-        let frame = raw_series_frame_schema_with_label_decode(
+        let frame = series_frame_schema(
             &test_schema(&["value"]),
-            RawLabelMode::Key,
+            FrameLabelMode::Key,
             Some(description),
         )
         .unwrap();
@@ -3394,10 +3848,10 @@ fn label_decode_text_is_independent_of_the_callers_tag_order() {
         write(&descending),
         "the writer reordered the encoding columns"
     );
-    let recovered = raw_series_frame_label_decode(
-        &raw_series_frame_schema_with_label_decode(
+    let recovered = series_frame_label_decode(
+        &series_frame_schema(
             &test_schema(&["value"]),
-            RawLabelMode::Key,
+            FrameLabelMode::Key,
             Some(&descending),
         )
         .unwrap(),

@@ -1,0 +1,98 @@
+[
+  {
+    "name": "missing_defaults_to_contiguous",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps"
+    },
+    "ordering": "contiguous",
+    "declaration": "accepted"
+  },
+  {
+    "name": "known_contiguous",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "contiguous"
+    },
+    "ordering": "contiguous",
+    "declaration": "accepted"
+  },
+  {
+    "name": "known_read_key_then_time",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "read_key_then_time"
+    },
+    "ordering": "read_key_then_time",
+    "declaration": "accepted"
+  },
+  {
+    "name": "unknown_ordering_rejected",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "future_value"
+    },
+    "ordering": null,
+    "declaration": "accepted"
+  },
+  {
+    "name": "evaluated_contiguous",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "evaluated",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "grid_spans",
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}",
+      "greptime.series.ordering": "contiguous"
+    },
+    "ordering": "contiguous",
+    "declaration": "accepted"
+  },
+  {
+    "name": "evaluated_read_key_then_time_still_reads",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "evaluated",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "grid_spans",
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}",
+      "greptime.series.ordering": "read_key_then_time"
+    },
+    "ordering": "read_key_then_time",
+    "declaration": "accepted"
+  },
+  {
+    "name": "wrong_layout_rejected",
+    "metadata": {
+      "greptime.series.layout": "v3",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps"
+    },
+    "ordering": "contiguous",
+    "declaration": "rejected"
+  },
+  {
+    "name": "unregistered_reserved_metadata_rejected",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.future": "x"
+    },
+    "ordering": "contiguous",
+    "declaration": "rejected"
+  }
+]

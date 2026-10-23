@@ -2,7 +2,7 @@
   {
     "name": "key_frame_declares_dense_description",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -13,7 +13,7 @@
   {
     "name": "key_frame_declares_sparse_description",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -24,7 +24,7 @@
   {
     "name": "missing_description_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps"
@@ -34,7 +34,7 @@
   {
     "name": "unknown_version_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -45,7 +45,7 @@
   {
     "name": "missing_field_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -56,7 +56,7 @@
   {
     "name": "unknown_field_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -67,7 +67,7 @@
   {
     "name": "wrong_field_type_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -78,7 +78,7 @@
   {
     "name": "unlisted_logical_tag_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
@@ -89,7 +89,7 @@
   {
     "name": "explicit_frame_with_description_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
@@ -100,11 +100,68 @@
   {
     "name": "malformed_json_rejected",
     "metadata": {
-      "greptime.series.layout": "v1",
+      "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
       "greptime.series.label_decode": "greptime"
+    },
+    "encoding": null
+  },
+  {
+    "name": "wrong_layout_rejected",
+    "metadata": {
+      "greptime.series.layout": "v3",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "key",
+      "greptime.series.time": "timestamps",
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+    },
+    "encoding": null
+  },
+  {
+    "name": "unregistered_reserved_metadata_rejected",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "key",
+      "greptime.series.time": "timestamps",
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.future": "x"
+    },
+    "encoding": null
+  },
+  {
+    "name": "evaluated_with_timestamps_rejected",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "evaluated",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}"
+    },
+    "encoding": null
+  },
+  {
+    "name": "evaluated_with_key_labels_rejected",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "evaluated",
+      "greptime.series.labels": "key",
+      "greptime.series.time": "grid_spans",
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}"
+    },
+    "encoding": null
+  },
+  {
+    "name": "raw_with_grid_rejected",
+    "metadata": {
+      "greptime.series.layout": "v2",
+      "greptime.series.content": "raw",
+      "greptime.series.labels": "explicit",
+      "greptime.series.time": "timestamps",
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}"
     },
     "encoding": null
   }
