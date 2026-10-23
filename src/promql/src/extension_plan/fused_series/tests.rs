@@ -274,7 +274,30 @@ fn nested_window_tree() -> NativeTree {
     .expect("the bound tree is legal")
 }
 
-/// The `rate(x[5m])` tree with a `sum by (job)` over it, which the runtime does not execute.
+/// The same tree asking for `quantile`, whose state the runtime does not keep yet.
+fn quantile_aggregate_tree() -> NativeTree {
+    let complete = aggregate_tree();
+    let root = complete.root();
+    let NativeExpr::Aggregate { input, op } = &root.expr else {
+        unreachable!("the fixture is an aggregate over a window");
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: input.clone(),
+            op: BoundAggregate {
+                kind: AggregateKind::Quantile { quantile: 0.5 },
+                group: op.group.clone(),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: root.output.clone(),
+    })
+    .expect("the bound tree is legal")
+}
+
+/// The `rate(x[5m])` tree with a `sum by (job)` over it.
+///
+/// A `Complete` aggregate: every contribution to each group lies inside one execution.
 fn aggregate_tree() -> NativeTree {
     let rate = rate_tree();
     let window = rate.root().clone();
@@ -1194,16 +1217,21 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
 }
 
 /// A tree the runtime does not execute is refused when the execution plan is built.
+///
+/// The runtime folds the supported `Complete` kinds now, so the tree below asks for one it still
+/// refuses on purpose: `quantile` needs the parameter and the member buffer that the other kinds
+/// do not. What the test pins is the refusal happening while the plan is built, not the particular
+/// kind of node that provokes it.
 #[tokio::test]
 async fn a_tree_the_runtime_cannot_run_is_rejected_when_the_exec_is_built() {
-    let node = fused(aggregate_tree());
+    let node = fused(quantile_aggregate_tree());
     let error = plan_of(node, memory_exec(Vec::new()))
-        .expect_err("the runtime does not execute aggregate nodes");
+        .expect_err("the runtime does not execute a quantile aggregate");
     assert!(
         matches!(error, DataFusionError::NotImplemented(_)),
         "the runtime refuses the tree it cannot run: {error}"
     );
-    assert!(error.to_string().contains("Aggregate"), "{error}");
+    assert!(error.to_string().contains("Quantile"), "{error}");
 }
 
 /// A tree evaluated on another grid than the node declares is refused before it runs.
