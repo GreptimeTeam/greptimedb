@@ -304,6 +304,32 @@ fn pick_closed_merge_with_budget(
     options: ClosedMergeOptions,
     work_budget: usize,
 ) -> Option<UnitPick> {
+    pick_closed_merge_filtered(files, mapper, options, work_budget, None)
+}
+
+/// Discovers the best closed candidate of one class without changing safety limits.
+/// `reduces_files = None` retains the original best-benefit selection.
+pub(crate) fn pick_closed_merge_for_class(
+    files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    options: ClosedMergeOptions,
+    reduces_files: Option<bool>,
+) -> Option<UnitPick> {
+    match reduces_files {
+        None => pick_closed_merge(files, mapper, options),
+        Some(_) => {
+            pick_closed_merge_filtered(files, mapper, options, CONFLICT_GRAPH_BUDGET, reduces_files)
+        }
+    }
+}
+
+fn pick_closed_merge_filtered(
+    files: &[FileHandle],
+    mapper: &PrimaryKeyRangeMapper,
+    options: ClosedMergeOptions,
+    work_budget: usize,
+    required_reduction: Option<bool>,
+) -> Option<UnitPick> {
     let limits = options.limits;
     let extents = extents_of(files, mapper);
     let index = ExtentIndex::new(&extents);
@@ -321,10 +347,12 @@ fn pick_closed_merge_with_budget(
     };
     sort_units(&mut units);
     if dense {
-        return pick_dense_closed_merge(&units, files, &extents, &index, options);
+        return pick_dense_closed_merge(&units, files, &extents, &index, options)
+            .filter(|_| required_reduction != Some(false));
     }
     let Some(pairs) = split_conflicts(&units, &extents, &index, work_budget) else {
-        return pick_dense_closed_merge(&units, files, &extents, &index, options);
+        return pick_dense_closed_merge(&units, files, &extents, &index, options)
+            .filter(|_| required_reduction != Some(false));
     };
 
     let mut best: Option<(u64, u64, Range<usize>, bool)> = None;
@@ -340,7 +368,8 @@ fn pick_closed_merge_with_budget(
         let reduces_files = reduction > 0
             && (options.allow_file_reduction || stats.conflicts > 0)
             && limits.within_reduction_cost(stats.size, reduction);
-        if (stats.conflicts > 0 && !options.allow_conflicts)
+        if required_reduction.is_some_and(|required| required != reduces_files)
+            || (stats.conflicts > 0 && !options.allow_conflicts)
             || (!reduces_files && stats.conflicts == 0)
         {
             return;

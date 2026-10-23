@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod history;
+
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use api::v1::region::compact_request;
 use common_time::range::TimestampRange;
@@ -22,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::last_non_null::LastNonNullPicker;
+use crate::compaction::picker::history::PickHistory;
 use crate::compaction::twcs::TwcsPicker;
 use crate::compaction::window::WindowedCompactionPicker;
 use crate::compaction::{CompactionOutput, SerializedCompactionOutput};
@@ -130,6 +133,25 @@ pub fn new_picker(
     time_range: Option<TimestampRange>,
     manual: bool,
 ) -> Arc<dyn Picker> {
+    new_picker_with_history(
+        compact_request_options,
+        region_options,
+        max_background_tasks,
+        time_range,
+        manual,
+        None,
+    )
+}
+
+/// Creates an automatic picker with region-resident waiting history.
+pub(crate) fn new_picker_with_history(
+    compact_request_options: &compact_request::Options,
+    region_options: &RegionOptions,
+    max_background_tasks: Option<usize>,
+    time_range: Option<TimestampRange>,
+    manual: bool,
+    pick_history: Option<Arc<Mutex<PickHistory>>>,
+) -> Arc<dyn Picker> {
     if let compact_request::Options::StrictWindow(window) = compact_request_options {
         let window = if window.window_seconds == 0 {
             None
@@ -153,6 +175,7 @@ pub fn new_picker(
                 max_background_tasks,
                 time_range,
                 all_windows_inactive: manual,
+                pick_history,
             },
         };
         if region_options.merge_mode() == MergeMode::LastNonNull {

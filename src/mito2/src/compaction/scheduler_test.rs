@@ -412,6 +412,48 @@ async fn test_resident_region_survives_terminal_cycles_and_truncate() {
     assert!(!scheduler.region_status.contains_key(&id));
 }
 
+#[tokio::test]
+async fn test_pick_history_survives_cycles_but_not_region_replacement() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = Arc::new(VersionControlBuilder::new().build());
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer);
+    let history = scheduler.region_status[&id].pick_history.clone();
+    scheduler.region_status.get_mut(&id).unwrap().become_idle();
+    scheduler.register_region(&version, &env.access_layer);
+    assert!(Arc::ptr_eq(
+        &history,
+        &scheduler.region_status[&id].pick_history
+    ));
+    scheduler.on_compaction_failed(id, Arc::new(InvalidSchedulerStateSnafu.build()));
+    assert!(Arc::ptr_eq(
+        &history,
+        &scheduler.region_status[&id].pick_history
+    ));
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _) = mock_schema_metadata_manager();
+    let request = scheduler.region_status[&id].new_compaction_request(
+        scheduler.request_sender.clone(),
+        scheduler.engine_config.clone(),
+        scheduler.cache_manager.clone(),
+        &manifest,
+        scheduler.listener.clone(),
+        schemas,
+        1,
+    );
+    assert!(Arc::ptr_eq(&history, &request.pick_history));
+    let replacement = Arc::new(VersionControlBuilder::new().build());
+    scheduler.register_region(&replacement, &env.access_layer);
+    assert!(!Arc::ptr_eq(
+        &history,
+        &scheduler.region_status[&id].pick_history
+    ));
+}
+
 /// Reads the real completion event produced by a wrapped DDL reply.
 async fn recv_ddl_completion(rx: &mut mpsc::Receiver<WorkerRequestWithTime>) -> (u64, usize) {
     let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())

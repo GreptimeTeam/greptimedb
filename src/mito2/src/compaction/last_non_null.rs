@@ -244,6 +244,7 @@ mod tests {
         #[case] busy: bool,
         #[case] limit: Option<usize>,
         #[case] expected_windows: Vec<Vec<usize>>,
+        #[values(false, true)] fair: bool,
     ) {
         // Three independent, eligible L0 windows. A large L1 dependency is not
         // a seed, but can reject the newest closure or connect two seeds.
@@ -293,7 +294,14 @@ mod tests {
             .unwrap()
             .set_compacting(busy);
         let request = compact_request::Options::Regular(Default::default());
-        let picker = new_picker(&request, &region.region_options, limit, None, false);
+        let picker = crate::compaction::picker::new_picker_with_history(
+            &request,
+            &region.region_options,
+            limit,
+            None,
+            false,
+            fair.then(|| std::sync::Arc::new(std::sync::Mutex::new(Default::default()))),
+        );
 
         let picked = picker.pick(&region).await.unwrap().unwrap();
         assert_eq!(expected_windows.len(), picked.outputs.len());

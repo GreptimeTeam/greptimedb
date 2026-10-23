@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet, hash_map};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -28,6 +28,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::CompactionVersion;
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::picker::history::PickHistory;
 use crate::compaction::scheduler::local::LocalCompaction;
 use crate::compaction::scheduler::planning::CompactionRequest;
 use crate::config::MitoConfig;
@@ -319,6 +320,7 @@ impl DdlExecution {
 
 /// Scheduling state retained for the lifetime of a loaded region.
 pub(super) struct CompactionStatus {
+    pub(crate) pick_history: Arc<Mutex<PickHistory>>,
     /// Id of the region.
     pub(super) region_id: RegionId,
     /// Version control of the region.
@@ -350,6 +352,7 @@ impl CompactionStatus {
         access_layer: AccessLayerRef,
     ) -> CompactionStatus {
         CompactionStatus {
+            pick_history: Arc::new(Mutex::new(PickHistory::default())),
             region_id,
             version_control,
             access_layer,
@@ -529,6 +532,7 @@ impl CompactionStatus {
         let start_time = Instant::now();
 
         CompactionRequest {
+            pick_history: self.pick_history.clone(),
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
