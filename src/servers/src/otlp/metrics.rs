@@ -1592,6 +1592,95 @@ mod tests {
     }
 
     #[test]
+    fn test_conversion_describes_only_accepted_exponential_histogram_windows() {
+        set_default_prefix(None).unwrap();
+        let window = common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS as u64;
+        let mut valid = exponential_point();
+        valid.time_unix_nano = window + 1_000_000;
+
+        let mut invalid_count = valid.clone();
+        invalid_count.time_unix_nano += 8_000_000;
+        invalid_count.count += 1;
+        let mut invalid_scale = valid.clone();
+        invalid_scale.time_unix_nano += window;
+        invalid_scale.scale = -5;
+        // OTLP bucket conversion succeeds, but the shared native encoder rejects this index.
+        let invalid_native = ExponentialHistogramDataPoint {
+            time_unix_nano: 3 * window + 1_000_000,
+            count: 1,
+            positive: Some(exponential_buckets(2000, vec![1])),
+            ..Default::default()
+        };
+        assert!(
+            exponential_histogram_value(&invalid_native, AggregationTemporality::Cumulative)
+                .unwrap_err()
+                .contains("out of range")
+        );
+        let stale = ExponentialHistogramDataPoint {
+            time_unix_nano: 4 * window + 1_000_000,
+            count: u64::MAX,
+            scale: i32::MIN,
+            flags: DataPointFlags::NoRecordedValueMask as u32,
+            ..Default::default()
+        };
+        let invalid_time = ExponentialHistogramDataPoint {
+            time_unix_nano: 5 * window + 1_000_000,
+            start_time_unix_nano: 5 * window + 2_000_000,
+            ..stale.clone()
+        };
+        let rejected = vec![invalid_count, invalid_scale, invalid_native, invalid_time];
+        let mut mixed = rejected.clone();
+        mixed.extend([valid, stale]);
+        for (points, expected) in [
+            (rejected, vec![]),
+            (
+                mixed,
+                vec![
+                    (window / 1_000_000 + 1) as i64,
+                    (4 * window / 1_000_000 + 1) as i64,
+                ],
+            ),
+        ] {
+            let mut request = metrics_request(vec![exponential_metric(
+                "latency",
+                points,
+                AggregationTemporality::Cumulative,
+            )]);
+            request.resource_metrics[0].resource = Some(Resource {
+                attributes: vec![keyvalue("service.name", "api")],
+                ..Default::default()
+            });
+            let conversion = to_grpc_insert_requests(request, &mut descriptor_ctx()).unwrap();
+            assert_eq!(conversion.outcome.rejected_data_points, 4);
+            assert_eq!(
+                conversion.outcome.accepted_data_points,
+                expected.len() as i64
+            );
+            assert_eq!(conversion.rows, expected.len());
+            assert_eq!(conversion.resource_info.is_some(), !expected.is_empty());
+            let actual = conversion
+                .resource_info
+                .map(|descriptor| {
+                    let rows = descriptor.inserts[0].rows.as_ref().unwrap();
+                    let ts_index = rows
+                        .schema
+                        .iter()
+                        .position(|column| column.column_name == greptime_timestamp())
+                        .unwrap();
+                    rows.rows
+                        .iter()
+                        .map(|row| match row.values[ts_index].value_data {
+                            Some(ValueData::TimestampMillisecondValue(ts)) => ts,
+                            _ => panic!("expected descriptor timestamp"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn test_conversion_skips_descriptor_on_metric_name_collision() {
         set_default_prefix(None).unwrap();
         for (enabled, attributes, warns) in [

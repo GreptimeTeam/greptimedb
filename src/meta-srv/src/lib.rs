@@ -26,6 +26,7 @@ pub mod metasrv;
 pub mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
+pub mod node_scheduling;
 pub mod peer;
 pub mod procedure;
 pub mod pubsub;

@@ -27,8 +27,8 @@ use bytes::Bytes;
 use common_telemetry::{debug, error, info, warn};
 use common_wal::config::object_store::{AckMode, CorruptedSegmentAction, ObjectStoreWalConfig};
 use futures::future::{BoxFuture, OptionFuture};
-use futures::stream::FuturesUnordered;
-use futures::{StreamExt, TryStreamExt};
+use futures::stream::{BoxStream, FuturesUnordered};
+use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::{ErrorKind, ObjectStore};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::logstore::entry::{Entry, NaiveEntry};
@@ -3072,12 +3072,12 @@ struct FetchedObject {
 /// are. Segments are not read, except those of release records, see
 /// [`read_releases`]; a segment checksum is verified by the read that decodes
 /// it. Footers are fetched for up to [`RECOVERY_CONCURRENCY`] objects
-/// at a time and indexed in sequence order, so the catalog checks the entry
-/// ranges of every object against its predecessors like a sequential replay.
-/// Only the objects on the chain [`select_chain`] picks are indexed.
+/// at a time while the listing goes on, and indexed in sequence order, so the
+/// catalog checks the entry ranges of every object against its predecessors
+/// like a sequential replay. Only the objects on the chain [`select_chain`]
+/// picks are indexed.
 async fn recover(io: &dyn WalObjectIo) -> Result<Recovered> {
-    let objects = io.list().await?;
-    let mut fetched = fetch_footers(io, objects, RECOVERY_CONCURRENCY).await?;
+    let mut fetched = fetch_footers(io, io.list_ahead(), RECOVERY_CONCURRENCY).await?;
     let releases = fetched
         .objects
         .iter_mut()
@@ -3375,18 +3375,18 @@ async fn stale_conflict(
     .fail()
 }
 
-/// Fetches and verifies the headers and footers of `objects`, up to
-/// `concurrency` objects at a time, and returns them ordered by object sequence
-/// whatever the order the fetches complete in. An object the object store no
-/// longer has is returned as vanished; any other failure abandons the
-/// remaining fetches.
+/// Fetches and verifies the headers and footers of `objects` as they are
+/// listed, up to `concurrency` objects at a time, and returns them ordered by
+/// object sequence whatever the order the fetches complete in. An object the
+/// object store no longer has is returned as vanished; a failed listing or
+/// any other failure abandons the remaining fetches.
 async fn fetch_footers(
     io: &dyn WalObjectIo,
-    objects: Vec<ListedObject>,
+    objects: impl Stream<Item = Result<ListedObject>>,
     concurrency: usize,
 ) -> Result<FetchedObjects> {
-    let outcomes = futures::stream::iter(objects)
-        .map(|object| async move {
+    let outcomes = objects
+        .map_ok(|object| async move {
             match fetch_footer(io, &object).await {
                 Ok((header, footer, releases)) => Ok(Ok(FetchedObject {
                     object,
@@ -3398,7 +3398,7 @@ async fn fetch_footers(
                 Err(error) => Err(error),
             }
         })
-        .buffer_unordered(concurrency)
+        .try_buffer_unordered(concurrency)
         .try_collect::<Vec<_>>()
         .await?;
     let mut objects = Vec::with_capacity(outcomes.len());
@@ -3552,6 +3552,16 @@ pub(crate) trait WalObjectIo: Send + Sync {
 
     async fn list(&self) -> Result<Vec<ListedObject>>;
 
+    /// See [`ObjectStoreIo::list_ahead`]; by default the objects
+    /// [`list`](Self::list) returns.
+    fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+        Box::pin(try_stream! {
+            for object in self.list().await? {
+                yield object;
+            }
+        })
+    }
+
     fn object_path(&self, object_seq: u64) -> String;
 
     /// Describes the object store the objects live in, for messages.
@@ -3578,6 +3588,10 @@ impl WalObjectIo for ObjectStoreIo {
 
     async fn list(&self) -> Result<Vec<ListedObject>> {
         ObjectStoreIo::list(self).await
+    }
+
+    fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+        ObjectStoreIo::list_ahead(self)
     }
 
     fn object_path(&self, object_seq: u64) -> String {
@@ -5286,7 +5300,7 @@ mod tests {
         let mut fetch = {
             let io = io.clone();
             tokio::spawn(async move {
-                fetch_footers(io.as_ref(), objects, RECOVERY_CONCURRENCY)
+                fetch_footers(io.as_ref(), listing(objects), RECOVERY_CONCURRENCY)
                     .await
                     .unwrap()
                     .objects
@@ -5371,6 +5385,170 @@ mod tests {
             store.catalog.read().unwrap().next_object_seq().unwrap()
         );
         store.stop().await.unwrap();
+    }
+
+    fn listing(objects: Vec<ListedObject>) -> impl Stream<Item = Result<ListedObject>> {
+        futures::stream::iter(objects.into_iter().map(Ok))
+    }
+
+    const LISTING_PAGE: usize = 4;
+
+    /// Serves the entries of a listing in pages of [`LISTING_PAGE`], each
+    /// only once `pages` allows it, fails, or panics with `panics`, after
+    /// `fail_after` entries, and records when it is dropped.
+    struct PagedLister {
+        inner: oio::Lister,
+        served: usize,
+        pages: watch::Receiver<usize>,
+        fail_after: Option<usize>,
+        panics: bool,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl oio::List for PagedLister {
+        async fn next(&mut self) -> mock::Result<Option<oio::Entry>> {
+            if self.fail_after == Some(self.served) {
+                assert!(!self.panics, "injected listing panic");
+                return Err(mock::Error::new(
+                    mock::ErrorKind::Unexpected,
+                    "injected listing failure",
+                ));
+            }
+            let page = self.served / LISTING_PAGE;
+            if self.pages.wait_for(|pages| *pages > page).await.is_err() {
+                return Err(mock::Error::new(
+                    mock::ErrorKind::Unexpected,
+                    "listing abandoned",
+                ));
+            }
+            self.served += 1;
+            self.inner.next().await
+        }
+    }
+
+    impl Drop for PagedLister {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The prefix of `object_store` listed by [`PagedLister`]s, whose reads
+    /// go through `read`.
+    fn paged_listing(
+        object_store: &ObjectStore,
+        pages: watch::Receiver<usize>,
+        fail_after: Option<usize>,
+        panics: bool,
+        read: mock::MockReaderFactory,
+    ) -> (ObjectStoreIo, Arc<AtomicBool>) {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let lister_dropped = dropped.clone();
+        let mock = MockLayerBuilder::default()
+            .lister_factory(Arc::new(move |_, _, inner| {
+                Box::new(PagedLister {
+                    inner,
+                    served: 0,
+                    pages: pages.clone(),
+                    fail_after,
+                    panics,
+                    dropped: lister_dropped.clone(),
+                })
+            }))
+            .reader_factory(read)
+            .build()
+            .unwrap();
+        let io = ObjectStoreIo::new(object_store.clone().layer(mock), PREFIX).unwrap();
+        (io, dropped)
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_reads_footers_while_the_listing_goes_on() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        populate(&object_store, 3 * LISTING_PAGE + 1, 3).await;
+        // Every read allows one more page, so recovery completes only if it
+        // reads footers before the listing ends.
+        let (pages, listed_pages) = watch::channel(1);
+        let (io, _) = paged_listing(
+            &object_store,
+            listed_pages,
+            None,
+            false,
+            Arc::new(move |_, _, inner| {
+                pages.send_modify(|pages| *pages += 1);
+                inner
+            }),
+        );
+
+        let recovered = timeout(WAIT, recover(&io)).await.unwrap().unwrap();
+        let expected = recover_by_decoding(&ObjectStoreIo::new(object_store, PREFIX).unwrap())
+            .await
+            .unwrap();
+        assert_same_recovery(&expected, &recovered);
+        assert_eq!(3 * LISTING_PAGE as u64 + 1, recovered.recovered_objects);
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_fails_on_a_listing_that_fails_part_way() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        populate(&object_store, 3 * LISTING_PAGE, 3).await;
+        for (panics, reason) in [
+            (false, "injected listing failure"),
+            (true, "the listing task did not complete"),
+        ] {
+            let (_pages, listed_pages) = watch::channel(usize::MAX);
+            let (io, _) = paged_listing(
+                &object_store,
+                listed_pages,
+                Some(LISTING_PAGE + 1),
+                panics,
+                Arc::new(|_, _, inner| inner),
+            );
+
+            let error = timeout(WAIT, recover(&io)).await.unwrap().unwrap_err();
+            assert!(
+                matches!(&error, Error::WalObjectStore { operation: "list", error, .. }
+                    if error.to_string().contains(reason)),
+                "unexpected error: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_stops_the_listing_when_a_footer_read_fails() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        populate(&object_store, 3 * LISTING_PAGE, 3).await;
+        // Only the first page is ever listed, so the listing waits for good
+        // unless the failed read stops it.
+        let (_pages, listed_pages) = watch::channel(1);
+        let (io, dropped) = paged_listing(
+            &object_store,
+            listed_pages,
+            None,
+            false,
+            Arc::new(|_, _, _| Box::new(RefusedReader(ErrorKind::PermissionDenied))),
+        );
+
+        let error = timeout(WAIT, recover(&io)).await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                Error::WalObjectStore {
+                    operation: "read",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+        timeout(WAIT, async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -8992,7 +9170,7 @@ mod tests {
     }
 
     async fn recover_listed(io: &ObjectStoreIo, listed: Vec<ListedObject>) -> Result<Recovered> {
-        finish_recovery(fetch_footers(io, listed, RECOVERY_CONCURRENCY).await?)
+        finish_recovery(fetch_footers(io, listing(listed), RECOVERY_CONCURRENCY).await?)
     }
 
     #[tokio::test]
@@ -10235,6 +10413,10 @@ mod tests {
 
             async fn list(&self) -> Result<Vec<ListedObject>> {
                 self.inner.list().await
+            }
+
+            fn list_ahead(&self) -> BoxStream<'_, Result<ListedObject>> {
+                self.inner.list_ahead()
             }
 
             fn object_path(&self, object_seq: u64) -> String {
