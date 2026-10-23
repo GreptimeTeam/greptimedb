@@ -654,6 +654,24 @@ fn an_offset_on_a_bare_selector_keeps_its_sign() {
     }
 }
 
+/// An instant selector's raw scan bounds use its `@` anchor rather than the statement grid.
+#[test]
+fn an_anchored_instant_selector_scans_from_its_anchor() {
+    let requirement = SelectorRequirement {
+        metric: Some("x".into()),
+        matchers: promql_parser::label::Matchers::empty(),
+        offset_ms: 2_000,
+        at_ms: Some(50_000),
+        grid_start_ms: 0,
+        grid_end_ms: 100_000,
+        timing: SelectorTiming::Instant { lookback_ms: 5_000 },
+    };
+    assert_eq!(
+        requirement.raw_scan_bounds().unwrap(),
+        (43_000, 48_000, false)
+    );
+}
+
 /// An `@`-anchored bare selector is refused because the instant node has no anchor field, not
 /// because anchoring is unsupported: the window shape binds an anchor.
 #[test]
