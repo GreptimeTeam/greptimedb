@@ -79,8 +79,7 @@ use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::InputId;
 use crate::native::execute::RuntimeTreeHandle;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
-use crate::native::metrics;
-use crate::native::plan::{NativeExpr, NativeTree};
+use crate::native::plan::{NativeExpr, NativeNode, NativeTree};
 use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
 
@@ -420,21 +419,7 @@ struct TreeInput {
 /// input is the tree's only leaf and is therefore the first one: the id it is queued at is
 /// [`InputId::new(0)`], so nothing here has to count leaves beyond checking that it is alone.
 fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
-    let mut sources = 0;
-    let mut schema = None;
-    metrics::walk(tree.root(), &mut |node, _| {
-        let NativeExpr::Input(input) = &node.expr else {
-            return;
-        };
-        sources += 1;
-        // Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was
-        // compiled against an already-evaluated schema would read the wrong thing.
-        schema = input
-            .output
-            .samples()
-            .filter(|schema| schema.eval_grid.is_none())
-            .map(Arc::clone);
-    });
+    let (sources, schema) = input_leaves(tree.root());
     if sources != 1 {
         return Err(DataFusionError::Plan(format!(
             "FusedSeries runs a tree with {sources} inputs, and it needs exactly one"
@@ -459,6 +444,36 @@ fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
         input_id: InputId::new(0),
         schema,
     })
+}
+
+/// Counts the [`NativeExpr::Input`] leaves under `node`, and reads the raw schema a leaf declares.
+///
+/// Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was compiled
+/// against an already-evaluated schema would read the wrong thing. A tree this node accepts has one
+/// leaf, so the schema carried out of here is that leaf's; every other leaf is only counted, which
+/// is what refuses a tree with more than one.
+fn input_leaves(node: &NativeNode) -> (usize, Option<Arc<SeriesSchema>>) {
+    match &node.expr {
+        NativeExpr::Input(input) => (
+            1,
+            input
+                .output
+                .samples()
+                .filter(|schema| schema.eval_grid.is_none())
+                .map(Arc::clone),
+        ),
+        NativeExpr::Scalar(_) => (0, None),
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => input_leaves(input),
+        NativeExpr::Binary { left, right, .. } => {
+            let (sources, schema) = input_leaves(left);
+            let (right_sources, right_schema) = input_leaves(right);
+            (sources + right_sources, right_schema.or(schema))
+        }
+    }
 }
 
 /// Refuses a tree whose logical series can be split across the partitions this node runs.
@@ -500,48 +515,54 @@ fn reject_a_split_logical_series(
     if partition_count == 1 {
         return Ok(());
     }
-    // The walk is outermost first, so it meets nodes in the reverse of the order data flows: a
-    // consumer met before a rewriter is one that the rewriter feeds.
-    let mut consumer: Option<String> = None;
-    let mut rejection: Option<(String, String)> = None;
-    metrics::walk(tree.root(), &mut |node, path| {
-        if rejection.is_some() {
-            return;
-        }
-        // A node can leave two raw series on one canonical label set. A map always can: it drops
-        // `__name__` and every empty-valued tag. An instant selection preserves its input labels,
-        // rather than dropping them, but can still leave two raw series on one canonical label set:
-        // `{zone=""}` and the absent `zone` are one label set and two raw keys. A window can
-        // whenever it did not merge its input, which a bare tree says nothing about: a check on the
-        // function alone accepts `last_over_time`, whose output keeps the name and can still hold
-        // both raw series. Every map, instant selection, and window is therefore taken to be a
-        // possible rewriter, and the refusal below is what narrows that to the shape that costs
-        // correctness - a window with a rewriter below it, a window being the only consumer here.
-        let rewrites = matches!(
-            node.expr,
-            NativeExpr::Map { .. } | NativeExpr::Instant { .. } | NativeExpr::Window { .. }
-        );
-        if rewrites && let Some(above) = &consumer {
-            rejection = Some((path.as_str().to_string(), above.clone()));
-            return;
-        }
-        let consumes = matches!(node.expr, NativeExpr::Window { .. });
-        if consumes && consumer.is_none() {
-            consumer = Some(path.as_str().to_string());
-        }
-    });
-    let Some((rewriter, above)) = rejection else {
+    let Some(rewriter) = split_series_rewriter(tree.root(), false) else {
         return Ok(());
     };
     Err(DataFusionError::Plan(format!(
         "FusedSeries runs a tree where `{rewriter}` can leave two raw series on one canonical label \
-         set and `{above}` above it reads a whole series, over {partition_count} partitions: an \
+         set and the `Window` above it reads a whole series, over {partition_count} partitions: an \
          empty tag value and an absent tag are the same label set, the runtime merges such \
-         fragments once per execution, and this node runs one execution per partition, so `{above}` \
-         would read one half and answer an empty result. Reading this tree needs an exchange between \
-         `{rewriter}` and `{above}` that merges a logical series across partitions, which is not \
-         implemented"
+         fragments once per execution, and this node runs one execution per partition, so the \
+         `Window` would read one half and answer an empty result. Reading this tree needs an \
+         exchange between `{rewriter}` and the `Window` above it that merges a logical series \
+         across partitions, which is not implemented"
     )))
+}
+
+/// Finds the rewriter below a consuming window in the subtree at `node`, naming its kind.
+///
+/// The search is outermost first, so it meets nodes in the reverse of the order data flows: a
+/// window met before a rewriter is one that the rewriter feeds. `consumer_above` says whether such
+/// a window was already met, which is what makes a rewriter below this node the shape that costs
+/// correctness.
+///
+/// A node can leave two raw series on one canonical label set. A map always can: it drops
+/// `__name__` and every empty-valued tag. An instant selection preserves its input labels, rather
+/// than dropping them, but can still leave two raw series on one canonical label set: `{zone=""}`
+/// and the absent `zone` are one label set and two raw keys. A window can whenever it did not merge
+/// its input, which a bare tree says nothing about: a check on the function alone accepts
+/// `last_over_time`, whose output keeps the name and can still hold both raw series. Every map,
+/// instant selection, and window is therefore taken to be a possible rewriter, and the caller's
+/// refusal narrows that to a window with a rewriter below it, a window being the only consumer.
+///
+/// A window both rewrites and consumes, so below a window it is the rewriter and otherwise
+/// everything below it is under a consumer. An aggregate and a vector operation are neither: they
+/// pass both facts on unchanged. A binary operation reads its operands independently, so a window
+/// in one operand does not consume the other operand's rewrite.
+fn split_series_rewriter(node: &NativeNode, consumer_above: bool) -> Option<&'static str> {
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => None,
+        NativeExpr::Window { .. } if consumer_above => Some("Window"),
+        NativeExpr::Window { input, .. } => split_series_rewriter(input, true),
+        NativeExpr::Map { .. } if consumer_above => Some("Map"),
+        NativeExpr::Instant { .. } if consumer_above => Some("Instant"),
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => split_series_rewriter(input, consumer_above),
+        NativeExpr::Binary { left, right, .. } => split_series_rewriter(left, consumer_above)
+            .or_else(|| split_series_rewriter(right, consumer_above)),
+    }
 }
 
 /// Checks that `tree` reads the schema `binding` declares, on the grid it declares.

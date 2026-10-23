@@ -1551,16 +1551,24 @@ fn a_nested_window_over_two_partitions_is_refused() {
     .expect_err("each of two partitions would merge only the fragment it was given");
     let message = error.to_string();
     assert!(
-        message.contains("`root.input`"),
-        "the refusal must name the inner window: {message}"
+        message.contains("`Window` can leave two raw series"),
+        "the refusal must name the inner window as the rewriter: {message}"
     );
     assert!(
-        message.contains("`root`"),
-        "the refusal must name the window above it: {message}"
+        message.contains("the `Window` above it reads a whole series"),
+        "the refusal must name the window above it as the consumer: {message}"
     );
     assert!(
         message.contains("2 partitions"),
         "the refusal must name the partition count: {message}"
+    );
+    assert!(
+        message.contains("merges such fragments once per execution"),
+        "the refusal must state why a partition splits the logical series: {message}"
+    );
+    assert!(
+        message.contains("which is not implemented"),
+        "the refusal must name the exchange it needs: {message}"
     );
 
     // The same tree over one partition is accepted, because one execution sees every fragment and
@@ -1579,16 +1587,20 @@ fn an_instant_then_window_over_two_partitions_is_refused() {
     .expect_err("each partition could hand the window only one fragment");
     let message = error.to_string();
     assert!(
-        message.contains("`root.input`"),
-        "the refusal must name the instant selection: {message}"
+        message.contains("`Instant` can leave two raw series"),
+        "the refusal must name the instant selection as the rewriter: {message}"
     );
     assert!(
-        message.contains("`root`"),
+        message.contains("the `Window` above it reads a whole series"),
         "the refusal must name the consuming window: {message}"
     );
     assert!(
         message.contains("2 partitions"),
         "the refusal must name the partition count: {message}"
+    );
+    assert!(
+        message.contains("which is not implemented"),
+        "the refusal must name the exchange it needs: {message}"
     );
 }
 
