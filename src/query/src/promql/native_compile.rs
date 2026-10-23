@@ -27,6 +27,7 @@
 //!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
 //!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
 //!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//!   <histogram function>(<expression>)             e.g. histogram_count(x)
 //!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
 //!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
@@ -74,7 +75,8 @@
 //! Those shapes become `Input` (raw samples) → `Instant` (the last sample within the statement's
 //! lookback), `Input` (raw samples) → `Window` (the range function over the statement's grid),
 //! `<expression>` → `Window` whose input is evaluated (the subquery, whose input grid is its own),
-//! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to) and, over
+//! `<expression>` → `Map` (a pointwise math, native histogram or label function over what its
+//! argument evaluates to) and, over
 //! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side),
 //! `Scalar` (that constant), `Aggregate` (one of the nine aggregators that fold a group's values
 //! into one value per grid point, optionally grouped) and `Vector` (an operation over the whole
@@ -133,7 +135,7 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{MetricName, SeriesOrdering};
-use promql::histogram_eval::HistogramFunction;
+use promql::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
@@ -168,7 +170,9 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          is any shape here, so a subquery nests on a grid of its own as in \
                          `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
                          `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
-                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a label function over any of them \
+                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a native \
+                         histogram function over any of them (`histogram_count(x)`), a label \
+                         function over any of them \
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
                          operation between one of them and a constant (`2 / (x + 1)`, \
                          `x > bool 0`), a negation of one of them (`-x`), or one of the aggregators \
@@ -632,10 +636,8 @@ fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
     }
 }
 
-/// Compiles a call: a range function opens a window over the selector it is given, and a math
-/// function maps the value of its first argument.
-/// Compiles a call: a range function opens a window over the selector it is given, and a math or
-/// label function maps the value of its first argument.
+/// Compiles a call: a range function opens a window over the selector it is given, and a math,
+/// native histogram or label function maps the value of its first argument.
 ///
 /// The name lists are disjoint, and a range function is decided first because it binds its own
 /// window rather than its argument's value. A name in neither list is refused here, which is where
@@ -655,6 +657,16 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     // wrote.
     if let Some((op, vector)) = math_op(func.name, &args.args)? {
         return map_call(context, func.name, MapOp::Math(op), vector);
+    }
+    if let Some(function) = histogram_function(func.name) {
+        let [vector] = args.args.as_slice() else {
+            return Err(not_implemented(&format!(
+                "a call to `{}` with {} argument(s), where it takes its vector",
+                func.name,
+                args.args.len()
+            )));
+        };
+        return map_call(context, func.name, MapOp::Histogram(function), vector);
     }
     if let Some((rewrite, vector)) = label_rewrite(func.name, &args.args)? {
         return map_call(context, func.name, MapOp::Label(Arc::new(rewrite)), vector);
@@ -712,7 +724,8 @@ fn window_call(
     }
 }
 
-/// Wraps `op` over the value of `vector`, which is the first argument of a math or label function.
+/// Wraps `op` over the value of `vector`, which is the first argument of a math, native histogram
+/// or label function.
 ///
 /// The output is the input's own type: a pointwise function moves no value to another grid point
 /// and reports one value per field it was given, so the map's schema is the input's allocation
@@ -1446,6 +1459,22 @@ fn math_op<'a>(
         ),
     };
     Ok(Some((op, vector)))
+}
+
+/// The native histogram function `name` denotes, or `None` when it is not one.
+///
+/// These read only native histogram samples and drop the float ones, as Prometheus'
+/// `simpleHistogramFunc` does; `histogram_quantile` and `histogram_fraction` also read classic
+/// bucket series and are not listed.
+fn histogram_function(name: &str) -> Option<NativeHistogramFunction> {
+    match name {
+        "histogram_count" => Some(NativeHistogramFunction::Count),
+        "histogram_sum" => Some(NativeHistogramFunction::Sum),
+        "histogram_avg" => Some(NativeHistogramFunction::Avg),
+        "histogram_stddev" => Some(NativeHistogramFunction::StdDev),
+        "histogram_stdvar" => Some(NativeHistogramFunction::StdVar),
+        _ => None,
+    }
 }
 
 /// The label change `label_replace` or `label_join` makes, and the vector it is made to, or `None`

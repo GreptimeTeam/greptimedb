@@ -4296,6 +4296,29 @@ fn label_functions_bind_their_change_into_a_map() {
     }
 }
 
+/// The native histogram functions bind their kernel into a map over the vector they are given.
+#[test]
+fn histogram_functions_bind_their_kernel_into_a_map() {
+    for name in [
+        "histogram_count",
+        "histogram_sum",
+        "histogram_avg",
+        "histogram_stddev",
+        "histogram_stdvar",
+    ] {
+        let query = format!("{name}(x)");
+        let tree = compile(
+            &eval_stmt(&query),
+            raw_schema(),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let display = tree.to_string();
+        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        assert_eq!(root, format!("  root Map {name}"), "`{query}`");
+    }
+}
+
 /// An invalid regular expression fails the statement, as it fails Prometheus' evaluation, rather
 /// than being left to another path that would fail it the same way.
 #[test]
