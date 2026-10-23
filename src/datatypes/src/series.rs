@@ -60,8 +60,7 @@ pub struct Label {
 ///
 /// The metric name is only the `__name__` value (see [`Self::name`]); this type is
 /// the whole label set a PromQL series shows. It is neither a canonical
-/// matching/grouping identity (matching drops `__name__` and compares the remaining
-/// labels canonically) nor a storage identity (read key / primary key).
+/// matching/grouping identity nor a storage identity (read key / primary key).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeriesLabels {
     name: Option<Arc<str>>,
