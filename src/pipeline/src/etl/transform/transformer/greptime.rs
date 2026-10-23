@@ -503,6 +503,12 @@ fn resolve_schema(
         let column_type = &mut schema_info.schema[index].column_schema.data_type;
         match (column_type, value_type) {
             (column_type, value_type) if column_type == value_type => Ok(()),
+            // Auto-transformed arrays and objects use JSONB-encoded binary values.
+            (ConcreteDataType::Json(json_type), ConcreteDataType::Binary(_))
+                if !json_type.is_json2() =>
+            {
+                Ok(())
+            }
             (ConcreteDataType::Json(column_type), ConcreteDataType::Json(value_type))
                 if column_type.is_json2() && value_type.is_json2() =>
             {
@@ -1064,7 +1070,89 @@ mod tests {
     use table::test_util::MemTable;
 
     use super::*;
-    use crate::{PipelineDefinition, identity_pipeline};
+    use crate::{Content, PipelineDefinition, identity_pipeline, parse, setup_pipeline};
+
+    #[test]
+    fn test_auto_transform_existing_json_column()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let pipeline = parse(&Content::Yaml(
+            r#"
+version: 2
+transform:
+  - field: ts
+    type: epoch, ms
+    index: timestamp
+"#,
+        ))?;
+        let (pipeline, mut schema_info, pipeline_definition, pipeline_params) =
+            setup_pipeline!(pipeline);
+        let pipeline_context =
+            PipelineContext::new(&pipeline_definition, &pipeline_params, Channel::Unknown);
+        schema_info.set_table(Some(MemTable::table(
+            "events",
+            RecordBatch::new_empty(Arc::new(Schema::new(vec![DatatypeColumnSchema::new(
+                "payload",
+                ConcreteDataType::Json(Default::default()),
+                true,
+            )]))),
+        )));
+        let inputs = [
+            serde_json::Value::Null,
+            serde_json::json!([2, 4, 6]),
+            serde_json::json!({"active": true}),
+            serde_json::json!({"a\"b": "\u{0001}"}),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::Value::Null,
+        ];
+        let records = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, payload)| serde_json::json!({"ts": i, "payload": payload}))
+            .collect::<Vec<_>>();
+        let output = pipeline
+            .exec_mut(
+                serde_json::Value::Array(records).into(),
+                &pipeline_context,
+                &mut schema_info,
+            )?
+            .into_transformed()
+            .ok_or("expected transformed rows")?;
+        assert_eq!(output.len(), inputs.len());
+        let index = schema_info.index["payload"];
+        assert_eq!(
+            schema_info.schema[index].column_schema.data_type,
+            ConcreteDataType::Json(Default::default())
+        );
+        for ((row, _), expected) in output.iter().zip(&inputs) {
+            if expected.is_null() {
+                assert_eq!(
+                    row.values.get(index).and_then(|v| v.value_data.as_ref()),
+                    None
+                );
+            } else {
+                let Some(ValueData::BinaryValue(value)) = &row.values[index].value_data else {
+                    return Err("expected JSONB-encoded value".into());
+                };
+                assert_eq!(datatypes::types::jsonb_to_serde_json(value)?, *expected);
+            }
+        }
+        let error = pipeline
+            .exec_mut(
+                serde_json::json!({"ts": 10, "payload": 7}).into(),
+                &pipeline_context,
+                &mut schema_info,
+            )
+            .err()
+            .ok_or("expected a datatype mismatch")?;
+        assert!(
+            error
+                .to_string()
+                .contains("expected datatype: Json, actual datatype: Int64"),
+            "{error:?}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_column_metadata_caches_json_settings() -> Result<()> {
