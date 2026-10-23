@@ -46,8 +46,9 @@ use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
+    BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -490,6 +491,7 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
         window: None,
         map: None,
         binary: None,
+        aggregate: None,
         broadcast: None,
         vector: None,
         source_schema: None,
@@ -512,6 +514,7 @@ fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> Nod
             Arc::new(binary_matching(BinaryOp::Add)),
             [Arc::clone(schema), Arc::clone(schema)],
         )),
+        aggregate: None,
         broadcast: None,
         vector: None,
         source_schema: None,
@@ -1093,30 +1096,17 @@ fn a_downstream_window_emits_before_its_input_series_ends() {
     }
 }
 
-/// Every node kind the runtime does not execute is rejected, naming the kind and its position.
+/// Every binary shape the runtime does not execute is rejected, naming the kind and its position.
 ///
 /// A scalar is not one of them any more: it is a value node, and a binary node over a constant is
-/// executed as a broadcast. The binary shapes that stay refused are the ones no kernel here takes,
-/// and the aggregate is still a kind this runtime does not run at all.
+/// executed as a broadcast. The binary shapes that stay refused are the ones no kernel here takes;
+/// the aggregate kinds and stages this runtime does not execute are refused by
+/// `an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named`.
 #[test]
 fn an_unimplemented_node_is_reported_not_panicked() {
     // One grid shared by the nodes that validate by allocation identity.
     let statement = || grid(0, 120_000, 2);
 
-    let aggregate_tree = {
-        let out = statement();
-        NativeNode {
-            expr: NativeExpr::Aggregate {
-                input: Box::new(window(input(), Arc::clone(&out))),
-                op: BoundAggregate {
-                    kind: AggregateKind::Sum,
-                    group: Grouping::By(Arc::new(["job".into()])),
-                    stage: AggregateStage::Complete,
-                },
-            },
-            output: NativeType::Samples(evaluated_schema(out)),
-        }
-    };
     // Two constants make a scalar, which is a legal node and a shape no binary here broadcasts
     // over: there is no vector to pair either of them with.
     let two_scalars_tree = {
@@ -1148,12 +1138,6 @@ fn an_unimplemented_node_is_reported_not_panicked() {
     };
 
     let cases = [
-        (
-            "Aggregate",
-            "root",
-            "does not execute Aggregate",
-            aggregate_tree,
-        ),
         ("Binary", "root", "two constants", two_scalars_tree),
         ("Binary", "root", "matching modifiers", matched_scalar_tree),
     ];
@@ -6568,6 +6552,158 @@ fn a_constant_on_the_right_multiplies_every_value() {
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
+/// A `Complete` aggregate over `inner`, carrying `inner`'s fields and evaluated on its grid.
+///
+/// A `Complete` aggregate neither adds nor drops a field and lands on its input's grid, so the node's
+/// own output is the layout its input produces.
+fn aggregate(inner: NativeNode, op: BoundAggregate) -> NativeNode {
+    let fields = inner
+        .output
+        .samples()
+        .expect("an aggregate reads samples")
+        .fields
+        .clone();
+    let grid = inner
+        .output
+        .grid()
+        .expect("a complete aggregate reads an evaluated vector")
+        .clone();
+    let output = NativeType::Samples(Arc::new(SeriesSchema {
+        fields,
+        eval_grid: Some(grid),
+    }));
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op,
+        },
+        output,
+    }
+}
+
+/// A `Complete` `sum` grouped as `group`.
+fn sum_grouping(group: Grouping) -> BoundAggregate {
+    BoundAggregate {
+        kind: AggregateKind::Sum,
+        group,
+        stage: AggregateStage::Complete,
+    }
+}
+
+/// `name{job=...,instance=...}`, the two labels these tests group by.
+fn job_instance_metric(name: &str, job: &str, instance: &str) -> MetricName {
+    MetricName::try_new(
+        Some(name.into()),
+        vec![
+            Label {
+                name: "job".into(),
+                value: job.into(),
+            },
+            Label {
+                name: "instance".into(),
+                value: instance.into(),
+            },
+        ],
+    )
+    .unwrap()
+}
+
+/// What one aggregate result reports: its name, its tags and the value at each point it decided.
+type GroupResult = (
+    Option<String>,
+    Vec<(String, String)>,
+    Vec<(usize, Option<f64>)>,
+);
+
+/// The groups a run produced, each with the absolute positions it decided, sorted by identity.
+///
+/// Sorting is the test's, not the runtime's: a group's place in the answer is the order its first
+/// input appeared, which the tests that check it assert on the stream rather than here.
+fn groups_of(chunks: &[EvaluatedChunk]) -> Vec<GroupResult> {
+    let mut results: Vec<GroupResult> = chunks
+        .iter()
+        .map(|chunk| {
+            let mut tags: Vec<(String, String)> = chunk
+                .series
+                .metric
+                .tags()
+                .iter()
+                .map(|tag| (tag.name.to_string(), tag.value.to_string()))
+                .collect();
+            tags.sort();
+            (
+                chunk.series.metric.name().map(str::to_string),
+                tags,
+                decided(std::slice::from_ref(chunk)),
+            )
+        })
+        .collect();
+    results.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    results
+}
+
+/// One group's answer under the name and tags `tags` give it, ordered by label name.
+fn grouped(tags: &[(&str, &str)], points: Vec<(usize, Option<f64>)>) -> GroupResult {
+    let mut tags: Vec<(String, String)> = tags
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .collect();
+    tags.sort();
+    (None, tags, points)
+}
+
+/// One group's answer when every label of its input was dropped.
+fn unlabelled(points: Vec<(usize, Option<f64>)>) -> GroupResult {
+    grouped(&[], points)
+}
+
+/// `sum` with no grouping drops every label, name and tags alike, and adds the members per point.
+#[test]
+fn an_aggregate_drops_every_label_and_adds_its_group_per_point() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let set = ExecutionPlanMetricsSet::new();
+    let mut execution = executor(&tree, pool(), &set);
+    for (metric, values) in [
+        (
+            job_instance_metric("requests", "api", "a"),
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+        ),
+        (
+            job_instance_metric("requests", "db", "b"),
+            vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+        ),
+    ] {
+        execution
+            .push_evaluated(evaluated_chunk_of(&schema, metric, 0, values, true))
+            .unwrap();
+    }
+
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![
+            (0, Some(11.0)),
+            (1, Some(22.0)),
+            (2, Some(33.0)),
+            (3, Some(44.0)),
+        ])],
+        "the two series were not folded into one unlabelled group"
+    );
+    // One group is one series, so it closes exactly once and its chunk says so.
+    assert!(output.len() == 1 && output[0].is_last);
+    assert_eq!(
+        count(&set, &NodePath::root(), NodeMetric::COMPLETED_SERIES),
+        1
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
 /// The side a constant is on decides which operand the vector's value is.
 ///
 /// Division is not commutative, so `x / 100` and `100 / x` answering different values is what says
@@ -7041,6 +7177,208 @@ fn a_window_above_a_broadcast_merges_the_series_it_collapses() {
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
+/// Every supported `Complete` kind reaches its matching float kernel through the native runtime.
+#[test]
+fn complete_aggregate_kinds_fold_two_values() {
+    let cases = [
+        (AggregateKind::Sum, 4.0),
+        (AggregateKind::Count, 2.0),
+        (AggregateKind::Avg, 2.0),
+        (AggregateKind::Min, 1.0),
+        (AggregateKind::Max, 3.0),
+        (AggregateKind::Group, 1.0),
+        (AggregateKind::Stddev, 1.0),
+        (AggregateKind::Stdvar, 1.0),
+    ];
+
+    for (kind, expected) in cases {
+        let grid = grid(0, 60_000, 1);
+        let schema = evaluated_schema(Arc::clone(&grid));
+        let tree = NativeTree::try_new(aggregate(
+            evaluated_input(Arc::clone(&grid)),
+            BoundAggregate {
+                kind,
+                group: Grouping::By(Arc::new([])),
+                stage: AggregateStage::Complete,
+            },
+        ))
+        .unwrap();
+        let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+        for value in [1.0, 3.0] {
+            execution
+                .push_evaluated(evaluated_chunk_of(
+                    &schema,
+                    metric(),
+                    0,
+                    vec![Some(value)],
+                    true,
+                ))
+                .unwrap();
+        }
+
+        let output = execution.finish().unwrap();
+        assert_eq!(
+            groups_of(&output),
+            vec![unlabelled(vec![(0, Some(expected))])],
+            "{kind:?} did not compute its native complete result"
+        );
+    }
+}
+
+/// The same series, delivered in two chunks, fold to what the whole series folds to.
+#[test]
+fn an_aggregate_folds_a_series_split_across_chunks_like_a_whole_one() {
+    let bound = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&bound));
+    // A fresh tree per execution: the node's state is the execution's, not the tree's.
+    let tree = || {
+        NativeTree::try_new(aggregate(
+            evaluated_input(grid(0, 60_000, 4)),
+            sum_grouping(Grouping::By(Arc::new(["job".into()]))),
+        ))
+        .unwrap()
+    };
+    let (first, second) = (
+        job_instance_metric("requests", "api", "a"),
+        job_instance_metric("requests", "api", "b"),
+    );
+
+    // One chunk per series.
+    let mut whole = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
+    for (metric, values) in [
+        (
+            first.clone(),
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+        ),
+        (
+            second.clone(),
+            vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+        ),
+    ] {
+        whole
+            .push_evaluated(evaluated_chunk_of(&schema, metric, 0, values, true))
+            .unwrap();
+    }
+    let whole = whole.finish().unwrap();
+
+    // The first series split in two, the second whole: the group is the same group, folded from
+    // positions the chunks name absolutely.
+    let mut split = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
+    split
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            first.clone(),
+            0,
+            vec![Some(1.0), Some(2.0)],
+            false,
+        ))
+        .unwrap();
+    assert!(
+        split.next_chunk().unwrap().is_none(),
+        "a chunk that does not close its series answered for the group"
+    );
+    split
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            first,
+            2,
+            vec![Some(3.0), Some(4.0)],
+            true,
+        ))
+        .unwrap();
+
+    split
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            second,
+            0,
+            vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+            true,
+        ))
+        .unwrap();
+
+    let split = split.finish().unwrap();
+    assert_eq!(groups_of(&split), groups_of(&whole));
+    assert_eq!(
+        groups_of(&split),
+        vec![grouped(
+            &[("job", "api")],
+            vec![
+                (0, Some(11.0)),
+                (1, Some(22.0)),
+                (2, Some(33.0)),
+                (3, Some(44.0)),
+            ],
+        )],
+        "the split series was folded as two groups or at the wrong positions"
+    );
+}
+
+/// A point no member of a group has a value at is not a point of the group's result.
+///
+/// Sparse input is what says the fold indexes its states by absolute position: a chunk holding
+/// positions 0 and 1 and another holding 1 and 2 leave position 3 to nothing, and the hole between
+/// the rows is never filled with a value.
+#[test]
+fn an_aggregate_reports_only_the_points_a_group_holds_a_value_at() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    // Positions 0 and 1 of the first series, 1 and 2 of the second, and nothing at 3.
+    execution
+        .push_evaluated(sparse_chunk(
+            &schema,
+            job_instance_metric("requests", "api", "a"),
+            &[(0, 2)],
+            vec![1.0, 2.0],
+            true,
+        ))
+        .unwrap();
+    execution
+        .push_evaluated(sparse_chunk(
+            &schema,
+            job_instance_metric("requests", "db", "b"),
+            &[(1, 2)],
+            vec![20.0, 300.0],
+            true,
+        ))
+        .unwrap();
+
+    let output = execution.finish().unwrap();
+    assert_eq!(
+        groups_of(&output),
+        vec![
+            // Position 1 is the only one both members hold, and it is their sum.
+            unlabelled(vec![(0, Some(1.0)), (1, Some(22.0)), (2, Some(300.0))]),
+        ],
+        "the group was answered at a point no member holds, or summed the wrong members"
+    );
+}
+
+/// An aggregate handed no series produces nothing at all: no group, so no empty series either.
+#[test]
+fn an_aggregate_over_no_series_produces_nothing() {
+    let grid = grid(0, 60_000, 4);
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new(["job".into()]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let output = execution.finish().unwrap();
+    assert!(
+        output.is_empty(),
+        "an aggregate with no input answered {} series",
+        output.len()
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
 /// A broadcast hands one chunk over for every chunk it reads, and closes the series once.
 ///
 /// The metrics are what says the chunk-per-chunk behaviour held: one input batch per chunk read, one
@@ -7254,6 +7592,411 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
         0,
         "error retained execution bytes: {message}"
     );
+}
+
+/// A series that ended is one member of a group, not the group: nothing is answered until the input
+/// ends.
+///
+/// The observable state between the two is what this pins: the fold has read the closing chunk of
+/// the first series and answered nothing, and `computed` still says so.
+#[test]
+fn an_aggregate_answers_nothing_until_its_whole_input_ends() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let computed = |execution: &NativeExecutor| {
+        execution.state().runtimes[0]
+            .aggregate
+            .as_ref()
+            .expect("the root holds an aggregate")
+            .computed
+    };
+
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            job_instance_metric("requests", "api", "a"),
+            0,
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+            true,
+        ))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(!computed(&execution), "the fold finished on one series");
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the closing chunk of one series answered for its group"
+    );
+    // The second series closed too, and the input still has not ended.
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            job_instance_metric("requests", "db", "b"),
+            0,
+            vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+            true,
+        ))
+        .unwrap();
+    assert!(
+        !computed(&execution),
+        "the fold finished before the input ended"
+    );
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "every series closed, and the group was answered before the input ended"
+    );
+
+    execution.end_of_input().unwrap();
+    assert!(
+        !computed(&execution),
+        "ending the input finished the fold before anything pulled for it"
+    );
+    let mut output = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        output.push(chunk);
+    }
+    assert_eq!(
+        groups_of(&output),
+        vec![unlabelled(vec![
+            (0, Some(11.0)),
+            (1, Some(22.0)),
+            (2, Some(33.0)),
+            (3, Some(44.0)),
+        ])],
+        "the group was not answered once the input ended"
+    );
+}
+
+/// A chunk of another layout is refused, naming the aggregate and its position, and the execution
+/// stops with nothing reserved.
+///
+/// The fold indexes its states by absolute position and by field, so a chunk of another field count
+/// would be folded into states that mean something else. It is refused rather than folded, and what
+/// the refusal leaves behind is a stopped execution whose reservation went back to the pool.
+#[test]
+fn an_aggregate_refuses_a_chunk_of_another_layout_and_returns_its_reservation() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            0,
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+            true,
+        ))
+        .unwrap();
+    // Two fields where the tree bound one: the source node accepts it, the fold refuses it.
+    let wider = Arc::new(SeriesSchema {
+        fields: field_count(2),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    execution
+        .push_evaluated(evaluated_columns(
+            &wider,
+            metric(),
+            0,
+            vec![vec![Some(1.0); 4], vec![Some(2.0); 4]],
+            true,
+        ))
+        .unwrap();
+
+    let error = execution
+        .next_chunk()
+        .expect_err("a chunk of another field count was folded");
+    assert!(
+        matches!(error, DataFusionError::Execution(_)),
+        "the refusal is not an execution error: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("aggregate at root"),
+        "the refusal does not name the aggregate: {message}"
+    );
+    assert!(
+        message.contains("field count"),
+        "the refusal does not say what disagreed: {message}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    // A stopped execution is not resumed: the fold must not be asked to continue after this.
+    assert!(execution.next_chunk().is_err());
+}
+
+/// A pool rejection while the first aggregate block is admitted releases the source and fold.
+#[test]
+fn aggregate_budget_rejects_first_block_and_releases_everything() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(2_000);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            0,
+            vec![Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    assert!(execution.next_chunk().is_err());
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// The aggregate runtime charges its output queue, releases each output as it is pulled, and keeps
+/// queue backing until the runtime itself is released.
+#[test]
+fn aggregate_runtime_queue_keeps_only_backing_after_pops_until_release() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new(["job".into()]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for (job, value) in [("api", 1.0), ("db", 2.0)] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                job_instance_metric("requests", job, "a"),
+                0,
+                vec![Some(value)],
+                true,
+            ))
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().expect("first group output");
+    assert_eq!(first.series.time.positions().count(), 1);
+    let runtime = &execution.state().runtimes[0];
+    let entry = std::mem::size_of::<(NativeChunk, usize)>();
+    assert_eq!(runtime.queued.len(), 1);
+    let remaining = runtime.queued[0].1;
+    let expected = runtime.queued.capacity() * entry + remaining;
+    assert_eq!(runtime.buffer.reservation.size(), expected);
+
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("second group output");
+    assert_eq!(second.series.time.positions().count(), 1);
+    let runtime = &execution.state().runtimes[0];
+    assert!(runtime.queued.is_empty());
+    let backing = runtime.queued.capacity() * entry;
+    assert!(backing > 0);
+    assert_eq!(runtime.buffer.reservation.size(), backing);
+    assert!(execution.next_chunk().unwrap().is_none());
+    // Pulling the terminal None releases the queue backing; only explicit close checks the
+    // runtime's final cleanup below.
+    assert_eq!(execution.state().runtimes[0].buffer.reservation.size(), 0);
+
+    execution.state.close().unwrap();
+    assert_eq!(execution.state().runtimes[0].queued.capacity(), 0);
+    assert_eq!(execution.state().runtimes[0].buffer.reservation.size(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An aggregate whose sparse output has a few points on a large grid can finish in a small pool.
+#[test]
+fn aggregate_sparse_output_budget_uses_rows_not_grid_length() {
+    let grid = grid(0, 1, 100_000);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(64 * 1024);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            10,
+            vec![Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    let output = execution.finish().unwrap();
+    assert_eq!(groups_of(&output), vec![unlabelled(vec![(10, Some(2.0))])]);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An aggregate retains its fold before finish and release returns its reservation.
+#[test]
+fn aggregate_fold_state_is_released_after_input() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(aggregate(
+        evaluated_input(Arc::clone(&grid)),
+        sum_grouping(Grouping::By(Arc::new([]))),
+    ))
+    .unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric(),
+            0,
+            vec![Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    let runtime = &execution.state.runtimes[0];
+    let aggregate = runtime.aggregate.as_ref().unwrap();
+    assert_eq!(aggregate.groups(), 1);
+    assert!(!aggregate.computed);
+    assert!(pool.reserved() > 0);
+    execution.state.close().unwrap();
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// An aggregate kind or stage this runtime does not compute is refused, naming what was found.
+#[test]
+fn an_aggregate_kind_or_stage_the_runtime_does_not_compute_is_named() {
+    let grid = || grid(0, 60_000, 4);
+    let kind_tree = NativeTree::try_new(aggregate(
+        evaluated_input(grid()),
+        BoundAggregate {
+            kind: AggregateKind::Quantile { quantile: 0.5 },
+            group: Grouping::By(Arc::new([])),
+            stage: AggregateStage::Complete,
+        },
+    ))
+    .unwrap();
+    let partial_tree = {
+        let out = grid();
+        let group = Grouping::By(Arc::new(["job".into()]));
+        let state = Arc::new(AggregateStateSchema {
+            group: group.clone(),
+            accumulators: fields(),
+            grid: Arc::clone(&out),
+        });
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Aggregate {
+                input: Box::new(evaluated_input(Arc::clone(&out))),
+                op: BoundAggregate {
+                    kind: AggregateKind::Sum,
+                    group,
+                    stage: AggregateStage::Partial,
+                },
+            },
+            output: NativeType::AggregateState(state),
+        })
+        .unwrap()
+    };
+
+    for (found, tree) in [("Quantile", kind_tree), ("Partial", partial_tree)] {
+        let error = match NativeExecutionState::try_new(
+            &tree,
+            pool(),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+        ) {
+            Ok(_) => panic!("the runtime accepted a {found} aggregate"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{found}: {error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains(found), "{found}: {message}");
+        // A `Partial` rejection has to say why it is not computed: the stages it would need.
+        if found == "Partial" {
+            assert!(message.contains("Final"), "{message}");
+        }
+    }
+}
+
+/// An aggregate above a window that collects and merges its input waits for that merge.
+///
+/// The multiplication drops the metric name, so the two input series land on one label set and the
+/// `last_over_time` above them has to collect and merge before it evaluates. The aggregate above the
+/// window must wait for that merge: its guard is `inputs_finished && settled(child)`, and with only
+/// the first half it finalizes on the pull that follows the caller's last chunk, before the window
+/// has answered.
+#[test]
+fn an_aggregate_above_a_collecting_window_waits_for_the_merge() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = || {
+        NativeTree::try_new(aggregate(
+            window_with(
+                broadcast_right(
+                    evaluated_input(Arc::clone(&grid)),
+                    2.0,
+                    BinaryOp::Mul,
+                    false,
+                ),
+                RangeFunction::LastOverTime,
+                60_000,
+                Some(Arc::clone(&grid)),
+                Arc::clone(&grid),
+            ),
+            sum_grouping(Grouping::By(Arc::new([]))),
+        ))
+        .unwrap()
+    };
+
+    let mut execution = executor(&tree(), pool(), &ExecutionPlanMetricsSet::new());
+    // Two series that only differ by name, each holding half of the grid the other leaves empty:
+    // after the name is dropped they are one series only once merged.
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("requests", "x"),
+            0,
+            vec![Some(1.0), Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the aggregate answered before the window above it had merged"
+    );
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("requests_total", "x"),
+            2,
+            vec![Some(3.0), Some(4.0)],
+            true,
+        ))
+        .unwrap();
+
+    let out = run(&mut execution);
+    assert_eq!(
+        decided(&out),
+        vec![
+            (0, Some(2.0)),
+            (1, Some(4.0)),
+            (2, Some(6.0)),
+            (3, Some(8.0)),
+        ],
+        "the aggregate did not fold the merged window result"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
 fn vector_op(inner: NativeNode, op: BoundVectorOp) -> NativeNode {
