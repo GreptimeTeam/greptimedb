@@ -513,7 +513,12 @@ impl PlanRewriter {
     /// `plan` must be the root of the tree that is about to be rewritten, otherwise
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
     fn new(plan: &LogicalPlan, in_process_region_transport: bool) -> Self {
-        let skip_encodability_gate = in_process_region_transport && is_fused_series_plan(plan);
+        let native_root = match plan {
+            LogicalPlan::Analyze(analyze) => analyze.input.as_ref(),
+            _ => plan,
+        };
+        let skip_encodability_gate =
+            in_process_region_transport && is_fused_series_plan(native_root);
         Self {
             // Preserve the ordinary whole-plan fast path unless this is the in-process root
             // exception: no node in that tree needs an encoding check.
