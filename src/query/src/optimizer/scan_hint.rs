@@ -26,7 +26,7 @@ use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
-use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
+use promql::extension_plan::{FusedSeries, InstantManipulate, SeriesDivide, SeriesNormalize};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -37,6 +37,9 @@ use crate::dummy_catalog::DummyTableProvider;
 /// - the nearest order requirement to the leaf table scan node as ordering hint.
 /// - the group by columns when all aggregate functions are `last_value` as
 ///   time series row selector hint.
+/// - the per-series distribution when the leaf table scan node is the input of a
+///   [`FusedSeries`] node, which reads the raw series frames a region only packs
+///   for that distribution.
 ///
 /// [`ScanRequest`]: store_api::storage::ScanRequest
 #[derive(Debug)]
@@ -68,6 +71,7 @@ impl ScanHintRule {
     fn set_hints(
         plan: LogicalPlan,
         rewriter: &mut ScanHintRewriter,
+        fused_series_input: bool,
     ) -> Result<Transformed<LogicalPlan>> {
         let LogicalPlan::TableScan(mut table_scan) = plan else {
             return Ok(Transformed::no(plan));
@@ -89,8 +93,10 @@ impl ScanHintRule {
         };
         let use_last_row = rewriter.inside_single_evaluation && filters_preserve_last_row;
 
-        let has_hint =
-            rewriter.order_expr.is_some() || rewriter.ts_row_selector.is_some() || use_last_row;
+        let has_hint = rewriter.order_expr.is_some()
+            || rewriter.ts_row_selector.is_some()
+            || use_last_row
+            || fused_series_input;
         if !has_hint {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         }
@@ -101,6 +107,14 @@ impl ScanHintRule {
         // local as well as the new LastRow hint.
         let adapter = original.clone_for_scan();
         Self::apply_hints(&adapter, rewriter);
+        if fused_series_input {
+            // The scan below a `FusedSeries` node reads packs of raw series, which a region only
+            // produces for a per-series request; the existing PromQL pipeline asks for the same
+            // distribution through a sort on `(series key, time)`, which the native node does not
+            // have below it. Applying it after the order hints makes the plan shape the deciding
+            // one: the node's own input is what reads the frames.
+            adapter.with_distribution(TimeSeriesDistribution::PerSeries);
+        }
         if use_last_row {
             // Apply the instant-derived hint after the aggregate hint. Both
             // select LastRow today, and this ordering preserves the existing
@@ -275,6 +289,12 @@ struct ScanHintRewriter {
     ts_stack: Vec<Option<(HashSet<Column>, Column)>>,
     inside_single_evaluation: bool,
     single_evaluation_stack: Vec<bool>,
+    /// Whether the node being visited is the input of a [`FusedSeries`] node.
+    ///
+    /// The flag only describes that one edge: it is set while a `FusedSeries` node is visited, so
+    /// the node visited next — that node's own input — sees it, and a node further down does not.
+    fused_series_input: bool,
+    fused_series_input_stack: Vec<bool>,
 }
 
 impl TreeNodeRewriter for ScanHintRewriter {
@@ -285,6 +305,13 @@ impl TreeNodeRewriter for ScanHintRewriter {
         self.ts_stack.push(self.ts_row_selector.clone());
         self.single_evaluation_stack
             .push(self.inside_single_evaluation);
+        self.fused_series_input_stack.push(self.fused_series_input);
+        // Read the edge this node sits on before recording what this node is, so a `FusedSeries`
+        // node hands the flag to its own input and to nothing below it.
+        let fused_series_input = std::mem::replace(
+            &mut self.fused_series_input,
+            matches!(&node, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>()),
+        );
 
         if let LogicalPlan::Sort(sort) = &node {
             self.order_expr = Some(sort.expr.clone());
@@ -321,7 +348,7 @@ impl TreeNodeRewriter for ScanHintRewriter {
             }
         }
 
-        ScanHintRule::set_hints(node, self)
+        ScanHintRule::set_hints(node, self, fused_series_input)
     }
 
     fn f_up(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
@@ -333,6 +360,9 @@ impl TreeNodeRewriter for ScanHintRewriter {
         }
         if let Some(previous) = self.single_evaluation_stack.pop() {
             self.inside_single_evaluation = previous;
+        }
+        if let Some(previous) = self.fused_series_input_stack.pop() {
+            self.fused_series_input = previous;
         }
         Ok(Transformed::no(node))
     }
@@ -446,6 +476,7 @@ impl ScanHintRewriter {
 mod test {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use datafusion::functions_aggregate::first_last::last_value_udaf;
     use datafusion::functions_aggregate::min_max::max_udaf;
@@ -454,21 +485,26 @@ mod test {
     use datafusion::logical_expr::{WindowFrame, WindowFunctionDefinition};
     use datafusion::prelude::JoinType;
     use datafusion_common::tree_node::TreeNodeRecursion;
+    use datafusion_common::{DFSchema, DFSchemaRef};
     use datafusion_expr::expr::{
         AggregateFunction, AggregateFunctionParams, Cast, WindowFunctionParams,
     };
     use datafusion_expr::expr_fn::scalar_subquery;
     use datafusion_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
-    use datatypes::arrow::datatypes::DataType;
+    use datatypes::arrow::datatypes::{DataType, Field, TimeUnit};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use promql::extension_plan::RangeManipulate;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RangeManipulate};
+    use promql_parser::parser;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
     use store_api::storage::{RegionId, TimeSeriesRowSelector};
 
     use super::*;
+    use crate::promql::native_compile::{compile, statement_grid};
 
     fn scan_requests(plan: &LogicalPlan) -> Vec<store_api::storage::ScanRequest> {
         scan_requests_with_names(plan)
@@ -1519,5 +1555,124 @@ mod test {
             scan_req.distribution,
             Some(TimeSeriesDistribution::PerSeries)
         );
+    }
+
+    /// A `FusedSeries` node over `input`, bound to the tree a bare selector compiles to.
+    ///
+    /// The rule reads the plan shape, not what the node computes, so the simplest shape the
+    /// compiler accepts is enough for these tests.
+    fn fused_series(input: LogicalPlan) -> LogicalPlan {
+        let stmt = promql_parser::parser::EvalStmt {
+            expr: parser::parse("some_metric").unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let tree = compile(
+            &stmt,
+            Arc::clone(&series_schema),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let binding = FusedSeriesBinding {
+            series_schema,
+            grid: statement_grid(&stmt).unwrap(),
+            metric_name: Some("some_metric".into()),
+            time_index: "ts".to_string(),
+            tags: Vec::new(),
+        };
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![
+                    (None, Arc::new(Field::new("v0", DataType::Float64, true))),
+                    (
+                        None,
+                        Arc::new(Field::new(
+                            "ts",
+                            DataType::Timestamp(TimeUnit::Millisecond, None),
+                            false,
+                        )),
+                    ),
+                ],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new(
+                    Arc::from("some_metric"),
+                    tree,
+                    binding,
+                    input,
+                    output_schema,
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
+    /// The region only packs raw series frames for a per-series request, and the node below is
+    /// what reads them, so the node's own input asks for that distribution.
+    #[test]
+    fn a_scan_under_fused_series_asks_for_the_per_series_distribution() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = fused_series(scan_plan(provider.clone(), "t"));
+
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(
+            scan_requests(&rewritten)[0].distribution,
+            Some(TimeSeriesDistribution::PerSeries)
+        );
+        // The hint belongs to this use-site only, never to the shared catalog provider.
+        assert_eq!(provider.scan_request().distribution, None);
+    }
+
+    /// The ordinary path: a scan with no fused node above it is left exactly as it was.
+    #[test]
+    fn a_scan_not_under_fused_series_keeps_its_request() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let plan = scan_plan(provider.clone(), "t");
+
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].distribution, None);
+        assert_eq!(provider.scan_request().distribution, None);
+    }
+
+    /// Only the node's own input is a raw series reader; a scan further down feeds something else
+    /// and keeps the request it had.
+    #[test]
+    fn a_scan_below_fused_series_input_keeps_its_request() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let scan = scan_plan(provider.clone(), "t");
+        let input = LogicalPlanBuilder::from(scan)
+            .project(vec![col("ts"), col("v0")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = fused_series(input);
+
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        assert_eq!(scan_requests(&rewritten)[0].distribution, None);
     }
 }

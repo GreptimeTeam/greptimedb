@@ -189,7 +189,7 @@ impl QueryEngineFactory {
         plugins: Plugins,
         options: QueryOptions,
     ) -> datafusion::error::Result<Self> {
-        let state = Arc::new(QueryEngineState::try_new(
+        Self::try_new_with_plugins_and_region_transport(
             catalog_manager,
             partition_rule_manager,
             region_query_handler,
@@ -197,6 +197,40 @@ impl QueryEngineFactory {
             procedure_service_handler,
             flow_service_handler,
             with_dist_planner,
+            false,
+            plugins,
+            options,
+        )
+    }
+
+    /// [`QueryEngineFactory::try_new_with_plugins`], additionally stating how the engine reaches
+    /// the regions it queries.
+    ///
+    /// `in_process_region_transport` reaches `DistPlannerAnalyzer`: when it is `true`, a region
+    /// input may travel as a `LogicalPlan` instead of Substrait bytes, which only a region server in
+    /// the same process can accept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_plugins_and_region_transport(
+        catalog_manager: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
+        with_dist_planner: bool,
+        in_process_region_transport: bool,
+        plugins: Plugins,
+        options: QueryOptions,
+    ) -> datafusion::error::Result<Self> {
+        let state = Arc::new(QueryEngineState::try_new_with_region_transport(
+            catalog_manager,
+            partition_rule_manager,
+            region_query_handler,
+            table_mutation_handler,
+            procedure_service_handler,
+            flow_service_handler,
+            with_dist_planner,
+            in_process_region_transport,
             plugins.clone(),
             options,
         )?);

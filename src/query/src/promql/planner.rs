@@ -16,6 +16,8 @@ mod at_modifier;
 mod function_plans;
 mod island;
 mod matching_filters;
+pub(crate) mod native;
+pub use native::NATIVE_PROMQL_EXTENSION_KEY;
 
 mod set_operator;
 
@@ -292,6 +294,16 @@ pub struct PromPlanner {
     ctx: PromPlannerContext,
     /// Optional collector passed to native histogram UDFs.
     promql_annotations: Option<PromqlAnnotationCollector>,
+    /// Whether a statement is first offered to the native fused-series compiler.
+    ///
+    /// Read per query from the context extension
+    /// [`NATIVE_PROMQL_EXTENSION_KEY`](super::planner::native::NATIVE_PROMQL_EXTENSION_KEY), and
+    /// `false` when the query says nothing: with it off, planning takes the existing path unchanged
+    /// and nothing below is reached.
+    ///
+    /// The engine-wide `QueryOptions::experimental_native_promql` is applied while `QueryEngineState`
+    /// is built; this planner reads the per-query request extension instead.
+    native_fused: bool,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
@@ -302,21 +314,37 @@ impl PromPlanner {
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
-        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None).await
+        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None, false)
+            .await
     }
 
     /// Plans a PromQL statement and passes the optional collector to histogram UDFs.
+    ///
+    /// `native_fused` enables the native fused-series route: the statement is offered to
+    /// [`compile`](crate::promql::native_compile::compile) first, and whatever that compiler does
+    /// not accept is planned by the existing path, unchanged. See
+    /// [`Self::try_plan_native_fused`].
     pub async fn stmt_to_plan_with_annotations(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
         promql_annotations: Option<PromqlAnnotationCollector>,
+        native_fused: bool,
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
+            native_fused,
         };
+
+        // The whole statement is offered to the native compiler first, because that compiler folds
+        // a range function and the math functions over it into one tree: offered any later, the
+        // expression has already been split into the nodes those functions would have shared. A
+        // shape it does not accept is planned by the existing path exactly as if it were not here.
+        if let Some(plan) = planner.try_plan_native_fused(&stmt.expr).await? {
+            return planner.strip_tsid_column(plan);
+        }
 
         let plan = planner
             .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
@@ -2394,9 +2422,20 @@ impl PromPlanner {
         // let promql_parser::parser::ast::Extension { expr } = ext_expr;
         let expr = &ext_expr.expr;
         let children = expr.children();
-        let plan = self
-            .prom_root_expr_to_plan(&children[0], query_engine_state)
-            .await?;
+        let native_plan = match expr.name() {
+            ANALYZE_NODE_NAME
+            | ANALYZE_VERBOSE_NODE_NAME
+            | EXPLAIN_NODE_NAME
+            | EXPLAIN_VERBOSE_NODE_NAME => self.try_plan_native_fused(&children[0]).await?,
+            _ => None,
+        };
+        let plan = match native_plan {
+            Some(plan) => plan,
+            None => {
+                self.prom_root_expr_to_plan(&children[0], query_engine_state)
+                    .await?
+            }
+        };
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
         // if `analyze` is true, runs the actual plan and produces
@@ -5476,6 +5515,25 @@ impl PromPlanner {
         schema
             .index_of_column_by_name(None, field_column)
             .map(|idx| schema.field(idx).data_type())
+    }
+
+    /// Whether every field column carries a type the region's raw series preflight serves.
+    ///
+    /// The preflight decides on `ConcreteDataType::is_numeric`, which excludes the decimals, so
+    /// the Arrow type is converted rather than asked: Arrow's own `is_numeric` includes
+    /// `Decimal128`/`Decimal256` (and `Float16`, which has no column type here), and a decimal
+    /// field would then pass here and fail once the logical plan is fixed. Anything else - a
+    /// string, a boolean, a timestamp - has no raw framing either.
+    fn field_columns_are_raw_series_servable(
+        schema: &DFSchemaRef,
+        field_columns: &[String],
+    ) -> bool {
+        field_columns.iter().all(|field| {
+            Self::field_column_type(schema, field).is_some_and(|data_type| {
+                datatypes::prelude::ConcreteDataType::from_arrow_type(data_type).is_numeric()
+                    || data_type == &Self::native_histogram_arrow_type()
+            })
+        })
     }
 
     fn field_column_is_native_histogram(schema: &DFSchemaRef, field_column: &str) -> bool {

@@ -11378,6 +11378,7 @@ dependencies = [
  "regex",
  "snafu 0.8.6",
  "store-api",
+ "table",
  "tokio",
  "twox-hash",
 ]
