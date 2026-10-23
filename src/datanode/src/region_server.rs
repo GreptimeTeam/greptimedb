@@ -3564,10 +3564,7 @@ mod tests {
         for chunk in &chunks {
             assert_eq!(host_a_key, chunk.primary_key.to_vec());
         }
-        let times = chunks
-            .iter()
-            .flat_map(|chunk| timestamps(chunk))
-            .collect::<Vec<_>>();
+        let times = chunks.iter().flat_map(timestamps).collect::<Vec<_>>();
         let field_1 = chunks
             .iter()
             .flat_map(|chunk| (0..chunk.time.len()).map(move |row| float_at(chunk, 0, row)))

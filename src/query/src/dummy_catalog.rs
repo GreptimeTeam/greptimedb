@@ -2091,8 +2091,11 @@ mod tests {
         chain.join(": ")
     }
 
+    /// Key, timestamps, float samples and finality from one fixture chunk.
+    type FrameChunkSnapshot = (Vec<u8>, Vec<i64>, Vec<f64>, bool);
+
     /// The complete payload of a raw-series stream: key, times, float samples and finality.
-    fn frame_snapshot(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, Vec<i64>, Vec<f64>, bool)> {
+    fn frame_snapshot(chunks: &[RawSeriesChunk]) -> Vec<FrameChunkSnapshot> {
         chunks
             .iter()
             .map(|chunk| {
