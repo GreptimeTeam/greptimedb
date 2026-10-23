@@ -201,14 +201,9 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        let offset = selector
-            .offset
-            .as_ref()
-            .map(|offset| match offset {
-                promql_parser::parser::Offset::Pos(duration) => duration.as_millis() as i64,
-                promql_parser::parser::Offset::Neg(duration) => -(duration.as_millis() as i64),
-            })
-            .unwrap_or_default();
+        // The legacy selector converts an offset the same way; sharing that conversion keeps the
+        // two scan paths from disagreeing about an extreme duration.
+        let offset = Self::offset_millis(&selector.offset);
         let (saved_start, saved_end, saved_range) = (self.ctx.start, self.ctx.end, self.ctx.range);
         self.ctx.range = selector_range_millis(prom_expr);
         // Keep the fused scan's bounds identical to the legacy selector scan, including @ and offset.
@@ -327,8 +322,9 @@ impl PromPlanner {
 
 /// The columns a [`FusedSeries`] node produces.
 ///
-/// The shape is the one the existing unary pipeline consumes — the series fields, the tags, then
-/// the time index — and each column is declared the way the node's own conversion reads it back:
+/// The shape is the one the existing unary pipeline consumes — the time index, then the series
+/// fields, then the tags — and each column is declared the way the node's own conversion reads it
+/// back:
 /// the time column is a non-nullable millisecond timestamp with no timezone, because every
 /// evaluated chunk is addressed on the statement's grid and carries one; a field is a nullable
 /// `Float64`, because a grid point inside the statement's interval can have no sample; and a tag is
