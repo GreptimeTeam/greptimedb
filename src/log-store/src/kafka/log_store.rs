@@ -40,7 +40,8 @@ use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer, RegionWalRange};
 use crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
-    ESTIMATED_META_SIZE, Record, convert_to_kafka_records, maybe_emit_entry, remaining_entries,
+    ESTIMATED_META_SIZE, Record, convert_to_kafka_records, is_record_meta_key, maybe_emit_entry,
+    remaining_entries,
 };
 use crate::metrics;
 
@@ -409,7 +410,8 @@ impl LogStore for KafkaLogStore {
 
                 // Ignores no-op records.
                 if kafka_record.value.is_some() {
-                    match Record::try_from(kafka_record) {
+                    let key = kafka_record.key;
+                    match Record::try_from_parts(key.as_deref(), kafka_record.value) {
                         Ok(record) => {
                             // Tries to construct an entry from records consumed so far.
                             if let Some(mut entry) =
@@ -423,11 +425,16 @@ impl LogStore for KafkaLogStore {
                             }
                         }
                         Err(err) => {
-                            // The producer always writes a JSON-encoded `RecordMeta` key, and
-                            // Kafka protects keys and values with the batch CRC, so a record
-                            // whose key cannot be decoded was not written by this log store or
-                            // a compatible version of it. Skipping it leaves the per-region
-                            // buffers untouched.
+                            // A key that cannot be decoded is skipped only when the log store
+                            // never wrote it. A key that is a JSON object with a `version`
+                            // field may be a `RecordMeta` written by an incompatible version,
+                            // for example one with a newer `RecordType` variant read after a
+                            // rollback or during a rolling upgrade; skipping it would lose the
+                            // entry once the WAL is pruned past its offset, so it stays fatal.
+                            if key.as_deref().is_some_and(is_record_meta_key) {
+                                yield Err(err);
+                                return;
+                            }
                             warn!(
                                 "Skipping unparsable record at offset {} of topic {}, reason: {}",
                                 offset, provider.topic, err
@@ -660,22 +667,15 @@ mod tests {
         provider: &Provider,
         records: Vec<KafkaRecord>,
     ) {
-        let kafka_provider = provider.as_kafka_provider().unwrap();
         // A freshly created topic can be missing from the broker's metadata for a short
-        // while, so the test retries instead of failing on that race.
-        let mut attempts = 0;
-        let client = (loop {
-            match logstore.client_manager.get_or_insert(kafka_provider).await {
-                Ok(client) => break client,
-                Err(_) if attempts < 10 => {
-                    attempts += 1;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(err) => panic!("failed to build a Kafka client for the test topic: {err}"),
-            }
-        })
-        .client()
-        .clone();
+        // while; `try_create_client` already retries that case.
+        let client = logstore
+            .client_manager
+            .get_or_insert(provider.as_kafka_provider().unwrap())
+            .await
+            .unwrap()
+            .client()
+            .clone();
         client
             .produce(records, Compression::NoCompression)
             .await
@@ -703,15 +703,15 @@ mod tests {
         client.client().get_offset(OffsetAt::Latest).await.unwrap()
     }
 
-    /// Returns one record per way a record can fail to parse: a missing key, a key that is
-    /// not JSON, and a key that is JSON with `RecordMeta` fields of the wrong type.
+    /// Returns one record per kind of key that the log store never writes: a missing key, a
+    /// key that is not JSON, a JSON value that is not an object, and a JSON object without a
+    /// `version` field.
     fn foreign_records() -> Vec<KafkaRecord> {
         vec![
             foreign_record(None),
             foreign_record(Some(b"not-a-json-key")),
-            foreign_record(Some(
-                br#"{"version": "0", "tp": "Full", "entry_id": 0, "ns": {"region_id": 1, "topic": ""}}"#,
-            )),
+            foreign_record(Some(b"[1, 2, 3]")),
+            foreign_record(Some(br#"{"hello": "world"}"#)),
         ]
     }
 
@@ -1063,7 +1063,7 @@ mod tests {
 
         // Asserts the read range covers the produced records; an empty range would let `read`
         // return without exercising the skip path.
-        assert_eq!(log_end_offset(&logstore, &provider).await, 3);
+        assert_eq!(log_end_offset(&logstore, &provider).await, 4);
 
         let entries = tokio::time::timeout(
             Duration::from_secs(30),
@@ -1078,6 +1078,36 @@ mod tests {
         .unwrap();
 
         assert!(entries.into_iter().flatten().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_read_fails_on_incompatible_record_meta() {
+        maybe_skip_kafka_integration_test!();
+        let logstore = new_test_logstore(ReadableSize::kb(32)).await;
+
+        // Keys that look like a `RecordMeta` but cannot be decoded by this version. They may
+        // come from an incompatible version of the log store, so the read must not skip them.
+        let keys: [&[u8]; 2] = [
+            // A `RecordType` variant this version does not know.
+            br#"{"version": 0, "tp": "Compressed", "entry_id": 0, "ns": {"region_id": 1, "topic": ""}}"#,
+            // A field with the wrong type.
+            br#"{"version": "0", "tp": "Full", "entry_id": 0, "ns": {"region_id": 1, "topic": ""}}"#,
+        ];
+        for key in keys {
+            let topic_name = uuid::Uuid::new_v4().to_string();
+            prepare_topic(&logstore, &topic_name).await;
+            let provider = Provider::kafka_provider(topic_name);
+            produce_records(&logstore, &provider, vec![foreign_record(Some(key))]).await;
+
+            let err = logstore
+                .read(&provider, 0)
+                .await
+                .unwrap()
+                .try_collect::<Vec<Vec<Entry>>>()
+                .await
+                .unwrap_err();
+            assert_matches!(err, error::Error::DecodeJson { .. });
+        }
     }
 
     #[tokio::test]
