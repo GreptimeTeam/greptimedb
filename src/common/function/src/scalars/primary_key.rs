@@ -442,6 +442,31 @@ mod tests {
     }
 
     #[test]
+    fn test_exemplar_decode_ordinary_sparse_primary_key() {
+        let encoding = parse_encoding(&ColumnarValue::Scalar(ScalarValue::Utf8(Some(
+            "sparse".into(),
+        ))))
+        .unwrap();
+        let columns = vec![
+            (10, "metric", ConcreteDataType::string_datatype()),
+            (11, "job", ConcreteDataType::string_datatype()),
+        ];
+        let metadata =
+            RegionMetadata::from_json(&region_metadata_json(&columns, encoding)).unwrap();
+        let codec = build_codec(&metadata, encoding);
+        let mut encoded = Vec::new();
+        codec
+            .encode_values(
+                &[(10, Value::from("requests")), (11, Value::Null)],
+                &mut encoded,
+            )
+            .unwrap();
+        let decoded = codec.decode(&encoded).unwrap().into_sparse();
+        assert_eq!(decoded.get(&10), Some(&Value::from("requests")));
+        assert!(decoded.get(&11).is_none());
+    }
+
+    #[test]
     fn test_decode_sparse_primary_key() {
         let columns = vec![
             (

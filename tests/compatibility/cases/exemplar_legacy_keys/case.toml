@@ -1,0 +1,8 @@
+name = "exemplar_legacy_keys"
+reason = "Ordinary sparse support must preserve existing dense and metric-engine sparse data."
+introduced_by = "persistent_metric_exemplars"
+topologies = ["standalone", "distributed"]
+from_range = [">=v1.2.1"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["metric", "sparse", "table", "read"]
+owner = "mito2"

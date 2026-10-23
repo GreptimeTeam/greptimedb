@@ -22,8 +22,8 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, RecordBatches};
 use common_test_util::flight::encode_to_flight_data;
 use datatypes::arrow::array::{
-    ArrayRef, Float64Array, Int64Array, LargeStringArray, ListArray, StringArray, StringViewArray,
-    TimestampMillisecondArray, TimestampSecondArray,
+    ArrayRef, BinaryArray, Float64Array, Int64Array, LargeStringArray, ListArray, StringArray,
+    StringViewArray, TimestampMillisecondArray, TimestampSecondArray,
 };
 use datatypes::arrow::datatypes::{Field, Int64Type, Schema};
 use datatypes::prelude::ConcreteDataType;
@@ -39,7 +39,12 @@ use crate::engine::MitoEngine;
 use crate::request::WorkerRequest;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, reopen_region, rows_schema};
 
-const SST_FORMATS: [&str; 2] = ["flat", "primary_key"];
+const REGION_LAYOUTS: [(&str, &str); 4] = [
+    ("flat", "dense"),
+    ("primary_key", "dense"),
+    ("flat", "sparse"),
+    ("primary_key", "sparse"),
+];
 
 fn column(name: &str, array: ArrayRef) -> (Field, ArrayRef) {
     (Field::new(name, array.data_type().clone(), true), array)
@@ -128,6 +133,28 @@ async fn test_bulk_insert_rejects_batches_not_matching_schema() {
             column("ts", Arc::new(TimestampSecondArray::from(vec![0, 1]))),
         ],
         vec![tag(), field()],
+        vec![field(), ts()],
+        vec![
+            column("tag_0", Arc::new(Int64Array::from(vec![1, 2]))),
+            field(),
+            ts(),
+        ],
+        vec![
+            column(
+                "__primary_key",
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ),
+            field(),
+            ts(),
+        ],
+        vec![
+            column(
+                "__primary_key",
+                Arc::new(BinaryArray::from(vec![None::<&[u8]>; 2])),
+            ),
+            field(),
+            ts(),
+        ],
         vec![
             tag(),
             column("field_0", Arc::new(StringArray::from(vec!["1", "2"]))),
@@ -150,13 +177,14 @@ async fn test_bulk_insert_rejects_batches_not_matching_schema() {
             column("unknown", Arc::new(Int64Array::from(vec![1, 2]))),
         ],
     ];
-    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
+    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, i as u32 + 1);
         let request = CreateRequestBuilder::new()
             .all_not_null(true)
             .insert_option("sst_format", sst_format)
+            .insert_option("primary_key_encoding", encoding)
             .build();
         let column_schemas = rows_schema(&request);
         let table_dir = request.table_dir.clone();
@@ -203,13 +231,14 @@ async fn test_bulk_insert_accepts_tag_encodings() {
         Arc::new(LargeStringArray::from(vec!["a", "b"])),
         Arc::new(StringViewArray::from(vec!["a", "b"])),
     ];
-    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
+    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         for (j, tag) in tags.iter().enumerate() {
             let region_id = RegionId::new(i as u32 + 1, j as u32 + 1);
             let request = CreateRequestBuilder::new()
                 .insert_option("sst_format", sst_format)
+                .insert_option("primary_key_encoding", encoding)
                 .build();
             let table_dir = request.table_dir.clone();
             let options = request.options.clone();
@@ -239,12 +268,13 @@ async fn test_bulk_insert_accepts_tag_encodings() {
 #[tokio::test]
 async fn test_bulk_insert_rechecks_batch_after_schema_change() {
     common_telemetry::init_default_ut_logging();
-    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
+    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, i as u32 + 1);
         let request = CreateRequestBuilder::new()
             .insert_option("sst_format", sst_format)
+            .insert_option("primary_key_encoding", encoding)
             .build();
         let table_dir = request.table_dir.clone();
         let options = request.options.clone();
@@ -296,12 +326,14 @@ async fn test_bulk_insert_rechecks_batch_after_schema_change() {
 #[tokio::test]
 async fn test_bulk_insert_fills_columns_missing_from_aligned_batch() {
     common_telemetry::init_default_ut_logging();
-    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
+    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, i as u32 + 1);
         let request = CreateRequestBuilder::new()
+            .tag_num(2)
             .insert_option("sst_format", sst_format)
+            .insert_option("primary_key_encoding", encoding)
             .build();
         let table_dir = request.table_dir.clone();
         let options = request.options.clone();
@@ -325,5 +357,158 @@ async fn test_bulk_insert_fills_columns_missing_from_aligned_batch() {
         assert_eq!(2, response.affected_rows, "{sst_format}");
         reopen_region(&engine, region_id, table_dir, true, options).await;
         assert_eq!(2, scan_num_rows(&engine, region_id).await, "{sst_format}");
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        for batch in batches.iter() {
+            let tag = batch.column_by_name("tag_1").unwrap();
+            assert_eq!(tag.null_count(), batch.num_rows());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_bulk_insert_json2_physical_layout() {
+    use datatypes::arrow::array::{NullArray, StructArray};
+    use datatypes::arrow::datatypes::DataType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
+    use datatypes::types::json_type::JsonNativeType;
+
+    for encoding in ["dense", "sparse"] {
+        for layout in ["v2", "legacy", "missing"] {
+            let mut env = TestEnv::new().await;
+            let engine = env.create_engine(MitoConfig::default()).await;
+            let region_id = RegionId::new(1, 1);
+            let settings = JsonSettings::default();
+            let mut request = CreateRequestBuilder::new()
+                .field_datatype(ConcreteDataType::json2(JsonNativeType::Null))
+                .insert_option("sst_format", "flat")
+                .insert_option("primary_key_encoding", encoding)
+                .build();
+            let json_column = &mut request.column_metadatas[1].column_schema;
+            json_column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                settings.clone(),
+            ))));
+            let mut columns = vec![tag(), ts()];
+            if layout != "missing" {
+                let (array, metadata) = if layout == "legacy" {
+                    let array = Arc::new(StructArray::from(vec![(
+                        Arc::new(Field::new("trace_id", DataType::Utf8, true)),
+                        Arc::new(StringArray::from(vec!["abc", "def"])) as ArrayRef,
+                    )])) as ArrayRef;
+                    (array, JsonMetadata::new_v1(settings.clone()))
+                } else {
+                    let mut builder = json_column.create_mutable_vector(2);
+                    for id in ["abc", "def"] {
+                        let value = settings
+                            .encode(serde_json::json!({"trace_id": id}))
+                            .unwrap();
+                        builder.try_push_value_ref(&value.as_value_ref()).unwrap();
+                    }
+                    (
+                        builder.to_vector().to_arrow_array(),
+                        JsonMetadata::new(settings.clone()),
+                    )
+                };
+                let field = Field::new("field_0", array.data_type().clone(), true)
+                    .with_extension_type(Json2ExtensionType::new(Arc::new(metadata)));
+                columns.push((field, array));
+            }
+            let table_dir = request.table_dir.clone();
+            let options = request.options.clone();
+            engine
+                .handle_request(region_id, RegionRequest::Create(request))
+                .await
+                .unwrap();
+            if layout == "v2" {
+                let malformed = Arc::new(StructArray::from(vec![(
+                    Arc::new(Field::new(
+                        datatypes::json::JSON2_REMAINDER_FIELD_NAME,
+                        DataType::Int64,
+                        true,
+                    )),
+                    Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+                )])) as ArrayRef;
+                for malformed in [
+                    malformed,
+                    Arc::new(StringArray::from(vec!["abc", "def"])) as ArrayRef,
+                ] {
+                    let malformed_field =
+                        Field::new("field_0", malformed.data_type().clone(), true)
+                            .with_extension_type(Json2ExtensionType::new(Arc::new(
+                                JsonMetadata::new(settings.clone()),
+                            )));
+                    let error = engine
+                        .handle_request(
+                            region_id,
+                            bulk_request(
+                                region_id,
+                                vec![tag(), ts(), (malformed_field, malformed)],
+                            ),
+                        )
+                        .await
+                        .unwrap_err();
+                    assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+                }
+                let mut invalid_layout =
+                    serde_json::to_value(JsonMetadata::new(settings.clone())).unwrap();
+                invalid_layout["layout_version"] = serde_json::json!(3);
+                let mut null_field = Field::new("field_0", DataType::Null, true)
+                    .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                        settings.clone(),
+                    ))));
+                null_field.metadata_mut().insert(
+                    arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY.to_string(),
+                    invalid_layout.to_string(),
+                );
+                let error = engine
+                    .handle_request(
+                        region_id,
+                        bulk_request(
+                            region_id,
+                            vec![tag(), ts(), (null_field, Arc::new(NullArray::new(2)))],
+                        ),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+            }
+            let response = engine
+                .handle_request(region_id, bulk_request(region_id, columns))
+                .await
+                .unwrap();
+            assert_eq!(response.affected_rows, 2);
+            for phase in 0..3 {
+                if phase == 1 {
+                    reopen_region(&engine, region_id, table_dir.clone(), true, options.clone())
+                        .await;
+                } else if phase == 2 {
+                    crate::test_util::flush_region(&engine, region_id, None).await;
+                }
+                let stream = engine
+                    .scan_to_stream(region_id, ScanRequest::default())
+                    .await
+                    .unwrap();
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+                let printed = batches.pretty_print().unwrap();
+                if layout != "missing" {
+                    assert!(
+                        printed.contains("abc") && printed.contains("def"),
+                        "{encoding}/{layout}/{phase}: {printed}"
+                    );
+                } else {
+                    for batch in batches.iter() {
+                        assert_eq!(
+                            batch.column_by_name("field_0").unwrap().null_count(),
+                            batch.num_rows()
+                        );
+                    }
+                }
+            }
+        }
     }
 }

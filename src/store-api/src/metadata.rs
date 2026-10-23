@@ -31,16 +31,17 @@ use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::extension::json::json2_metadata_with_updated_settings;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SchemaRef,
+};
 use datatypes::types::TimestampType;
+use datatypes::value::Value;
 use itertools::Itertools;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{Location, OptionExt, ResultExt, Snafu, ensure};
 
 use crate::codec::PrimaryKeyEncoding;
-use crate::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME};
 use crate::region_request::{
     AddColumn, AddColumnLocation, AlterKind, ModifyColumnType, SetIndexOption, UnsetIndexOption,
 };
@@ -48,6 +49,26 @@ use crate::storage::consts::{ReservedColumnId, is_internal_column};
 use crate::storage::{ColumnId, RegionId};
 
 pub type Result<T> = std::result::Result<T, MetadataError>;
+
+/// Validates the default of a sparse tag that needs backfilling after schema evolution.
+pub fn validate_sparse_tag_default(
+    name: &str,
+    default: Option<&ColumnDefaultConstraint>,
+) -> Result<()> {
+    // Backfilling non-NULL sparse tags can reverse encoded key order; omitting them loses defaults.
+    ensure!(
+        matches!(
+            default,
+            None | Some(ColumnDefaultConstraint::Value(Value::Null))
+        ),
+        InvalidMetaSnafu {
+            reason: format!(
+                "non-NULL defaults for added or altered sparse tag column '{name}' are unsupported"
+            ),
+        }
+    );
+    Ok(())
+}
 
 /// Metadata of a column.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -331,6 +352,15 @@ impl RegionMetadata {
             .map(|id| self.column_by_id(*id).unwrap())
     }
 
+    /// Returns whether this region uses sparse keys without metric-engine reserved columns.
+    pub fn is_ordinary_sparse(&self) -> bool {
+        self.primary_key_encoding == PrimaryKeyEncoding::Sparse
+            && self
+                .primary_key
+                .iter()
+                .all(|id| !ReservedColumnId::is_reserved(*id))
+    }
+
     /// Returns all field columns before projection.
     ///
     /// **Use with caution**. On read path where might have projection, this method
@@ -478,17 +508,8 @@ impl RegionMetadata {
             }
         );
 
-        if self.primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            ensure!(
-                self.primary_key
-                    .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]),
-                InvalidMetaSnafu {
-                    reason: "sparse primary keys must start with (__table_id, __tsid)",
-                }
-            );
-        }
-
         if !self.primary_key.is_empty() {
+            let ordinary_sparse = self.is_ordinary_sparse();
             let mut pk_ids = HashSet::with_capacity(self.primary_key.len());
             // Checks column ids in the primary key is valid.
             for column_id in &self.primary_key {
@@ -535,26 +556,15 @@ impl RegionMetadata {
                     }
                 );
 
-                if self.primary_key_encoding == PrimaryKeyEncoding::Sparse {
-                    let schema = &column.column_schema;
-                    let valid = if *column_id == ReservedColumnId::table_id() {
-                        schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
-                            && schema.data_type == ConcreteDataType::uint32_datatype()
-                            && !schema.is_nullable()
-                    } else if *column_id == ReservedColumnId::tsid() {
-                        schema.name == DATA_SCHEMA_TSID_COLUMN_NAME
-                            && schema.data_type == ConcreteDataType::uint64_datatype()
-                            && !schema.is_nullable()
-                    } else {
-                        !ReservedColumnId::is_reserved(*column_id) && schema.data_type.is_string()
-                    };
-                    ensure!(
-                        valid,
-                        InvalidMetaSnafu {
-                            reason: format!("invalid sparse primary key column {}", schema.name),
-                        }
-                    );
-                }
+                ensure!(
+                    !ordinary_sparse || column.column_schema.data_type.is_string(),
+                    InvalidMetaSnafu {
+                        reason: format!(
+                            "ordinary sparse primary keys require string tags: column {} has type {}",
+                            column.column_schema.name, column.column_schema.data_type,
+                        ),
+                    }
+                );
 
                 pk_ids.insert(column_id);
             }
@@ -1422,101 +1432,32 @@ mod test {
     }
 
     #[test]
-    fn test_sparse_primary_key_requires_reserved_columns() {
-        for primary_key in [vec![], vec![1]] {
-            let mut metadata = build_test_region_metadata();
-            if primary_key.is_empty() {
-                metadata.column_metadatas[0].semantic_type = SemanticType::Field;
+    fn test_sparse_primary_key_tag_types() {
+        for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+            for data_type in [
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::boolean_datatype(),
+                ConcreteDataType::binary_datatype(),
+            ] {
+                let accepted = encoding == PrimaryKeyEncoding::Dense || data_type.is_string();
+                let mut builder =
+                    RegionMetadataBuilder::from_existing(build_test_region_metadata());
+                builder.primary_key_encoding(encoding);
+                builder.column_metadatas[0].column_schema.data_type = data_type;
+                let result = builder.build();
+                if accepted {
+                    result.unwrap();
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("ordinary sparse primary keys require string tags")
+                    );
+                }
             }
-            metadata.primary_key = primary_key;
-            let mut builder = RegionMetadataBuilder::from_existing(metadata);
-            builder.primary_key_encoding(PrimaryKeyEncoding::Sparse);
-            let error = builder.build().unwrap_err();
-            assert_eq!(error.status_code(), StatusCode::InvalidArguments);
-            assert!(
-                error
-                    .to_string()
-                    .contains("sparse primary keys must start with (__table_id, __tsid)")
-            );
-        }
-    }
-
-    #[test]
-    fn test_sparse_reserved_primary_key_contract() {
-        let mut builder = RegionMetadataBuilder::from_existing(build_test_region_metadata());
-        builder.primary_key_encoding(PrimaryKeyEncoding::Sparse);
-        builder.column_metadatas[0].column_schema.data_type = ConcreteDataType::string_datatype();
-        for (name, column_id, data_type) in [
-            (
-                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-                ReservedColumnId::table_id(),
-                ConcreteDataType::uint32_datatype(),
-            ),
-            (
-                DATA_SCHEMA_TSID_COLUMN_NAME,
-                ReservedColumnId::tsid(),
-                ConcreteDataType::uint64_datatype(),
-            ),
-        ] {
-            builder.push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(name, data_type, false),
-                semantic_type: SemanticType::Tag,
-                column_id,
-            });
-        }
-        builder.primary_key(vec![
-            ReservedColumnId::table_id(),
-            ReservedColumnId::tsid(),
-            1,
-        ]);
-        let metadata = builder.build().unwrap();
-        let json = serde_json::to_string(&metadata).unwrap();
-        assert_eq!(
-            metadata,
-            serde_json::from_str::<RegionMetadata>(&json).unwrap()
-        );
-
-        for case in 0..12 {
-            let mut builder = RegionMetadataBuilder::from_existing(metadata.clone());
-            match case {
-                0 => builder.primary_key.swap(0, 1),
-                1 => {
-                    builder.primary_key.remove(0);
-                    builder.column_metadatas.remove(3);
-                }
-                2 => builder.column_metadatas[3].column_schema.set_nullable(),
-                3 => {
-                    builder.column_metadatas[3].column_schema.data_type =
-                        ConcreteDataType::uint64_datatype()
-                }
-                4 => builder.column_metadatas[4].column_schema.name = "wrong_name".into(),
-                5 => {
-                    builder.column_metadatas[0].column_schema.data_type =
-                        ConcreteDataType::int64_datatype()
-                }
-                6 => {
-                    builder.primary_key.remove(1);
-                    builder.column_metadatas.remove(4);
-                }
-                7 => builder.column_metadatas[4].column_schema.set_nullable(),
-                8 => {
-                    builder.column_metadatas[4].column_schema.data_type =
-                        ConcreteDataType::uint32_datatype()
-                }
-                9 => builder.column_metadatas[3].semantic_type = SemanticType::Field,
-                10 => builder.column_metadatas[4].semantic_type = SemanticType::Field,
-                11 => {
-                    builder.primary_key[0] = 10;
-                    builder.primary_key[1] = 11;
-                    builder.column_metadatas[3].column_id = 10;
-                    builder.column_metadatas[4].column_id = 11;
-                }
-                _ => unreachable!(),
-            }
-            assert_eq!(
-                builder.build().unwrap_err().status_code(),
-                StatusCode::InvalidArguments
-            );
         }
     }
 
