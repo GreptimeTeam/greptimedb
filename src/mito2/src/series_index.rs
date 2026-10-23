@@ -21,20 +21,12 @@ mod artifact_writer;
 mod bucket;
 mod builder;
 mod catalog;
-#[allow(
-    dead_code,
-    reason = "Opt-in format; query consumer integration is deferred."
-)]
 pub(crate) mod columnar;
 pub(crate) mod format;
 #[cfg(test)]
 mod format_tests;
 mod maintenance;
 mod purger;
-#[allow(
-    dead_code,
-    reason = "Samples are an opt-in backend; query integration is deferred."
-)]
 pub(crate) mod samples;
 mod searcher;
 mod task;
@@ -42,6 +34,11 @@ mod task;
 mod tests;
 mod version;
 mod writer;
+
+#[cfg(test)]
+pub(crate) use maintenance::reconcile_series_indexes_with_mode;
+#[cfg(test)]
+pub(crate) use tests::prepare_region_with_metadata;
 
 use std::sync::Arc;
 
@@ -71,6 +68,7 @@ pub use crate::series_index::writer::{
 /// Index storage and pinned catalog snapshot for a query.
 #[derive(Clone)]
 pub(crate) struct SeriesIndexReadContext {
+    pub(crate) format: crate::config::SeriesIndexFormat,
     pub(crate) store: ObjectStore,
     pub(crate) version: Arc<SeriesIndexVersion>,
 }

@@ -54,6 +54,17 @@ const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
 /// Fetch option timeout
 pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Paired series-index and sample storage selection for the experimental reader.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SeriesIndexFormat {
+    /// Parquet series indexes and authoritative SST reads.
+    #[default]
+    Legacy,
+    /// Columnar series indexes and per-SST columnar samples.
+    Columnar,
+}
+
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 /// Before using the config, make sure to call `MitoConfig::validate()` to check if the config is valid.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -92,6 +103,8 @@ pub struct MitoConfig {
     /// Under development; do not enable. Whether to enable series indexes (default false).
     /// Indexes are stored on the local filesystem under `{data_home}/series_index`.
     pub experimental_enable_series_index: bool,
+    /// Paired artifact format (default legacy).
+    pub experimental_series_index_format: SeriesIndexFormat,
     /// Approximate series and range index size limit in open regions (default: 5 GiB).
     /// Workers share a periodically refreshed estimate and skip maintenance when full.
     /// In-flight reconciliation can exceed the limit; closed-region files are not counted.
@@ -222,6 +235,7 @@ impl Default for MitoConfig {
             compress_manifest: false,
             max_background_index_builds: divide_num_cpus(8),
             experimental_enable_series_index: false,
+            experimental_series_index_format: SeriesIndexFormat::Legacy,
             experimental_series_index_max_size: ReadableSize::gb(5),
             experimental_enable_range_index: false,
             experimental_series_index_maintenance_interval:
@@ -450,6 +464,7 @@ mod tests {
         );
         let mut config: MitoConfig = toml::from_str(
             "experimental_enable_series_index = true
+             experimental_series_index_format = 'columnar'
              experimental_enable_range_index = false
              experimental_series_index_max_size = '64MiB'
              experimental_series_index_maintenance_interval = '30s'
@@ -458,6 +473,10 @@ mod tests {
         .unwrap();
         config.sanitize("/data").unwrap();
         assert!(config.experimental_enable_series_index);
+        assert_eq!(
+            config.experimental_series_index_format,
+            SeriesIndexFormat::Columnar
+        );
         assert_eq!(
             ReadableSize::mb(64),
             config.experimental_series_index_max_size
