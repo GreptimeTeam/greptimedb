@@ -54,7 +54,7 @@ use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue, MetricsSet};
+use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, collect, displayable,
@@ -995,13 +995,8 @@ async fn a_runtime_error_after_rows_releases_the_input() {
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
     let tree = rate_tree();
     let mut execution = NativeExecutor::new(
-        NativeExecutionState::try_new(
-            &tree,
-            Arc::new(UnboundedMemoryPool::default()),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-        )
-        .expect("the runtime executes a rate tree"),
+        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))
+            .expect("the runtime executes a rate tree"),
     );
     let samples = series_samples(1.0);
     execution
@@ -1218,6 +1213,48 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
         .expect("the node reports its runtime's metrics");
     assert_eq!(1, count(&metrics, "native.root.input.completed_series"));
     assert_eq!(1, count(&metrics, "native.root.completed_series"));
+
+    // Exporting a snapshot repeatedly does not register another copy of the runtime metrics.
+    let repeated = exec.metrics().expect("metrics can be exported repeatedly");
+    assert_eq!(metrics.iter().count(), repeated.iter().count());
+    assert_eq!(1, count(&repeated, "native.root.input.completed_series"));
+    assert_eq!(1, count(&repeated, "native.root.completed_series"));
+}
+
+/// Dropping a partially consumed execution releases its live reservation but preserves its peak.
+#[tokio::test]
+async fn cancelling_after_partial_input_clears_current_bytes_and_keeps_peak() {
+    let schema = frame_schema();
+    let partial = frame(&series_chunk("web-1", &series_samples(1.0)[..4], false));
+    let exec = plan(
+        rate_tree(),
+        staged(schema.clone(), move || {
+            Box::pin(StagedStream::new(schema.clone(), vec![partial.clone()]).pending_after(1))
+        }),
+    )
+    .expect("the runtime executes a rate tree");
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = exec
+        .execute(0, task_context(&pool))
+        .expect("the node executes");
+
+    // One unclosed series chunk is accepted; the source then parks before another arrives.
+    assert!(futures::poll!(stream.next()).is_pending());
+    drop(stream);
+
+    let metrics = exec.metrics().expect("the runtime metrics are exported");
+    let current = metrics
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is exported");
+    let peak = metrics
+        .sum_by_name("native.p0.root.peak_reserved_bytes")
+        .expect("the peak-bytes gauge is exported");
+    assert!(matches!(current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0));
+    assert!(matches!(peak, MetricValue::Gauge { gauge, .. } if gauge.value() > 0));
+    assert!(
+        pool.reserved() > 0,
+        "plan-level label-set charge is independent"
+    );
 }
 
 /// A tree the runtime does not execute is refused when the execution plan is built.

@@ -14,10 +14,9 @@
 
 //! One line per node of a [`NativeTree`].
 //!
-//! The position a node is shown at is derived by [`metrics::walk`], the same traversal that names
-//! the node's metrics, so a node cannot be shown at one place and measured at another. The
-//! display is an observation of a compiled tree: it runs nothing, and every line reads as the node
-//! it is, making no claim about whether that node could run.
+//! The tree is displayed by recursively visiting its bound expressions. The display is an
+//! observation of a compiled tree: it runs nothing, and every line reads as the node it is,
+//! making no claim about whether that node could run.
 
 use std::fmt::{self, Write};
 use std::sync::Arc;
@@ -27,7 +26,6 @@ use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
-use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
     NativeNode, NativeTree, NativeType,
@@ -38,17 +36,6 @@ use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The header line of every tree.
 const HEADER: &str = "NativeTree";
-
-/// How deep `path` is: the root is at depth zero, its input at one.
-fn depth(path: &NodePath) -> usize {
-    path.as_str().matches('.').count()
-}
-
-/// The last segment of `path`, which is the name of the node in its parent.
-fn name(path: &NodePath) -> &str {
-    // `NodePath` only ever appends `.segment`, so the last segment is never empty.
-    path.as_str().rsplit('.').next().unwrap_or(path.as_str())
-}
 
 /// A grid as `<start>/<step>x<len>`.
 fn grid_name(grid: &EvalGrid) -> String {
@@ -346,29 +333,39 @@ fn kind(expr: &NativeExpr) -> &'static str {
     }
 }
 
-/// The line a node is shown as, without its indentation.
-fn line(node: &NativeNode, path: &NodePath) -> String {
-    format!("{} {} {}", name(path), kind(&node.expr), describe(node))
+/// One recursively displayed node and its children.
+fn display_node(
+    f: &mut fmt::Formatter<'_>,
+    node: &NativeNode,
+    depth: usize,
+    edge: &str,
+) -> fmt::Result {
+    f.write_char('\n')?;
+    // The root sits one level in from the header, and each child one level below its consumer.
+    for _ in 0..depth + 1 {
+        f.write_str("  ")?;
+    }
+    write!(f, "{edge} {} {}", kind(&node.expr), describe(node))?;
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => {}
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => display_node(f, input, depth + 1, "input")?,
+        NativeExpr::Binary { left, right, .. } => {
+            display_node(f, left, depth + 1, "left")?;
+            display_node(f, right, depth + 1, "right")?;
+        }
+    }
+    Ok(())
 }
 
 impl fmt::Display for NativeTree {
     /// One line per node, outermost first, indented two spaces per depth below the header.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(HEADER)?;
-        let mut lines = Vec::new();
-        metrics::walk(self.root(), &mut |node, path| {
-            lines.push((depth(path), line(node, path)));
-        });
-        for (depth, line) in lines {
-            f.write_char('\n')?;
-            // The root sits one level in from the header, and each input one level below its
-            // consumer, so the shape of the tree is the shape of the output.
-            for _ in 0..depth + 1 {
-                f.write_str("  ")?;
-            }
-            f.write_str(&line)?;
-        }
-        Ok(())
+        display_node(f, self.root(), 0, "root")
     }
 }
 
