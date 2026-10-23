@@ -21,6 +21,9 @@ INSERT INTO null_samples VALUES
 TQL EVAL (2, 7, '1s') count_over_time(null_samples{host="a"}[4s]);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (2, 7, '1s') last_over_time(null_samples{host="a"}[4s]);
+-- Prefix NULLs must be skipped after the 0s sample expires.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (2, 7, '1s') first_over_time(null_samples[4s]);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (2, 7, '1s') present_over_time(null_samples{host="a"}[4s]);
 -- SQLNESS SORT_RESULT 3 1
