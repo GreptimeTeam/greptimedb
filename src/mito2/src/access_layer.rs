@@ -46,7 +46,7 @@ use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
-use crate::sst::index::{IndexOutput, IndexerBuilderImpl, build_index_from_parquet_bytes};
+use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -478,15 +478,17 @@ impl AccessLayer {
 
     /// Puts encoded SST bytes to the write cache (if enabled) and uploads it to the object store.
     ///
-    /// Builds the SST's indexes from `data` when `index` is set.
+    /// Builds the SST's indexes from `data` into `sst_info.index_metadata` when `index` is set.
     pub(crate) async fn put_sst(
         &self,
         data: &bytes::Bytes,
-        region_file_id: RegionFileId,
+        region_id: RegionId,
+        sst_info: &mut SstInfo,
         cache_manager: &CacheManagerRef,
         write_buffer_size: ReadableSize,
         index: Option<EncodedSstIndexRequest>,
-    ) -> Result<(Metrics, IndexOutput)> {
+    ) -> Result<Metrics> {
+        let region_file_id = RegionFileId::new(region_id, sst_info.file_id);
         if let Some(write_cache) = cache_manager.write_cache() {
             // Write to cache and upload to remote store
             let upload_request = SstUploadRequest {
@@ -499,7 +501,8 @@ impl AccessLayer {
             write_cache
                 .put_and_upload_sst(
                     data,
-                    region_file_id,
+                    region_id,
+                    sst_info,
                     upload_request,
                     write_buffer_size,
                     index,
@@ -529,7 +532,6 @@ impl AccessLayer {
             let mut metrics = Metrics::new(WriteType::Flush);
             metrics.write_batch = start.elapsed();
 
-            let mut index_output = IndexOutput::default();
             if let Some(index) = index {
                 let start = Instant::now();
                 let builder = index.indexer_builder(
@@ -538,10 +540,11 @@ impl AccessLayer {
                     false,
                     self.intermediate_manager.clone(),
                 );
-                index_output = build_index_from_parquet_bytes(&builder, region_file_id, data).await;
+                sst_info.index_metadata =
+                    build_index_from_parquet_bytes(&builder, region_file_id, data).await;
                 metrics.update_index = start.elapsed();
             }
-            Ok((metrics, index_output))
+            Ok(metrics)
         }
     }
 
@@ -882,7 +885,11 @@ mod tests {
         access_layer
             .put_sst(
                 &encoded,
-                file_id,
+                file_id.region_id(),
+                &mut SstInfo {
+                    file_id: file_id.file_id(),
+                    ..Default::default()
+                },
                 &cache_manager,
                 ReadableSize(chunk_size as u64),
                 None,

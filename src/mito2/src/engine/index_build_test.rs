@@ -23,6 +23,8 @@ use api::v1::region::{StrictWindow, compact_request};
 use api::v1::{Rows, SemanticType};
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion_expr::expr::InList;
 use datafusion_expr::{Expr, col, lit};
@@ -34,7 +36,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AddColumn, AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionRequest, SetIndexOption,
+    RegionCompactRequest, RegionFlushRequest, RegionRequest, RegionTruncateRequest, SetIndexOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{Notify, Semaphore};
@@ -2428,4 +2430,149 @@ async fn test_flush_indexes_encoded_bulk_parts(
                 .unwrap()
         );
     }
+}
+
+/// Blocks closing a puffin file whose SST is already closed, which only happens for encoded
+/// bulk parts: the SST writer closes the puffin file before the SST.
+struct BlockingPuffinWriter {
+    file_name: String,
+    inner: object_store::layers::mock::Writer,
+    closed_ssts: Arc<std::sync::Mutex<HashSet<String>>>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl object_store::layers::mock::Write for BlockingPuffinWriter {
+    async fn write(
+        &mut self,
+        bs: object_store::layers::mock::Buffer,
+    ) -> object_store::layers::mock::Result<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(
+        &mut self,
+    ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+        if let Some(file_id) = self.file_name.strip_suffix(".puffin")
+            && self.closed_ssts.lock().unwrap().contains(file_id)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        let metadata = self.inner.close().await?;
+        if let Some(file_id) = self.file_name.strip_suffix(".parquet") {
+            self.closed_ssts.lock().unwrap().insert(file_id.to_string());
+        }
+        Ok(metadata)
+    }
+
+    async fn abort(&mut self) -> object_store::layers::mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+#[tokio::test]
+async fn test_truncate_while_indexing_encoded_bulk_part_removes_uploaded_sst() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let closed_ssts = Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let (factory_entered, factory_release) = (entered.clone(), release.clone());
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _op, inner| {
+            Box::new(BlockingPuffinWriter {
+                file_name: path.rsplit('/').next().unwrap_or_default().to_string(),
+                inner,
+                closed_ssts: closed_ssts.clone(),
+                entered: factory_entered.clone(),
+                release: factory_release.clone(),
+            }) as object_store::layers::mock::Writer
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::with_prefix("test_truncate_while_indexing_encoded_bulk_part_")
+        .await
+        .with_mock_layer(layer);
+    let config = MitoConfig {
+        default_flat_format: true,
+        ..Default::default()
+    };
+    let engine = env.create_engine_with(config, None, None, None).await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("memtable.bulk.merge_threshold", "2")
+        .insert_option("memtable.bulk.encode_row_threshold", "1")
+        .build_with_index();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for (start, end) in [(0, 100_000), (100_000, 200_000)] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(start, end),
+        };
+        put_rows(&engine, region_id, rows).await;
+    }
+    let version = engine.get_region(region_id).unwrap().version();
+    for memtable in version.memtables.list_memtables() {
+        memtable.compact(false).unwrap();
+    }
+
+    let flush_engine = engine.clone();
+    let flush_task = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+    });
+    // The encoded SST is uploaded and its index is being written.
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("flush did not reach index creation");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        ),
+    )
+    .await
+    .expect("truncate did not finish after cancelling flush")
+    .unwrap();
+    release.notify_one();
+    let flush_err = tokio::time::timeout(Duration::from_secs(5), flush_task)
+        .await
+        .expect("cancelled flush did not finish")
+        .expect("flush task panicked")
+        .unwrap_err();
+    assert_eq!(flush_err.status_code(), StatusCode::Cancelled);
+
+    let access_layer = engine.get_region(region_id).unwrap().access_layer.clone();
+    let leftovers = access_layer
+        .object_store()
+        .list_with(access_layer.table_dir())
+        .recursive(true)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path().to_string())
+        .filter(|path| path.ends_with(".parquet") || path.ends_with(".puffin"))
+        .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }

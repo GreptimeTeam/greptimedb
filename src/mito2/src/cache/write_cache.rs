@@ -21,7 +21,6 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use futures::AsyncWriteExt;
 use object_store::ObjectStore;
-use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -39,7 +38,7 @@ use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
-use crate::sst::index::{IndexOutput, IndexerBuilderImpl, build_index_from_parquet_bytes};
+use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
@@ -180,13 +179,14 @@ impl WriteCache {
     pub(crate) async fn put_and_upload_sst(
         &self,
         data: &bytes::Bytes,
-        region_file_id: RegionFileId,
+        region_id: RegionId,
+        sst_info: &mut SstInfo,
         upload_request: SstUploadRequest,
         write_buffer_size: ReadableSize,
         index: Option<EncodedSstIndexRequest>,
-    ) -> Result<(Metrics, IndexOutput)> {
-        let region_id = region_file_id.region_id();
-        let file_id = region_file_id.file_id();
+    ) -> Result<Metrics> {
+        let file_id = sst_info.file_id;
+        let region_file_id = RegionFileId::new(region_id, file_id);
         let mut metrics = Metrics::new(WriteType::Flush);
 
         // Create index key for the SST file
@@ -209,10 +209,6 @@ impl WriteCache {
 
         metrics.write_batch = cache_start.elapsed();
 
-        let mut sst_info = SstInfo {
-            file_id,
-            ..Default::default()
-        };
         if let Some(index) = index {
             let start = Instant::now();
             let builder = index.indexer_builder(
@@ -269,11 +265,15 @@ impl WriteCache {
 
         if let Err(e) = result {
             upload_tracker
-                .clean(&smallvec![sst_info], &self.file_cache, remote_store)
+                .clean(
+                    std::slice::from_ref(sst_info),
+                    &self.file_cache,
+                    remote_store,
+                )
                 .await;
             return Err(e);
         }
-        Ok((metrics, sst_info.index_metadata))
+        Ok(metrics)
     }
 
     /// Returns the intermediate manager of the write cache.
@@ -581,7 +581,7 @@ impl UploadTracker {
     /// Cleans uploaded files and files in the file cache at best effort.
     pub(crate) async fn clean(
         &self,
-        sst_info: &SstInfoArray,
+        sst_info: &[SstInfo],
         file_cache: &FileCacheRef,
         remote_store: &ObjectStore,
     ) {

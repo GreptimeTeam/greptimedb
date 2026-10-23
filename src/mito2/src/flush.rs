@@ -67,7 +67,7 @@ use crate::request::{
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileMeta, RegionFileId, UncommittedSsts};
+use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
@@ -767,18 +767,21 @@ impl RegionFlushTask {
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
             });
+            // Index creation runs after the SST is uploaded, so cancellation can land after the
+            // upload. Own the files before uploading them.
+            uncommitted.track_before_upload(encoded.sst_info.file_id, index.is_some());
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                let (metrics, index_output) = access_layer
+                let metrics = access_layer
                     .put_sst(
                         &encoded.data,
-                        RegionFileId::new(region_id, encoded.sst_info.file_id),
+                        region_id,
+                        &mut encoded.sst_info,
                         &cache_manager,
                         write_buffer_size,
                         index,
                     )
                     .await?;
-                encoded.sst_info.index_metadata = index_output;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
                 FLUSH_FILE_TOTAL.inc();
                 Ok((max_sequence, smallvec![encoded.sst_info], metrics))

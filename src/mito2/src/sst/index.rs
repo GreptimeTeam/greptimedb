@@ -44,7 +44,7 @@ use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use puffin_manager::SstPuffinManager;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use statistics::{ByteCount, RowCount};
 use store_api::codec::PrimaryKeyEncoding;
@@ -1220,7 +1220,7 @@ impl IndexBuildTask {
                 // Cleans index files on failure.
                 upload_tracker
                     .clean(
-                        &smallvec![SstInfo {
+                        &[SstInfo {
                             file_id,
                             index_metadata: output,
                             ..Default::default()
@@ -1649,6 +1649,7 @@ mod tests {
     use partition::expr::col;
     use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use puffin_manager::PuffinManagerFactory;
+    use smallvec::smallvec;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use tokio::sync::mpsc;
 
