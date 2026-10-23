@@ -996,7 +996,7 @@ fn fields_clone_buffers_and_series_validate_schema_alignment_and_time_order() {
         ]),
         eval_grid: None,
     };
-    let metric = MetricName::try_new(None, vec![]).unwrap();
+    let metric = SeriesLabels::try_new(None, vec![]).unwrap();
     let time = TimeAxis::Explicit(ScalarBuffer::from(vec![1, 2]));
     assert!(
         Series::try_new(
@@ -1040,7 +1040,7 @@ fn float_fields_clones_and_series_keep_real_arrow_buffer_owner_alive() {
     };
     let series = Series::try_new(
         &schema,
-        MetricName::try_new(None, vec![]).unwrap(),
+        SeriesLabels::try_new(None, vec![]).unwrap(),
         TimeAxis::Explicit(ScalarBuffer::from(vec![1_i64, 2])),
         fields,
     )
@@ -1071,7 +1071,7 @@ fn series_enforces_grid_policy_and_matches_grid_spec_by_value() {
     let equal_grid = Arc::new(EvalGrid::try_new(spec).unwrap());
     let range = GridRange::try_new(equal_grid, 1, 1).unwrap();
     let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0])));
-    let metric = MetricName::try_new(None, vec![]).unwrap();
+    let metric = SeriesLabels::try_new(None, vec![]).unwrap();
     let grid_schema = SeriesSchema {
         fields: Arc::from([FieldSpec {
             name: Arc::from("value"),
@@ -1226,7 +1226,7 @@ fn short_multifield_series_uses_its_grid_range_and_checks_explicit_chunk_order()
     };
     let series = Series::try_new(
         &schema,
-        MetricName::try_new(None, vec![]).unwrap(),
+        SeriesLabels::try_new(None, vec![]).unwrap(),
         TimeAxis::Grid(GridRange::try_new(grid, 800, 20).unwrap()),
         fields.clone(),
     )
@@ -1266,7 +1266,7 @@ fn short_multifield_series_uses_its_grid_range_and_checks_explicit_chunk_order()
     assert!(
         Series::try_new(
             &explicit_schema,
-            MetricName::try_new(None, vec![]).unwrap(),
+            SeriesLabels::try_new(None, vec![]).unwrap(),
             out_of_order,
             explicit_fields,
         )
@@ -1285,7 +1285,7 @@ fn short_multifield_series_uses_its_grid_range_and_checks_explicit_chunk_order()
     assert!(
         Series::try_new(
             &explicit_schema,
-            MetricName::try_new(None, vec![]).unwrap(),
+            SeriesLabels::try_new(None, vec![]).unwrap(),
             ordered_chunks.clone(),
             ordered_fields.clone(),
         )
@@ -1299,7 +1299,7 @@ fn short_multifield_series_uses_its_grid_range_and_checks_explicit_chunk_order()
     assert!(
         Series::try_new(
             &grid_schema,
-            MetricName::try_new(None, vec![]).unwrap(),
+            SeriesLabels::try_new(None, vec![]).unwrap(),
             ordered_chunks,
             ordered_fields,
         )
@@ -1311,7 +1311,7 @@ fn short_multifield_series_uses_its_grid_range_and_checks_explicit_chunk_order()
 fn series_accepts_a_sparse_axis_on_its_schema_grid_only() {
     let spec = GridSpec::try_new(100, 10, 5).unwrap();
     let schema_grid = Arc::new(EvalGrid::try_new(spec).unwrap());
-    let metric = MetricName::try_new(None, vec![]).unwrap();
+    let metric = SeriesLabels::try_new(None, vec![]).unwrap();
     let schema = SeriesSchema {
         fields: Arc::from([FieldSpec {
             name: Arc::from("value"),
@@ -1396,7 +1396,7 @@ fn series_accepts_a_sparse_axis_on_its_schema_grid_only() {
     assert!(
         Series::try_new(
             &schema,
-            MetricName::try_new(None, vec![]).unwrap(),
+            SeriesLabels::try_new(None, vec![]).unwrap(),
             TimeAxis::GridRanges(ranges()),
             empty_fields
         )

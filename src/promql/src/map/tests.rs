@@ -32,7 +32,7 @@ use datatypes::series::histogram::{
 };
 use datatypes::series::samples::{FieldSpec, HistogramSamples, SampleRef};
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 
 use super::*;
 use crate::functions::IeeeSqrt;
@@ -55,7 +55,7 @@ fn series(schema: &SeriesSchema, start: usize, fields: Vec<Samples>) -> Series {
     let time = TimeAxis::Grid(
         GridRange::try_new(schema.eval_grid.clone().unwrap(), start, fields[0].len()).unwrap(),
     );
-    let metric = MetricName::try_new(
+    let metric = SeriesLabels::try_new(
         Some("requests".into()),
         vec![
             Label {
@@ -604,7 +604,7 @@ fn scalar_functions_pair_scalars_by_position() {
     let scalar = |start: usize, values: &[Option<f64>]| {
         Series::try_new(
             &schema,
-            MetricName::try_new(None, Vec::new()).unwrap(),
+            SeriesLabels::try_new(None, Vec::new()).unwrap(),
             TimeAxis::Grid(
                 GridRange::try_new(schema.eval_grid.clone().unwrap(), start, values.len()).unwrap(),
             ),

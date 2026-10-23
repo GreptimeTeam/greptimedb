@@ -80,7 +80,7 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::Float64Array;
-    use datatypes::series::MetricName;
+    use datatypes::series::SeriesLabels;
     use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
     use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 
@@ -97,8 +97,8 @@ mod tests {
         }
     }
 
-    fn metric() -> MetricName {
-        MetricName::try_new(Some("requests".into()), Vec::new()).unwrap()
+    fn metric() -> SeriesLabels {
+        SeriesLabels::try_new(Some("requests".into()), Vec::new()).unwrap()
     }
 
     /// `values` are the floats this chunk finished evaluating; `start` is their absolute offset.

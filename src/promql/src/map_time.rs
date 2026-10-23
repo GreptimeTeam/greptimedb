@@ -17,7 +17,7 @@
 
 use datafusion::arrow::array::Float64Array;
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{GridRange, TimeAxis};
 
@@ -96,7 +96,7 @@ fn eval_time_series(schema: &SeriesSchema, value: impl Fn(i64) -> f64) -> Result
     let fields = vec![Samples::from_float(values); schema.fields.len()];
     Series::try_new(
         schema,
-        MetricName::try_new(None, Vec::new()).map_err(external)?,
+        SeriesLabels::try_new(None, Vec::new()).map_err(external)?,
         TimeAxis::Grid(range),
         SeriesFields::try_from_vec(fields).map_err(external)?,
     )
