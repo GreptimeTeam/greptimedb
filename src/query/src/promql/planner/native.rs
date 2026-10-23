@@ -891,7 +891,7 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
             // built from the table's own tags, so folding `label_replace`/`label_join` in would
             // silently drop the destination label the existing plan projects.
             if matches!(call.func.name, "label_replace" | "label_join") {
-                return;
+                return false;
             }
             for arg in &call.args.args {
                 if !collect_selectors(arg, out) {
