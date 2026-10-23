@@ -445,6 +445,13 @@ fn a_vector_operation_names_its_binding() {
             },
             r#"  root Vector absent {job="x"}"#,
         ),
+        (
+            BoundVectorOp::CountValues {
+                label: "value".into(),
+                group: Grouping::Without(Arc::new(["job".into()])),
+            },
+            r#"  root Vector count_values "value" without [job]"#,
+        ),
     ];
     for (op, line) in lines {
         let tree = NativeTree::try_new(NativeNode {
