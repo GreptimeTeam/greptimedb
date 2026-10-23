@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, ListActiveDatanodesSnafu, Result};
 use crate::metasrv::SelectorContext;
-use crate::selector::common::{choose_items, filter_out_excluded_peers};
+use crate::selector::common::{choose_items, filter_out_excluded_peers, is_schedulable_datanode};
 use crate::selector::weight_compute::WeightCompute;
 use crate::selector::weighted_choose::RandomWeightedChoose;
 use crate::selector::{Selector, SelectorOptions};
@@ -58,6 +58,7 @@ where
             .await
             .context(ListActiveDatanodesSnafu)?
             .into_iter()
+            .filter(is_schedulable_datanode)
             .filter(|node| {
                 opts.affinity
                     .is_none_or(|requirements| ctx.affinity.matches(requirements, node))

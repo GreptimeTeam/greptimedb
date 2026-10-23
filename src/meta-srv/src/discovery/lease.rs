@@ -140,6 +140,7 @@ mod tests {
                 peer: Peer::new(1, "127.0.0.1:4001".to_string()),
                 last_activity_ts: current_time_millis(),
                 status: NodeStatus::Datanode(DatanodeStatus {
+                    schedulable: true,
                     rcus: 0,
                     wcus: 0,
                     leader_regions: 0,

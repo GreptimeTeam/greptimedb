@@ -144,6 +144,7 @@ mod tests {
         let status = match role {
             Role::Frontend => NodeStatus::Frontend(FrontendStatus::default()),
             Role::Datanode => NodeStatus::Datanode(DatanodeStatus {
+                schedulable: true,
                 rcus: 0,
                 wcus: 0,
                 leader_regions: 0,

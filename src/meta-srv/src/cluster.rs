@@ -35,7 +35,9 @@ use common_meta::util;
 use common_telemetry::warn;
 use derive_builder::Builder;
 use snafu::{OptionExt, ResultExt, ensure};
+use tokio::sync::RwLock;
 
+use crate::datanode_state::DatanodeStateManagerRef;
 use crate::error::{self, Result, match_for_io_error};
 use crate::metasrv::ElectionRef;
 
@@ -45,12 +47,20 @@ pub type MetaPeerClientRef = Arc<MetaPeerClient>;
 pub struct MetaPeerClient {
     election: Option<ElectionRef>,
     in_memory: ResettableKvBackendRef,
+    #[builder(default)]
+    pub(crate) datanode_state_manager: Arc<RwLock<Option<DatanodeStateManagerRef>>>,
     #[builder(default = "ChannelManager::default()")]
     channel_manager: ChannelManager,
     #[builder(default = "3")]
     max_retry_count: usize,
     #[builder(default = "1000")]
     retry_interval_ms: u64,
+}
+
+impl MetaPeerClient {
+    pub(crate) async fn set_datanode_state_manager(&self, manager: DatanodeStateManagerRef) {
+        *self.datanode_state_manager.write().await = Some(manager);
+    }
 }
 
 #[async_trait::async_trait]

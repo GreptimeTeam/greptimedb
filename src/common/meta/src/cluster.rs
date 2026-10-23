@@ -173,6 +173,9 @@ impl NodeStatus {
 /// The status of a datanode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatanodeStatus {
+    /// Whether this datanode may receive new regions. Metasrv discovery enriches this field.
+    #[serde(skip, default = "default_schedulable")]
+    pub schedulable: bool,
     /// The read capacity units during this period.
     pub rcus: i64,
     /// The write capacity units during this period.
@@ -183,6 +186,10 @@ pub struct DatanodeStatus {
     pub follower_regions: usize,
     /// The workloads of the datanode.
     pub workloads: DatanodeWorkloads,
+}
+
+fn default_schedulable() -> bool {
+    true
 }
 
 /// The status of a frontend.
@@ -347,6 +354,7 @@ mod tests {
             },
             last_activity_ts: 123,
             status: NodeStatus::Datanode(DatanodeStatus {
+                schedulable: true,
                 rcus: 1,
                 wcus: 2,
                 leader_regions: 3,
@@ -367,6 +375,7 @@ mod tests {
         };
 
         let node_info_bytes: Vec<u8> = node_info.try_into().unwrap();
+        assert!(!String::from_utf8_lossy(&node_info_bytes).contains("schedulable"));
         let new_node_info: NodeInfo = node_info_bytes.try_into().unwrap();
 
         assert_matches!(
@@ -375,6 +384,7 @@ mod tests {
                 peer: Peer { id: 1, .. },
                 last_activity_ts: 123,
                 status: NodeStatus::Datanode(DatanodeStatus {
+                    schedulable: true,
                     rcus: 1,
                     wcus: 2,
                     leader_regions: 3,
@@ -508,6 +518,7 @@ mod tests {
             },
             last_activity_ts: 123,
             status: NodeStatus::Datanode(DatanodeStatus {
+                schedulable: true,
                 rcus: 0,
                 wcus: 0,
                 leader_regions: 0,

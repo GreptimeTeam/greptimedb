@@ -59,6 +59,7 @@ pub trait PeerDiscovery: Send + Sync {
     ///
     /// A datanode is considered active if it has reported a heartbeat within the most recent heartbeat interval,
     /// as determined by the in-memory backend.
+    /// Metasrv includes unschedulable datanodes with `DatanodeStatus::schedulable` set to false.
     /// The optional `filter` allows further selection based on the node's workloads.
     async fn active_datanodes(
         &self,
