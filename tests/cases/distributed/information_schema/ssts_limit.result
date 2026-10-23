@@ -72,28 +72,77 @@ FROM (
   LIMIT 1
 );
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                            |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                 |
-|               | Projection: count(Int64(1)) AS count(*) AS filtered_limited_rows                                                                                                                                                                                |
-|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                                                                                                                                                                                             |
-|               |     Limit: skip=0, fetch=1                                                                                                                                                                                                                      |
-|               |       Projection: information_schema.ssts_manifest.region_id                                                                                                                                                                                    |
-|               |         Filter: information_schema.ssts_manifest.table_id > UInt32(0)                                                                                                                                                                           |
-|               |           TableScan: information_schema.ssts_manifest, partial_filters=[information_schema.ssts_manifest.table_id > UInt32(0)]                                                                                                                  |
-|               | ]]                                                                                                                                                                                                                                              |
-| physical_plan | ProjectionExec: expr=[count(Int64(1))@0 as filtered_limited_rows]                                                                                                                                                                               |
-|               |   AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))]                                                                                                                                                                                     |
-|               |     CoalescePartitionsExec                                                                                                                                                                                                                      |
-|               |       AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))]                                                                                                                                                                               |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                         |
+|               | Projection: count(Int64(1)) AS count(*) AS filtered_limited_rows                                                                                                                                        |
+|               |   Aggregate: groupBy=[[]], aggr=[[count(Int64(1))]]                                                                                                                                                     |
+|               |     Limit: skip=0, fetch=1                                                                                                                                                                              |
+|               |       Projection: information_schema.ssts_manifest.region_id                                                                                                                                            |
+|               |         TableScan: information_schema.ssts_manifest, full_filters=[information_schema.ssts_manifest.table_id > UInt32(0)]                                                                               |
+|               | ]]                                                                                                                                                                                                      |
+| physical_plan | ProjectionExec: expr=[count(Int64(1))@0 as filtered_limited_rows]                                                                                                                                       |
+|               |   AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))]                                                                                                                                             |
+|               |     CoalescePartitionsExec                                                                                                                                                                              |
+|               |       AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))]                                                                                                                                       |
 |               |         RepartitionExec: REDACTED
-|               |           CoalescePartitionsExec: fetch=1                                                                                                                                                                                                       |
-|               |             FilterExec: table_id@0 > 0, projection=[], fetch=1                                                                                                                                                                                  |
-|               |               RepartitionExec: REDACTED
-|               |                 DistributedInspectExec: kind=SstManifest, scan=ScanRequest { projection: [2], filters: [table_id > UInt32(0)] }, schema=Schema { fields: [Field { name: "table_id", data_type: UInt32 }], metadata: {"greptime:version": "0"} } |
-|               |                                                                                                                                                                                                                                                 |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |           GlobalLimitExec: skip=0, fetch=1                                                                                                                                                              |
+|               |             DistributedInspectExec: kind=SstManifest, scan=ScanRequest { projection: [], filters: [table_id > UInt32(0)], limit: 1 }, schema=Schema { fields: [], metadata: {"greptime:version": "0"} } |
+|               |                                                                                                                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- The frontend orders results from all datanodes before applying the global offset.
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0
+ORDER BY min_ts DESC
+LIMIT 2 OFFSET 1;
+
++-------------------------+-------------------------+
+| min_ts                  | max_ts                  |
++-------------------------+-------------------------+
+| 1970-01-01T00:00:00.002 | 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.001 | 1970-01-01T00:00:00.001 |
++-------------------------+-------------------------+
+
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN SELECT min_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0
+ORDER BY min_ts DESC
+LIMIT 1;
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                         |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                              |
+|               | Limit: skip=0, fetch=1                                                                                                                                                                                                                                                       |
+|               |   Sort: information_schema.ssts_manifest.min_ts DESC NULLS FIRST                                                                                                                                                                                                             |
+|               |     Projection: information_schema.ssts_manifest.min_ts                                                                                                                                                                                                                      |
+|               |       TableScan: information_schema.ssts_manifest, full_filters=[information_schema.ssts_manifest.region_id > UInt64(0)]                                                                                                                                                     |
+|               | ]]                                                                                                                                                                                                                                                                           |
+| physical_plan | SortPreservingMergeExec: [min_ts@0 DESC], fetch=1                                                                                                                                                                                                                            |
+|               |   CooperativeExec                                                                                                                                                                                                                                                            |
+|               |     RepartitionExec: REDACTED
+|               |       SortExec: TopK(fetch=1), expr=[min_ts@0 DESC], preserve_partitioning=[false]                                                                                                                                                                                           |
+|               |         DistributedInspectExec: kind=SstManifest, scan=ScanRequest { projection: [16], filters: [region_id > UInt64(0)] }, schema=Schema { fields: [Field { name: "min_ts", data_type: Timestamp(Nanosecond, None), nullable: true }], metadata: {"greptime:version": "0"} } |
+|               |                                                                                                                                                                                                                                                                              |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- Timestamp filtering happens before global ordering and offset. The sort key
+-- must remain available even when it is absent from the output projection.
+SELECT max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts DESC
+LIMIT 1 OFFSET 1;
+
++-------------------------+
+| max_ts                  |
++-------------------------+
+| 1970-01-01T00:00:00.002 |
++-------------------------+
 
 DROP TABLE ssts_limit_case;
 

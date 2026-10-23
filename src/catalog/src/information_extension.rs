@@ -310,3 +310,122 @@ impl InformationExtension for DistributedInformationExtension {
         ))))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use common_meta::node_manager::{DatanodeManager, DatanodeRef};
+    use common_meta::peer::Peer;
+    use datafusion::common::tree_node::TreeNode;
+    use datafusion::logical_expr::LogicalPlan;
+    use datafusion::physical_plan::sorts::sort::SortExec;
+    use meta_client::client::MetaClientBuilder;
+    use store_api::sst_entry::ManifestSstEntry;
+    use store_api::storage::ScanRequest;
+
+    use super::*;
+    use crate::information_schema::DatanodeInspectKind;
+
+    struct UnusedDatanodeManager;
+
+    #[async_trait::async_trait]
+    impl DatanodeManager for UnusedDatanodeManager {
+        async fn datanode(&self, _node: &Peer) -> DatanodeRef {
+            panic!("plan tests must not contact datanodes")
+        }
+    }
+
+    #[derive(Debug)]
+    struct ManifestScanProvider;
+
+    #[async_trait::async_trait]
+    impl datafusion::catalog::TableProvider for ManifestScanProvider {
+        fn schema(&self) -> ArrowSchemaRef {
+            ManifestSstEntry::schema().arrow_schema().clone()
+        }
+
+        fn table_type(&self) -> datafusion::logical_expr::TableType {
+            datafusion::logical_expr::TableType::View
+        }
+
+        fn supports_filters_pushdown(
+            &self,
+            filters: &[&datafusion::logical_expr::Expr],
+        ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
+            Ok(vec![datafusion::logical_expr::TableProviderFilterPushDown::Exact; filters.len()])
+        }
+
+        async fn scan(
+            &self,
+            _state: &dyn datafusion::catalog::Session,
+            projection: Option<&Vec<usize>>,
+            filters: &[datafusion::logical_expr::Expr],
+            limit: Option<usize>,
+        ) -> Result<Arc<dyn ExecutionPlan>> {
+            let schema = ManifestSstEntry::schema();
+            let schema = match projection {
+                Some(projection) => Arc::new(schema.try_project(projection).unwrap()),
+                None => schema,
+            };
+            Ok(Arc::new(DistributedInspectExec::new(
+                DatanodeInspectRequest {
+                    kind: DatanodeInspectKind::SstManifest,
+                    scan: ScanRequest {
+                        projection: projection.cloned(),
+                        filters: filters.to_vec(),
+                        limit,
+                        ..Default::default()
+                    },
+                },
+                schema,
+                Arc::new(MetaClientBuilder::new(0, api::v1::meta::Role::Frontend).build()),
+                Arc::new(UnusedDatanodeManager),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_manifest_sort_stays_on_frontend() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        ctx.register_table("ssts_manifest", Arc::new(ManifestScanProvider))
+            .unwrap();
+        for sql in [
+            "SELECT region_id, file_id, min_ts, max_ts, file_size FROM ssts_manifest WHERE region_id = 42 ORDER BY min_ts LIMIT 100",
+            "SELECT file_id FROM ssts_manifest WHERE region_id = 42 ORDER BY max_ts DESC LIMIT 10 OFFSET 3",
+            "SELECT min_ts AS ts, file_id FROM ssts_manifest WHERE region_id = 42 ORDER BY ts DESC NULLS FIRST LIMIT 10",
+            "SELECT file_id FROM ssts_manifest WHERE region_id = 42 ORDER BY min_ts, max_ts DESC LIMIT 10",
+        ] {
+            let plan = ctx
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            let mut found_scan = false;
+            let mut found_sort = false;
+            plan.apply(|plan| {
+                found_sort |= plan.is::<SortExec>();
+                if let Some(scan) = plan.downcast_ref::<DistributedInspectExec>() {
+                    found_scan = true;
+                    // All matching rows must reach the frontend global sort.
+                    assert_eq!(scan.request.scan.limit, None);
+                    let remote = scan.request.clone().build_plan().unwrap();
+                    remote.apply(|node| {
+                        assert!(!matches!(
+                            node,
+                            LogicalPlan::Sort(_) | LogicalPlan::Limit(_)
+                        ));
+                        Ok(TreeNodeRecursion::Continue)
+                    })?;
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            assert!(
+                found_scan && found_sort,
+                "{}",
+                datafusion::physical_plan::displayable(plan.as_ref()).indent(true)
+            );
+        }
+    }
+}
