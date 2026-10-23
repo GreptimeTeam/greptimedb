@@ -28,6 +28,7 @@ remote datanodes via `operator`/`client`.
 | `instance/builder` | `src/frontend/src/instance/builder.rs` | `FrontendBuilder` assembles `Instance` from its dependencies |
 | `instance/grpc` | `src/frontend/src/instance/grpc.rs` | `GrpcQueryHandler`: insert/delete/query/promql over gRPC |
 | `instance/region_query` | `src/frontend/src/instance/region_query.rs` | Routes distributed region reads to datanodes |
+| `instance/exemplar` | `src/frontend/src/instance/exemplar.rs` | Resolves and authorizes selector branches before bounded exemplar-table scans |
 | `instance/*` | `src/frontend/src/instance/` | Per-protocol handlers (`influxdb.rs`, `promql.rs`, `otlp/`, `jaeger.rs`, `logs.rs`, `prom_store.rs`, ...) |
 | `frontend` | `src/frontend/src/frontend.rs` | `Frontend` lifecycle wrapper (`FrontendOptions`, start/shutdown) |
 | `server` | `src/frontend/src/server.rs` | `Services`: builds and wires the protocol servers |
