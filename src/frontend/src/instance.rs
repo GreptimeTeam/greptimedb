@@ -47,7 +47,7 @@ use catalog::CatalogManagerRef;
 use catalog::process_manager::{
     ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryRecorder, SlowQueryTimer,
 };
-use client::OutputData;
+use client::{OutputData, RecordBatches};
 use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
 use common_batcher::request_limiter::RequestLimiter;
@@ -786,7 +786,8 @@ impl Instance {
                 }
 
                 let mut results = Vec::with_capacity(stmts.len());
-                for stmt in stmts {
+                let stmt_count = stmts.len();
+                for (idx, stmt) in stmts.into_iter().enumerate() {
                     if let Err(e) = self.check_sql_permission(&stmt, &query_ctx).await {
                         results.push(Err(e));
                         break;
@@ -796,6 +797,18 @@ impl Instance {
                         Ok(output) => {
                             let output_result =
                                 query_interceptor.post_execute(output, query_ctx.clone());
+                            // A non-final statement must complete fully before the next
+                            // statement runs, otherwise a later `DROP TABLE` can
+                            // invalidate the table route while this statement's lazy
+                            // read stream is still being polled.
+                            let output_result = if idx + 1 < stmt_count {
+                                match output_result {
+                                    Ok(output) => materialize_stream_output(output).await,
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                output_result
+                            };
                             results.push(output_result);
                         }
                         Err(e) => {
@@ -1181,6 +1194,27 @@ pub(crate) fn map_query_output(output: Output) -> Result<Output> {
     output
         .map_dictionary_to_values()
         .context(CollectRecordbatchSnafu)
+}
+
+/// Drains a stream-backed [`Output`] into [`RecordBatches`].
+///
+/// Statements in a multi-statement batch are executed sequentially, but a read
+/// such as `SELECT` resolves its region route lazily when the returned stream is
+/// first polled. Draining the stream here forces that routing to complete before
+/// a later statement (e.g. `DROP TABLE`) invalidates the table route cache.
+/// See <https://github.com/GreptimeTeam/greptimedb/issues/9618>.
+async fn materialize_stream_output(output: Output) -> Result<Output> {
+    let Output { data, meta } = output;
+    let data = match data {
+        OutputData::Stream(stream) => {
+            let recordbatches = RecordBatches::try_collect(stream)
+                .await
+                .context(CollectRecordbatchSnafu)?;
+            OutputData::RecordBatches(recordbatches)
+        }
+        other => other,
+    };
+    Ok(Output { data, meta })
 }
 
 /// Attaches a timer to the output and observes it once the output is exhausted.
@@ -1902,6 +1936,15 @@ mod tests {
 
     fn parse_test_sql(sql: &str) -> Vec<Statement> {
         parse_stmt(sql, &GreptimeDbDialect {}).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_materialize_stream_output() {
+        let output = Output::new_with_stream(RecordBatches::empty().as_stream());
+
+        let materialized = materialize_stream_output(output).await.unwrap();
+
+        assert!(matches!(materialized.data, OutputData::RecordBatches(_)));
     }
 
     #[derive(Debug, Default)]
