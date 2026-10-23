@@ -173,6 +173,10 @@ impl Configurable for DatanodeOptions {
             "wal.broker_endpoints",
         ])
     }
+
+    fn env_tagged_seq_keys() -> Option<&'static [&'static str]> {
+        Some(&["region_engine"])
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
