@@ -31,9 +31,13 @@ use datatypes::value::{
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use sql::statements::value_to_sql_value;
-use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
+use sqlparser::ast::{
+    BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName,
+};
 
 use crate::error;
+use crate::function::IcebergHash;
 use crate::partition::PartitionBound;
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
@@ -52,6 +56,7 @@ pub enum Operand {
     Column(String),
     Value(Value),
     Expr(PartitionExpr),
+    IcebergHash(IcebergHash),
 }
 
 pub fn col(column_name: impl Into<String>) -> Operand {
@@ -108,6 +113,38 @@ impl Operand {
                 Ok(datafusion_expr::lit(scalar_value))
             }
             Self::Expr(e) => e.try_as_logical_expr(),
+            Self::IcebergHash(f) => Ok(f.to_logical_expr()),
+        }
+    }
+
+    /// Whether this operand is a partition dimension that values are compared against.
+    fn is_dimension(&self) -> bool {
+        matches!(self, Self::Column(_) | Self::IcebergHash(_))
+    }
+
+    fn to_parser_expr(&self) -> ParserExpr {
+        // Safety: Partition rule won't contains unsupported value type.
+        // Otherwise it will be rejected by the parser.
+        match self {
+            Self::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
+            Self::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
+            Self::Expr(e) => e.to_parser_expr(),
+            Self::IcebergHash(f) => ParserExpr::Function(Function {
+                name: ObjectName::from(vec![Ident::new(IcebergHash::NAME)]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                        ParserExpr::Identifier(Ident::new(f.column())),
+                    ))],
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }),
         }
     }
 
@@ -142,6 +179,7 @@ impl Display for Operand {
             Self::Column(v) => write!(f, "{v}"),
             Self::Value(v) => write!(f, "{v}"),
             Self::Expr(v) => write!(f, "{v}"),
+            Self::IcebergHash(v) => write!(f, "{v}"),
         }
     }
 }
@@ -239,7 +277,7 @@ impl PartitionExpr {
             rhs: Box::new(rhs),
         };
 
-        if matches!(&*expr.lhs, Operand::Value(_)) && matches!(&*expr.rhs, Operand::Column(_)) {
+        if matches!(&*expr.lhs, Operand::Value(_)) && expr.rhs.is_dimension() {
             std::mem::swap(&mut expr.lhs, &mut expr.rhs);
             expr.op = expr.op.invert_for_swap();
         }
@@ -258,24 +296,10 @@ impl PartitionExpr {
     ///
     /// [Expr]: ParserExpr
     pub fn to_parser_expr(&self) -> ParserExpr {
-        // Safety: Partition rule won't contains unsupported value type.
-        // Otherwise it will be rejected by the parser.
-        let lhs = match &*self.lhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
-
-        let rhs = match &*self.rhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
-
         ParserExpr::BinaryOp {
-            left: Box::new(lhs),
+            left: Box::new(self.lhs.to_parser_expr()),
             op: self.op.to_parser_op(),
-            right: Box::new(rhs),
+            right: Box::new(self.rhs.to_parser_expr()),
         }
     }
 
@@ -284,10 +308,10 @@ impl PartitionExpr {
         // Batch routing and region filters treat a NULL result as false, so only the
         // comparisons that hold for NULL need an explicit `IS NULL`.
         let comparison = match (self.lhs.as_ref(), self.rhs.as_ref()) {
-            (column @ Operand::Column(_), Operand::Value(value)) => {
+            (column, Operand::Value(value)) if column.is_dimension() => {
                 Some((column, value, self.op.clone()))
             }
-            (Operand::Value(value), column @ Operand::Column(_)) => {
+            (Operand::Value(value), column) if column.is_dimension() => {
                 Some((column, value, self.op.invert_for_swap()))
             }
             _ => None,
@@ -355,32 +379,7 @@ impl PartitionExpr {
         &self,
         schema: &arrow::datatypes::SchemaRef,
     ) -> error::Result<Arc<dyn PhysicalExpr>> {
-        let df_schema = schema
-            .clone()
-            .to_dfschema_ref()
-            .context(error::ToDFSchemaSnafu)?;
-        let expr = self.try_as_logical_expr()?;
-        // Persisted partition bounds keep the unit (and type) they were created
-        // with, so after a schema change like widening the time index unit the
-        // expression may mix types with the columns it is evaluated against.
-        // Coerce it against the schema so comparisons share a common type, the
-        // same way `PredicateGroup` does for region partition filters.
-        let simplifier = ExprSimplifier::new(
-            SimplifyContext::builder()
-                .with_schema(df_schema.clone())
-                .build(),
-        );
-        let expr = simplifier
-            .coerce(expr, &df_schema)
-            .context(error::CoercePartitionExprSnafu)?;
-        let execution_props = &ExecutionProps::default();
-        create_physical_expr(
-            &expr,
-            &df_schema,
-            execution_props,
-            &PhysicalPlanningContext::default(),
-        )
-        .context(error::CreatePhysicalExprSnafu)
+        plan_physical_expr(self.try_as_logical_expr()?, schema)
     }
 
     pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {
@@ -432,9 +431,43 @@ impl PartitionExpr {
             Operand::Expr(e) => {
                 e.collect_column_names(columns);
             }
+            Operand::IcebergHash(f) => {
+                columns.insert(f.column().to_string());
+            }
             Operand::Value(_) => {}
         }
     }
+}
+
+/// Plans a logical partition expression for evaluation against `schema`.
+pub(crate) fn plan_physical_expr(
+    expr: Expr,
+    schema: &arrow::datatypes::SchemaRef,
+) -> error::Result<Arc<dyn PhysicalExpr>> {
+    let df_schema = schema
+        .clone()
+        .to_dfschema_ref()
+        .context(error::ToDFSchemaSnafu)?;
+    // Persisted partition bounds keep the unit (and type) they were created
+    // with, so after a schema change like widening the time index unit the
+    // expression may mix types with the columns it is evaluated against.
+    // Coerce it against the schema so comparisons share a common type, the
+    // same way `PredicateGroup` does for region partition filters.
+    let simplifier = ExprSimplifier::new(
+        SimplifyContext::builder()
+            .with_schema(df_schema.clone())
+            .build(),
+    );
+    let expr = simplifier
+        .coerce(expr, &df_schema)
+        .context(error::CoercePartitionExprSnafu)?;
+    create_physical_expr(
+        &expr,
+        &df_schema,
+        &ExecutionProps::default(),
+        &PhysicalPlanningContext::default(),
+    )
+    .context(error::CreatePhysicalExprSnafu)
 }
 
 impl Display for PartitionExpr {
@@ -814,6 +847,26 @@ mod tests {
     }
 
     #[test]
+    fn test_serde_iceberg_hash_partition_expr() {
+        let hash = Operand::IcebergHash(IcebergHash::new("host"));
+        let expr = hash.clone().lt(Value::Int32(0));
+        let json = expr.as_json_str().unwrap();
+        assert_eq!(
+            json,
+            r#"{"Expr":{"lhs":{"IcebergHash":"host"},"op":"Lt","rhs":{"Value":{"Int32":0}}}}"#
+        );
+        assert_eq!(PartitionExpr::from_json_str(&json).unwrap().unwrap(), expr);
+
+        let swapped =
+            r#"{"Expr":{"lhs":{"Value":{"Int32":0}},"op":"Gt","rhs":{"IcebergHash":"host"}}}"#;
+        assert_eq!(
+            PartitionExpr::from_json_str(swapped).unwrap().unwrap(),
+            expr
+        );
+        assert_eq!(expr.to_string(), "iceberg_hash(host) < 0");
+    }
+
+    #[test]
     fn test_collect_column_names() {
         // Simple expression: col_a = 1 should give {col_a}
         let expr = col("a").eq(Value::Int64(1));
@@ -854,10 +907,8 @@ mod tests {
         assert!(columns.contains("c"));
     }
 
-    /// Real serialized expressions must survive the round trip through
-    /// `common-meta`'s persisted-expression mirror: whenever that mirror drifts
-    /// from these types, deserialization fails, validation is skipped and the
-    /// overflowing cases below stop producing `PartitionExprIncompatible`.
+    /// `common-meta` mirrors these types to validate ALTERs. If the mirror drifts,
+    /// it can't parse the expressions and skips validation, which fails these cases.
     #[test]
     fn test_serialized_expressions_validate_against_type_changes() {
         let overflow_ms = serde_json::from_str::<Value>(
@@ -884,10 +935,7 @@ mod tests {
             HashMap::from([(column.to_string(), (old_type, new_type))])
         };
 
-        // Compile-time tripwire: exhaustively matching the operand and operator
-        // variants makes a new variant break this test at compile time, so the
-        // `partition_compat::Persisted*` mirror and these cases must be extended
-        // together instead of silently skipping validation.
+        // Fails to compile on a new variant, which the mirror must learn too.
         fn walk(expr: &PartitionExpr) {
             walk_operand(&expr.lhs);
             walk_operand(&expr.rhs);
@@ -904,13 +952,11 @@ mod tests {
         }
         fn walk_operand(operand: &Operand) {
             match operand {
-                Operand::Column(_) | Operand::Value(_) => {}
+                Operand::Column(_) | Operand::Value(_) | Operand::IcebergHash(_) => {}
                 Operand::Expr(expr) => walk(expr),
             }
         }
 
-        // Every expression shape must be rejected while the bound overflows
-        // nanoseconds, with the error naming the offending column.
         let simple = col("ts").lt(overflow_ms.clone());
         let nested_and = col("ts")
             .gt_eq(start_ms.clone())
@@ -920,7 +966,10 @@ mod tests {
             RestrictedOp::Or,
             Operand::Expr(col("ts").lt(overflow_ms.clone())),
         );
-        for expr in [&simple, &nested_and, &nested_or] {
+        let with_hash = col("ts")
+            .lt(overflow_ms.clone())
+            .and(Operand::IcebergHash(IcebergHash::new("host")).lt(Value::Int32(0)));
+        for expr in [&simple, &nested_and, &nested_or, &with_hash] {
             walk(expr);
             let err = validate_region_partition_bounds(
                 &changed("ts", ts_ms.clone(), ts_ns.clone()),
@@ -941,9 +990,6 @@ mod tests {
         validate_region_partition_bounds(&changed("ts", ts_ms, ts_ns), &routes(&compatible))
             .unwrap();
 
-        // Narrowing a field column must be rejected as well: the region's write
-        // path compares the persisted Int64 bound against Int32 rows directly
-        // and panics, even though the scan would coerce both sides.
         let narrowing = col("v").lt(Value::Int64(3_000_000_000));
         let err = validate_region_partition_bounds(
             &changed(
@@ -952,6 +998,25 @@ mod tests {
                 ConcreteDataType::int32_datatype(),
             ),
             &routes(&narrowing),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::PartitionExprIncompatible { ref column, .. } if column == "v"
+            ),
+            "unexpected error: {err}"
+        );
+
+        // The hash of a column depends on its type.
+        let hashed = Operand::IcebergHash(IcebergHash::new("v")).lt(Value::Int32(0));
+        let err = validate_region_partition_bounds(
+            &changed(
+                "v",
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+            ),
+            &routes(&hashed),
         )
         .unwrap_err();
         assert!(
