@@ -12,6 +12,62 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// Column names shared by the manifest SST schema and its scan consumers.
+pub mod manifest_columns {
+    /// Name of the `table_dir` column.
+    pub const TABLE_DIR: &str = "table_dir";
+    /// Name of the `region_id` column.
+    pub const REGION_ID: &str = "region_id";
+    /// Name of the `table_id` column.
+    pub const TABLE_ID: &str = "table_id";
+    /// Name of the `region_number` column.
+    pub const REGION_NUMBER: &str = "region_number";
+    /// Name of the `region_group` column.
+    pub const REGION_GROUP: &str = "region_group";
+    /// Name of the `region_sequence` column.
+    pub const REGION_SEQUENCE: &str = "region_sequence";
+    /// Name of the `file_id` column.
+    pub const FILE_ID: &str = "file_id";
+    /// Name of the `index_version` column.
+    pub const INDEX_VERSION: &str = "index_version";
+    /// Name of the `level` column.
+    pub const LEVEL: &str = "level";
+    /// Name of the `file_path` column.
+    pub const FILE_PATH: &str = "file_path";
+    /// Name of the `file_size` column.
+    pub const FILE_SIZE: &str = "file_size";
+    /// Name of the `index_file_path` column.
+    pub const INDEX_FILE_PATH: &str = "index_file_path";
+    /// Name of the `index_file_size` column.
+    pub const INDEX_FILE_SIZE: &str = "index_file_size";
+    /// Name of the `num_rows` column.
+    pub const NUM_ROWS: &str = "num_rows";
+    /// Name of the `num_row_groups` column.
+    pub const NUM_ROW_GROUPS: &str = "num_row_groups";
+    /// Name of the `num_series` column.
+    pub const NUM_SERIES: &str = "num_series";
+    /// Name of the `min_ts` column.
+    pub const MIN_TS: &str = "min_ts";
+    /// Name of the `max_ts` column.
+    pub const MAX_TS: &str = "max_ts";
+    /// Name of the `sequence` column.
+    pub const SEQUENCE: &str = "sequence";
+    /// Name of the `origin_region_id` column.
+    pub const ORIGIN_REGION_ID: &str = "origin_region_id";
+    /// Name of the `node_id` column.
+    pub const NODE_ID: &str = "node_id";
+    /// Name of the `visible` column.
+    pub const VISIBLE: &str = "visible";
+    /// Name of the `primary_key_min` column.
+    pub const PRIMARY_KEY_MIN: &str = "primary_key_min";
+    /// Name of the `primary_key_max` column.
+    pub const PRIMARY_KEY_MAX: &str = "primary_key_max";
+    /// Name of the `max_row_group_uncompressed_size` column.
+    pub const MAX_ROW_GROUP_UNCOMPRESSED_SIZE: &str = "max_row_group_uncompressed_size";
+    /// Name of the `partition_expr` column.
+    pub const PARTITION_EXPR: &str = "partition_expr";
+}
+
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -102,110 +158,210 @@ impl ManifestSstEntry {
     pub fn schema() -> SchemaRef {
         use datatypes::prelude::ConcreteDataType as Ty;
         Arc::new(Schema::new(vec![
-            ColumnSchema::new("table_dir", Ty::string_datatype(), false),
-            ColumnSchema::new("region_id", Ty::uint64_datatype(), false),
-            ColumnSchema::new("table_id", Ty::uint32_datatype(), false),
-            ColumnSchema::new("region_number", Ty::uint32_datatype(), false),
-            ColumnSchema::new("region_group", Ty::uint8_datatype(), false),
-            ColumnSchema::new("region_sequence", Ty::uint32_datatype(), false),
-            ColumnSchema::new("file_id", Ty::string_datatype(), false),
-            ColumnSchema::new("index_version", Ty::uint64_datatype(), false),
-            ColumnSchema::new("level", Ty::uint8_datatype(), false),
-            ColumnSchema::new("file_path", Ty::string_datatype(), false),
-            ColumnSchema::new("file_size", Ty::uint64_datatype(), false),
-            ColumnSchema::new("index_file_path", Ty::string_datatype(), true),
-            ColumnSchema::new("index_file_size", Ty::uint64_datatype(), true),
-            ColumnSchema::new("num_rows", Ty::uint64_datatype(), false),
-            ColumnSchema::new("num_row_groups", Ty::uint64_datatype(), false),
-            ColumnSchema::new("num_series", Ty::uint64_datatype(), true),
-            ColumnSchema::new("min_ts", Ty::timestamp_nanosecond_datatype(), true),
-            ColumnSchema::new("max_ts", Ty::timestamp_nanosecond_datatype(), true),
-            ColumnSchema::new("sequence", Ty::uint64_datatype(), true),
-            ColumnSchema::new("origin_region_id", Ty::uint64_datatype(), false),
-            ColumnSchema::new("node_id", Ty::uint64_datatype(), true),
-            ColumnSchema::new("visible", Ty::boolean_datatype(), false),
-            ColumnSchema::new("primary_key_min", Ty::binary_datatype(), true),
-            ColumnSchema::new("primary_key_max", Ty::binary_datatype(), true),
+            ColumnSchema::new(manifest_columns::TABLE_DIR, Ty::string_datatype(), false),
+            ColumnSchema::new(manifest_columns::REGION_ID, Ty::uint64_datatype(), false),
+            ColumnSchema::new(manifest_columns::TABLE_ID, Ty::uint32_datatype(), false),
             ColumnSchema::new(
-                "max_row_group_uncompressed_size",
+                manifest_columns::REGION_NUMBER,
+                Ty::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(manifest_columns::REGION_GROUP, Ty::uint8_datatype(), false),
+            ColumnSchema::new(
+                manifest_columns::REGION_SEQUENCE,
+                Ty::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(manifest_columns::FILE_ID, Ty::string_datatype(), false),
+            ColumnSchema::new(
+                manifest_columns::INDEX_VERSION,
                 Ty::uint64_datatype(),
                 false,
             ),
-            ColumnSchema::new("partition_expr", Ty::string_datatype(), true),
+            ColumnSchema::new(manifest_columns::LEVEL, Ty::uint8_datatype(), false),
+            ColumnSchema::new(manifest_columns::FILE_PATH, Ty::string_datatype(), false),
+            ColumnSchema::new(manifest_columns::FILE_SIZE, Ty::uint64_datatype(), false),
+            ColumnSchema::new(
+                manifest_columns::INDEX_FILE_PATH,
+                Ty::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                manifest_columns::INDEX_FILE_SIZE,
+                Ty::uint64_datatype(),
+                true,
+            ),
+            ColumnSchema::new(manifest_columns::NUM_ROWS, Ty::uint64_datatype(), false),
+            ColumnSchema::new(
+                manifest_columns::NUM_ROW_GROUPS,
+                Ty::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(manifest_columns::NUM_SERIES, Ty::uint64_datatype(), true),
+            ColumnSchema::new(
+                manifest_columns::MIN_TS,
+                Ty::timestamp_nanosecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                manifest_columns::MAX_TS,
+                Ty::timestamp_nanosecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(manifest_columns::SEQUENCE, Ty::uint64_datatype(), true),
+            ColumnSchema::new(
+                manifest_columns::ORIGIN_REGION_ID,
+                Ty::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(manifest_columns::NODE_ID, Ty::uint64_datatype(), true),
+            ColumnSchema::new(manifest_columns::VISIBLE, Ty::boolean_datatype(), false),
+            ColumnSchema::new(
+                manifest_columns::PRIMARY_KEY_MIN,
+                Ty::binary_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                manifest_columns::PRIMARY_KEY_MAX,
+                Ty::binary_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                manifest_columns::MAX_ROW_GROUP_UNCOMPRESSED_SIZE,
+                Ty::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                manifest_columns::PARTITION_EXPR,
+                Ty::string_datatype(),
+                true,
+            ),
         ]))
     }
 
     /// Converts a list of manifest sst entries to a record batch.
     pub fn to_record_batch(entries: &[Self]) -> std::result::Result<DfRecordBatch, ArrowError> {
-        let schema = Self::schema();
-        let table_dirs = entries.iter().map(|e| e.table_dir.as_str());
-        let region_ids = entries.iter().map(|e| e.region_id.as_u64());
-        let table_ids = entries.iter().map(|e| e.table_id);
-        let region_numbers = entries.iter().map(|e| e.region_number);
-        let region_groups = entries.iter().map(|e| e.region_group);
-        let region_sequences = entries.iter().map(|e| e.region_sequence);
-        let file_ids = entries.iter().map(|e| e.file_id.as_str());
-        let index_versions = entries.iter().map(|e| e.index_version);
-        let levels = entries.iter().map(|e| e.level);
-        let file_paths = entries.iter().map(|e| e.file_path.as_str());
-        let file_sizes = entries.iter().map(|e| e.file_size);
-        let max_row_group_uncompressed_sizes =
-            entries.iter().map(|e| e.max_row_group_uncompressed_size);
-        let index_file_paths = entries.iter().map(|e| e.index_file_path.as_ref());
-        let index_file_sizes = entries.iter().map(|e| e.index_file_size);
-        let num_rows = entries.iter().map(|e| e.num_rows);
-        let num_row_groups = entries.iter().map(|e| e.num_row_groups);
-        let num_series = entries.iter().map(|e| e.num_series);
-        let min_ts = entries.iter().map(|e| {
-            e.min_ts
-                .convert_to(TimeUnit::Nanosecond)
-                .map(|ts| ts.value())
-        });
-        let max_ts = entries.iter().map(|e| {
-            e.max_ts
-                .convert_to(TimeUnit::Nanosecond)
-                .map(|ts| ts.value())
-        });
-        let sequences = entries.iter().map(|e| e.sequence);
-        let partition_exprs = entries.iter().map(|e| e.partition_expr.as_ref());
-        let origin_region_ids = entries.iter().map(|e| e.origin_region_id.as_u64());
-        let node_ids = entries.iter().map(|e| e.node_id);
-        let visible_flags = entries.iter().map(|e| Some(e.visible));
-        let primary_key_min = entries.iter().map(|e| e.primary_key_min.as_deref());
-        let primary_key_max = entries.iter().map(|e| e.primary_key_max.as_deref());
+        Self::to_projected_record_batch(entries, None)
+    }
 
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from_iter_values(table_dirs)),
-            Arc::new(UInt64Array::from_iter_values(region_ids)),
-            Arc::new(UInt32Array::from_iter_values(table_ids)),
-            Arc::new(UInt32Array::from_iter_values(region_numbers)),
-            Arc::new(UInt8Array::from_iter_values(region_groups)),
-            Arc::new(UInt32Array::from_iter_values(region_sequences)),
-            Arc::new(StringArray::from_iter_values(file_ids)),
-            Arc::new(UInt64Array::from_iter(index_versions)),
-            Arc::new(UInt8Array::from_iter_values(levels)),
-            Arc::new(StringArray::from_iter_values(file_paths)),
-            Arc::new(UInt64Array::from_iter_values(file_sizes)),
-            Arc::new(StringArray::from_iter(index_file_paths)),
-            Arc::new(UInt64Array::from_iter(index_file_sizes)),
-            Arc::new(UInt64Array::from_iter_values(num_rows)),
-            Arc::new(UInt64Array::from_iter_values(num_row_groups)),
-            Arc::new(UInt64Array::from_iter(num_series)),
-            Arc::new(TimestampNanosecondArray::from_iter(min_ts)),
-            Arc::new(TimestampNanosecondArray::from_iter(max_ts)),
-            Arc::new(UInt64Array::from_iter(sequences)),
-            Arc::new(UInt64Array::from_iter_values(origin_region_ids)),
-            Arc::new(UInt64Array::from_iter(node_ids)),
-            Arc::new(BooleanArray::from_iter(visible_flags)),
-            Arc::new(BinaryArray::from_iter(primary_key_min)),
-            Arc::new(BinaryArray::from_iter(primary_key_max)),
-            Arc::new(UInt64Array::from_iter_values(
-                max_row_group_uncompressed_sizes,
-            )),
-            Arc::new(StringArray::from_iter(partition_exprs)),
-        ];
-
-        DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
+    /// Builds only the requested columns, including empty and repeated projections.
+    pub fn to_projected_record_batch(
+        entries: &[Self],
+        projection: Option<&[usize]>,
+    ) -> std::result::Result<DfRecordBatch, ArrowError> {
+        let schema = Self::schema().arrow_schema().clone();
+        let schema = match projection {
+            Some(projection) => Arc::new(schema.project(projection)?),
+            None => schema,
+        };
+        let columns = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let array: ArrayRef = match field.name().as_str() {
+                    manifest_columns::TABLE_DIR => Arc::new(StringArray::from_iter_values(
+                        entries.iter().map(|e| e.table_dir.as_str()),
+                    )),
+                    manifest_columns::REGION_ID => Arc::new(UInt64Array::from_iter_values(
+                        entries.iter().map(|e| e.region_id.as_u64()),
+                    )),
+                    manifest_columns::TABLE_ID => Arc::new(UInt32Array::from_iter_values(
+                        entries.iter().map(|e| e.table_id),
+                    )),
+                    manifest_columns::REGION_NUMBER => Arc::new(UInt32Array::from_iter_values(
+                        entries.iter().map(|e| e.region_number),
+                    )),
+                    manifest_columns::REGION_GROUP => Arc::new(UInt8Array::from_iter_values(
+                        entries.iter().map(|e| e.region_group),
+                    )),
+                    manifest_columns::REGION_SEQUENCE => Arc::new(UInt32Array::from_iter_values(
+                        entries.iter().map(|e| e.region_sequence),
+                    )),
+                    manifest_columns::FILE_ID => Arc::new(StringArray::from_iter_values(
+                        entries.iter().map(|e| e.file_id.as_str()),
+                    )),
+                    manifest_columns::INDEX_VERSION => Arc::new(UInt64Array::from_iter(
+                        entries.iter().map(|e| e.index_version),
+                    )),
+                    manifest_columns::LEVEL => Arc::new(UInt8Array::from_iter_values(
+                        entries.iter().map(|e| e.level),
+                    )),
+                    manifest_columns::FILE_PATH => Arc::new(StringArray::from_iter_values(
+                        entries.iter().map(|e| e.file_path.as_str()),
+                    )),
+                    manifest_columns::FILE_SIZE => Arc::new(UInt64Array::from_iter_values(
+                        entries.iter().map(|e| e.file_size),
+                    )),
+                    manifest_columns::INDEX_FILE_PATH => Arc::new(StringArray::from_iter(
+                        entries.iter().map(|e| e.index_file_path.as_ref()),
+                    )),
+                    manifest_columns::INDEX_FILE_SIZE => Arc::new(UInt64Array::from_iter(
+                        entries.iter().map(|e| e.index_file_size),
+                    )),
+                    manifest_columns::NUM_ROWS => Arc::new(UInt64Array::from_iter_values(
+                        entries.iter().map(|e| e.num_rows),
+                    )),
+                    manifest_columns::NUM_ROW_GROUPS => Arc::new(UInt64Array::from_iter_values(
+                        entries.iter().map(|e| e.num_row_groups),
+                    )),
+                    manifest_columns::NUM_SERIES => {
+                        Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.num_series)))
+                    }
+                    manifest_columns::MIN_TS => Arc::new(TimestampNanosecondArray::from_iter(
+                        entries.iter().map(|e| {
+                            e.min_ts
+                                .convert_to(TimeUnit::Nanosecond)
+                                .map(|ts| ts.value())
+                        }),
+                    )),
+                    manifest_columns::MAX_TS => Arc::new(TimestampNanosecondArray::from_iter(
+                        entries.iter().map(|e| {
+                            e.max_ts
+                                .convert_to(TimeUnit::Nanosecond)
+                                .map(|ts| ts.value())
+                        }),
+                    )),
+                    manifest_columns::SEQUENCE => {
+                        Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.sequence)))
+                    }
+                    manifest_columns::ORIGIN_REGION_ID => Arc::new(UInt64Array::from_iter_values(
+                        entries.iter().map(|e| e.origin_region_id.as_u64()),
+                    )),
+                    manifest_columns::NODE_ID => {
+                        Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.node_id)))
+                    }
+                    manifest_columns::VISIBLE => Arc::new(BooleanArray::from_iter(
+                        entries.iter().map(|e| Some(e.visible)),
+                    )),
+                    manifest_columns::PRIMARY_KEY_MIN => Arc::new(BinaryArray::from_iter(
+                        entries.iter().map(|e| e.primary_key_min.as_deref()),
+                    )),
+                    manifest_columns::PRIMARY_KEY_MAX => Arc::new(BinaryArray::from_iter(
+                        entries.iter().map(|e| e.primary_key_max.as_deref()),
+                    )),
+                    manifest_columns::MAX_ROW_GROUP_UNCOMPRESSED_SIZE => {
+                        Arc::new(UInt64Array::from_iter_values(
+                            entries.iter().map(|e| e.max_row_group_uncompressed_size),
+                        ))
+                    }
+                    manifest_columns::PARTITION_EXPR => Arc::new(StringArray::from_iter(
+                        entries.iter().map(|e| e.partition_expr.as_ref()),
+                    )),
+                    name => {
+                        return Err(ArrowError::SchemaError(format!(
+                            "Unknown manifest SST column: {name}"
+                        )));
+                    }
+                };
+                Ok(array)
+            })
+            .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
+        DfRecordBatch::try_new_with_options(
+            schema,
+            columns,
+            &datatypes::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(entries.len())),
+        )
     }
 
     /// Reserved internal inspect table name.
@@ -421,11 +577,23 @@ fn build_plan_helper(
 ) -> Result<LogicalPlan, DataFusionError> {
     let table_source = LogicalTableSource::new(schema.arrow_schema().clone());
 
+    // Filters may reference columns omitted from the requested output. Apply
+    // them to the full schema and let the optimizer push the minimal projection.
     let projection = scan_request.projection;
-    let mut builder = LogicalPlanBuilder::scan(table_name, Arc::new(table_source), projection)?;
+    let mut builder = LogicalPlanBuilder::scan(table_name, Arc::new(table_source), None)?;
 
     for filter in scan_request.filters {
         builder = builder.filter(filter)?;
+    }
+
+    if let Some(projection) = projection {
+        let projected = schema.arrow_schema().project(&projection)?;
+        builder = builder.project(
+            projected
+                .fields()
+                .iter()
+                .map(|field| datafusion_expr::col(field.name())),
+        )?;
     }
 
     if let Some(limit) = scan_request.limit {
@@ -438,7 +606,7 @@ fn build_plan_helper(
 #[cfg(test)]
 mod tests {
     use datafusion_common::TableReference;
-    use datafusion_expr::{LogicalPlan, Operator, binary_expr, col, lit};
+    use datafusion_expr::{Expr, LogicalPlan, Operator, binary_expr, col, lit};
     use datatypes::arrow::array::{
         Array, BinaryArray, TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array,
         UInt32Array, UInt64Array,
@@ -523,6 +691,13 @@ mod tests {
 
         let schema = ManifestSstEntry::schema();
         let batch = ManifestSstEntry::to_record_batch(&entries).unwrap();
+        for projection in [vec![], vec![16, 6, 10], vec![1, 1], (0..26).rev().collect()] {
+            let projected =
+                ManifestSstEntry::to_projected_record_batch(&entries, Some(&projection)).unwrap();
+            assert_eq!(projected, batch.project(&projection).unwrap());
+            assert_eq!(projected.num_rows(), entries.len());
+        }
+        assert!(ManifestSstEntry::to_projected_record_batch(&entries, Some(&[26])).is_err());
 
         // Schema checks
         assert_eq!(schema.arrow_schema().fields().len(), batch.num_columns());
@@ -1021,35 +1196,46 @@ mod tests {
 
     #[test]
     fn test_manifest_build_plan() {
-        // Note: filter must reference a column in the projected schema
-        let projection = Some(vec![0, 1, 2]);
         let request = ScanRequest {
-            projection,
-            filters: vec![binary_expr(col("table_id"), Operator::Gt, lit(0))],
+            projection: Some(vec![0, 1]),
+            filters: vec![col("table_id").gt(lit(0u32))],
             limit: Some(5),
             ..Default::default()
         };
 
         let plan = ManifestSstEntry::build_plan(request).unwrap();
 
-        // Expect plan to be Filter -> Limit -> TableScan or Filter+Limit wrapped.
-        // We'll pattern match to reach TableScan and verify key fields.
-        let (scan, has_filter, has_limit) = extract_scan(&plan);
-
-        assert!(has_filter);
-        assert!(has_limit);
+        // The hidden table_id predicate must run before projection and limit.
+        let LogicalPlan::Limit(limit) = &plan else {
+            panic!("expected limit")
+        };
+        let LogicalPlan::Projection(projection) = limit.input.as_ref() else {
+            panic!("expected projection")
+        };
+        let LogicalPlan::Filter(filter) = projection.input.as_ref() else {
+            panic!("expected filter")
+        };
+        let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
+            panic!("expected table scan")
+        };
         assert_eq!(
             scan.table_name,
             TableReference::bare(ManifestSstEntry::reserved_table_name_for_inspection())
         );
-        assert_eq!(scan.projection, Some(vec![0, 1, 2]));
+        assert_eq!(scan.projection, None);
+        assert_eq!(
+            filter.predicate,
+            Expr::Column(datafusion_common::Column::new(
+                Some(scan.table_name.clone()),
+                "table_id",
+            ))
+            .gt(lit(0u32))
+        );
 
-        // projected schema should match projection
-        let fields = scan.projected_schema.fields();
-        assert_eq!(fields.len(), 3);
+        let fields = plan.schema().fields();
+        assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name(), "table_dir");
         assert_eq!(fields[1].name(), "region_id");
-        assert_eq!(fields[2].name(), "table_id");
     }
 
     #[test]
@@ -1070,9 +1256,9 @@ mod tests {
             scan.table_name,
             TableReference::bare(StorageSstEntry::reserved_table_name_for_inspection())
         );
-        assert_eq!(scan.projection, Some(vec![0, 2]));
+        assert_eq!(scan.projection, None);
 
-        let fields = scan.projected_schema.fields();
+        let fields = plan.schema().fields();
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name(), "file_path");
         assert_eq!(fields[1].name(), "last_modified_ms");
@@ -1091,6 +1277,7 @@ mod tests {
                 let (scan, has_filter, _) = extract_scan(input);
                 (scan, has_filter, true)
             }
+            LogicalPlan::Projection(projection) => extract_scan(&projection.input),
             LogicalPlan::TableScan(scan) => (scan, false, false),
             other => panic!("unexpected plan: {other:?}"),
         }

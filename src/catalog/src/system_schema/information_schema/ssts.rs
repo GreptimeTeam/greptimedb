@@ -82,6 +82,12 @@ impl InformationTable for InformationSchemaSstsManifest {
 }
 
 impl SystemTable for InformationSchemaSstsManifest {
+    fn filter_pushdown_type(&self) -> table::metadata::FilterPushDownType {
+        // Both standalone and distributed inspection execute the complete logical
+        // filter on the datanode before projecting or limiting the results.
+        table::metadata::FilterPushDownType::Exact
+    }
+
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_SSTS_MANIFEST_TABLE_ID
     }
@@ -348,6 +354,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+
+        let filter =
+            datafusion::logical_expr::col("region_id").eq(datafusion::logical_expr::lit(42_u64));
+        assert_eq!(
+            table.supports_filters_pushdown(&[&filter]).unwrap(),
+            vec![table::metadata::FilterPushDownType::Exact],
+        );
 
         let request = ScanRequest {
             projection: Some(vec![0]),
