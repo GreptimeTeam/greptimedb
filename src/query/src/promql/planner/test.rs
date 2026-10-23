@@ -2014,6 +2014,23 @@ async fn native_fused_topk_declines_a_partitioned_table() {
     );
 }
 
+/// The other series-selecting operations are not rankings over a per-series prefix, and the
+/// existing planner already refuses them. The native route neither admits nor changes them: with
+/// the flag on, the query fails with the same answer it fails with when the flag is off.
+#[tokio::test]
+async fn native_fused_limit_operations_keep_the_existing_answer() {
+    for query in ["limitk(2, some_metric)", "limit_ratio(0.5, some_metric)"] {
+        let native =
+            build_native_fused_plan_error(query, true, native_engine_provider(vec![]).await).await;
+        let legacy =
+            build_native_fused_plan_error(query, false, native_engine_provider(vec![]).await).await;
+        assert_eq!(
+            native, legacy,
+            "`{query}` must answer exactly what it answers without the flag"
+        );
+    }
+}
+
 /// Metric logical scans retain their table-id restriction on the direct fused scan input.
 #[tokio::test]
 async fn native_fused_metric_engine_table_is_accepted() {
@@ -2265,8 +2282,6 @@ async fn native_fused_whole_vector_operation_falls_back() {
     for query in [
         "sort(some_metric)",
         "count_values(\"v\", some_metric)",
-        "limitk(2, some_metric)",
-        "limit_ratio(0.5, some_metric)",
         "topk(2, sum(rate(some_metric[5m])))",
         "absent(some_metric)",
     ] {
