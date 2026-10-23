@@ -364,7 +364,6 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
         run: |
-          sudo apt-get install -y libfuzzer-14-dev
           cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
       - name: Build fuzz target binaries
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
