@@ -437,8 +437,8 @@ pub(crate) struct MemtableBuilderProvider {
     compact_dispatcher: Arc<CompactDispatcher>,
 }
 
-/// Ensures JSON2 columns are not used with [`TimeSeriesMemtable`].
-pub(crate) fn ensure_json2_not_use_time_series_memtable(
+/// Ensures JSON2 columns use flat SST output after resolving the SST format.
+pub(crate) fn ensure_json2_uses_flat_format(
     metadata: &RegionMetadata,
     options: &RegionOptions,
 ) -> Result<()> {
@@ -447,10 +447,11 @@ pub(crate) fn ensure_json2_not_use_time_series_memtable(
         .iter()
         .any(|x| x.column_schema.data_type.is_json2())
     {
+        // Bulk memtables alone do not ensure the SST writer supports JSON2.
         ensure!(
-            !matches!(&options.memtable, Some(MemtableOptions::TimeSeries)),
+            options.sst_format == Some(FormatType::Flat),
             InvalidRegionOptionsSnafu {
-                reason: "JSON2 columns only support BulkMemtable",
+                reason: "JSON2 columns require sst_format=flat",
             }
         );
     }
@@ -994,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json2_requires_bulk_memtable() -> WhateverResult<()> {
+    fn test_json2_requires_flat_format() -> WhateverResult<()> {
         let mut metadata = sst_region_metadata();
         metadata.column_metadatas[2].column_schema.data_type =
             ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
@@ -1005,14 +1006,28 @@ mod tests {
             ..Default::default()
         };
 
-        let err = ensure_json2_not_use_time_series_memtable(&metadata, &options).unwrap_err();
+        let err = ensure_json2_uses_flat_format(&metadata, &options).unwrap_err();
         assert!(
             err.to_string()
-                .contains("JSON2 columns only support BulkMemtable")
+                .contains("JSON2 columns require sst_format=flat")
         );
 
+        options.memtable = None;
+        assert!(ensure_json2_uses_flat_format(&metadata, &options).is_err());
+
         options.memtable = Some(MemtableOptions::Bulk(BulkMemtableConfig::default()));
-        ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        assert!(ensure_json2_uses_flat_format(&metadata, &options).is_err());
+
+        options.memtable = Some(MemtableOptions::TimeSeries);
+        options.sst_format = Some(FormatType::Flat);
+        ensure_json2_uses_flat_format(&metadata, &options)?;
+
+        options.sst_format = Some(FormatType::PrimaryKey);
+        options.primary_key_encoding = Some(PrimaryKeyEncoding::Sparse);
+        assert!(ensure_json2_uses_flat_format(&metadata, &options).is_err());
+
+        options.sst_format = Some(FormatType::Flat);
+        ensure_json2_uses_flat_format(&metadata, &options)?;
         Ok(())
     }
 }
