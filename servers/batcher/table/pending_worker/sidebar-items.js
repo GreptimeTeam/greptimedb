@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WorkerCommand"],"fn":["drain_batch","spawn_flush","start_worker"],"struct":["BatchIdentity","PendingWorker"]};

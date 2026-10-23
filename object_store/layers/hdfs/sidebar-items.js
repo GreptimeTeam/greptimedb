@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AtomicRenamer","HdfsWriterInner"],"fn":["abort_and_delete","copy_via_read_write","delete_path","hdfs_error","temporary_path","writer_unavailable"],"struct":["HdfsCompatibilityLayer","HdfsCompatibilityService","HdfsWriter"]};

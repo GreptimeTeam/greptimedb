@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RegionServerEvent"],"fn":["new_region_server_event_channel"],"struct":["NoopRegionServerEventListener","RegionServerEventReceiver","RegionServerEventSender"],"trait":["RegionServerEventListener"],"type":["RegionServerEventListenerRef"]};

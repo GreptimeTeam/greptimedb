@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PersistedOp","PersistedOperand","PersistedPartitionBound"],"fn":["changed_column_types","validate_comparison","validate_expr","validate_operand","validate_region_partition_bounds","value_to_scalar_value"],"struct":["PersistedPartitionExpr"]};

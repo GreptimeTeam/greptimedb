@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ACCEPT_PARTIAL_RESULT"],"fn":["set_accept_partial_result"],"struct":["BatchRegionResponse","RegionResponse"]};

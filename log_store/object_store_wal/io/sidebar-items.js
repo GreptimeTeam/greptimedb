@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LISTING_AHEAD_OBJECTS","OBJECT_SEQ_WIDTH","OBJECT_SUFFIX"],"enum":["PutResult"],"fn":["normalize_prefix","reports_existing_object","settle_listing"],"struct":["ListedObject","ObjectStoreIo"]};

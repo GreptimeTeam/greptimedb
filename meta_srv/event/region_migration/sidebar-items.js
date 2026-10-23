@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REGION_MIGRATION_EVENT_TYPE"],"struct":["Payload","RegionMigrationEvent"]};

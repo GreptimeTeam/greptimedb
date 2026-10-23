@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["error","events","frontend","heartbeat","instance","metrics","server","service_config","stream_wrapper"],"struct":["OTLP_METRICS_ROWS","OTLP_RESOURCE_INFO_WRITE_ERRORS"]};
