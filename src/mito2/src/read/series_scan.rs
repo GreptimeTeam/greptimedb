@@ -45,6 +45,7 @@ use crate::error::{
     Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
+use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
 use crate::read::scan_region::{ScanInput, StreamContext};
@@ -493,6 +494,15 @@ impl SeriesScan {
                 range_meta.indices.len()
             })
             .sum();
+
+        if !self.stream_ctx.input.compaction {
+            SCAN_MAX_CONCURRENT_FILES
+                .with_label_values(&["query"])
+                .observe(total_files as f64);
+        }
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
 
         let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
         if total_files > max_concurrent_files {
