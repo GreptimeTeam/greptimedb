@@ -321,9 +321,10 @@ fn set_string_at(vector: VectorRef, row_index: usize, value: &str) -> VectorRef 
 }
 
 /// Incremental scan of raw CSV bytes recording, per completed record,
-/// whether each field was quoted. Mirrors the decoder's record and field
-/// splitting rules (delimiter, quoting, escapes, CRLF/LF ends) so the
-/// masks align with its output; field VALUES are not materialized.
+/// whether each field was quoted. Mirrors the decoder's own splitting
+/// rules — delimiter, quoting, escapes, LF/CRLF/CR record ends, blank
+/// lines skipped, chunk-boundary carry — so the masks align with its
+/// output; field VALUES are not materialized.
 struct QuoteMaskScanner {
     delimiter: u8,
     quote: u8,
@@ -384,11 +385,11 @@ impl QuoteMaskScanner {
                     } else if b == self.delimiter {
                         self.fields.push(false);
                         idx += 1;
-                    } else if is_record_end(b, next) {
+                    } else if is_record_end(b) {
                         if let Some(record) = self.end_record() {
                             records.push(record);
                         }
-                        idx += record_end_len(b);
+                        idx += record_end_len(b, next);
                     } else if is_incomplete_record_end(b, next) {
                         self.carry = Some(b);
                         return records;
@@ -402,11 +403,11 @@ impl QuoteMaskScanner {
                     if b == self.delimiter {
                         self.state = MaskState::FieldStart;
                         idx += 1;
-                    } else if is_record_end(b, next) {
+                    } else if is_record_end(b) {
                         if let Some(record) = self.end_record() {
                             records.push(record);
                         }
-                        idx += record_end_len(b);
+                        idx += record_end_len(b, next);
                     } else if is_incomplete_record_end(b, next) {
                         self.carry = Some(b);
                         return records;
@@ -442,11 +443,11 @@ impl QuoteMaskScanner {
                     } else if b == self.delimiter {
                         self.state = MaskState::FieldStart;
                         idx += 1;
-                    } else if is_record_end(b, next) {
+                    } else if is_record_end(b) {
                         if let Some(record) = self.end_record() {
                             records.push(record);
                         }
-                        idx += record_end_len(b);
+                        idx += record_end_len(b, next);
                     } else if is_incomplete_record_end(b, next) {
                         self.carry = Some(b);
                         return records;
@@ -478,7 +479,12 @@ impl QuoteMaskScanner {
     fn end_record(&mut self) -> Option<Vec<bool>> {
         self.state = MaskState::FieldStart;
         let record = std::mem::take(&mut self.fields);
-        if self.skip_first && !self.header_seen {
+        if record.is_empty() {
+            // A completely blank line produces no decoded row (csv-core
+            // skips it): no mask, and the header expectation is not
+            // consumed either.
+            None
+        } else if self.skip_first && !self.header_seen {
             // The header record produces no data row; drop its mask.
             self.header_seen = true;
             None
@@ -488,16 +494,23 @@ impl QuoteMaskScanner {
     }
 }
 
-fn is_record_end(b: u8, next: Option<u8>) -> bool {
-    b == b'\n' || (b == b'\r' && next == Some(b'\n'))
+/// The decoder accepts LF, CRLF, and CR alone as record terminators.
+fn is_record_end(b: u8) -> bool {
+    b == b'\n' || b == b'\r'
 }
 
+/// A `\r` at the end of a chunk may still turn into CRLF once the next
+/// chunk arrives; defer it via `carry` instead of guessing.
 fn is_incomplete_record_end(b: u8, next: Option<u8>) -> bool {
     b == b'\r' && next.is_none()
 }
 
-fn record_end_len(b: u8) -> usize {
-    if b == b'\r' { 2 } else { 1 }
+fn record_end_len(b: u8, next: Option<u8>) -> usize {
+    if b == b'\r' && next == Some(b'\n') {
+        2
+    } else {
+        1
+    }
 }
 
 /// Parses PostgreSQL's boolean spellings: `true`/`false`, `t`/`f`,
@@ -930,6 +943,134 @@ mod tests {
         assert_eq!(millis(&rows[1]), 1704038400000);
         // Explicit Z: parsed as UTC regardless of the session zone.
         assert_eq!(millis(&rows[2]), 1704067200000);
+    }
+
+    #[test]
+    fn test_csv_blank_lines_keep_masks_aligned() {
+        // csv-core skips blank lines; the scanner must not emit a mask
+        // for them (before, between or after records — and before a
+        // header), or every later row consumes the wrong mask.
+        let columns = vec![
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let payload: Vec<u8> = b"\n\"\",2024-01-01 00:00:00\n\n,2024-01-01 00:00:01\n".to_vec();
+        for chunk in [1usize, 2, 3, 5, 7, 11, 64] {
+            let mut parser = build_csv_codec(CopyOptionSet::default())
+                .unwrap()
+                .create_parser(&columns, "UTC")
+                .unwrap();
+            let mut rows = Vec::new();
+            for c in payload.chunks(chunk) {
+                rows.extend(parser.feed(c).unwrap());
+            }
+            rows.extend(parser.finish().unwrap());
+            assert_eq!(rows.len(), 2, "chunk={chunk}");
+            assert!(
+                matches!(
+                    rows[0].values[0].value_data,
+                    Some(api::v1::value::ValueData::StringValue(ref s)) if s.is_empty()
+                ),
+                "chunk={chunk}: row 0 quoted empty must be an empty string, got {:?}",
+                rows[0].values[0].value_data
+            );
+            assert!(
+                rows[1].values[0].value_data.is_none(),
+                "chunk={chunk}: row 1 unquoted empty must be NULL, got {:?}",
+                rows[1].values[0].value_data
+            );
+        }
+
+        // A blank line before the header must not shift the header's
+        // position either.
+        let mut set = CopyOptionSet::default();
+        set.insert("header".into(), CopyOptionValue::Flag).unwrap();
+        let mut parser = build_csv_codec(set)
+            .unwrap()
+            .create_parser(&columns, "UTC")
+            .unwrap();
+        let rows = feed_all(&mut parser, &[b"\nnote,ts\n\"\",2024-01-01 00:00:00\n"]);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0].values[0].value_data,
+            Some(api::v1::value::ValueData::StringValue(ref s)) if s.is_empty()
+        ));
+
+        // NOT NULL behavior with a leading blank line: the quoted empty
+        // still restores to an empty string instead of tripping the
+        // constraint through the blank line's (wrong) mask.
+        let not_null_columns = vec![
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&not_null_columns, "UTC")
+            .unwrap();
+        let rows = feed_all(&mut parser, &[b"\n\"\",2024-01-01 00:00:00\n"]);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0].values[0].value_data,
+            Some(api::v1::value::ValueData::StringValue(ref s)) if s.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_csv_cr_only_record_separators() {
+        // The decoder accepts CR alone as a record terminator, just like
+        // LF and CRLF; the scanner must too, or it emits fewer masks
+        // than the decoder emits rows.
+        let columns = vec![
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        // CR-only, then CRLF, then LF — mixed terminators in one stream.
+        let payload: Vec<u8> =
+            b"\"\",2024-01-01 00:00:00\r\"\",2024-01-01 00:00:01\r\n\"\",2024-01-01 00:00:02\n"
+                .to_vec();
+        for chunk in [1usize, 2, 3, 5, 7, 11, 64] {
+            let mut parser = build_csv_codec(CopyOptionSet::default())
+                .unwrap()
+                .create_parser(&columns, "UTC")
+                .unwrap();
+            let mut rows = Vec::new();
+            for c in payload.chunks(chunk) {
+                rows.extend(parser.feed(c).unwrap());
+            }
+            rows.extend(parser.finish().unwrap());
+            assert_eq!(rows.len(), 3, "chunk={chunk}");
+            for (i, row) in rows.iter().enumerate() {
+                assert!(
+                    matches!(
+                        row.values[0].value_data,
+                        Some(api::v1::value::ValueData::StringValue(ref s)) if s.is_empty()
+                    ),
+                    "chunk={chunk}: row {i} quoted empty must be an empty string, got {:?}",
+                    row.values[0].value_data
+                );
+            }
+        }
+
+        // A CR-only terminator at the very end of the stream (no LF
+        // following) must also complete the trailing record.
+        let mut parser = build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&columns, "UTC")
+            .unwrap();
+        let rows = feed_all(&mut parser, &[b"x,2024-01-01 00:00:00\r"]);
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
