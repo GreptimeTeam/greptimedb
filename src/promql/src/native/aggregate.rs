@@ -38,7 +38,7 @@ use crate::aggregate::{AggregateOp, FloatAggregator, Grouping};
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::series_bytes;
 use crate::map::validate_float_series;
-use crate::native::execute::{evaluated_bytes, NodeBuffer};
+use crate::native::execute::{NodeBuffer, evaluated_bytes};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, Grouping as BoundGrouping,
 };
