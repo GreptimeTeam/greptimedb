@@ -765,10 +765,11 @@ mod tests {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit as DfMemoryLimit};
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
     use datafusion_common::config::SpillCompression;
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
 
     use super::*;
     use crate::options::{QueryOptions, QuerySpillCompression, QuerySpillMode};
+    use crate::planner::LogicalPlanner;
     use crate::query_engine::runtime::{
         DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider,
         QueryRuntimeProviderRef,
@@ -790,6 +791,53 @@ mod tests {
             plugins,
             options,
         )
+    }
+
+    struct RecordingAnalyzer(Arc<std::sync::Mutex<Option<(bool, usize)>>>);
+
+    impl ExtensionAnalyzerRule for RecordingAnalyzer {
+        fn analyze(
+            &self,
+            plan: DfLogicalPlan,
+            _ctx: &QueryEngineContext,
+            config: &datafusion_common::config::ConfigOptions,
+        ) -> DfResult<DfLogicalPlan> {
+            *self.0.lock().unwrap() = Some((
+                config.optimizer.prefer_hash_join,
+                config.execution.target_partitions,
+            ));
+            Ok(plan)
+        }
+    }
+
+    #[tokio::test]
+    async fn extension_analyzer_receives_query_specific_options() {
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut state = new_query_engine_state();
+        state
+            .extension_rules
+            .push(Arc::new(RecordingAnalyzer(observed.clone())));
+        let state = Arc::new(state);
+
+        let query_ctx = QueryContextBuilder::default().build();
+        query_ctx
+            .configuration_parameter()
+            .set_query_option("datafusion.optimizer.prefer_hash_join", "false")
+            .unwrap();
+        query_ctx
+            .configuration_parameter()
+            .set_query_option("query.parallelism", "2")
+            .unwrap();
+        let query_ctx = Arc::new(query_ctx);
+        let statement =
+            crate::parser::QueryLanguageParser::parse_sql("SELECT 1", &query_ctx).unwrap();
+
+        crate::planner::DfLogicalPlanner::new(state)
+            .plan(&statement, query_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(*observed.lock().unwrap(), Some((false, 2)));
     }
 
     struct TestRuntimeProvider {
@@ -906,6 +954,15 @@ mod tests {
 
         assert!(provider.configure_called.load(Ordering::SeqCst));
         assert_eq!(7, state.session_state().config().target_partitions());
+        assert!(
+            !state
+                .session_state()
+                .config()
+                .options()
+                .optimizer
+                .filter_null_join_keys,
+            "DataFusion's main optimizer default remains disabled"
+        );
         assert_eq!(
             SpillCompression::Zstd,
             state
