@@ -55,6 +55,7 @@ use crate::statements::create::{
     CreateTableLike, CreateView, Partitions, SqlOrTql, TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
+use crate::statements::tql::Tql;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
 use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
 use crate::util::{OptionValue, location_to_index, parse_option_string};
@@ -148,7 +149,18 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = self.parse_query()?;
+        let query = match self.parser.peek_token().token {
+            Token::Word(word)
+                if word.quote_style.is_none()
+                    && word.value.eq_ignore_ascii_case(tql_parser::TQL) =>
+            {
+                match self.parse_tql(false)? {
+                    Statement::Tql(tql @ Tql::Eval(_)) => Statement::Tql(tql),
+                    _ => return self.expected("TQL EVAL", self.parser.peek_token()),
+                }
+            }
+            _ => self.parse_query()?,
+        };
 
         Ok(Statement::CreateView(CreateView {
             name: view_name,
@@ -3311,6 +3323,35 @@ CREATE TABLE spans (
             assert!(
                 result.as_ref().is_err_and(|e| e.to_string().contains(err)),
                 "{sql}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_create_view_tql_eval() {
+        let sql = "CREATE VIEW test AS TQL EVAL (0, 15, '5s') metric";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert!(matches!(
+            &result[0],
+            Statement::CreateView(CreateView {
+                query,
+                ..
+            }) if matches!(query.as_ref(), Statement::Tql(Tql::Eval(_)))
+        ));
+
+        for sql in [
+            "CREATE VIEW test AS TQL EXPLAIN (0, 15, '5s') metric",
+            "CREATE VIEW test AS TQL ANALYZE (0, 15, '5s') metric",
+        ] {
+            assert!(
+                ParserContext::create_with_dialect(
+                    sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .is_err()
             );
         }
     }
