@@ -30,6 +30,7 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use common_catalog::consts::{MITO_ENGINE, MITO2_ENGINE};
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
@@ -167,6 +168,14 @@ impl PromPlanner {
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
+        // An engine without a raw-series scanner has no frame to give this node, and by the time
+        // the physical planner asks, the logical plan is already this node: the refusal there is a
+        // planning error, not a fallback. So the engine is checked here, where the existing plan is
+        // still the answer. A file-engine table is the concrete case: its scanner is a
+        // `SinglePartitionScanner`, which leaves `raw_series_schema` at the default `None`.
+        if !supports_native_raw_series(&table_meta.engine) {
+            return Ok(None);
+        }
         // The region's raw-series preflight refuses these, and the physical layer turns that refusal into an error, so decline this route here instead.
         let time_index_type = table_meta
             .schema
@@ -371,6 +380,20 @@ fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
             .find_map(|arg| selector_range_millis(arg)),
         _ => None,
     }
+}
+
+/// Whether `engine` can serve raw series frames to the node this route builds.
+///
+/// A whitelist, not a probe: the logical planner cannot ask a region what its scanner supports
+/// without reading the table, and a false negative only costs the query its native route. Mito's
+/// series scanner implements the raw path; every other engine in the workspace leaves
+/// `raw_series_schema` at its default `None`, so only those two are named. This is deliberately not
+/// [`supports_pk_dictionary_encoding`]: that answers a different question and includes the metric
+/// engine, whose logical tables a bare scan cannot reach anyway.
+///
+/// [`supports_pk_dictionary_encoding`]: table::table::scan
+fn supports_native_raw_series(engine: &str) -> bool {
+    matches!(engine, MITO_ENGINE | MITO2_ENGINE)
 }
 
 /// Whether any node of `tree` reads the whole input vector at a point rather than one series.
