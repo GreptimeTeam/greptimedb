@@ -1881,14 +1881,15 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
 }
 
 /// The flag on and a shape the compiler refuses: the existing planner plans it unchanged.
-/// A metric-engine logical table is served by its physical region's scanner, so it is admitted.
+/// A metric-engine logical table keeps the existing plan.
 ///
-/// The ordinary metric rewrite puts a filter and an alias between the scan and this node, which the
-/// bare-scan check refuses - that is why such a query usually falls back. This test pins the one
-/// shape that reaches the node bare (the physical table could not be resolved), so that the engine
-/// whitelist does not refuse a table whose region really does serve frames.
+/// A logical table reads through its physical region, which is a mito scanner, but the planner
+/// only reaches this node with a bare scan when that physical table could not be resolved: the
+/// ordinary rewrite puts a `__table_id` filter and an alias in between. Such a table's `TableInfo`
+/// also carries no `append_mode`, so the preflight's own check could not be made here. Both are
+/// reasons the engine is not on the route's whitelist, and this test pins that it falls back.
 #[tokio::test]
-async fn native_fused_metric_engine_bare_scan_is_admitted() {
+async fn native_fused_metric_engine_table_falls_back() {
     let native = build_native_fused_plan_with_provider(
         "rate(some_metric[5m])",
         true,
@@ -1905,10 +1906,30 @@ async fn native_fused_metric_engine_bare_scan_is_admitted() {
         .await,
     )
     .await;
+    let without_flag = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        false,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            METRIC_ENGINE,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&native).is_none(),
+        "a metric-engine table must not reach the native route"
+    );
     assert_eq!(
-        find_fused_series(&native).map(|fused| fused.promql().to_string()),
-        Some("rate(some_metric[5m])".to_string()),
-        "a metric-engine table serves frames, so a bare scan over one keeps the native route"
+        native.display_indent().to_string(),
+        without_flag.display_indent().to_string(),
+        "a metric-engine table must keep the existing plan"
     );
 }
 

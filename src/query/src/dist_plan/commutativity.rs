@@ -23,7 +23,7 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use promql::native::plan::{NativeExpr, NativeNode};
+use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
@@ -393,18 +393,6 @@ impl Categorizer {
 /// several series at once. Neither has a compiler producer yet, which is why refusing them costs
 /// nothing today: a tree built some other way is exactly what this check is for, because evaluating
 /// it one region at a time would fold a partial input and answer a wrong query silently.
-fn reads_across_series(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. } => reads_across_series(input),
-        NativeExpr::Aggregate { .. } | NativeExpr::Binary { .. } => true,
-        // A vector operation reads the whole vector at each grid point (`topk`, `absent`,
-        // `histogram_quantile`, ...), so it is not a per-series node either.
-        NativeExpr::Vector { .. } => true,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -431,7 +419,7 @@ mod tests {
     };
     use promql::native::plan::{
         AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, Grouping,
-        NativeType,
+        NativeExpr, NativeNode, NativeType,
     };
     use promql_parser::parser;
     use store_api::storage::RegionId;

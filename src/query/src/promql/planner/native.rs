@@ -30,7 +30,7 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_catalog::consts::{MITO_ENGINE, MITO2_ENGINE};
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
@@ -38,6 +38,7 @@ use datafusion::logical_expr::{Extension, LogicalPlan};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+use promql::native::plan::reads_across_series;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
@@ -387,12 +388,15 @@ fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
 /// A whitelist, not a probe: the logical planner cannot ask a region what its scanner supports
 /// without reading the table, and a false negative only costs the query its native route.
 ///
-/// Mito's series scanner implements the raw path. The metric engine is named too because a logical
-/// region reads through its physical region and hands back that same scanner - its own raw-series
-/// test is `test_raw_series_scan_uses_logical_metric_route_and_bound_metadata` - and the ordinary
-/// metric rewrite puts a filter and an alias between the scan and this node, which the bare-scan
-/// check above already refuses. A logical table reaches that check with a bare scan only when the
-/// physical table cannot be resolved, and there the logical scan is served by the same scanner.
+/// Mito's series scanner implements the raw path.
+///
+/// The metric engine is deliberately absent. A logical metric table does read through its physical
+/// region, which is a mito scanner, but the planner reaches this node with a bare scan only when it
+/// could not resolve that physical table: the ordinary rewrite puts a `__table_id` filter and an
+/// alias between the scan and this node, which the bare-scan check above already refuses. A logical
+/// table whose physical table is missing is not a table this route can serve - its `TableInfo`
+/// carries no `append_mode` either, so the preflight's own check could not be made here - and
+/// naming the engine would admit exactly that unverifiable case.
 ///
 /// Every other engine in the workspace leaves `raw_series_schema` at its default `None`: a
 /// file-engine table, for one, is read by a `SinglePartitionScanner` that cannot frame a series.
@@ -401,26 +405,7 @@ fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
 ///
 /// [`supports_pk_dictionary_encoding`]: table::table::scan
 fn supports_native_raw_series(engine: &str) -> bool {
-    matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
-}
-
-/// Whether any node of `tree` reads the whole input vector at a point rather than one series.
-///
-/// Such a node folds or pairs across series (`Aggregate`, `Binary`) or reorders/reads a whole
-/// vector (`Vector`: `sort`, `absent`, `topk`, `limitk`, `histogram_quantile`, ...). This node runs
-/// one executor per scan partition, and a partition holds only part of a metric's series, so those
-/// nodes would answer from a fragment.
-fn reads_across_series(node: &promql::native::plan::NativeNode) -> bool {
-    use promql::native::plan::NativeExpr;
-    match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. } => reads_across_series(input),
-        NativeExpr::Aggregate { .. } | NativeExpr::Binary { .. } | NativeExpr::Vector { .. } => {
-            true
-        }
-    }
+    matches!(engine, MITO_ENGINE | MITO2_ENGINE)
 }
 
 fn single_selector(expr: &PromExpr) -> Option<&VectorSelector> {
