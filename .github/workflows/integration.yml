@@ -54,9 +54,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Build Binaries Cache
         id: build-binaries-cache
@@ -193,9 +193,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -327,9 +327,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
@@ -364,13 +364,11 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
         run: |
-          sudo apt-get install -y libfuzzer-14-dev
           cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
       - name: Build fuzz target binaries
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
         shell: bash
         env:
-          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           FUZZ_TARGETS: |
             fuzz_create_database
@@ -587,9 +585,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Build Profile-CI Cache
         id: build-greptime-ci-cache
@@ -705,9 +703,9 @@ jobs:
         uses: ./.github/actions/setup-etcd-cluster
       # Only the Kafka WAL helper needs the Rust toolchain.
       - if: matrix.mode.kafkaWalHelper
-        uses: arduino/setup-protoc@v3
+        uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - if: matrix.mode.kafkaWalHelper
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
