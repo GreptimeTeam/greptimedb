@@ -37,7 +37,7 @@ use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
+use datatypes::series::{Label, MetricName, SeriesOrdering};
 use promql::evaluated::EvaluatedChunk;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::plan::NativeExpr;
@@ -74,7 +74,7 @@ fn compile(query: &str) -> CompiledTree {
 }
 
 /// The metric `name` with `labels`, as a source series of the samples a scan would read.
-fn metric(name: &str, labels: &[(&str, &str)]) -> SeriesLabels {
+fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
     let tags = labels
         .iter()
         .map(|(name, value)| Label {
@@ -82,7 +82,7 @@ fn metric(name: &str, labels: &[(&str, &str)]) -> SeriesLabels {
             value: (*value).into(),
         })
         .collect();
-    SeriesLabels::try_new(Some(name.into()), tags).expect("distinct label names")
+    MetricName::try_new(Some(name.into()), tags).expect("distinct label names")
 }
 
 /// One raw chunk of `series`, holding `rows` at their source timestamps, closing the series.
@@ -92,7 +92,7 @@ fn metric(name: &str, labels: &[(&str, &str)]) -> SeriesLabels {
 fn raw_chunk(
     schema: &SeriesSchema,
     key: &str,
-    series: SeriesLabels,
+    series: MetricName,
     rows: &[(i64, f64)],
 ) -> RawSeriesChunk {
     let timestamps: Vec<i64> = rows.iter().map(|&(time, _)| time).collect();
@@ -530,12 +530,11 @@ fn a_two_input_tree_refuses_a_chunk_that_names_no_input() {
 }
 
 /// `group_right(env)` makes the right operand the many side and copies `env` from the left one, so
-/// one left series answers two right series. Group-right matching without fill executes; fill on
-/// this one-to-many shape is refused until the native kernel supports its semantics.
+/// one left series answers two right series.
 #[test]
-fn group_right_executes_without_fill_and_declines_fill() {
-    let pushes = |compiled: &CompiledTree, with_unmatched: bool| {
-        let mut pushes = vec![
+fn group_right_answers_each_right_series_and_copies_its_label() {
+    let pushes = |compiled: &CompiledTree| {
+        vec![
             (
                 0,
                 raw_chunk(
@@ -563,24 +562,11 @@ fn group_right_executes_without_fill_and_declines_fill() {
                     &[(0, 20.0)],
                 ),
             ),
-        ];
-        if with_unmatched {
-            pushes.push((
-                1,
-                raw_chunk(
-                    compiled.inputs[1].schema.as_ref(),
-                    "b-job=y-instance=i3",
-                    metric("b", &[("instance", "i3"), ("job", "y")]),
-                    &[(0, 5.0)],
-                ),
-            ));
-        }
-        pushes
+        ]
     };
 
-    // One left series, two right ones: each right series is answered and gains `env` from the left.
-    let unfilled = compile("a{job=\"x\"} / on(job) group_right(env) b");
-    let output = results(&run(&unfilled, pushes(&unfilled, true)));
+    let compiled = compile("a{job=\"x\"} / on(job) group_right(env) b");
+    let output = results(&run(&compiled, pushes(&compiled)));
     assert_eq!(
         output.len(),
         2,
@@ -596,22 +582,73 @@ fn group_right_executes_without_fill_and_declines_fill() {
         Some(&every_point(0.1)),
         "the second right series is not `2 / 20`: {output:?}"
     );
+}
 
-    // The kernel currently applies the wrong fill side for one-to-many matching; refuse this shape
-    // until its matching/fill semantics are corrected.
-    for fill in ["fill_right(83)", "fill(41)"] {
-        let query = format!("a{{job=\"x\"}} / on(job) group_right(env) {fill} b");
-        let error = compile_selectors(
-            &eval_stmt(&query),
-            &|_| Ok(raw_schema()),
-            SeriesOrdering::KeyThenTime,
-        )
-        .expect_err("one-to-many matching with fill must fall back");
-        assert!(
-            matches!(error, datafusion::error::DataFusionError::NotImplemented(_)),
-            "`{query}` was refused for the wrong reason: {error}"
-        );
-    }
+/// `fill_left` and `fill_right` fill the side written in the query, also under `group_right`, where
+/// the many side is the right one: prometheus/prometheus#19939. The two values differ so a swap is
+/// visible. `fill_left(5)` answers a right series with no left counterpart as `5 - 4`, and
+/// `fill_right(7)` answers a left series with no right counterpart as `2 - 7`; the pre-fix kernel
+/// had the two trade places, answering `7 - 4` and `2 - 5`.
+#[test]
+fn group_right_fills_the_side_the_query_wrote() {
+    let compiled = compile("a{job=\"x\"} - on(job) group_right() fill_left(5) fill_right(7) b");
+    let pushes = vec![
+        (
+            0,
+            raw_chunk(
+                compiled.inputs[0].schema.as_ref(),
+                "a-job=x",
+                metric("a", &[("job", "x")]),
+                &[(0, 2.0)],
+            ),
+        ),
+        // This left series has no right counterpart at all, so `fill_right` answers every point.
+        (
+            0,
+            raw_chunk(
+                compiled.inputs[0].schema.as_ref(),
+                "a-job=z",
+                metric("a", &[("job", "z")]),
+                &[(0, 2.0)],
+            ),
+        ),
+        (
+            1,
+            raw_chunk(
+                compiled.inputs[1].schema.as_ref(),
+                "b-job=x-instance=i1",
+                metric("b", &[("instance", "i1"), ("job", "x")]),
+                &[(0, 10.0)],
+            ),
+        ),
+        // This right series has no left counterpart, so `fill_left` answers every point.
+        (
+            1,
+            raw_chunk(
+                compiled.inputs[1].schema.as_ref(),
+                "b-job=y-instance=i2",
+                metric("b", &[("instance", "i2"), ("job", "y")]),
+                &[(0, 4.0)],
+            ),
+        ),
+    ];
+    let output = results(&run(&compiled, pushes));
+    assert_eq!(output.len(), 3, "every series is answered: {output:?}");
+    assert_eq!(
+        output.get("{instance=\"i1\", job=\"x\"}"),
+        Some(&every_point(-8.0)),
+        "the matched series is not `2 - 10`: {output:?}"
+    );
+    assert_eq!(
+        output.get("{job=\"z\"}"),
+        Some(&every_point(-5.0)),
+        "`fill_right(7)` did not fill the right side the query wrote: {output:?}"
+    );
+    assert_eq!(
+        output.get("{instance=\"i2\", job=\"y\"}"),
+        Some(&every_point(1.0)),
+        "`fill_left(5)` did not fill the left side the query wrote: {output:?}"
+    );
 }
 
 #[test]
