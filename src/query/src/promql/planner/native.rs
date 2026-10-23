@@ -41,7 +41,8 @@ use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{FusedSeries, FusedSeriesBinding, FusedSeriesInput};
-use promql::native::plan::{NativeExpr, reads_across_series};
+use promql::native::plan::{NativeExpr, NativeNode, NativeTree, reads_across_series};
+use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -50,6 +51,7 @@ use promql_parser::parser::{
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
+use table::metadata::TableMeta;
 
 use crate::parser::{EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME};
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
@@ -92,6 +94,15 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
 /// `Interleaved`, so a tree compiled here runs on either scanner.
 const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
+/// The primary-key column names that carry pipeline metadata rather than series identity.
+///
+/// A window, a map and a binary operation drop these three labels wherever they read them, while
+/// this route reports a series under the primary key it carries. A key column with one of these
+/// names therefore keeps the existing plan however whole the rest of the key is: a node that drops
+/// one of them can leave two raw series on one canonical label set, and the label set then no
+/// longer names the series the partition holds.
+const METADATA_KEY_TAGS: [&str; 3] = ["__name__", "__type__", "__unit__"];
+
 impl PromPlanner {
     /// Plans `prom_expr` as one [`FusedSeries`] node, or returns `None` to keep the existing plan.
     ///
@@ -109,6 +120,13 @@ impl PromPlanner {
     /// subqueries, a label matcher the bare scan below the node would not apply, alternative (`or`)
     /// matchers, an `__field__` matcher that narrows the field set, a missing table, a field that is
     /// not `Float64`, a `rate`/`increase` over a delta-temporality table, or an unusable grid.
+    ///
+    /// A statement with two occurrences of one selector is admitted only when both read one scan
+    /// point-wise. That is the only shape this node can run over every partition of one input
+    /// independently: both sides then see the same series in the same partition, so the series a
+    /// partition holds is whole. Everything else — a different scan, different bounds, a match key
+    /// that is not the whole series identity, a shape that reads a whole series as a group —
+    /// keeps the existing plan rather than gathering every partition into one execution.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
@@ -132,6 +150,12 @@ impl PromPlanner {
             values
         };
         if selectors.is_empty() {
+            return Ok(None);
+        }
+        // One occurrence keeps the single-scan route below unchanged. Two are admitted only as one
+        // source read point-wise; three or more would need a match over more than two series sets,
+        // which the collapse at the end of this method cannot express.
+        if selectors.len() > 2 {
             return Ok(None);
         }
         let Some(stmt) = self.native_statement(prom_expr) else {
@@ -281,6 +305,16 @@ impl PromPlanner {
                 }) {
                     return Ok(None);
                 }
+                // Two occurrences are admitted only when the scan's raw series keys name one
+                // logical series each, so that either occurrence reads the same series in whichever
+                // partition holds it. A single occurrence needs no such proof: it reads its own scan
+                // once, and the checks above are the ones it has always had.
+                if selectors.len() == 2
+                    && (!selector.matchers.or_matchers.is_empty()
+                        || !identity_keys_are_injective(&matchers, table_meta, &tags))
+                {
+                    return Ok(None);
+                }
                 let series_schema = Arc::new(SeriesSchema {
                     fields: fields
                         .iter()
@@ -306,6 +340,8 @@ impl PromPlanner {
                     time_index: time,
                     tags,
                     input,
+                    // Filled from the compiled tree, which is what names an input.
+                    paths: Vec::new(),
                 });
             }
             Ok(Some(prepared))
@@ -425,7 +461,32 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu);
             }
             input.input = scan;
+            // The tree names the input this occurrence compiled to, and the collapse below joins
+            // two of them onto one plan.
+            input.paths = vec![compiled_input.path.clone()];
             inputs.push(input);
+        }
+        // Two occurrences of one selector read the same series only when the tree between them is
+        // point-wise and both scans are the same scan. Then both inputs are one plan, and this node
+        // runs one execution per partition of it instead of one execution over every partition.
+        // Anything else keeps the existing plan: a match that pairs two scans' series needs an
+        // exchange that pairs them, which this node does not have.
+        if selectors.len() == 2 {
+            if !two_occurrences_read_one_source(&compiled.tree, &inputs) {
+                return Ok(None);
+            }
+            // The tree still names two input paths, so the second occurrence's destination moves
+            // onto the first plan rather than being dropped with the plan that carried it. `append`
+            // leaves the second list empty, which is what makes removing that plan lose nothing.
+            let prepared_inputs = inputs.len();
+            let [first, second] = &mut inputs[..] else {
+                return Err(DataFusionError::Internal(format!(
+                    "two occurrences prepared {prepared_inputs} input(s) rather than a pair"
+                )))
+                .context(DataFusionPlanningSnafu);
+            };
+            first.paths.append(&mut second.paths);
+            inputs.remove(1);
         }
         let root_fields = compiled
             .tree
@@ -601,6 +662,163 @@ fn literal_or_next(start: i64) -> Option<DfExpr> {
         ScalarValue::TimestampMillisecond(Some(next), None),
         None,
     ))
+}
+
+/// Whether a tree's two occurrences may be read as one source.
+///
+/// The claim is about one series: it is whole in the partition it was scanned in, so a tree whose
+/// nodes each read one series separately can run one execution per partition. What breaks that is a
+/// node that reads a *series* rather than its samples point by point — an aggregate folds a group,
+/// and two vectors matched against each other pair one series with another — so those keep the
+/// existing plan. The remaining shapes are the ones a scan's own samples support: an instant
+/// selection or a window directly over the raw input, a point-wise map over either, and a binary
+/// operation with a constant on one side, which is a broadcast over the same positions.
+///
+/// A one-to-one match is admitted without looking at its fill values: the compiler refuses to bind
+/// `fill_left` or `fill_right` on anything but a `group_left`/`group_right` match, so a one-to-one
+/// node has none to account for.
+fn two_occurrences_read_one_source(tree: &NativeTree, inputs: &[FusedSeriesInput]) -> bool {
+    let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &tree.root().expr
+    else {
+        return false;
+    };
+    // A root with a constant on one side is a broadcast of that constant, not two occurrences
+    // matched, and `group_left`/`group_right` pair a group against one series.
+    if matching.cardinality != Cardinality::OneToOne
+        || !pointwise_operand(left)
+        || !pointwise_operand(right)
+    {
+        return false;
+    }
+    let [first, second] = inputs else {
+        return false;
+    };
+    // A key that does not hold the whole identity pairs series Prometheus keeps apart, and a
+    // partition that holds one of them cannot tell that the other is missing.
+    matching_keys_on_identity(&matching.labels, &first.tags) && same_source(first, second)
+}
+
+/// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
+///
+/// A node's output type is not checked here: [`NativeNode::validate`] already refuses a selection,
+/// a map or a binary operation whose operands are not evaluated vectors, so every branch below is
+/// one that produces values rather than raw samples.
+fn pointwise_operand(node: &NativeNode) -> bool {
+    match &node.expr {
+        // A selection reads the raw samples below it; anything else below it is a value computed
+        // from a whole series, not a scan.
+        NativeExpr::Instant { input, .. } | NativeExpr::Window { input, .. } => {
+            matches!(input.expr, NativeExpr::Input(_))
+        }
+        NativeExpr::Map { input, .. } => pointwise_operand(input),
+        // A constant on one side is broadcast over the vector side's positions. Two vectors are a
+        // match between two series sets, which is the shape this route cannot split.
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
+            matching.cardinality == Cardinality::OneToOne
+                && match (&left.expr, &right.expr) {
+                    (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => false,
+                    (NativeExpr::Scalar(_), _) => pointwise_operand(right),
+                    (_, NativeExpr::Scalar(_)) => pointwise_operand(left),
+                    _ => false,
+                }
+        }
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => false,
+        // A vector operation (`sort`, `absent`, `topk`, `histogram_quantile`, ...) reads the whole
+        // vector at each grid point, so it is not a point-wise operand of one series.
+        NativeExpr::Vector { .. } => false,
+    }
+}
+
+/// Whether `labels` matches on the whole series identity `tags` names.
+///
+/// `on(...)` keeps the identity when every tag is listed, because two series that differ in any
+/// tag then differ in the key. Anything else — a tag left out of `on`, or a tag named in
+/// `ignoring` — pairs two series that Prometheus reads as two, and each partition would then
+/// answer for the half it happens to hold.
+fn matching_keys_on_identity(labels: &MatchingLabels, tags: &[String]) -> bool {
+    match labels {
+        MatchingLabels::On(names) => tags
+            .iter()
+            .all(|tag| names.iter().any(|name| name.as_ref() == tag.as_str())),
+        MatchingLabels::Ignoring(names) => tags
+            .iter()
+            .all(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str())),
+    }
+}
+
+/// Whether the raw series keys `meta` declares name one logical series each.
+///
+/// The label set this route reports is the primary key it reads off a series, so the key is only a
+/// faithful identity when it is the whole label set and its values are distinct strings: a hidden
+/// key column (a metric engine's internals), a key column with a metadata name a window or a map
+/// drops, and a key column that can read both NULL and the empty string — Prometheus's one absent
+/// label, but two raw keys — all keep the existing plan. A matcher that rejects the empty value is
+/// what makes a nullable key column safe: it leaves no row whose key could read either way.
+fn identity_keys_are_injective(matchers: &Matchers, meta: &TableMeta, tags: &[String]) -> bool {
+    // A table with no key column has one label set for every series, and a metric engine keeps its
+    // identity in columns the planner hides from `tags`.
+    if tags.is_empty() || meta.engine == METRIC_ENGINE_NAME {
+        return false;
+    }
+    // The planner hides exactly `__table_id` and `__tsid`; a key that differs from the columns this
+    // route reports means part of the identity is not in the label set.
+    if !meta.row_key_column_names().eq(tags.iter()) {
+        return false;
+    }
+    tags.iter().all(|tag| {
+        if METADATA_KEY_TAGS.contains(&tag.as_str()) {
+            return false;
+        }
+        let Some(column) = meta.schema.column_schema_by_name(tag) else {
+            return false;
+        };
+        // The label set is reported as strings, which is what a string key column already is.
+        if column.data_type != datatypes::prelude::ConcreteDataType::string_datatype() {
+            return false;
+        }
+        // A non-nullable column cannot read NULL, so an empty value and an absent one are two
+        // different keys.
+        !column.is_nullable()
+            || matchers
+                .matchers
+                .iter()
+                .any(|matcher| matcher.name == tag.as_str() && !matcher.is_match(""))
+    })
+}
+
+/// Whether two prepared inputs read the same scan, and so produce the same series.
+///
+/// Everything below the node is compared, not only the table name: two selectors over one table
+/// with different matchers or different bounds read different rows, and a partition that holds one
+/// of them is not the partition that holds the other. DataFusion's own scan comparison covers the
+/// table name, the projection, the schema, the filters and the fetch; the source is compared by
+/// identity, because it is what resolves those rows in the first place. The time index and the tag
+/// list are not compared here: both are checked once for every prepared input, above.
+fn same_source(left: &FusedSeriesInput, right: &FusedSeriesInput) -> bool {
+    let (LogicalPlan::TableScan(left_scan), LogicalPlan::TableScan(right_scan)) =
+        (&left.input, &right.input)
+    else {
+        return false;
+    };
+    // Both schemas are raw series schemas, so the fields are what the tree's input was compiled
+    // against, in the order it reads them.
+    left.metric_name == right.metric_name
+        && left
+            .series_schema
+            .fields
+            .iter()
+            .map(|field| &field.name)
+            .eq(right.series_schema.fields.iter().map(|field| &field.name))
+        && left_scan == right_scan
+        && Arc::ptr_eq(&left_scan.source, &right_scan.source)
 }
 
 /// The columns a [`FusedSeries`] node produces.
