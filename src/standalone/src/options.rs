@@ -137,6 +137,10 @@ impl Configurable for StandaloneOptions {
             "pending_rows_batcher.logical_table.protocols",
         ])
     }
+
+    fn env_tagged_seq_keys() -> Option<&'static [&'static str]> {
+        Some(&["region_engine"])
+    }
 }
 
 /// The [`StandaloneOptions`] is only defined in `standalone` crate,
