@@ -481,8 +481,7 @@ fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
 /// Compiles a binary operation, preserving written operand order and vector matching modifiers.
 ///
 /// A scalar carries no labels, so broadcasting it over a vector is unambiguous. Vector operands
-/// retain their own input bindings and matching; a `group_right` operation with fill is refused
-/// until the kernel supports that combination.
+/// retain their own input bindings and matching, including a fill on either side.
 fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode> {
     // A set operator combines two vectors' series rather than their values, and the tree has no node
     // for it at all. Its name is reported before the operands are looked at, so a set operation
@@ -619,8 +618,8 @@ fn scalar_matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
 ///
 /// Each part is read from the modifier the query wrote, and a modifier it did not write is the
 /// default PromQL applies: every label but `__name__` matches (`ignoring` nothing), and the
-/// cardinality is one-to-one. Fill fields retain the parser's left/right values; one-to-many
-/// matching with fill is refused until the native kernel supports that combination.
+/// cardinality is one-to-one. Fill fields retain the parser's left/right values, which name the
+/// sides as written: the kernel swaps them together with the operands under `group_right`.
 ///
 /// `ManyToMany` is the cardinality of a set operator, which [`binary_operation`] refuses before
 /// asking for a matching, so reaching it means the two disagree; it is reported as a shape with no
@@ -652,18 +651,11 @@ fn vector_matching(binary: &BinaryExpr, op: BinaryOp) -> Result<BinaryMatching> 
             )));
         }
     };
-    if matches!(&cardinality, Cardinality::OneToMany(_))
-        && modifier.is_some_and(|modifier| {
-            modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some()
-        })
-    {
-        return Err(not_implemented(&format!(
-            "the one-to-many vector matching with fill in `{binary}`, which the native kernel does not support"
-        )));
-    }
     // The fields keep the parser's operand names: `fill_values.lhs` is `fill_left`, and
-    // `fill_values.rhs` is `fill_right`. One-to-many matching with either field set was refused
-    // above; the remaining supported cardinalities preserve these parser-side values for the kernel.
+    // `fill_values.rhs` is `fill_right`. They name the side written in the query, which is what the
+    // kernel fills under every cardinality: since prometheus/prometheus#19939 the values swap with
+    // the operands, so `group_right` fills the query's left and right sides rather than the
+    // matching's one and many sides.
     let fill = modifier.map_or_else(FillValues::default, |modifier| FillValues {
         lhs: modifier.fill_values.lhs,
         rhs: modifier.fill_values.rhs,
