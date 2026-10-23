@@ -537,6 +537,95 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_authorizes_every_resolved_branch_before_missing_table() {
+        use servers::exemplar::query::Query;
+        use servers::prometheus_handler::PrometheusHandler;
+        use std::sync::Mutex;
+
+        struct Checker(Mutex<Vec<auth::PermissionTableTargets>>);
+        impl auth::PermissionChecker for Checker {
+            fn check_permission(
+                &self,
+                _: auth::UserInfoRef,
+                _: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+            fn check_permission_with_table_targets(
+                &self,
+                _: auth::UserInfoRef,
+                req: auth::PermissionReq,
+                targets: auth::PermissionTableTargets,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if !matches!(req, auth::PermissionReq::Action(auth::PROMQL_QUERY)) {
+                    return Ok(auth::PermissionResp::Allow);
+                }
+                self.0.lock().unwrap().push(targets.clone());
+                let denied = match targets {
+                    auth::PermissionTableTargets::Unresolved => true,
+                    auth::PermissionTableTargets::Resolved(targets) => targets.iter().any(|t| {
+                        t.schema == "secret" && t.table == "metric"
+                            || t.schema == "shared_denied" && t.table == "metrics_exemplars"
+                    }),
+                };
+                Ok(if denied {
+                    auth::PermissionResp::Reject
+                } else {
+                    auth::PermissionResp::Allow
+                })
+            }
+        }
+        let checker = Arc::new(Checker(Mutex::new(Vec::new())));
+        let plugins = Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(checker.clone());
+        let standalone = GreptimeDbStandaloneBuilder::new("exemplar_query_auth")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        for expression in [
+            "rate(metric{__schema__=\"public\"}[5m]) + metric{__database__=\"secret\"}",
+            "metric{__schema__=\"public\" or __schema__=\"secret\"}",
+            "metric{__database__=\"shared_denied\"}",
+            "{__name__=~\"metric.*\",__schema__=\"secret\"}",
+        ] {
+            checker.0.lock().unwrap().clear();
+            let query = Query::parse(expression.into(), "0", "1", "public").unwrap();
+            let error = instance
+                .query_exemplars(query, QueryContext::arc())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.status_code(),
+                StatusCode::PermissionDenied,
+                "{expression}: {error:?}"
+            );
+            assert!(!checker.0.lock().unwrap().is_empty());
+        }
+        let query = Query::parse(
+            "metric{__schema__=\"public\" or __database__=\"other\"}".into(),
+            "0",
+            "1",
+            "public",
+        )
+        .unwrap();
+        checker.0.lock().unwrap().clear();
+        assert!(
+            instance
+                .query_exemplars(query, QueryContext::arc())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let checks = checker.0.lock().unwrap();
+        for schema in ["public", "other"] {
+            for table in ["metric", "metrics_exemplars"] {
+                assert!(checks.iter().any(|c| matches!(c, auth::PermissionTableTargets::Resolved(t) if t.iter().any(|t| t.schema == schema && t.table == table))));
+            }
+        }
+    }
+
     /// The entity-graph derivation must run as the caller: a source table the
     /// caller cannot read contributes neither entities nor edges.
     #[tokio::test(flavor = "multi_thread")]

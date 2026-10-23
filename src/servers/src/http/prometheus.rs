@@ -175,6 +175,7 @@ pub enum PrometheusResponse {
     BuildInfo(OwnedBuildInfo),
     #[serde(skip_deserializing)]
     ParseResult(promql_parser::parser::Expr),
+    Exemplars(Vec<crate::exemplar::query::Series>),
     #[default]
     None,
 }
@@ -218,6 +219,83 @@ impl PrometheusResponse {
 
     pub fn is_none(&self) -> bool {
         matches!(self, PrometheusResponse::None)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ExemplarQuery {
+    query: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    db: Option<String>,
+    timeout: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "query_exemplars")
+)]
+pub async fn query_exemplars(
+    State(handler): State<PrometheusHandlerRef>,
+    Query(params): Query<ExemplarQuery>,
+    Extension(mut ctx): Extension<QueryContext>,
+    Form(form): Form<ExemplarQuery>,
+) -> PrometheusJsonResponse {
+    if let Some(db) = params.db.or(form.db) {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
+        try_update_catalog_schema(&mut ctx, &catalog, &schema);
+    }
+    let ctx = Arc::new(ctx);
+    let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
+        .with_label_values(&[ctx.get_db_string().as_str(), "query_exemplars"])
+        .start_timer();
+    let query = match crate::exemplar::query::Query::parse(
+        params.query.or(form.query).unwrap_or_default(),
+        &params.start.or(form.start).unwrap_or_default(),
+        &params.end.or(form.end).unwrap_or_default(),
+        &ctx.current_schema(),
+    ) {
+        Ok(query) => query,
+        Err(error) => {
+            return PrometheusJsonResponse::error(error.status_code(), error.output_msg());
+        }
+    };
+    let timeout = if let Some(timeout) = params.timeout.or(form.timeout) {
+        match humantime::parse_duration(&timeout) {
+            Ok(timeout) => Some(timeout),
+            Err(error) => {
+                return PrometheusJsonResponse::error(
+                    StatusCode::InvalidArguments,
+                    error.to_string(),
+                );
+            }
+        }
+    } else {
+        ctx.query_timeout()
+    };
+    let future = handler.query_exemplars(query, ctx.clone());
+    let result = if let Some(timeout) = timeout.filter(|timeout| !timeout.is_zero()) {
+        match tokio::time::timeout(timeout, future).await {
+            Ok(result) => result,
+            Err(_) => {
+                return PrometheusJsonResponse::error(
+                    StatusCode::Cancelled,
+                    "exemplar query timed out".to_string(),
+                );
+            }
+        }
+    } else {
+        future.await
+    };
+    match result {
+        Ok(series) => {
+            let mut response =
+                PrometheusJsonResponse::success(PrometheusResponse::Exemplars(series));
+            response.warnings = ctx.warning().map(|warning| vec![warning]);
+            response
+        }
+        Err(error) => PrometheusJsonResponse::error(error.status_code(), error.output_msg()),
     }
 }
 
@@ -2642,6 +2720,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PrometheusHandler for TestPrometheusHandler {
+        async fn query_exemplars(
+            &self,
+            _: crate::exemplar::query::Query,
+            _: QueryContextRef,
+        ) -> Result<Vec<crate::exemplar::query::Series>> {
+            struct Scan<'a>(&'a Mutex<Vec<String>>);
+            impl Drop for Scan<'_> {
+                fn drop(&mut self) {
+                    self.0.lock().unwrap().push("cancelled".into());
+                }
+            }
+            let _scan = Scan(&self.queries);
+            self.queries.lock().unwrap().push("started".into());
+            futures::future::pending().await
+        }
+
         async fn do_query(&self, _: &PromQuery, _: QueryContextRef) -> Result<Output> {
             unreachable!("HTTP handlers should execute the parsed query")
         }
@@ -2779,6 +2873,41 @@ mod tests {
             error.contains("unexpected end of input inside braces"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_timeout_cancels_scan() {
+        for explicit in [false, true] {
+            let handler = Arc::new(TestPrometheusHandler {
+                catalog_manager: MemoryCatalogManager::new(),
+                deny_operation: false,
+                denied_table: None,
+                metric_names: Vec::new(),
+                label_metric_names: Vec::new(),
+                label_lookups: Mutex::new(Vec::new()),
+                queries: Mutex::new(Vec::new()),
+                ordered_outputs: Mutex::new(Vec::new()),
+            });
+            let ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+            if !explicit {
+                ctx.set_query_timeout(std::time::Duration::from_millis(1));
+            }
+            let response = query_exemplars(
+                State(handler.clone()),
+                Query(ExemplarQuery {
+                    query: Some("requests".into()),
+                    start: Some("0".into()),
+                    end: Some("1".into()),
+                    timeout: explicit.then(|| "1ms".into()),
+                    ..Default::default()
+                }),
+                Extension(ctx),
+                Form(ExemplarQuery::default()),
+            )
+            .await;
+            assert_eq!(response.status_code, Some(StatusCode::Cancelled));
+            assert_eq!(*handler.queries.lock().unwrap(), ["started", "cancelled"]);
+        }
     }
 
     #[tokio::test]
