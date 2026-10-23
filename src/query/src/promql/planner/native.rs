@@ -414,24 +414,6 @@ impl PromPlanner {
             Err(DataFusionError::NotImplemented(_)) => return Ok(None),
             Err(e) => return Err(e).context(DataFusionPlanningSnafu),
         };
-        // An aggregate or a vector operation (`sort`, `absent`, `topk`, `histogram_quantile`, ...)
-        // reads the whole vector at each grid point rather than one series at a time, so it cannot
-        // be evaluated by one executor per scan partition. Declining here is the only place that
-        // still works: once the `FusedSeries` node exists the logical plan is fixed, and the
-        // categorizer merely declining to push it down would leave a node the physical layer must
-        // build anyway. A binary operation pairs one series with another and reads each of them
-        // point-wise, so a tree rooted in one keeps the route: its operands are the independent
-        // scans prepared above.
-        //
-        // TEMPORARY: the exception below is stated over the root alone, while the classifier it
-        // narrows is a whole-tree walk. The two have to be reconciled with the per-operand
-        // point-wise check the shared gate will own, so this narrowing is the first stage's anchor
-        // rather than the shape to keep.
-        if !matches!(compiled.tree.root().expr, NativeExpr::Binary { .. })
-            && reads_across_series(compiled.tree.root())
-        {
-            return Ok(None);
-        }
         if compiled.inputs.len() != prepared.len() {
             return Err(DataFusionError::Internal(
                 "the compiled tree reads a different number of inputs than the planner prepared"
@@ -466,15 +448,28 @@ impl PromPlanner {
             input.paths = vec![compiled_input.path.clone()];
             inputs.push(input);
         }
+        // A tree run once per scan partition has to read one series at a time: an aggregate folds a
+        // label set's series together and a vector operation (`sort`, `absent`, `topk`,
+        // `histogram_quantile`, ...) reads the whole vector at a grid point, so one region's share
+        // of the series cannot answer either. Declining here is the only place that still works:
+        // once the `FusedSeries` node exists the logical plan is fixed, and the categorizer merely
+        // declining to push it down would leave a node the physical layer must build anyway. What
+        // does read one series at a time is one occurrence's samples - a selection, a window, a map
+        // over either, or a constant broadcast - and, for a statement that names one selector
+        // twice, a one-to-one match whose key holds the whole identity, which the collapse below
+        // then reads as one scan.
+        if reads_across_series(compiled.tree.root())
+            && !(pointwise_operand(compiled.tree.root())
+                || (selectors.len() == 2
+                    && two_occurrences_read_one_source(&compiled.tree, &inputs)))
+        {
+            return Ok(None);
+        }
         // Two occurrences of one selector read the same series only when the tree between them is
-        // point-wise and both scans are the same scan. Then both inputs are one plan, and this node
-        // runs one execution per partition of it instead of one execution over every partition.
-        // Anything else keeps the existing plan: a match that pairs two scans' series needs an
-        // exchange that pairs them, which this node does not have.
+        // point-wise and both scans are the same scan, which the check above has just admitted.
+        // Then both inputs are one plan, and this node runs one execution per partition of it
+        // instead of one execution over every partition.
         if selectors.len() == 2 {
-            if !two_occurrences_read_one_source(&compiled.tree, &inputs) {
-                return Ok(None);
-            }
             // The tree still names two input paths, so the second occurrence's destination moves
             // onto the first plan rather than being dropped with the plan that carried it. `append`
             // leaves the second list empty, which is what makes removing that plan lose nothing.
@@ -674,9 +669,16 @@ fn literal_or_next(start: i64) -> Option<DfExpr> {
 /// selection or a window directly over the raw input, a point-wise map over either, and a binary
 /// operation with a constant on one side, which is a broadcast over the same positions.
 ///
-/// A one-to-one match is admitted without looking at its fill values: the compiler refuses to bind
-/// `fill_left` or `fill_right` on anything but a `group_left`/`group_right` match, so a one-to-one
-/// node has none to account for.
+/// A one-to-one match is admitted without rejecting its fill values: the compiler binds
+/// `fill_left`/`fill_right` for a one-to-one match too, and what the admission rests on is the key
+/// and the operands, not the absence of a fill — see [`matching_keys_on_identity`].
+///
+/// The raw keys themselves are proven to name one logical series each by the caller's preparation,
+/// which checks the table's primary key against the tags this binding reports
+/// (`identity_keys_are_injective`). That is a planning-time check over the scan the planner
+/// prepared, not a property this function re-derives: a tree and binding built by anything other
+/// than this planner carries no such proof, so a manual `FusedSeries` node is only as safe as the
+/// binding its builder passed.
 fn two_occurrences_read_one_source(tree: &NativeTree, inputs: &[FusedSeriesInput]) -> bool {
     let NativeExpr::Binary {
         left,
@@ -707,7 +709,7 @@ fn two_occurrences_read_one_source(tree: &NativeTree, inputs: &[FusedSeriesInput
 /// A node's output type is not checked here: [`NativeNode::validate`] already refuses a selection,
 /// a map or a binary operation whose operands are not evaluated vectors, so every branch below is
 /// one that produces values rather than raw samples.
-fn pointwise_operand(node: &NativeNode) -> bool {
+pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
     match &node.expr {
         // A selection reads the raw samples below it; anything else below it is a value computed
         // from a whole series, not a scan.
@@ -730,10 +732,12 @@ fn pointwise_operand(node: &NativeNode) -> bool {
                     _ => false,
                 }
         }
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => false,
-        // A vector operation (`sort`, `absent`, `topk`, `histogram_quantile`, ...) reads the whole
-        // vector at each grid point, so it is not a point-wise operand of one series.
-        NativeExpr::Vector { .. } => false,
+        // An aggregate folds a group, a vector operation reads the whole vector, and a bare input or
+        // scalar is not a per-series evaluation.
+        NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::Aggregate { .. }
+        | NativeExpr::Vector { .. } => false,
     }
 }
 
@@ -743,7 +747,7 @@ fn pointwise_operand(node: &NativeNode) -> bool {
 /// tag then differ in the key. Anything else — a tag left out of `on`, or a tag named in
 /// `ignoring` — pairs two series that Prometheus reads as two, and each partition would then
 /// answer for the half it happens to hold.
-fn matching_keys_on_identity(labels: &MatchingLabels, tags: &[String]) -> bool {
+pub(crate) fn matching_keys_on_identity(labels: &MatchingLabels, tags: &[String]) -> bool {
     match labels {
         MatchingLabels::On(names) => tags
             .iter()

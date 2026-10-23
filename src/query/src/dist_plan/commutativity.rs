@@ -23,12 +23,14 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use promql::native::plan::{NativeExpr, NativeNode};
+use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
+use promql::vector_match::Cardinality;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
+use crate::promql::planner::native::{matching_keys_on_identity, pointwise_operand};
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -246,36 +248,35 @@ impl Categorizer {
                 // A region builds this node from the region scans themselves: the conversion takes a
                 // scan's raw-series entrypoint and cannot look through anything in between, so a
                 // node with an input that is not such a scan has nothing to read where it would be
-                // placed and stays where it was planned. Every input also has to read the same
-                // table: two tables need not share a region, and a region can only evaluate the tree
-                // over the scans it can build for itself.
-                let inputs = fused.inputs();
-                let mut table = None;
-                for input in &inputs {
-                    let LogicalPlan::TableScan(scan) = input else {
-                        return Commutativity::NonCommutative;
-                    };
-                    if table.is_some_and(|name| name != &scan.table_name) {
-                        return Commutativity::NonCommutative;
-                    }
-                    table = Some(&scan.table_name);
-                }
-                // The region asks each scan for the series of one named metric, so a node with an
-                // input that binds no name cannot be built there at all.
-                if fused
-                    .fused_inputs()
-                    .iter()
-                    .any(|input| input.metric_name.is_none())
-                {
+                // placed and stays where it was planned. A binding is one actual source, so a node
+                // that lists its raw inputs as several bindings reads several plans and a region has
+                // nothing to build for it either.
+                let [input] = fused.fused_inputs() else {
+                    return Commutativity::NonCommutative;
+                };
+                let LogicalPlan::TableScan(_) = &input.input else {
+                    return Commutativity::NonCommutative;
+                };
+                // The region asks the scan for the series of one named metric, so a node that binds
+                // no name cannot be built there at all.
+                if input.metric_name.is_none() {
                     return Commutativity::NonCommutative;
                 }
-                // A region evaluates the tree over whatever series its own scans return. A window,
-                // a map and an instant read one series at a time, so one region's share of a series
-                // is everything they need of it. An aggregate folds a label set's series together
-                // and would fold one region's half of the group, so it stays where it was planned.
-                // A binary operation pairs series by label, which a region can answer for every
-                // pair whose two sides it holds; see the caveat below.
-                if folds_across_series(fused.tree().root()) {
+                // A region evaluates the tree over whatever series its own scan returns, so the tree
+                // has to read one series at a time. An aggregate folds a label set's series together,
+                // a vector operation reads the whole vector, and a match between two series sets
+                // pairs one series with another; one region holds only part of them. What does read
+                // one series at a time is a point-wise operand - a selection, a window, a map over
+                // either, or a constant broadcast - or, for the two occurrences the planner
+                // collapsed onto this one plan, a one-to-one match over the whole series identity
+                // with a point-wise operand on each side.
+                let root = fused.tree().root();
+                let per_series = match input.paths.as_slice() {
+                    [_] => pointwise_operand(root),
+                    [_, _] => two_occurrences_pair_one_series(root, &input.tags),
+                    _ => false,
+                };
+                if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
                 }
 
@@ -288,16 +289,9 @@ impl Categorizer {
                 // the partition key is a function of the label set and a series cannot straddle
                 // regions.
                 //
-                // A binary operation adds one more way to be in this position: it pairs two series
-                // by their labels, and the two sides of one pair need not reach one region - a
-                // table partitioned by a column the match does not name puts `a{kind="a"}` and
-                // `a{kind="b"}` with the same `host` in different regions, and the region holding
-                // one of them finds no partner and drops the match. One region holds every series
-                // both scans can return, so the pair is there. The admission above does not reach
-                // this: each side's series can stay whole in its own region while the labels the
-                // operation pairs on differ inside the partition column. The proof that would
-                // cover it - that both sides of every pair are read from the same source - is
-                // owed by the route that prepares those inputs, not by this categorizer.
+                // A match between two occurrences of one selector is not a hole in this: the
+                // same-source, whole-identity binding above admits both sides from one source, so
+                // a region holding one side holds the other and evaluates the pair itself.
                 Commutativity::Commutative
             }
             name if name == SeriesNormalize::name()
@@ -406,31 +400,25 @@ impl Categorizer {
     }
 }
 
-/// Whether `tree` folds one label set's series into a single value.
+/// Whether `root` pairs the two occurrences one plan feeds point-wise over the whole identity.
 ///
-/// An aggregate folds every series of a group together, so a region that holds part of the group
-/// would answer the fold of its own half and the union of the parts would be a wrong query answered
-/// silently. Everything else the native compiler emits reads one series at a time: an instant
-/// selection, a window and a point-wise map each select, fold or map the samples of the series they
-/// were handed. A binary operation pairs series rather than folding them, so it is not a fold here;
-/// what a region can pair is the subject of the caveat at the placement decision. A vector operation
-/// reads the whole vector at a grid point, so it folds across series the way an aggregate does.
-fn folds_across_series(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. } => folds_across_series(input),
-        // A binary operation pairs the two sides rather than folding either of them, so what
-        // decides is whether a side folds its own input.
-        NativeExpr::Binary { left, right, .. } => {
-            folds_across_series(left) || folds_across_series(right)
-        }
-        NativeExpr::Aggregate { .. } => true,
-        // `sort`, `absent`, `topk` and `histogram_quantile` reorder or read every series of the
-        // vector at a grid point, so one region's share of the series cannot answer them.
-        NativeExpr::Vector { .. } => true,
-    }
+/// The two occurrences are one scan, so both sides hold the same series in the same partition: what
+/// is left to check is that the tree between them is a one-to-one match over the key that names the
+/// whole series ([`matching_keys_on_identity`]) with a point-wise operand on each side, which is the
+/// shape `PromPlanner` collapses onto one input. Anything else keeps the node on the frontend.
+fn two_occurrences_pair_one_series(root: &NativeNode, tags: &[String]) -> bool {
+    let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &root.expr
+    else {
+        return false;
+    };
+    matching.cardinality == Cardinality::OneToOne
+        && pointwise_operand(left)
+        && pointwise_operand(right)
+        && matching_keys_on_identity(&matching.labels, tags)
 }
 
 #[cfg(test)]
@@ -456,10 +444,8 @@ mod tests {
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
-    use promql::native::plan::{
-        AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, Grouping,
-        NativeExpr, NativeNode, NativeType,
-    };
+    use promql::native::metrics::NodePath;
+    use promql::native::plan::{NativeExpr, NativeTree};
     use promql_parser::parser;
     use store_api::storage::RegionId;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -467,7 +453,7 @@ mod tests {
     use super::*;
     use crate::dist_plan::DistPlannerAnalyzer;
     use crate::optimizer::test_util::mock_table_provider;
-    use crate::promql::native_compile::{compile, statement_grid};
+    use crate::promql::native_compile::{compile, compile_selectors, statement_grid};
     use crate::query_engine::DefaultSerializer;
 
     #[test]
@@ -545,7 +531,7 @@ mod tests {
         // tree rather than assuming.
         let mut paths = Vec::new();
         promql::native::metrics::walk(tree.root(), &mut |node, path| {
-            if matches!(node.expr, promql::native::plan::NativeExpr::Input(_)) {
+            if matches!(node.expr, NativeExpr::Input(_)) {
                 paths.push(path.clone());
             }
         });
@@ -772,51 +758,191 @@ mod tests {
         ));
     }
 
-    /// A tree built by something other than the compiler can hold a node that folds several
-    /// series. The check is a property of the tree, so it is exercised on the node itself: the
-    /// compiler emits no such node today, and nothing else would build a tree containing one.
-    #[test]
-    fn a_tree_that_folds_across_series_is_not_per_series() {
-        let raw = NativeType::Samples(Arc::new(SeriesSchema {
+    /// The statement `query` is planned as, on the grid these tests evaluate on.
+    fn eval_statement(query: &str) -> promql_parser::parser::EvalStmt {
+        let mut stmt = native_statement();
+        stmt.expr = parser::parse(query).unwrap();
+        stmt
+    }
+
+    /// The tree `query` compiles to, with the raw-series schema every input is bound to.
+    fn query_tree(
+        query: &str,
+    ) -> (
+        NativeTree,
+        Arc<SeriesSchema>,
+        promql_parser::parser::EvalStmt,
+    ) {
+        let stmt = eval_statement(query);
+        let series_schema = Arc::new(SeriesSchema {
             fields: Arc::from([FieldSpec { name: "v0".into() }]),
             eval_grid: None,
-        }));
-        let input = NativeNode {
-            expr: NativeExpr::Input(BoundInput {
-                output: raw.clone(),
-                ordering: SeriesOrdering::KeyThenTime,
-            }),
-            output: raw,
+        });
+        let tree = {
+            let bound = Arc::clone(&series_schema);
+            compile_selectors(
+                &stmt,
+                &move |_| Ok(Arc::clone(&bound)),
+                SeriesOrdering::KeyThenTime,
+            )
+            .unwrap()
+            .tree
         };
-        let group = Grouping::By(Arc::from(["k0".into()]));
-        let aggregate = NativeNode {
-            expr: NativeExpr::Aggregate {
-                input: Box::new(input),
-                op: BoundAggregate {
-                    kind: AggregateKind::Sum,
-                    group: group.clone(),
-                    stage: AggregateStage::Partial,
-                },
-            },
-            output: NativeType::AggregateState(Arc::new(AggregateStateSchema {
-                group,
-                accumulators: Arc::from([]),
-                grid: statement_grid(&native_statement()).unwrap(),
-            })),
-        };
-        assert!(folds_across_series(&aggregate));
+        (tree, series_schema, stmt)
+    }
 
-        // The same walk over what the compiler emits stays per-series.
-        let single_selector = compile(
-            &native_statement(),
-            Arc::new(SeriesSchema {
-                fields: Arc::from([FieldSpec { name: "v0".into() }]),
-                eval_grid: None,
-            }),
-            SeriesOrdering::KeyThenTime,
-        )
-        .unwrap();
-        assert!(!folds_across_series(single_selector.root()));
+    /// The paths of a tree's raw inputs, in walk order.
+    fn tree_input_paths(tree: &NativeTree) -> Vec<NodePath> {
+        let mut paths = Vec::new();
+        promql::native::metrics::walk(tree.root(), &mut |node, path| {
+            if matches!(node.expr, NativeExpr::Input(_)) {
+                paths.push(path.clone());
+            }
+        });
+        paths
+    }
+
+    /// A `FusedSeries` node over `query`, with `one_source` deciding how its raw inputs bind.
+    ///
+    /// `one_source` binds every tree input to one plan - the shape a two-occurrence statement
+    /// collapses to - and otherwise binds one plan per input.
+    fn occurrence_plan(query: &str, tags: &[&str], one_source: bool) -> LogicalPlan {
+        let (tree, series_schema, stmt) = query_tree(query);
+        let paths = tree_input_paths(&tree);
+        let binding = |paths| FusedSeriesInput {
+            series_schema: Arc::clone(&series_schema),
+            metric_name: Some(Arc::from("some_metric")),
+            time_index: "ts".to_string(),
+            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+            input: table_scan_plan(),
+            paths,
+        };
+        let inputs = if one_source {
+            vec![binding(paths)]
+        } else {
+            paths.into_iter().map(|path| binding(vec![path])).collect()
+        };
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![
+                    (
+                        None,
+                        Arc::new(Field::new("v0", ArrowDataType::Float64, true)),
+                    ),
+                    (
+                        None,
+                        Arc::new(Field::new(
+                            "ts",
+                            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                            false,
+                        )),
+                    ),
+                ],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new(
+                    Arc::from(query),
+                    tree,
+                    FusedSeriesBinding {
+                        grid: statement_grid(&stmt).unwrap(),
+                    },
+                    inputs,
+                    output_schema,
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
+    fn commutativity_of(plan: &LogicalPlan) -> Commutativity {
+        Categorizer::check_plan(plan, None).unwrap()
+    }
+
+    /// One source read twice point-wise over the whole identity is one series per partition, so the
+    /// node is placed as it was planned.
+    #[test]
+    fn fused_series_over_one_source_read_twice_is_commutative() {
+        for query in [
+            "some_metric + on(host) some_metric",
+            "abs(some_metric) + on(host) some_metric",
+            "(some_metric > bool 0) + on(host) some_metric",
+        ] {
+            let plan = occurrence_plan(query, &["host"], true);
+            assert!(
+                matches!(commutativity_of(&plan), Commutativity::Commutative),
+                "{query}"
+            );
+        }
+    }
+
+    /// A statement that names its selector once is placed from the shape that reads one series'
+    /// samples: a selection, a window or a map over one, or a constant broadcast.
+    #[test]
+    fn fused_series_over_one_pointwise_operand_is_commutative() {
+        for query in [
+            "some_metric",
+            "rate(some_metric[5m])",
+            "abs(some_metric)",
+            "some_metric * 2",
+            "-some_metric",
+        ] {
+            let plan = occurrence_plan(query, &["host"], true);
+            assert!(
+                matches!(commutativity_of(&plan), Commutativity::Commutative),
+                "{query}"
+            );
+        }
+    }
+
+    /// A node that lists its raw inputs as two bindings reads two plans, and a region has nothing
+    /// to build for it.
+    #[test]
+    fn fused_series_over_two_actual_scans_is_not_commutative() {
+        let plan = occurrence_plan("some_metric + on(host) some_metric", &["host"], false);
+        assert!(matches!(
+            commutativity_of(&plan),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// A match key that drops an identity tag, or a cardinality that pairs a group with a series,
+    /// leaves a partition answering for the half of a series it holds.
+    #[test]
+    fn fused_series_over_a_partial_key_or_group_match_is_not_commutative() {
+        for query in [
+            "some_metric + on(host) some_metric",
+            "some_metric + ignoring(zone) some_metric",
+            "some_metric + on(host, zone) group_left some_metric",
+            "some_metric + on(host, zone) group_right some_metric",
+        ] {
+            let plan = occurrence_plan(query, &["host", "zone"], true);
+            assert!(
+                matches!(commutativity_of(&plan), Commutativity::NonCommutative),
+                "{query}"
+            );
+        }
+    }
+
+    /// A tree that reads a whole vector or folds a group reads across series, whether it is the
+    /// root or sits below the match the planner collapsed.
+    #[test]
+    fn fused_series_whose_tree_reads_across_series_is_not_commutative() {
+        for (query, one_source) in [
+            ("sort(some_metric)", true),
+            ("sum(some_metric)", true),
+            ("sort(some_metric) + on(host) sort(some_metric)", true),
+            ("sum(some_metric) + on(host) sum(some_metric)", true),
+        ] {
+            let plan = occurrence_plan(query, &["host"], one_source);
+            assert!(
+                matches!(commutativity_of(&plan), Commutativity::NonCommutative),
+                "{query}"
+            );
+        }
     }
 
     /// The encoding gate is what kept the node on the frontend, and it only exists for a plan that

@@ -26,18 +26,24 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   (`src/promql/src/extension_plan/planner.rs`) maps the logical nodes to their
   execution plans.
 - **Fused native-series route:** the query planner offers a PromQL statement to
-  `native_compile::compile` only when the engine's
+  `native_compile::compile_selectors` only when the engine's
   `in_process_region_transport` and `QueryOptions::experimental_native_promql`
   options are enabled and the per-request `query.experimental_native_promql`
   extension is true. Accepted plans use process-local `FusedSeries`; declined
-  or unsupported shapes fall back to the existing planner. The supported subset
-  requires one selector, a direct scan with a bound metric name, and no residual
-  label matchers or `__field__` matcher that narrows the scan, plus an eligible
-  raw-series table/field set and supported expression/grid. Metric scans retain
-  the static `__table_id` predicate. Hybrid CTEs keep the existing plan. The
-  operator also disables native planning for a programmatic TQL view so its
-  persisted Substrait plan remains serializable; `CREATE VIEW ... AS TQL EVAL`
-  syntax is a separate change.
+  or unsupported shapes fall back to the existing planner. `compile_selectors`
+  binds each selector to its own scan, and the route accepts one selector over a
+  direct scan with a bound metric name, or two occurrences of one selector when
+  both read one identical final scan, matched one-to-one over the whole series
+  identity with a point-wise operand on each side. Ordinary conjunctive label
+  matchers are not a reason to decline: each scan applies its own. Only trees that
+  read one series at a time are admitted, so an aggregate or a whole-vector
+  operation (`sort`, `absent`, ...) anywhere in the tree falls back, as does an
+  ineligible raw-series table/field set, a `__field__` matcher that narrows the
+  scan, or an unsupported expression/grid. Metric scans retain the static
+  `__table_id` predicate. Hybrid CTEs keep the existing plan. The operator also
+  disables native planning for a programmatic TQL view so its persisted Substrait
+  plan remains serializable; `CREATE VIEW ... AS TQL EVAL` syntax is a separate
+  change.
 - **Admission and SQL output:** the guards live in
   `src/query/src/promql/planner/native.rs`. Non-`Float64` fields, alternative
   (`or`) matchers and `rate`/`increase` on temporality-tagged tables keep the

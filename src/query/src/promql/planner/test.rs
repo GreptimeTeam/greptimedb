@@ -1156,6 +1156,9 @@ async fn build_test_identity_table_provider(
     ));
     let table_meta = TableMetaBuilder::empty()
         .schema(Arc::new(Schema::new(columns)))
+        // The engine decides whether the table can serve raw series at all, so a fixture that
+        // leaves it unset declines the native route before any identity rule is reached.
+        .engine(MITO_ENGINE.to_string())
         .primary_key_indices((0..tags.len()).collect())
         .value_indices(vec![tags.len() + 1])
         .next_column_id(1024)
@@ -2148,6 +2151,58 @@ async fn native_fused_two_occurrences_decline_metadata_key() {
         [("__unit__", false), ("host", false)],
     ] {
         assert_two_occurrences_fall_back(&tags, "some_metric + some_metric").await;
+    }
+}
+
+/// A statement that names its selector once reads one scan, so it records one path however many
+/// positional operands its tree has.
+#[tokio::test]
+async fn native_fused_one_occurrence_records_one_path() {
+    for query in [
+        "some_metric",
+        "some_metric * 2",
+        "-some_metric",
+        "2 - some_metric",
+        "abs(some_metric)",
+        "abs(some_metric * 2)",
+        "some_metric > bool 0",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query}: {}", plan.display_indent()));
+        assert_eq!(1, fused.fused_inputs().len(), "{query}");
+        let input = &fused.fused_inputs()[0];
+        assert!(
+            matches!(input.input, LogicalPlan::TableScan(_)),
+            "{query}: {:?}",
+            input.input
+        );
+        assert_eq!(1, input.paths.len(), "{query}: {:?}", input.paths);
+    }
+}
+
+/// A whole-vector operation or a group fold reads across series wherever it sits, so a statement
+/// that holds one keeps the existing plan — under a binary root, under a map, and under a constant
+/// broadcast over either.
+#[tokio::test]
+async fn native_fused_binary_holding_a_whole_vector_operation_falls_back() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        "sort(some_metric{host!=\"\"}) + some_metric{host!=\"\"}",
+        "abs(sort(some_metric{host!=\"\"})) + some_metric{host!=\"\"}",
+        "sort(some_metric{host!=\"\"}) * 2",
+        "sum(some_metric{host!=\"\"}) + some_metric{host!=\"\"}",
+        "abs(sum(some_metric{host!=\"\"})) * 2",
+    ] {
+        let native = build_identity_fused_plan(&tags, query, true).await;
+        let legacy = build_identity_fused_plan(&tags, query, false).await;
+        let display = native.display_indent().to_string();
+        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        assert_eq!(
+            native.display_indent_schema().to_string(),
+            legacy.display_indent_schema().to_string(),
+            "{query}: a tree that reads across series must keep the existing plan"
+        );
     }
 }
 
