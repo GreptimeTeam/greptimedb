@@ -530,15 +530,10 @@ fn a_two_input_tree_refuses_a_chunk_that_names_no_input() {
 }
 
 /// `group_right(env)` makes the right operand the many side and copies `env` from the left one, so
-/// one left series answers two right series. The fill then shows the same swap from the other end:
-/// the kernel fills its many side from `fill.rhs`, and in `group_right` the many side is the right
-/// operand, so a right series with no left match is answered by `fill_right` — the field named
-/// after the side the fill *is* rather than the side it stands in for. That mismatch between the
-/// field's name and the operand the fill becomes is the point of this case: the arithmetic itself is
-/// covered by the kernel's own golden fixtures, so what is pinned here is only that the compiler put
-/// `fill_right`'s value in the field the kernel reads for that side.
+/// one left series answers two right series. Group-right matching without fill executes; fill on
+/// this one-to-many shape is refused until the native kernel supports its semantics.
 #[test]
-fn a_group_right_swaps_the_many_side_and_fills_the_missing_one_side_sample() {
+fn group_right_executes_without_fill_and_declines_fill() {
     let pushes = |compiled: &CompiledTree, with_unmatched: bool| {
         let mut pushes = vec![
             (
@@ -602,40 +597,21 @@ fn a_group_right_swaps_the_many_side_and_fills_the_missing_one_side_sample() {
         "the second right series is not `2 / 20`: {output:?}"
     );
 
-    // `fill_right(100)` supplies the stand-in for the left operand: `group_right` makes the right
-    // operand the many side, the kernel fills that side from `fill.rhs`, and so the query writes
-    // `fill_right` for a sample that stands in for a missing left-hand one. The `job="y"` right
-    // series has no left match, so it is answered as `100 / 5` while the two matched series keep
-    // their own values.
-    let filled = compile("a{job=\"x\"} / on(job) group_right(env) fill_right(100) b");
-    let output = results(&run(&filled, pushes(&filled, true)));
-    assert_eq!(
-        output.len(),
-        3,
-        "`fill_right(100)` did not answer the right series with no left match: {output:?}"
-    );
-    assert_eq!(
-        output.get("{env=\"prod\", instance=\"i1\", job=\"x\"}"),
-        Some(&every_point(0.2)),
-        "the fill changed the first matched series: {output:?}"
-    );
-    assert_eq!(
-        output.get("{env=\"prod\", instance=\"i2\", job=\"x\"}"),
-        Some(&every_point(0.1)),
-        "the fill changed the second matched series: {output:?}"
-    );
-    // A fill row pairs no two series, so there is no one side to copy `env` from: `group_right`'s
-    // included label is removed rather than invented, which is why the filled series carries no
-    // `env` while its value is `100 / 5`.
-    assert_eq!(
-        output.get("{instance=\"i3\", job=\"y\"}"),
-        Some(&every_point(20.0)),
-        "the filled series is not `100 / 5`: {output:?}"
-    );
-    assert!(
-        !output.contains_key("{env=\"prod\", instance=\"i3\", job=\"y\"}"),
-        "the filled series invented the included label from the side it stands in for: {output:?}"
-    );
+    // The kernel currently applies the wrong fill side for one-to-many matching; refuse this shape
+    // until its matching/fill semantics are corrected.
+    for fill in ["fill_right(83)", "fill(41)"] {
+        let query = format!("a{{job=\"x\"}} / on(job) group_right(env) {fill} b");
+        let error = compile_selectors(
+            &eval_stmt(&query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .expect_err("one-to-many matching with fill must fall back");
+        assert!(
+            matches!(error, datafusion::error::DataFusionError::NotImplemented(_)),
+            "`{query}` was refused for the wrong reason: {error}"
+        );
+    }
 }
 
 #[test]
