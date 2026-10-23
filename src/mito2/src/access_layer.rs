@@ -478,7 +478,8 @@ impl AccessLayer {
 
     /// Puts encoded SST bytes to the write cache (if enabled) and uploads it to the object store.
     ///
-    /// Builds the SST's indexes from `data` into `sst_info.index_metadata` when `index` is set.
+    /// Builds the SST's indexes from `data` into `sst_info.index_metadata` when
+    /// `index_build_params` is set.
     pub(crate) async fn put_sst(
         &self,
         data: &bytes::Bytes,
@@ -486,7 +487,7 @@ impl AccessLayer {
         sst_info: &mut SstInfo,
         cache_manager: &CacheManagerRef,
         write_buffer_size: ReadableSize,
-        index: Option<EncodedSstIndexRequest>,
+        index_build_params: Option<EncodedSstIndexBuildParams>,
     ) -> Result<Metrics> {
         let region_file_id = RegionFileId::new(region_id, sst_info.file_id);
         if let Some(write_cache) = cache_manager.write_cache() {
@@ -505,7 +506,7 @@ impl AccessLayer {
                     sst_info,
                     upload_request,
                     write_buffer_size,
-                    index,
+                    index_build_params,
                 )
                 .await
         } else {
@@ -532,9 +533,9 @@ impl AccessLayer {
             let mut metrics = Metrics::new(WriteType::Flush);
             metrics.write_batch = start.elapsed();
 
-            if let Some(index) = index {
+            if let Some(params) = index_build_params {
                 let start = Instant::now();
-                let builder = index.indexer_builder(
+                let builder = params.indexer_builder(
                     self.puffin_manager_factory
                         .build(self.object_store.clone(), path_provider),
                     false,
@@ -619,7 +620,7 @@ pub struct SstWriteRequest {
 }
 
 /// Index inputs for SST bytes that were encoded outside [ParquetWriter].
-pub(crate) struct EncodedSstIndexRequest {
+pub(crate) struct EncodedSstIndexBuildParams {
     pub(crate) metadata: RegionMetadataRef,
     pub(crate) index_options: IndexOptions,
     pub(crate) inverted_index_config: InvertedIndexConfig,
@@ -627,7 +628,7 @@ pub(crate) struct EncodedSstIndexRequest {
     pub(crate) bloom_filter_index_config: BloomFilterConfig,
 }
 
-impl EncodedSstIndexRequest {
+impl EncodedSstIndexBuildParams {
     pub(crate) fn indexer_builder(
         self,
         puffin_manager: SstPuffinManager,

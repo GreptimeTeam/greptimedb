@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::access_layer::{
-    EncodedSstIndexRequest, FilePathProvider, Metrics, OperationType, RegionFilePathFactory,
+    EncodedSstIndexBuildParams, FilePathProvider, Metrics, OperationType, RegionFilePathFactory,
     SstInfoArray, SstWriteRequest, TempFileCleaner, WriteCachePathProvider, WriteType,
     new_fs_cache_store,
 };
@@ -175,7 +175,8 @@ impl WriteCache {
 
     /// Put encoded SST data to the cache and upload to the remote object store.
     ///
-    /// Builds the SST's indexes from `data` when `index` is set and uploads them with the SST.
+    /// Builds the SST's indexes from `data` when `index_build_params` is set and uploads them
+    /// with the SST.
     pub(crate) async fn put_and_upload_sst(
         &self,
         data: &bytes::Bytes,
@@ -183,7 +184,7 @@ impl WriteCache {
         sst_info: &mut SstInfo,
         upload_request: SstUploadRequest,
         write_buffer_size: ReadableSize,
-        index: Option<EncodedSstIndexRequest>,
+        index_build_params: Option<EncodedSstIndexBuildParams>,
     ) -> Result<Metrics> {
         let file_id = sst_info.file_id;
         let region_file_id = RegionFileId::new(region_id, file_id);
@@ -209,9 +210,9 @@ impl WriteCache {
 
         metrics.write_batch = cache_start.elapsed();
 
-        if let Some(index) = index {
+        if let Some(params) = index_build_params {
             let start = Instant::now();
-            let builder = index.indexer_builder(
+            let builder = params.indexer_builder(
                 self.build_puffin_manager(),
                 true,
                 self.intermediate_manager.clone(),

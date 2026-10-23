@@ -474,6 +474,8 @@ pub(crate) async fn build_index_from_parquet_bytes(
         return IndexOutput::default();
     }
 
+    // TODO(dennis): decode only the columns the enabled indexers need, including the encoded
+    // primary key for tag indexes. This needs the indexer to stop locating columns by position.
     let reader = match reader_builder
         .with_batch_size(DEFAULT_READ_BATCH_SIZE)
         .build()

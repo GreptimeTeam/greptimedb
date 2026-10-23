@@ -34,8 +34,8 @@ use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::access_layer::{
-    AccessLayerRef, EncodedSstIndexRequest, Metrics, OperationType, SstInfoArray, SstWriteRequest,
-    WriteType,
+    AccessLayerRef, EncodedSstIndexBuildParams, Metrics, OperationType, SstInfoArray,
+    SstWriteRequest, WriteType,
 };
 use crate::cache::CacheManagerRef;
 use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
@@ -760,7 +760,7 @@ impl RegionFlushTask {
             let write_buffer_size = write_opts.write_buffer_size;
             let semaphore = self.flush_semaphore.clone();
             let uncommitted = uncommitted.clone();
-            let index = build_index.then(|| EncodedSstIndexRequest {
+            let index_build_params = build_index.then(|| EncodedSstIndexBuildParams {
                 metadata: version.metadata.clone(),
                 index_options: self.index_options.clone(),
                 inverted_index_config: self.engine_config.inverted_index.clone(),
@@ -769,7 +769,7 @@ impl RegionFlushTask {
             });
             // Index creation runs after the SST is uploaded, so cancellation can land after the
             // upload. Own the files before uploading them.
-            uncommitted.track_before_upload(encoded.sst_info.file_id, index.is_some());
+            uncommitted.track_before_upload(encoded.sst_info.file_id, index_build_params.is_some());
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let metrics = access_layer
@@ -779,7 +779,7 @@ impl RegionFlushTask {
                         &mut encoded.sst_info,
                         &cache_manager,
                         write_buffer_size,
-                        index,
+                        index_build_params,
                     )
                     .await?;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
