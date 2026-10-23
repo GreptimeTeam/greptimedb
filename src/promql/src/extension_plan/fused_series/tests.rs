@@ -53,7 +53,9 @@ use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNod
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::execution_plan::{
+    Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions,
+};
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
@@ -1225,6 +1227,64 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
     assert_eq!(metrics.iter().count(), repeated.iter().count());
     assert_eq!(1, count(&repeated, "native.root.input.completed_series"));
     assert_eq!(1, count(&repeated, "native.root.completed_series"));
+}
+
+/// A node rebuilt over another input runs its tree again instead of inheriting what an earlier
+/// execution recorded.
+///
+/// The rebuild keeps the compiled tree and rebuilds everything an execution owns: the rebuilt plan
+/// reports an empty set before it runs and its own execution afterwards, and its plan-owned label
+/// sets are fresh, so the same series can be read again.
+#[tokio::test]
+async fn a_rebuilt_node_reports_only_its_own_execution() {
+    let exec = plan(rate_tree(), memory_exec(one_series_frames()))
+        .expect("the runtime executes a rate tree");
+    let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .expect("the node runs");
+    let first_rows = rows(&batches);
+    assert_eq!(
+        grid_timestamps(),
+        first_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the series is answered at every grid position"
+    );
+    let original = exec
+        .metrics()
+        .expect("the node reports its runtime's metrics");
+    assert_eq!(1, count(&original, "native.root.completed_series"));
+
+    // Rebuilt over a fresh input of the same frames, the way an optimizer replaces a child.
+    let rebuilt = Arc::clone(&exec)
+        .replace_children(
+            vec![memory_exec(one_series_frames())],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect("the node rebuilds over another input");
+    // No execution of the rebuilt node has run, so it holds no runtime root to report.
+    let before = rebuilt
+        .metrics()
+        .expect("a plan that has not run reports an empty set rather than none");
+    assert_eq!(
+        0,
+        before.iter().count(),
+        "the rebuilt node inherited an execution's metrics"
+    );
+    // Rebuilding does not reset the node it was built from.
+    assert_eq!(1, count(&original, "native.root.completed_series"));
+
+    let rebuilt_batches = collect(Arc::clone(&rebuilt), SessionContext::default().task_ctx())
+        .await
+        .expect("the rebuilt node runs");
+    // The same rows: the rebuilt plan's label sets started empty, not repeating the first claim.
+    assert_eq!(first_rows, rows(&rebuilt_batches));
+
+    let after = rebuilt
+        .metrics()
+        .expect("the rebuilt node reports the execution it ran");
+    assert_eq!(1, count(&after, "native.root.completed_series"));
+    assert_eq!(1, count(&after, "native.root.input.completed_series"));
+    // One execution's set, not two: a copy of the original's roots would answer 2 here.
+    assert_eq!(original.iter().count(), after.iter().count());
 }
 
 /// Dropping a partially consumed execution releases its live reservation but preserves its peak.

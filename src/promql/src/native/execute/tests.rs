@@ -1300,6 +1300,155 @@ fn each_node_records_its_own_metrics() {
     );
 }
 
+/// A tree whose left operand is a broadcast exports its whole runtime topology, the constant
+/// included.
+///
+/// The tree is `(2 + in0) + in1`: the root is a binary, its left operand a broadcast over the first
+/// input, its right operand the second. Each of the five nodes keeps its own handles, so a fresh
+/// export names one entry per node and per metric a node reports, and the branches carry what each
+/// node did with the input it was handed.
+#[test]
+fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
+    let out_grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&out_grid));
+    let tree = NativeTree::try_new(binary_of(
+        broadcast_left(
+            2.0,
+            evaluated_input(Arc::clone(&out_grid)),
+            BinaryOp::Add,
+            false,
+        ),
+        evaluated_input(Arc::clone(&out_grid)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+
+    // One direct pattern per level, on the nodes the constructor made; the lock goes before the
+    // first push.
+    {
+        let runtime = execution.state().runtime_tree();
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Binary { left, right, .. } = &guard.root.op else {
+            panic!("the root is not the binary node the tree built");
+        };
+        let RuntimeOp::Broadcast {
+            left: constant,
+            right: vector,
+            ..
+        } = &left.op
+        else {
+            panic!("the left operand is not the broadcast the tree built");
+        };
+        assert!(
+            matches!(&constant.op, RuntimeOp::Scalar),
+            "the broadcast's left operand is not the constant the tree built"
+        );
+        assert!(
+            matches!(&vector.op, RuntimeOp::Input(id) if id.index() == 0),
+            "the broadcast's vector is not the first input"
+        );
+        assert!(
+            matches!(&right.op, RuntimeOp::Input(id) if id.index() == 1),
+            "the binary's right operand is not the second input"
+        );
+    }
+
+    // Input 0 is the vector under the broadcast, where `2 +` applies; input 1 is the right operand.
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&schema, 0, vec![1.0, 2.0], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(1),
+            evaluated_chunk(&schema, 0, vec![10.0, 20.0], true),
+        )
+        .unwrap();
+    // A matching binary answers nothing before its input ends.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the binary answered before its input ended"
+    );
+    let out = run(&mut execution);
+    assert_eq!(decided(&out), vec![(0, Some(13.0)), (1, Some(24.0))]);
+
+    let metrics = execution.state().runtime_tree();
+    // Each leaf closed the one series it was handed; the constant closed none.
+    assert_eq!(
+        count(&metrics, "root.left.right", NodeMetric::COMPLETED_SERIES),
+        1
+    );
+    assert_eq!(
+        count(&metrics, "root.right", NodeMetric::COMPLETED_SERIES),
+        1
+    );
+    for metric in [
+        NodeMetric::INPUT_BATCHES,
+        NodeMetric::OUTPUT_BATCHES,
+        NodeMetric::COMPLETED_SERIES,
+    ] {
+        assert_eq!(
+            count(&metrics, "root.left.left", metric),
+            0,
+            "the constant counted {metric}"
+        );
+    }
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_BATCHES), 1);
+
+    // Five nodes of 11 names each, the peak under the partition it belongs to.
+    let mut expected: Vec<String> = Vec::new();
+    for node in [
+        "root",
+        "root.left",
+        "root.left.left",
+        "root.left.right",
+        "root.right",
+    ] {
+        for metric in NodeMetric::ALL {
+            expected.push(if *metric == NodeMetric::PEAK_RESERVED_BYTES {
+                format!("native.p0.{node}.{metric}")
+            } else {
+                format!("native.{node}.{metric}")
+            });
+        }
+    }
+    expected.sort();
+    let exported = |runtime: &RuntimeTreeHandle| -> Vec<String> {
+        let mut names: Vec<String> = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .export_metrics(0)
+            .iter()
+            .map(|metric| metric.value().name().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(exported(&metrics), expected);
+    // A second fresh export repeats no name, which a doubled entry in the sorted list would show.
+    assert_eq!(exported(&metrics), expected);
+
+    // The execution closed itself, so every node gave its bytes back.
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    for node in [
+        "root",
+        "root.left",
+        "root.left.left",
+        "root.left.right",
+        "root.right",
+    ] {
+        let current = format!("native.{node}.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+        assert_eq!(gauge(&metrics, &current), 0, "{node} kept its bytes");
+    }
+}
+
 /// An error returns the reservation while the execution is still alive, and a drop returns it too.
 #[test]
 fn an_error_releases_the_reservation() {
