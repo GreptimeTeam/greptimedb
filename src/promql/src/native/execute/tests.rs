@@ -9118,15 +9118,18 @@ fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
         vec![MapOp::Label(Arc::new(rewrite))],
     ))
     .unwrap();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let mut execution = executor(&tree, pool());
     execution
-        .push_evaluated(evaluated_chunk_of(
-            &schema,
-            named_metric("a", "x"),
-            0,
-            vec![Some(1.0), Some(2.0)],
-            true,
-        ))
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
         .unwrap();
     let first = execution
         .next_chunk()
@@ -9134,13 +9137,10 @@ fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
         .expect("the relabelled series");
     assert_eq!(first.series.metric, named_metric("a", "all"));
     execution
-        .push_evaluated(evaluated_chunk_of(
-            &schema,
-            named_metric("a", "y"),
-            1,
-            vec![Some(3.0)],
-            true,
-        ))
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, named_metric("a", "y"), 1, vec![Some(3.0)], true),
+        )
         .unwrap();
     let error = execution.next_chunk().unwrap_err().to_string();
     assert!(
@@ -9166,15 +9166,18 @@ fn an_emptied_closing_chunk_carries_the_labels_of_the_whole_chain() {
         ],
     ))
     .unwrap();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let mut execution = executor(&tree, pool());
     execution
-        .push_evaluated(evaluated_chunk_of(
-            &schema,
-            named_metric("a", "x"),
-            0,
-            vec![Some(1.0), Some(2.0)],
-            true,
-        ))
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("a", "x"),
+                0,
+                vec![Some(1.0), Some(2.0)],
+                true,
+            ),
+        )
         .unwrap();
     let chunks = run(&mut execution);
     let [closing] = chunks.as_slice() else {
@@ -9263,240 +9266,240 @@ fn a_label_change_admits_the_label_it_writes_before_building_it() {
         vec![MapOp::Label(join)],
     ))
     .unwrap();
-    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
-    execution.push_evaluated(chunk).unwrap();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.push_evaluated(InputId::new(0), chunk).unwrap();
     let error = execution.next_chunk().unwrap_err();
     assert!(error.to_string().contains("Resources exhausted"), "{error}");
     assert_eq!(pool.reserved(), 0);
+}
 
-    /// An execution that ended keeps its topology and its counters, and nothing the input was read
-    /// with: the schema the leaf was bound to and the grid that schema is addressed on go with it.
-    ///
-    /// The leaf itself stays -- the root still says which routing slot it is, and the metrics an
-    /// observer keeps the runtime tree for still read -- but the slot that fed it is taken, so an
-    /// executor kept alive past the execution holds no input schema and no materialized grid. Both ways
-    /// an execution ends are covered: the answer is drained, and a rejected push stops it first.
-    #[test]
-    fn an_ended_execution_keeps_no_input_schema_or_grid() {
-        for fails in [false, true] {
-            let out_grid = grid(0, 60_000, 4);
-            let tree = NativeTree::try_new(evaluated_input(Arc::clone(&out_grid))).unwrap();
-            let schema = Arc::clone(
-                tree.root()
-                    .output
-                    .samples()
-                    .expect("an input node produces samples"),
-            );
-            // Both chunks are built while the schema is at hand: the one the input answers, and one the
-            // failing case pushes at an input the tree does not have.
-            let queued = evaluated_chunk(&schema, 0, vec![1.0; 4], true);
-            let refused = evaluated_chunk(&schema, 0, vec![2.0; 4], true);
-            let (schema_weak, grid_weak) = (Arc::downgrade(&schema), Arc::downgrade(&out_grid));
+/// An execution that ended keeps its topology and its counters, and nothing the input was read
+/// with: the schema the leaf was bound to and the grid that schema is addressed on go with it.
+///
+/// The leaf itself stays -- the root still says which routing slot it is, and the metrics an
+/// observer keeps the runtime tree for still read -- but the slot that fed it is taken, so an
+/// executor kept alive past the execution holds no input schema and no materialized grid. Both ways
+/// an execution ends are covered: the answer is drained, and a rejected push stops it first.
+#[test]
+fn an_ended_execution_keeps_no_input_schema_or_grid() {
+    for fails in [false, true] {
+        let out_grid = grid(0, 60_000, 4);
+        let tree = NativeTree::try_new(evaluated_input(Arc::clone(&out_grid))).unwrap();
+        let schema = Arc::clone(
+            tree.root()
+                .output
+                .samples()
+                .expect("an input node produces samples"),
+        );
+        // Both chunks are built while the schema is at hand: the one the input answers, and one the
+        // failing case pushes at an input the tree does not have.
+        let queued = evaluated_chunk(&schema, 0, vec![1.0; 4], true);
+        let refused = evaluated_chunk(&schema, 0, vec![2.0; 4], true);
+        let (schema_weak, grid_weak) = (Arc::downgrade(&schema), Arc::downgrade(&out_grid));
 
-            let pool = pool();
-            let mut execution = executor(&tree, Arc::clone(&pool));
-            let runtime = execution.state().runtime_tree();
-            drop(tree);
-            drop(schema);
-            drop(out_grid);
-            // A chunk addresses its grid but holds no schema, so what still holds either of them is the
-            // slot the input leaf reads through: that is what the terminal checks below ask about.
-            assert!(
-                schema_weak.upgrade().is_some(),
-                "the queued input is not what holds the schema it was bound to"
-            );
-            assert!(
-                grid_weak.upgrade().is_some(),
-                "the queued input is not what holds the grid it is addressed on"
-            );
-            assert!(
-                root_holds(&execution, holds_input),
-                "the root is not the input leaf the tree built"
-            );
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let runtime = execution.state().runtime_tree();
+        drop(tree);
+        drop(schema);
+        drop(out_grid);
+        // A chunk addresses its grid but holds no schema, so what still holds either of them is the
+        // slot the input leaf reads through: that is what the terminal checks below ask about.
+        assert!(
+            schema_weak.upgrade().is_some(),
+            "the queued input is not what holds the schema it was bound to"
+        );
+        assert!(
+            grid_weak.upgrade().is_some(),
+            "the queued input is not what holds the grid it is addressed on"
+        );
+        assert!(
+            root_holds(&execution, holds_input),
+            "the root is not the input leaf the tree built"
+        );
 
-            execution.push_evaluated(InputId::new(0), queued).unwrap();
-            assert!(pool.reserved() > 0, "the queued chunk was not charged for");
-            if fails {
-                let error = execution
-                    .push_evaluated(InputId::new(1), refused)
-                    .expect_err("a chunk at an input the tree does not have was queued");
-                assert!(
-                    matches!(error, DataFusionError::Execution(_)),
-                    "the refusal is not an execution error: {error}"
-                );
-                assert!(
-                    error.to_string().contains("no input 1"),
-                    "the refusal does not name the input it was queued at: {error}"
-                );
-                // The push stopped the execution, so neither the chunk queued before it nor anything
-                // the leaf held is answered or kept.
-                assert_eq!(execution.state().reserved_bytes(), 0);
-                assert_eq!(pool.reserved(), 0);
-            } else {
-                let answered = execution.finish().expect("the queued chunk is answered");
-                assert_eq!(answered.len(), 1);
-                assert_eq!(answered[0].series.metric, metric());
-                assert_eq!(addressed(&answered), vec![(0, vec![Some(1.0); 4])]);
-                // The answer holds the grid, so it goes before the checks below: what is asked about
-                // there is what the execution kept, not what the caller's own chunk holds.
-                drop(answered);
-                drop(refused);
-            }
-
-            // What an observer keeping the runtime tree alive sees is the topology and the counters.
+        execution.push_evaluated(InputId::new(0), queued).unwrap();
+        assert!(pool.reserved() > 0, "the queued chunk was not charged for");
+        if fails {
+            let error = execution
+                .push_evaluated(InputId::new(1), refused)
+                .expect_err("a chunk at an input the tree does not have was queued");
             assert!(
-                schema_weak.upgrade().is_none(),
-                "the ended execution kept the schema its input was bound to"
+                matches!(error, DataFusionError::Execution(_)),
+                "the refusal is not an execution error: {error}"
             );
             assert!(
-                grid_weak.upgrade().is_none(),
-                "the ended execution kept the grid its input was addressed on"
+                error.to_string().contains("no input 1"),
+                "the refusal does not name the input it was queued at: {error}"
             );
+            // The push stopped the execution, so neither the chunk queued before it nor anything
+            // the leaf held is answered or kept.
             assert_eq!(execution.state().reserved_bytes(), 0);
             assert_eq!(pool.reserved(), 0);
-            assert!(
-                execution.state().inputs.is_empty(),
-                "the ended execution kept an input slot"
-            );
-            assert_eq!(
-                execution.state().inputs.capacity(),
-                0,
-                "the ended execution kept the slot vector's backing"
-            );
-            let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
-            assert_eq!(
-                gauge(&runtime, &current),
-                0,
-                "the ended execution still charges its leaf"
-            );
-            let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
-            assert!(
-                gauge(&runtime, &peak) > 0,
-                "the peak the leaf reached did not survive the end of the execution"
-            );
-            assert!(
-                root_holds(&execution, holds_input),
-                "the ended execution replaced the root it was built from"
-            );
+        } else {
+            let answered = execution.finish().expect("the queued chunk is answered");
+            assert_eq!(answered.len(), 1);
+            assert_eq!(answered[0].series.metric, metric());
+            assert_eq!(addressed(&answered), vec![(0, vec![Some(1.0); 4])]);
+            // The answer holds the grid, so it goes before the checks below: what is asked about
+            // there is what the execution kept, not what the caller's own chunk holds.
+            drop(answered);
+            drop(refused);
         }
-    }
 
-    /// A chunk pushed after the input ended is refused, and the answer already queued stays pullable.
-    ///
-    /// The ending stages run as the caller pulls, so a chunk arriving behind them would reach a leaf
-    /// whose consumer has already decided what to answer. It is refused rather than queued, and the
-    /// refusal is not a stop: what the execution holds is the answer the caller has not pulled yet.
-    #[test]
-    fn a_chunk_pushed_after_the_input_ended_is_refused() {
-        let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
-        let schema = evaluated_schema(Arc::clone(&grid));
-        let pool = bounded_pool(1 << 22);
-        let mut execution = executor(&tree, Arc::clone(&pool));
-        // Two matched series on each side, so the answer is two chunks and pulling one leaves one
-        // queued: `{job="a"}` adds two to one, `{job="b"}` adds three to two.
-        for (side, metric, value) in [
-            (left, named_metric("m", "a"), 1.0),
-            (left, named_metric("m", "b"), 2.0),
-            (right, named_metric("m", "a"), 2.0),
-            (right, named_metric("m", "b"), 3.0),
-        ] {
-            execution
-                .push_evaluated(
-                    side,
-                    evaluated_chunk_of(&schema, metric, 0, vec![Some(value); 4], true),
-                )
-                .unwrap();
-        }
-        execution.end_of_input().expect("both operands closed");
-        let first = execution
-            .next_chunk()
-            .unwrap()
-            .expect("the first answer is settled");
-        let first_job = first
-            .series
-            .metric
-            .get("job")
-            .expect("the answer keeps the labels it matched")
-            .to_string();
+        // What an observer keeping the runtime tree alive sees is the topology and the counters.
         assert!(
-            first_job == "a" || first_job == "b",
-            "the answer names a job the operands do not hold: {first_job}"
-        );
-        // Whichever of the two the kernel matched first, it carries its whole grid: `{job="a"}` adds
-        // two to one, `{job="b"}` adds three to two.
-        let first_value = if first_job == "a" { 3.0 } else { 5.0 };
-        assert_eq!(
-            addressed(std::slice::from_ref(&first)),
-            vec![(0, vec![Some(first_value); 4])],
-            "the first answer does not hold the values its labels decide"
-        );
-        // One answer is still queued, and it is charged to the node holding it.
-        let held = execution.state().reserved_bytes();
-        assert!(
-            held > 0,
-            "the answer the caller has not pulled is not charged for"
-        );
-        assert_eq!(pool.reserved(), held);
-
-        let rejection = execution
-            .push_evaluated(
-                InputId::new(0),
-                evaluated_chunk_of(
-                    &schema,
-                    named_metric("m", "late"),
-                    0,
-                    vec![Some(9.0); 4],
-                    true,
-                ),
-            )
-            .expect_err("a chunk pushed after the input ended was queued");
-        assert!(
-            matches!(rejection, DataFusionError::Execution(_)),
-            "the refusal is not an execution error: {rejection}"
+            schema_weak.upgrade().is_none(),
+            "the ended execution kept the schema its input was bound to"
         );
         assert!(
-            rejection.to_string().contains("already ended its input"),
-            "the refusal does not say the input ended: {rejection}"
-        );
-        // The refused chunk was not queued, and nothing else changed: the answer still waits.
-        assert_eq!(
-            execution.state().reserved_bytes(),
-            held,
-            "the refused chunk changed what the execution holds"
-        );
-        assert_eq!(pool.reserved(), held);
-
-        // The refusal did not stop the execution: the rest of the answer is still pullable.
-        let mut pulled = vec![first];
-        while let Some(chunk) = execution.next_chunk().unwrap() {
-            pulled.push(chunk);
-        }
-        let mut answers = decided_by_job(&pulled);
-        answers.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(
-            answers,
-            [
-                (
-                    "a".to_string(),
-                    vec![
-                        (0, Some(3.0)),
-                        (1, Some(3.0)),
-                        (2, Some(3.0)),
-                        (3, Some(3.0))
-                    ]
-                ),
-                (
-                    "b".to_string(),
-                    vec![
-                        (0, Some(5.0)),
-                        (1, Some(5.0)),
-                        (2, Some(5.0)),
-                        (3, Some(5.0))
-                    ]
-                ),
-            ]
+            grid_weak.upgrade().is_none(),
+            "the ended execution kept the grid its input was addressed on"
         );
         assert_eq!(execution.state().reserved_bytes(), 0);
         assert_eq!(pool.reserved(), 0);
+        assert!(
+            execution.state().inputs.is_empty(),
+            "the ended execution kept an input slot"
+        );
+        assert_eq!(
+            execution.state().inputs.capacity(),
+            0,
+            "the ended execution kept the slot vector's backing"
+        );
+        let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+        assert_eq!(
+            gauge(&runtime, &current),
+            0,
+            "the ended execution still charges its leaf"
+        );
+        let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+        assert!(
+            gauge(&runtime, &peak) > 0,
+            "the peak the leaf reached did not survive the end of the execution"
+        );
+        assert!(
+            root_holds(&execution, holds_input),
+            "the ended execution replaced the root it was built from"
+        );
     }
+}
+
+/// A chunk pushed after the input ended is refused, and the answer already queued stays pullable.
+///
+/// The ending stages run as the caller pulls, so a chunk arriving behind them would reach a leaf
+/// whose consumer has already decided what to answer. It is refused rather than queued, and the
+/// refusal is not a stop: what the execution holds is the answer the caller has not pulled yet.
+#[test]
+fn a_chunk_pushed_after_the_input_ended_is_refused() {
+    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let pool = bounded_pool(1 << 22);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    // Two matched series on each side, so the answer is two chunks and pulling one leaves one
+    // queued: `{job="a"}` adds two to one, `{job="b"}` adds three to two.
+    for (side, metric, value) in [
+        (left, named_metric("m", "a"), 1.0),
+        (left, named_metric("m", "b"), 2.0),
+        (right, named_metric("m", "a"), 2.0),
+        (right, named_metric("m", "b"), 3.0),
+    ] {
+        execution
+            .push_evaluated(
+                side,
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(value); 4], true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().expect("both operands closed");
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first answer is settled");
+    let first_job = first
+        .series
+        .metric
+        .get("job")
+        .expect("the answer keeps the labels it matched")
+        .to_string();
+    assert!(
+        first_job == "a" || first_job == "b",
+        "the answer names a job the operands do not hold: {first_job}"
+    );
+    // Whichever of the two the kernel matched first, it carries its whole grid: `{job="a"}` adds
+    // two to one, `{job="b"}` adds three to two.
+    let first_value = if first_job == "a" { 3.0 } else { 5.0 };
+    assert_eq!(
+        addressed(std::slice::from_ref(&first)),
+        vec![(0, vec![Some(first_value); 4])],
+        "the first answer does not hold the values its labels decide"
+    );
+    // One answer is still queued, and it is charged to the node holding it.
+    let held = execution.state().reserved_bytes();
+    assert!(
+        held > 0,
+        "the answer the caller has not pulled is not charged for"
+    );
+    assert_eq!(pool.reserved(), held);
+
+    let rejection = execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("m", "late"),
+                0,
+                vec![Some(9.0); 4],
+                true,
+            ),
+        )
+        .expect_err("a chunk pushed after the input ended was queued");
+    assert!(
+        matches!(rejection, DataFusionError::Execution(_)),
+        "the refusal is not an execution error: {rejection}"
+    );
+    assert!(
+        rejection.to_string().contains("already ended its input"),
+        "the refusal does not say the input ended: {rejection}"
+    );
+    // The refused chunk was not queued, and nothing else changed: the answer still waits.
+    assert_eq!(
+        execution.state().reserved_bytes(),
+        held,
+        "the refused chunk changed what the execution holds"
+    );
+    assert_eq!(pool.reserved(), held);
+
+    // The refusal did not stop the execution: the rest of the answer is still pullable.
+    let mut pulled = vec![first];
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        pulled.push(chunk);
+    }
+    let mut answers = decided_by_job(&pulled);
+    answers.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        answers,
+        [
+            (
+                "a".to_string(),
+                vec![
+                    (0, Some(3.0)),
+                    (1, Some(3.0)),
+                    (2, Some(3.0)),
+                    (3, Some(3.0))
+                ]
+            ),
+            (
+                "b".to_string(),
+                vec![
+                    (0, Some(5.0)),
+                    (1, Some(5.0)),
+                    (2, Some(5.0)),
+                    (3, Some(5.0))
+                ]
+            ),
+        ]
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
 }

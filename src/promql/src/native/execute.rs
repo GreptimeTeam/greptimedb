@@ -43,8 +43,8 @@ use crate::grid_series::{
 use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
 use crate::instant_eval::select_instants;
 use crate::map::{
-    ArithmeticOp, Comparison, ComparisonOp, MathOp, ScalarOperand, drop_metric_name,
-    map_arithmetic, map_compare, map_math,
+    ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, drop_metric_name, map_arithmetic,
+    map_compare, map_math,
 };
 use crate::native::aggregate::AggregateRuntime;
 use crate::native::batch::EvaluatedChunk;
