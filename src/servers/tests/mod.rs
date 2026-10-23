@@ -14,13 +14,14 @@
 
 use std::sync::Arc;
 
+use api::v1::RowInsertRequests;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use catalog::system_schema::SystemSchemaProvider;
 use catalog::system_schema::pg_catalog::PGCatalogProvider;
-use catalog::{CatalogManager, RegisterTableRequest};
+use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, PG_CATALOG_NAME};
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
@@ -32,6 +33,7 @@ use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::{ExecuteQuerySnafu, NotSupportedSnafu, Result};
+use servers::query_handler::CopyInHandler;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
@@ -39,6 +41,7 @@ use snafu::{ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use table::TableRef;
+use table::metadata::TableInfoRef;
 
 mod http;
 mod interceptor;
@@ -53,6 +56,64 @@ pub struct DummyInstance {
 impl DummyInstance {
     fn new(query_engine: QueryEngineRef) -> Self {
         Self { query_engine }
+    }
+
+    pub fn catalog_manager(&self) -> CatalogManagerRef {
+        self.query_engine.engine_state().catalog_manager().clone()
+    }
+}
+
+/// A [`CopyInHandler`] test double: resolves tables through the catalog
+/// manager and records the insert requests instead of writing them.
+pub struct RecordingCopyInHandler {
+    catalog_manager: CatalogManagerRef,
+    pub requests: std::sync::Mutex<Vec<RowInsertRequests>>,
+}
+
+impl RecordingCopyInHandler {
+    pub fn new(catalog_manager: CatalogManagerRef) -> Self {
+        Self {
+            catalog_manager,
+            requests: Default::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl CopyInHandler for RecordingCopyInHandler {
+    async fn copy_in_table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Option<TableInfoRef>> {
+        Ok(self
+            .catalog_manager
+            .table(catalog, schema, table, None)
+            .await
+            .unwrap()
+            .map(|table| table.table_info()))
+    }
+
+    async fn copy_in_insert(
+        &self,
+        requests: RowInsertRequests,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let rows: usize = requests
+            .inserts
+            .iter()
+            .map(|insert| {
+                insert
+                    .rows
+                    .as_ref()
+                    .map(|rows| rows.rows.len())
+                    .unwrap_or(0)
+            })
+            .sum();
+        self.requests.lock().unwrap().push(requests);
+        Ok(Output::new_with_affected_rows(rows))
     }
 }
 
