@@ -1445,7 +1445,9 @@ impl Error {
     /// Returns whether a failed manifest update may have been persisted.
     ///
     /// Unknown errors are treated conservatively because deleting output SSTs after an ambiguous
-    /// manifest write could leave the manifest referencing missing files.
+    /// manifest write could leave the manifest referencing missing files. The retry layer returns
+    /// the last attempt's error, so an error that can follow a stored attempt (throttling, or a 403
+    /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
             Error::UpdateManifest { .. }
@@ -1459,11 +1461,9 @@ impl Error {
                 ErrorKind::Unsupported
                     | ErrorKind::ConfigInvalid
                     | ErrorKind::NotFound
-                    | ErrorKind::PermissionDenied
                     | ErrorKind::IsADirectory
                     | ErrorKind::NotADirectory
                     | ErrorKind::AlreadyExists
-                    | ErrorKind::RateLimited
                     | ErrorKind::IsSameFile
                     | ErrorKind::ConditionNotMatch
                     | ErrorKind::RangeNotSatisfied
@@ -1847,11 +1847,9 @@ mod tests {
             ErrorKind::Unsupported,
             ErrorKind::ConfigInvalid,
             ErrorKind::NotFound,
-            ErrorKind::PermissionDenied,
             ErrorKind::IsADirectory,
             ErrorKind::NotADirectory,
             ErrorKind::AlreadyExists,
-            ErrorKind::RateLimited,
             ErrorKind::IsSameFile,
             ErrorKind::ConditionNotMatch,
             ErrorKind::RangeNotSatisfied,
@@ -1864,9 +1862,18 @@ mod tests {
             );
         }
 
-        let error =
-            OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::Unexpected, "test"));
-        assert!(error.may_have_persisted_manifest_update());
+        // The last retry can fail with these kinds even though an earlier attempt was stored.
+        for kind in [
+            ErrorKind::Unexpected,
+            ErrorKind::RateLimited,
+            ErrorKind::PermissionDenied,
+        ] {
+            let error = OpenDalSnafu {}.into_error(object_store::Error::new(kind, "test"));
+            assert!(
+                error.may_have_persisted_manifest_update(),
+                "error kind {kind:?} should not prove the manifest was not persisted"
+            );
+        }
 
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();
