@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use common_telemetry::warn;
 use opendal::raw::Timestamp;
-#[cfg(feature = "hdfs-object-store")]
 use uuid::Uuid;
 
 use crate::{ErrorKind, ObjectStore};
@@ -32,12 +31,8 @@ const TEMPORARY_MARKER: &str = ".greptime-";
 /// Suffix of a temporary file name.
 const TEMPORARY_SUFFIX: &str = ".tmp";
 
-/// Scheme of the only service that publishes non-append writes with a rename,
-/// or `None` if that service isn't compiled in.
-#[cfg(feature = "hdfs-object-store")]
-const TEMPORARY_FILE_SCHEME: Option<&str> = Some(crate::services::HDFS_NATIVE_SCHEME);
-#[cfg(not(feature = "hdfs-object-store"))]
-const TEMPORARY_FILE_SCHEME: Option<&str> = None;
+/// Scheme of the only service that publishes non-append writes with a rename.
+const TEMPORARY_FILE_SCHEME: &str = crate::services::HDFS_NATIVE_SCHEME;
 
 /// Returns true if `store` publishes non-append writes with a rename, which is
 /// what leaves temporary files behind when the writer dies.
@@ -45,7 +40,7 @@ const TEMPORARY_FILE_SCHEME: Option<&str> = None;
 /// Only the HDFS compatibility layer does that; a write to any other service
 /// appears under its final name.
 pub fn writes_temporary_files(store: &ObjectStore) -> bool {
-    TEMPORARY_FILE_SCHEME == Some(store.info().scheme())
+    store.info().scheme() == TEMPORARY_FILE_SCHEME
 }
 
 /// What a sweep did.
@@ -76,18 +71,13 @@ impl SweepReport {
 /// of [`ATOMIC_WRITE_DIR`](crate::ATOMIC_WRITE_DIR) doesn't reach it.
 ///
 /// The caller runs this for a region that just became its writable leader, so a
-/// file that is old enough belongs to a writer that is gone. A store that
-/// doesn't write temporary files is left untouched. Failures are logged and
-/// don't stop the sweep.
+/// file that is old enough belongs to a writer that is gone. Failures are
+/// logged and don't stop the sweep.
 pub async fn sweep_temporary_files(
     store: &ObjectStore,
     dirs: &[String],
     older_than: Duration,
 ) -> SweepReport {
-    if !writes_temporary_files(store) {
-        return SweepReport::default();
-    }
-
     let mut report = SweepReport::default();
     for dir in dirs {
         report.merge(sweep_dir(store, dir, older_than).await);
@@ -154,7 +144,6 @@ async fn sweep_dir(store: &ObjectStore, dir: &str, older_than: Duration) -> Swee
 ///
 /// A writer that dies in between leaves the file behind, which is what
 /// [`sweep_temporary_files`] reclaims.
-#[cfg(feature = "hdfs-object-store")]
 pub(crate) fn temporary_path(path: &str) -> String {
     let suffix = format!("{TEMPORARY_MARKER}{}{TEMPORARY_SUFFIX}", Uuid::new_v4());
     match path.rsplit_once('/') {
@@ -179,6 +168,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::layers::HdfsCompatibilityLayer;
     use crate::layers::mock::{MockLayer, MockLayerBuilder, OpDelete, oio};
     use crate::{Error, Result};
 
@@ -354,19 +344,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sweep_skips_service_without_temporary_files() {
+    async fn test_sweep_temporary_files_on_compatibility_layer() {
         let (_directory, store) = test_store();
         let temporary = "data/.42.parquet.greptime-53f0f4a6.tmp";
         store.create_dir("data/").await.unwrap();
+        // What a writer that died before it renamed its file leaves behind.
         store.write(temporary, "partial").await.unwrap();
+        // The same layer HDFS writes through, on an Fs store whose scheme stays `fs`.
+        let store = store.layer(HdfsCompatibilityLayer::new_for_test());
 
         wait_until_expired().await;
-        assert!(!writes_temporary_files(&store));
         assert_eq!(
-            SweepReport::default(),
-            sweep_temporary_files(&store, &["data/".to_string()], EXPIRED).await
+            SweepReport {
+                deleted: 1,
+                failed: 0
+            },
+            sweep_temporary_files(
+                &store,
+                &["data/".to_string(), "data/staging/blob/".to_string()],
+                EXPIRED,
+            )
+            .await
         );
 
-        assert!(store.exists(temporary).await.unwrap());
+        assert!(!store.exists(temporary).await.unwrap());
     }
 }

@@ -25,6 +25,7 @@ pub mod factory;
 pub mod layers;
 pub mod manager;
 pub mod secure_fs;
+#[cfg(feature = "hdfs-object-store")]
 pub mod temp_file;
 #[cfg(feature = "testing")]
 pub mod test_util;

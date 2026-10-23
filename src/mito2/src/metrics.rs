@@ -582,6 +582,25 @@ lazy_static! {
         &[FILE_TYPE_LABEL],
     ).unwrap();
 
+    /// Total number of files downloaded during cache fill on region open.
+    pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(
+        "mito_cache_fill_downloaded_files",
+        "mito cache fill downloaded files count",
+    ).unwrap();
+
+    /// Number of files pending download during cache fill on region open.
+    pub static ref CACHE_FILL_PENDING_FILES: IntGauge = register_int_gauge!(
+        "mito_cache_fill_pending_files",
+        "mito cache fill pending files count",
+    ).unwrap();
+
+    /// Counter of flush files.
+    pub static ref FLUSH_FILE_TOTAL: IntCounter =
+        register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
+}
+
+#[cfg(feature = "hdfs-object-store")]
+lazy_static! {
     /// Counter for the number of temporary files deleted by the sweeper.
     pub static ref SWEEP_FILES_DELETED_TOTAL: IntCounter = register_int_counter!(
         "greptime_mito_sweep_files_deleted_total",
@@ -599,22 +618,6 @@ lazy_static! {
         "greptime_mito_sweep_runs_total",
         "Total temporary file sweeps run",
     ).unwrap();
-
-    /// Total number of files downloaded during cache fill on region open.
-    pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(
-        "mito_cache_fill_downloaded_files",
-        "mito cache fill downloaded files count",
-    ).unwrap();
-
-    /// Number of files pending download during cache fill on region open.
-    pub static ref CACHE_FILL_PENDING_FILES: IntGauge = register_int_gauge!(
-        "mito_cache_fill_pending_files",
-        "mito cache fill pending files count",
-    ).unwrap();
-
-    /// Counter of flush files.
-    pub static ref FLUSH_FILE_TOTAL: IntCounter =
-        register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
 }
 
 /// Stager notifier to collect metrics.

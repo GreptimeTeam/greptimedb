@@ -28,6 +28,7 @@ use crate::region::MitoRegion;
 use crate::region::catchup::RegionCatchupTask;
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
+#[cfg(feature = "hdfs-object-store")]
 use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::RegionWorkerLoop;
@@ -70,7 +71,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let catchup_regions = self.catchup_regions.clone();
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
+        #[cfg(feature = "hdfs-object-store")]
         let sweep_older_than = self.config.gc.unknown_file_lingering_time;
+        #[cfg(feature = "hdfs-object-store")]
         let sweep_limiter = self.sweep_limiter.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
@@ -87,12 +90,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                             .set_role_state_gracefully(SettableRegionRoleState::Leader)
                             .await
                         {
-                            Ok(()) => temp_file_sweeper::spawn_region_sweep(
-                                region.access_layer(),
-                                region_id,
-                                sweep_older_than,
-                                sweep_limiter,
-                            ),
+                            Ok(()) => {
+                                #[cfg(feature = "hdfs-object-store")]
+                                temp_file_sweeper::spawn_region_sweep(
+                                    region.access_layer(),
+                                    region_id,
+                                    sweep_older_than,
+                                    sweep_limiter,
+                                );
+                            }
                             Err(err) => {
                                 error!(err; "Failed to set region {region_id} to leader");
                             }
