@@ -59,8 +59,8 @@ use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, ComputeArrowSnafu, Error, JoinSnafu, ReadDataPartSnafu,
-    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    BuildIndexAsyncSnafu, Error, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
+    RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
     INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_MEMORY_USAGE, INDEX_PUBLICATION_STALE_TOTAL,
@@ -447,16 +447,22 @@ impl IndexerBuilder for IndexerBuilderImpl {
 /// Builds the indexes of an SST from its encoded parquet bytes.
 ///
 /// Encoded bulk parts are flushed without passing through [ParquetWriter], so their indexes
-/// are built from the bytes still in memory instead of reading the uploaded SST back.
+/// are built from the bytes still in memory instead of reading the uploaded SST back. Like
+/// the writer, a failure only drops the index and leaves the SST unindexed.
 ///
 /// [ParquetWriter]: crate::sst::parquet::writer::ParquetWriter
 pub(crate) async fn build_index_from_parquet_bytes(
     builder: &IndexerBuilderImpl,
     region_file_id: RegionFileId,
     data: &Bytes,
-) -> Result<IndexOutput> {
-    let reader_builder =
-        ParquetRecordBatchReaderBuilder::try_new(data.clone()).context(ReadDataPartSnafu)?;
+) -> IndexOutput {
+    let reader_builder = match ParquetRecordBatchReaderBuilder::try_new(data.clone()) {
+        Ok(reader_builder) => reader_builder,
+        Err(e) => {
+            warn!(e; "Failed to read encoded SST {:?} for index creation", region_file_id);
+            return IndexOutput::default();
+        }
+    };
     let row_group_size = reader_builder
         .metadata()
         .row_groups()
@@ -465,30 +471,31 @@ pub(crate) async fn build_index_from_parquet_bytes(
         .filter(|size| *size > 0);
     let mut indexer = builder.build(region_file_id, 0, row_group_size).await;
     if indexer.is_empty() {
-        return Ok(IndexOutput::default());
+        return IndexOutput::default();
     }
 
     let reader = match reader_builder
         .with_batch_size(DEFAULT_READ_BATCH_SIZE)
         .build()
-        .context(ReadDataPartSnafu)
     {
         Ok(reader) => reader,
         Err(e) => {
+            warn!(e; "Failed to read encoded SST {:?} for index creation", region_file_id);
             indexer.abort().await;
-            return Err(e);
+            return IndexOutput::default();
         }
     };
     for batch in reader {
-        match batch.context(ComputeArrowSnafu) {
+        match batch {
             Ok(batch) => indexer.update_flat(&batch).await,
             Err(e) => {
+                warn!(e; "Failed to decode encoded SST {:?} for index creation", region_file_id);
                 indexer.abort().await;
-                return Err(e);
+                return IndexOutput::default();
             }
         }
     }
-    Ok(indexer.finish().await)
+    indexer.finish().await
 }
 
 impl IndexerBuilderImpl {

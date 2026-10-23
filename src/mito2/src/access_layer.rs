@@ -538,8 +538,7 @@ impl AccessLayer {
                     false,
                     self.intermediate_manager.clone(),
                 );
-                index_output =
-                    build_index_from_parquet_bytes(&builder, region_file_id, data).await?;
+                index_output = build_index_from_parquet_bytes(&builder, region_file_id, data).await;
                 metrics.update_index = start.elapsed();
             }
             Ok((metrics, index_output))

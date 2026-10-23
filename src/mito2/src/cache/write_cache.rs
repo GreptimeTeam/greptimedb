@@ -220,13 +220,8 @@ impl WriteCache {
                 true,
                 self.intermediate_manager.clone(),
             );
-            match build_index_from_parquet_bytes(&builder, region_file_id, data).await {
-                Ok(output) => sst_info.index_metadata = output,
-                Err(e) => {
-                    self.remove(parquet_key).await;
-                    return Err(e);
-                }
-            }
+            sst_info.index_metadata =
+                build_index_from_parquet_bytes(&builder, region_file_id, data).await;
             metrics.update_index = start.elapsed();
         }
 
