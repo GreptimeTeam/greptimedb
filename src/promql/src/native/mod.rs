@@ -27,8 +27,10 @@
 //! - A series closes exactly once, on the chunk that says so, so a consumer can tell "nothing more
 //!   here" from "no more input".
 
+mod aggregate;
 pub mod batch;
 mod display;
 pub mod execute;
 pub mod metrics;
 pub mod plan;
+pub(crate) mod runs;

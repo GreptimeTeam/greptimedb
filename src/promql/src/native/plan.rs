@@ -259,7 +259,7 @@ pub struct BoundAggregate {
 
 /// An operator over the whole input vector at each grid point: one that keeps some of the input's
 /// samples with their series' labels and values, orders the series, reports where none is present,
-/// or reads a classic histogram from its bucket series.
+/// reads a classic histogram from its bucket series, or counts the samples sharing a value.
 ///
 /// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
 /// field.
@@ -282,6 +282,9 @@ pub enum BoundVectorOp {
     /// `histogram_quantile` or `histogram_fraction`: each classic histogram is read from the bucket
     /// series that share its labels, so this too reads the whole vector at a point.
     Histogram(HistogramFunction),
+    /// `count_values(label, v)`: how many samples of each group share a value, under a label set
+    /// per value. It writes a label per distinct value, which an aggregate's fixed groups cannot.
+    CountValues { label: Arc<str>, group: Grouping },
 }
 
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
