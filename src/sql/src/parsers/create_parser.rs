@@ -3329,17 +3329,35 @@ CREATE TABLE spans (
 
     #[test]
     fn test_parse_create_view_tql_eval() {
-        let sql = "CREATE VIEW test AS TQL EVAL (0, 15, '5s') metric";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-        assert!(matches!(
-            &result[0],
-            Statement::CreateView(CreateView {
-                query,
-                ..
-            }) if matches!(query.as_ref(), Statement::Tql(Tql::Eval(_)))
-        ));
+        for (query, expected_lookback) in [
+            ("TQL EVAL (0, 15, '5s') metric", None),
+            ("TQL EVAL (0, 15, '5s', '5m') metric", Some("5m")),
+            ("TQL EVAL (0, 15, '5s', '300') metric", Some("300")),
+        ] {
+            let sql = format!("CREATE VIEW test AS {query}");
+            let result = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::CreateView(view) = &result[0] else {
+                panic!("expected CREATE VIEW, got {:?}", result[0]);
+            };
+            let Statement::Tql(Tql::Eval(eval)) = view.query.as_ref() else {
+                panic!("expected TQL EVAL, got {}", view.query);
+            };
+            assert_eq!(eval.lookback.as_deref(), expected_lookback);
+
+            let formatted = result[0].to_string();
+            let reparsed = ParserContext::create_with_dialect(
+                &formatted,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(reparsed[0], result[0], "{formatted}");
+        }
 
         for sql in [
             "CREATE VIEW test AS TQL EXPLAIN (0, 15, '5s') metric",
