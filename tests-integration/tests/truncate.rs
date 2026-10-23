@@ -291,7 +291,10 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
 #[case::mysql("MYSQL_SERVER", "mysql")]
 #[case::postgres("POSTGRES_SERVER", "postgres")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_procedure_state_prepared(#[case] server_name: &str, #[case] protocol: &str) {
+async fn test_procedure_state_prepared_and_admin(
+    #[case] server_name: &str,
+    #[case] protocol: &str,
+) {
     let instance = GreptimeDbStandaloneBuilder::new("procedure_state_prepared")
         .build()
         .await;
@@ -306,12 +309,8 @@ async fn test_procedure_state_prepared(#[case] server_name: &str, #[case] protoc
             .unwrap();
     servers.start_all().await.unwrap();
     sqlx::any::install_default_drivers();
-    let mut connection = sqlx::AnyConnection::connect(&format!(
-        "{protocol}://{}/public",
-        servers.addr(server_name).unwrap()
-    ))
-    .await
-    .unwrap();
+    let url = format!("{protocol}://{}/public", servers.addr(server_name).unwrap());
+    let mut connection = sqlx::AnyConnection::connect(&url).await.unwrap();
     for table in ["prepared_async", "prepared_sync"] {
         connection
             .execute(format!("CREATE TABLE {table} (ts TIMESTAMP TIME INDEX)").as_str())
@@ -339,6 +338,30 @@ async fn test_procedure_state_prepared(#[case] server_name: &str, #[case] protoc
         .unwrap()
         .unwrap();
     assert_eq!(prepared_state(&mut connection, &statement).await, "Done");
+
+    // An explicit ADMIN ID works without history and does not record that ID.
+    let mut other_connection = sqlx::AnyConnection::connect(&url).await.unwrap();
+    for explicit in [false, true, false] {
+        let sql = if explicit {
+            format!("ADMIN procedure_state('{id}')")
+        } else {
+            "ADMIN procedure_state()".to_string()
+        };
+        let result = sqlx::query(sql.as_str())
+            .fetch_one(&mut other_connection)
+            .await;
+        if explicit {
+            assert_eq!(result.unwrap().get::<String, _>(0), r#"{"status":"Done"}"#);
+        } else {
+            let err = result.err().expect("expected missing procedure ID error");
+            assert!(
+                err.to_string()
+                    .contains("No procedure ID has been returned"),
+                "{err}"
+            );
+        }
+    }
+    other_connection.close().await.unwrap();
 
     let table_id = instance
         .fe_instance()
@@ -375,6 +398,22 @@ async fn test_procedure_state_prepared(#[case] server_name: &str, #[case] protoc
         .unwrap();
     // A is Done and B is Running, so retaining A cannot pass this assertion.
     assert_eq!(prepared_state(&mut connection, &statement).await, "Running");
+    for (sql, expected) in [
+        ("ADMIN procedure_state()".to_string(), "Running"),
+        (format!("ADMIN procedure_state('{id}')"), "Done"),
+        ("ADMIN procedure_state()".to_string(), "Running"),
+    ] {
+        let state: String = connection.fetch_one(sql.as_str()).await.unwrap().get(0);
+        assert_eq!(state, format!(r#"{{"status":"{expected}"}}"#), "{sql}");
+    }
+    for sql in [
+        "ADMIN procedure_state('a', 'b')",
+        "ADMIN procedure_state(NULL)",
+        "ADMIN procedure_state('')",
+        "ADMIN procedure_state('invalid-id')",
+    ] {
+        assert!(connection.fetch_one(sql).await.is_err(), "{sql}");
+    }
     connection
         .execute("TRUNCATE TABLE prepared_sync WITH (wait=true)")
         .await
