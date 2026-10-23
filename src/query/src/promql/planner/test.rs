@@ -2426,14 +2426,12 @@ async fn native_fused_whole_vector_operation_falls_back() {
 
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
-    // A set operator combines two vectors' series rather than their values, which no node of the
-    // tree does, so this is a shape the compiler names and declines.
+    // A set operator combines vectors' series rather than their values, so the compiler names and
+    // declines it.
     let query = "some_metric and on(tag_0) some_metric";
     let plan = build_native_fused_plan(query, true).await;
-
     let display = plan.display_indent().to_string();
     assert!(!display.contains("FusedSeries"), "{display}");
-    // Falling back is not an approximation of the existing plan: it is the existing plan.
     let without_flag = build_native_fused_plan(query, false).await;
     assert_eq!(display, without_flag.display_indent().to_string());
 }
@@ -2470,6 +2468,50 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
             without_flag.display_indent().to_string(),
             "`{query}` must keep the existing plan, not an approximation of it"
         );
+    }
+}
+
+#[tokio::test]
+async fn native_fused_preparation_decline_preserves_legacy_plan() {
+    let query = "absent(vector(1)) + on(tag_0) some_metric{tag_0=\"x\",__field__=\"field_0\"}";
+    let native = build_native_fused_plan(query, true).await;
+    let legacy = build_native_fused_plan(query, false).await;
+
+    assert!(!native.display_indent().to_string().contains("FusedSeries"));
+    assert_eq!(
+        native.display_indent_schema().to_string(),
+        legacy.display_indent_schema().to_string(),
+        "a native preparation decline must leave legacy planning context unchanged"
+    );
+}
+
+#[tokio::test]
+async fn native_fused_aggregate_falls_back_to_legacy_plan() {
+    for query in [
+        "sum(rate(some_metric[5m]))",
+        "avg by(tag_0)(some_metric)",
+        "some_metric + sum(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        assert!(display.contains("Aggregate:"), "{query}: {display}");
+        let legacy = build_native_fused_plan(query, false).await;
+        assert_eq!(display, legacy.display_indent().to_string(), "{query}");
+    }
+}
+
+#[tokio::test]
+async fn native_fused_subquery_falls_back_to_legacy_plan() {
+    for query in [
+        "rate(some_metric[5m:1m])",
+        "rate(rate(some_metric[5m:1m])[10m:1m])",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        let legacy = build_native_fused_plan(query, false).await;
+        assert_eq!(display, legacy.display_indent().to_string(), "{query}");
     }
 }
 
@@ -2519,6 +2561,46 @@ async fn native_fused_anchored_rate_scan_uses_anchor_bounds() {
             && display.contains("timestamp <= TimestampMillisecond(300000, None)"),
         "native scan should cover the five-minute window ending at the anchor: {display}"
     );
+}
+
+#[tokio::test]
+async fn native_fused_at_anchor_offset_identity_uses_raw_anchor() {
+    // The fixture's statement spans 0..100_000_000ms. For explicit 300s, the
+    // offset shifts the window end exactly once; start/end use those same raw anchors.
+    for (query, lower, upper) in [
+        (
+            "rate(some_metric[5m] @ 300 offset 10s)",
+            "timestamp >= TimestampMillisecond(-9999, None)",
+            "timestamp <= TimestampMillisecond(290000, None)",
+        ),
+        (
+            "rate(some_metric[5m] @ 300 offset -10s)",
+            "timestamp >= TimestampMillisecond(10001, None)",
+            "timestamp <= TimestampMillisecond(310000, None)",
+        ),
+        (
+            "rate(some_metric[5m] @ start() offset 10s)",
+            "timestamp >= TimestampMillisecond(-309999, None)",
+            "timestamp <= TimestampMillisecond(-10000, None)",
+        ),
+        (
+            "rate(some_metric[5m] @ end() offset -10s)",
+            "timestamp >= TimestampMillisecond(99710001, None)",
+            "timestamp <= TimestampMillisecond(100010000, None)",
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(display.contains("FusedSeries"), "{query}: {display}");
+        assert!(
+            display.contains(lower),
+            "{query}: expected {lower}: {display}"
+        );
+        assert!(
+            display.contains(upper),
+            "{query}: expected {upper}: {display}"
+        );
+    }
 }
 
 #[tokio::test]
