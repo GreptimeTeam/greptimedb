@@ -51,7 +51,7 @@ use response_header_handler::ResponseHeaderHandler;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{Notify, RwLock, oneshot, watch};
+use tokio::sync::{Notify, OwnedMutexGuard, RwLock, oneshot, watch};
 
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
 use crate::handler::collect_topic_stats_handler::CollectTopicStatsHandler;
@@ -391,6 +391,8 @@ pub type HeartbeatHandlerGroupRef = Arc<HeartbeatHandlerGroup>;
 pub struct HeartbeatHandlerGroup {
     handlers: Vec<NameCachedHandler>,
     pushers: Pushers,
+    /// One lock per datanode id seen, kept for the life of the process.
+    datanode_locks: DashMap<u64, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl HeartbeatHandlerGroup {
@@ -417,6 +419,13 @@ impl HeartbeatHandlerGroup {
             info!("Pusher unregister: {}", pusher_id);
             METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         }
+    }
+
+    /// Locks the datanode with the given id until the guard is dropped, so its requests are
+    /// checked and handled one at a time.
+    pub(crate) async fn lock_datanode(&self, node_id: u64) -> OwnedMutexGuard<()> {
+        let lock = self.datanode_locks.entry(node_id).or_default().clone();
+        lock.lock_owned().await
     }
 
     #[cfg(test)]
@@ -827,6 +836,7 @@ impl HeartbeatHandlerGroupBuilder {
         Ok(HeartbeatHandlerGroup {
             handlers: self.handlers,
             pushers: self.pushers,
+            datanode_locks: DashMap::new(),
         })
     }
 

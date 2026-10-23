@@ -237,17 +237,22 @@ where
             .with_label_values(&[sender_id.as_str()])
             .inc();
 
+        // A datanode's requests that carry an epoch are checked and handled one at a time, so
+        // an older process's request cannot run its handlers after a newer process is admitted.
+        let datanode_lock = if self.sender_id.role == Role::Datanode && req.node_epoch != 0 {
+            Some(self.handler_group.lock_datanode(self.sender_id.id).await)
+        } else {
+            None
+        };
         let res = match self.check_node_epoch(&req, is_handshake).await {
             Some(res) => res,
             None => {
-                let node_epoch = req.node_epoch;
-                let ctx = self.ctx.clone().with_handshake(is_handshake);
-                match self.handler_group.handle(req, ctx).await {
-                    Ok(res) => self.recheck_node_epoch(node_epoch, res).await,
-                    Err(e) => Err(e),
-                }
+                self.handler_group
+                    .handle(req, self.ctx.clone().with_handshake(is_handshake))
+                    .await
             }
         };
+        drop(datanode_lock);
         let res = res
             .inspect_err(
                 |e| warn!(e; "Failed to handle heartbeat request, sender: {}", self.sender_id),
@@ -304,7 +309,13 @@ where
             let kv_backend = &*self.ctx.leader_cached_kv_backend;
             match accept_node_epoch(kv_backend, self.sender_id.id, node_epoch).await {
                 Ok(true) => {}
-                Ok(false) => return Some(Ok(self.fence().await)),
+                // No error, so the datanode does not reconnect.
+                Ok(false) => {
+                    self.handler_group
+                        .deregister_push(self.sender_id, &self.tx)
+                        .await;
+                    return Some(Ok(header_only(None)));
+                }
                 Err(e) => return Some(Err(e)),
             }
         }
@@ -317,32 +328,6 @@ where
                 .await;
         }
         None
-    }
-
-    /// Checks the epoch of a datanode request again after its handlers ran, since a newer
-    /// process may have been recorded meanwhile. The record is read from the leader cache.
-    async fn recheck_node_epoch(
-        &self,
-        node_epoch: u64,
-        res: HeartbeatResponse,
-    ) -> Result<HeartbeatResponse> {
-        if self.sender_id.role != Role::Datanode || node_epoch == 0 {
-            return Ok(res);
-        }
-        let kv_backend = &*self.ctx.leader_cached_kv_backend;
-        if accept_node_epoch(kv_backend, self.sender_id.id, node_epoch).await? {
-            return Ok(res);
-        }
-        Ok(self.fence().await)
-    }
-
-    /// Removes the stream's own pusher and returns the reply to a fenced request. It carries no
-    /// error, so the datanode does not reconnect.
-    async fn fence(&self) -> HeartbeatResponse {
-        self.handler_group
-            .deregister_push(self.sender_id, &self.tx)
-            .await;
-        header_only(None)
     }
 
     async fn send_not_leader_error(&mut self) {
@@ -992,9 +977,11 @@ mod tests {
             Arc::new(group_builder().build().unwrap())
         }
 
-        /// Holds a request from the address "pause" after its region lease is granted:
-        /// notifies the first, waits for the second.
-        struct PauseHandler(Arc<Notify>, Arc<Notify>);
+        /// Holds a request from the address "pause": notifies `entered`, then waits for `release`.
+        struct PauseHandler {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
 
         #[async_trait::async_trait]
         impl HeartbeatHandler for PauseHandler {
@@ -1009,8 +996,8 @@ mod tests {
                 _: &mut HeartbeatAccumulator,
             ) -> crate::error::Result<HandleControl> {
                 if req.peer.as_ref().is_some_and(|peer| peer.addr == "pause") {
-                    self.0.notify_one();
-                    self.1.notified().await;
+                    self.entered.notify_one();
+                    self.release.notified().await;
                 }
                 Ok(HandleControl::Continue)
             }
@@ -1190,33 +1177,43 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_request_overtaken_in_the_handlers_is_fenced() {
+        async fn test_newer_process_waits_for_an_older_request() {
             let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
             let mut builder = group_builder();
-            let pause = PauseHandler(entered.clone(), release.clone());
+            let pause = PauseHandler {
+                entered: entered.clone(),
+                release: release.clone(),
+            };
             builder
-                .add_handler_after("RegionLeaseHandler", pause)
+                .add_handler_before("DatanodeKeepLeaseHandler", pause)
                 .unwrap();
             let group = Arc::new(builder.build().unwrap());
             let ctx = TestEnv::new().ctx();
             let (e1, e2) = epochs();
             let mut a1 = Stream::open(&group, &ctx).await;
-            a1.send(heartbeat(e1, "a1")).await;
+            let mut a2 = Stream::open(&group, &ctx).await;
 
-            // A1's request passes the check and is held in the handlers while A2 is recorded.
-            let a2 = async {
-                entered.notified().await;
-                let mut a2 = Stream::open(&group, &ctx).await;
-                let res = a2.send(heartbeat(e2, "a2")).await;
-                release.notify_one();
-                res
-            };
+            // A1's request passes the check and is held before the keep-alive handler, and
+            // A2's request waits for it.
             let a1_req = a1.session.handle_request(heartbeat(e1, "pause"), false);
-            let (open, a2_res) = tokio::join!(a1_req, a2);
+            let a2_req = async {
+                entered.notified().await;
+                let mut a2_req = std::pin::pin!(a2.send(heartbeat(e2, "a2")));
+                let waiting = tokio::time::timeout(Duration::from_millis(100), &mut a2_req).await;
+                assert!(waiting.is_err());
+                release.notify_one();
+                a2_req.await
+            };
+            let (open, res) = tokio::join!(a1_req, a2_req);
             assert!(open);
-            assert!(a2_res.region_lease.is_some());
-            let res = a1.rx.recv().await.unwrap().unwrap();
+            assert!(res.region_lease.is_some());
+            assert_eq!(lease_addr(&ctx).await.as_deref(), Some("a2"));
+
+            // A1 can no longer overwrite the address or get a lease.
+            a1.rx.recv().await.unwrap().unwrap();
+            let res = a1.send(heartbeat(e1, "a1")).await;
             assert!(res.region_lease.is_none());
+            assert_eq!(lease_addr(&ctx).await.as_deref(), Some("a2"));
         }
 
         #[tokio::test]
