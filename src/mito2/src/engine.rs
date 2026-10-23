@@ -135,9 +135,7 @@ use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
-use store_api::sst_entry::{
-    ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry, manifest_columns,
-};
+use store_api::sst_entry::{self, ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
@@ -614,7 +612,7 @@ impl MitoEngine {
             let node_id = engine.inner.workers.file_ref_manager().node_id();
             let filters = PruningFilter::new(&filters);
             if !filters.matches(|column| match column {
-                manifest_columns::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                sst_entry::NODE_ID => Some(ScalarValue::UInt64(node_id)),
                 _ => None,
             }) {
                 return;
@@ -623,7 +621,7 @@ impl MitoEngine {
             for region in engine.inner.workers.all_regions() {
                 if !manifest_region_matches(region.region_id, node_id, &filters)
                     || !filters.matches(|column| match column {
-                        manifest_columns::TABLE_DIR => Some(ScalarValue::Utf8(Some(region.table_dir().to_string()))),
+                        sst_entry::TABLE_DIR => Some(ScalarValue::Utf8(Some(region.table_dir().to_string()))),
                         _ => None,
                     })
                 {
@@ -1759,14 +1757,12 @@ fn manifest_region_matches(
 ) -> bool {
     filters.matches(|column| {
         Some(match column {
-            manifest_columns::REGION_ID => ScalarValue::UInt64(Some(region_id.as_u64())),
-            manifest_columns::TABLE_ID => ScalarValue::UInt32(Some(region_id.table_id())),
-            manifest_columns::REGION_NUMBER => ScalarValue::UInt32(Some(region_id.region_number())),
-            manifest_columns::REGION_GROUP => ScalarValue::UInt8(Some(region_id.region_group())),
-            manifest_columns::REGION_SEQUENCE => {
-                ScalarValue::UInt32(Some(region_id.region_sequence()))
-            }
-            manifest_columns::NODE_ID => ScalarValue::UInt64(node_id),
+            sst_entry::REGION_ID => ScalarValue::UInt64(Some(region_id.as_u64())),
+            sst_entry::TABLE_ID => ScalarValue::UInt32(Some(region_id.table_id())),
+            sst_entry::REGION_NUMBER => ScalarValue::UInt32(Some(region_id.region_number())),
+            sst_entry::REGION_GROUP => ScalarValue::UInt8(Some(region_id.region_group())),
+            sst_entry::REGION_SEQUENCE => ScalarValue::UInt32(Some(region_id.region_sequence())),
+            sst_entry::NODE_ID => ScalarValue::UInt64(node_id),
             _ => return None,
         })
     })

@@ -46,7 +46,7 @@ use store_api::region_engine::{
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{PathType, StagingPartitionDirective};
-use store_api::sst_entry::{ManifestSstEntry, manifest_columns};
+use store_api::sst_entry::{self, ManifestSstEntry};
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
 pub use utils::*;
@@ -866,7 +866,7 @@ impl MitoRegion {
                 // Construct them only when a path predicate or projection needs them.
                 let mut file_path = None;
                 if !filters.matches(|column| match column {
-                    manifest_columns::FILE_PATH => Some(ScalarValue::Utf8(Some(file_path.get_or_insert_with(|| {
+                    sst_entry::FILE_PATH => Some(ScalarValue::Utf8(Some(file_path.get_or_insert_with(|| {
                         sst_file_path(table_dir, meta.file_id(), path_type)
                     }).clone()))),
                     _ => None,
@@ -2060,14 +2060,14 @@ impl ManifestSstProjection {
             })
         };
         Self {
-            visible: included(manifest_columns::VISIBLE),
-            table_dir: included(manifest_columns::TABLE_DIR),
-            file_id: included(manifest_columns::FILE_ID),
-            file_path: included(manifest_columns::FILE_PATH),
-            index_file_path: included(manifest_columns::INDEX_FILE_PATH),
-            partition_expr: included(manifest_columns::PARTITION_EXPR),
-            primary_key_min: included(manifest_columns::PRIMARY_KEY_MIN),
-            primary_key_max: included(manifest_columns::PRIMARY_KEY_MAX),
+            visible: included(sst_entry::VISIBLE),
+            table_dir: included(sst_entry::TABLE_DIR),
+            file_id: included(sst_entry::FILE_ID),
+            file_path: included(sst_entry::FILE_PATH),
+            index_file_path: included(sst_entry::INDEX_FILE_PATH),
+            partition_expr: included(sst_entry::PARTITION_EXPR),
+            primary_key_min: included(sst_entry::PRIMARY_KEY_MIN),
+            primary_key_max: included(sst_entry::PRIMARY_KEY_MAX),
         }
     }
 }
@@ -2077,21 +2077,19 @@ impl ManifestSstProjection {
 fn manifest_file_matches(meta: &FileMeta, filters: &PruningFilter) -> bool {
     filters.matches(|column| {
         Some(match column {
-            manifest_columns::FILE_SIZE => ScalarValue::UInt64(Some(meta.file_size)),
-            manifest_columns::LEVEL => ScalarValue::UInt8(Some(meta.level)),
-            manifest_columns::NUM_ROWS => ScalarValue::UInt64(Some(meta.num_rows)),
-            manifest_columns::NUM_ROW_GROUPS => ScalarValue::UInt64(Some(meta.num_row_groups)),
-            manifest_columns::ORIGIN_REGION_ID => {
-                ScalarValue::UInt64(Some(meta.region_id.as_u64()))
-            }
-            manifest_columns::MIN_TS => ScalarValue::TimestampNanosecond(
+            sst_entry::FILE_SIZE => ScalarValue::UInt64(Some(meta.file_size)),
+            sst_entry::LEVEL => ScalarValue::UInt8(Some(meta.level)),
+            sst_entry::NUM_ROWS => ScalarValue::UInt64(Some(meta.num_rows)),
+            sst_entry::NUM_ROW_GROUPS => ScalarValue::UInt64(Some(meta.num_row_groups)),
+            sst_entry::ORIGIN_REGION_ID => ScalarValue::UInt64(Some(meta.region_id.as_u64())),
+            sst_entry::MIN_TS => ScalarValue::TimestampNanosecond(
                 meta.time_range
                     .0
                     .convert_to(TimeUnit::Nanosecond)
                     .map(|ts| ts.value()),
                 None,
             ),
-            manifest_columns::MAX_TS => ScalarValue::TimestampNanosecond(
+            sst_entry::MAX_TS => ScalarValue::TimestampNanosecond(
                 meta.time_range
                     .1
                     .convert_to(TimeUnit::Nanosecond)
