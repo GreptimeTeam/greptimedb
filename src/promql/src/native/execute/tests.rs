@@ -15,7 +15,6 @@
 //! What the runtime has to get right: each layer's grid, per-node accounting, rejection and
 //! release.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use datafusion::error::DataFusionError;
@@ -34,9 +33,9 @@ use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis}
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
-    BinaryRuntime, Emitted, InputId, NativeChunk, NativeExecutionState, NativeExecutor, NodeBuffer,
-    NodeRuntime, RuntimeTreeHandle, absorb_rebuilds, evaluated_bytes, grid_end_ms, map_chunk,
-    operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
+    BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
+    NodeState, RuntimeOp, RuntimeTreeHandle, absorb_rebuilds, evaluated_bytes, grid_end_ms,
+    map_chunk, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -44,7 +43,7 @@ use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
-use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
+use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode,
@@ -479,51 +478,34 @@ fn raw_shared_histogram_chunk(
     .unwrap()
 }
 
-/// A source node's runtime: the queue and the reservation it is held for.
-fn source_runtime(pool: &Arc<dyn MemoryPool>) -> NodeRuntime {
-    NodeRuntime {
-        buffer: NodeBuffer::new(
-            &NodePath::root().input(),
-            Arc::new(NodeMetrics::default()),
-            pool,
-        ),
-        queued: VecDeque::new(),
-        queued_tables: 0,
-        instant: None,
-        window: None,
-        map: None,
-        binary: None,
-        aggregate: None,
-        broadcast: None,
-        vector: None,
-        source_schema: None,
-        emitted: None,
-        merge: None,
+/// A source leaf: the schema its chunks are checked against and the queue it is held for.
+///
+/// The leaf owns the only state a source has, which is why the figure below is read off the slot
+/// rather than off a node: a source reserves for what the caller queued at it and for nothing else.
+fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
+    InputSlot {
+        schema: raw_schema(),
         open_source_series: false,
+        state: NodeState::new("native.input", Arc::new(NodeMetrics::default()), pool),
     }
 }
 
-/// A binary node's runtime: both operands bound to `schema` and the reservation they are held for.
-fn binary_runtime(pool: &Arc<dyn MemoryPool>, schema: &Arc<SeriesSchema>) -> NodeRuntime {
-    NodeRuntime {
-        buffer: NodeBuffer::new(&NodePath::root(), Arc::new(NodeMetrics::default()), pool),
-        queued: VecDeque::new(),
-        queued_tables: 0,
-        instant: None,
-        window: None,
-        map: None,
-        binary: Some(BinaryRuntime::new(
+/// A binary node's state and the operation it runs: both operands bound to `schema`, and the
+/// reservation the node is held for.
+///
+/// The two are returned side by side because that is how a node keeps them: its state is shared by
+/// every node kind, and the operation is the payload that belongs to this one.
+fn binary_runtime(
+    pool: &Arc<dyn MemoryPool>,
+    schema: &Arc<SeriesSchema>,
+) -> (NodeState, BinaryRuntime) {
+    (
+        NodeState::new("native.binary", Arc::new(NodeMetrics::default()), pool),
+        BinaryRuntime::new(
             Arc::new(binary_matching(BinaryOp::Add)),
             [Arc::clone(schema), Arc::clone(schema)],
-        )),
-        aggregate: None,
-        broadcast: None,
-        vector: None,
-        source_schema: None,
-        emitted: None,
-        merge: None,
-        open_source_series: false,
-    }
+        ),
+    )
 }
 
 /// What a binary node holds once it retains `left` and `right`, and what assembling the retained
@@ -537,18 +519,15 @@ fn binary_charge(
     left: &EvaluatedChunk,
     right: &EvaluatedChunk,
 ) -> (usize, usize) {
-    let mut runtime = binary_runtime(&pool(), schema);
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left.clone()))
+    let (mut state, mut binary) = binary_runtime(&pool(), schema);
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(left.clone()))
         .unwrap();
-    runtime
-        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right.clone()))
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(right.clone()))
         .unwrap();
-    let retained = runtime.buffer.reservation.size();
-    let assembly = runtime
-        .binary
-        .as_ref()
-        .expect("the runtime holds a binary node")
+    let retained = state.buffer.reservation.size();
+    let assembly = binary
         .assembly_bytes()
         .expect("the assembly bound does not overflow");
     (retained, assembly)
@@ -813,6 +792,54 @@ fn gauge(runtime: &RuntimeTreeHandle, name: &str) -> usize {
         Some(MetricValue::Gauge { gauge, .. }) => gauge.value(),
         other => panic!("no gauge named {name}: {other:?}"),
     }
+}
+
+/// Whether the root node of `execution` still holds the payload its kind keeps.
+///
+/// A window's evaluator, an instant node's buffered series and a binary node's retained operands all
+/// belong to the node that owns them, so what is read here is the root operator and nothing below
+/// it: the trees these tests build have one node of that kind, and it is the root. The runtime
+/// tree's lock is taken and dropped inside this call, so the execution can be polled again after
+/// it returns.
+fn root_holds(execution: &NativeExecutor, holds: fn(&RuntimeOp) -> bool) -> bool {
+    let runtime = execution.state().runtime_tree();
+    let guard = runtime
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    holds(&guard.root.op)
+}
+
+/// The payload a window root holds: its range evaluator.
+fn holds_window(op: &RuntimeOp) -> bool {
+    matches!(
+        op,
+        RuntimeOp::Window {
+            window: Some(_),
+            ..
+        }
+    )
+}
+
+/// The payload an instant root holds: the chunks of the series it is gathering.
+fn holds_instant(op: &RuntimeOp) -> bool {
+    matches!(
+        op,
+        RuntimeOp::Instant {
+            instant: Some(_),
+            ..
+        }
+    )
+}
+
+/// The payload a binary root holds: the operands it retained.
+fn holds_binary(op: &RuntimeOp) -> bool {
+    matches!(
+        op,
+        RuntimeOp::Binary {
+            binary: Some(_),
+            ..
+        }
+    )
 }
 
 /// A window over raw input evaluates onto its own output grid, and its values are the evaluator's.
@@ -1154,10 +1181,10 @@ fn an_unimplemented_node_is_reported_not_panicked() {
     };
 
     let cases = [
-        ("Binary", "root", "two constants", two_scalars_tree),
-        ("Binary", "root", "matching modifiers", matched_scalar_tree),
+        ("Binary", "two constants", two_scalars_tree),
+        ("Binary", "matching modifiers", matched_scalar_tree),
     ];
-    for (kind, path, reason, root) in cases {
+    for (kind, reason, root) in cases {
         // Legality stays `validate`'s: the plan accepts these trees, the runtime does not run them.
         let tree = NativeTree::try_new(root).expect("the bound tree is legal");
         let error = match NativeExecutionState::try_new(&tree, pool()) {
@@ -1170,7 +1197,6 @@ fn an_unimplemented_node_is_reported_not_panicked() {
         );
         let message = error.to_string();
         assert!(message.contains(kind), "{kind}: {message}");
-        assert!(message.contains(&format!("at {path}")), "{message}");
         assert!(message.contains(reason), "{reason}: {message}");
     }
 }
@@ -1278,9 +1304,8 @@ fn an_error_releases_the_reservation() {
     let mut execution = executor(&tree, Arc::clone(&pool));
     let metrics = execution.state().runtime_tree();
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(
-        execution.state().nodes_holding_windows(),
-        1,
+    assert!(
+        root_holds(&execution, holds_window),
         "a window that has not been released is what the drop below has to give back"
     );
     execution
@@ -1320,9 +1345,8 @@ fn an_error_releases_the_reservation() {
     // The numbers above only say the reservation was returned. The state the bytes were taken for
     // has to be gone too, or the executor keeps the evaluator's sample buffers alive while the pool
     // reports them as free: the window is dropped, not only its accounting.
-    assert_eq!(
-        execution.state().nodes_holding_windows(),
-        0,
+    assert!(
+        !root_holds(&execution, holds_window),
         "the stopped execution still holds a window's samples while its reservation reads zero"
     );
     let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
@@ -1468,9 +1492,8 @@ fn a_collector_refuses_the_malformed_streams_a_streaming_window_refuses() {
         // The failure released everything the chain held while the executor is still alive.
         assert_eq!(execution.state().reserved_bytes(), 0);
         assert_eq!(pool.reserved(), 0);
-        assert_eq!(
-            execution.state().nodes_holding_windows(),
-            0,
+        assert!(
+            !root_holds(&execution, holds_window),
             "{what}: the stopped execution still holds a window's samples"
         );
         // A stopped execution is not resumed.
@@ -1605,9 +1628,8 @@ fn an_input_that_ends_inside_a_collected_series_is_reported() {
     // alive.
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(
-        execution.state().nodes_holding_windows(),
-        0,
+    assert!(
+        !root_holds(&execution, holds_window),
         "the stopped execution still holds a window's samples"
     );
     // The window's own gauge, which is the node that collected the fragment, reads zero.
@@ -1928,7 +1950,18 @@ fn a_window_that_merges_its_input_releases_what_it_collected() {
         "the collecting window reported a piece"
     );
     let held = execution.state().reserved_bytes();
-    let window_held = execution.state().runtimes[0].buffer.reservation.size();
+    // The root is the window that collected the fragments, so its own reservation is what the peak
+    // below has to cover. The lock is dropped before the close below.
+    let window_held = {
+        let runtime = execution.state().runtime_tree();
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Window { state, .. } = &guard.root.op else {
+            panic!("the root is not the window the tree built");
+        };
+        state.buffer.reservation.size()
+    };
     assert!(held > 0, "the collected input is not charged for");
     assert_eq!(
         held,
@@ -1941,13 +1974,236 @@ fn a_window_that_merges_its_input_releases_what_it_collected() {
     // The fragments, the workspace, the queue and the evaluator are all gone.
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(execution.state().nodes_holding_windows(), 0);
+    assert!(!root_holds(&execution, holds_window));
     let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
     assert_eq!(gauge(&metrics, &current), 0);
     let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
     assert!(
         gauge(&metrics, &peak) >= window_held,
         "the peak does not cover the input the window collected"
+    );
+}
+
+/// Every answer a merge flush queues stays charged until its own pull hands it over.
+///
+/// The flush evaluates one series per label set at once, and only the pull of the first of them
+/// returns the fragments it collected: what is left in the queue after that pull is what the node
+/// still keeps, so the reservation is what those answers hold, the label sets the node handed out
+/// under and what the evaluator retains. Pulling the second one gives its share back in turn, and
+/// the pool is empty once the tree has answered everything it had.
+#[test]
+fn a_merge_flush_reserves_every_queued_output() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("x", name), 0, values, true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&first)),
+        vec![(0, vec![Some(1.0)])]
+    );
+    assert_eq!(first.series.metric.tags()[0].value.as_ref(), "a");
+    assert!(first.is_last, "a merged series is handed over closed");
+
+    // What the root holds once one of the two answers left: the answer still queued, the label sets
+    // the node handed out under, and the evaluator that evaluated them. The figures are read under
+    // the runtime tree's lock, which is dropped before the next pull.
+    let (queued, queued_bytes, retained, emitted, held) = {
+        let runtime = execution.state().runtime_tree();
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Window { window, state, .. } = &guard.root.op else {
+            panic!("the root is not the window the tree built");
+        };
+        let queued_bytes = state.queued.iter().map(|(_, bytes)| *bytes).sum::<usize>();
+        (
+            state.queued.len(),
+            queued_bytes,
+            window.as_ref().map_or(0, RangeEvaluator::retained_bytes),
+            state.emitted_bytes(),
+            state.buffer.reservation.size(),
+        )
+    };
+    assert_eq!(queued, 1, "the second answer was queued but not kept");
+    assert!(
+        queued_bytes > 0,
+        "the answer left in the queue is charged nothing"
+    );
+    assert_eq!(
+        held,
+        queued_bytes + retained + emitted,
+        "the reservation after the first pull is not what the node still holds"
+    );
+    assert_eq!(pool.reserved(), execution.state().reserved_bytes());
+
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the second merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&second)),
+        vec![(0, vec![Some(3.0)])]
+    );
+    assert_eq!(second.series.metric.tags()[0].value.as_ref(), "b");
+    assert!(second.is_last, "a merged series is handed over closed");
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Dropping the execution releases a root a caller still holds the handle of, and keeps the tree.
+///
+/// A plan keeps the runtime tree's handle after a partition's stream is gone, to export what the
+/// nodes recorded. What the handle keeps is the node structure and its metrics, not what the nodes
+/// hold: dropping the execution takes the evaluator, the collected input, the queued answers and
+/// the reservation with it, so the root reads released and the pool reads empty, while the leaf the
+/// window was built over is still where it was.
+#[test]
+fn dropping_the_execution_releases_a_retained_root() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let runtime = execution.state().runtime_tree();
+    for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric("x", name), 0, values, true),
+            )
+            .unwrap();
+    }
+    // Pulling takes both fragments out of the input and into the window, which collects them.
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the collecting window reported a piece"
+    );
+    // The root holds the evaluator and the collected input before the input ends.
+    {
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Window {
+            input,
+            window,
+            merge,
+            state,
+        } = &guard.root.op
+        else {
+            panic!("the root is not the window the tree built");
+        };
+        assert!(window.is_some(), "the root holds no evaluator to release");
+        assert!(merge.is_some(), "the root collected nothing to release");
+        assert!(state.queued.is_empty(), "a fragment was not collected");
+        let RuntimeOp::Map { input: leaf, .. } = &input.op else {
+            panic!("the window's input is not the map the tree built");
+        };
+        assert!(
+            matches!(&leaf.op, RuntimeOp::Input(id) if id.index() == 0),
+            "the window's leaf is not the input it was built over"
+        );
+    }
+    execution.end_of_input().unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&first)),
+        vec![(0, vec![Some(1.0)])]
+    );
+    // The flush took the collected input, so what is left to release is the evaluator and the
+    // answer the caller has not pulled yet.
+    {
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Window {
+            window,
+            merge,
+            state,
+            ..
+        } = &guard.root.op
+        else {
+            panic!("the root is not the window the tree built");
+        };
+        assert!(window.is_some(), "the evaluator left before the drop");
+        assert!(merge.is_none(), "the collected input outlived its flush");
+        assert_eq!(state.queued.len(), 1, "the second answer is not queued");
+        assert!(state.buffer.reservation.size() > 0);
+    }
+    assert!(pool.reserved() > 0, "the root reserved nothing to release");
+
+    drop(execution);
+
+    // The handle is what is left, and it reads a released tree while the peak it reached stands.
+    let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
+    let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
+    assert_eq!(gauge(&runtime, &current), 0);
+    assert!(
+        gauge(&runtime, &peak) > 0,
+        "the peak the node reached did not survive the release"
+    );
+    assert_eq!(pool.reserved(), 0);
+    let guard = runtime
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let RuntimeOp::Window {
+        input,
+        window,
+        merge,
+        state,
+    } = &guard.root.op
+    else {
+        panic!("the dropped execution took the root with it");
+    };
+    assert!(window.is_none(), "the dropped execution kept the evaluator");
+    assert!(
+        merge.is_none(),
+        "the dropped execution kept the collected input"
+    );
+    assert!(
+        state.queued.is_empty(),
+        "the dropped execution kept a queued answer"
+    );
+    assert_eq!(state.buffer.reservation.size(), 0);
+    let RuntimeOp::Map { input: leaf, .. } = &input.op else {
+        panic!("the window's input is not the map the tree built");
+    };
+    assert!(
+        matches!(&leaf.op, RuntimeOp::Input(id) if id.index() == 0),
+        "the released tree lost the leaf the window was built over"
     );
 }
 
@@ -1995,9 +2251,8 @@ fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
     );
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(
-        execution.state().nodes_holding_windows(),
-        0,
+    assert!(
+        !root_holds(&execution, holds_window),
         "the stopped execution still holds a window's samples"
     );
 }
@@ -2075,9 +2330,8 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     // evaluator and both queues.
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(
-        execution.state().nodes_holding_windows(),
-        0,
+    assert!(
+        !root_holds(&execution, holds_window),
         "the stopped execution still holds a window's samples"
     );
     // A stopped execution is not resumed.
@@ -2764,7 +3018,6 @@ fn a_window_over_an_interleaved_input_is_rejected() {
     );
     let message = error.to_string();
     assert!(message.contains("Interleaved"), "{message}");
-    assert!(message.contains("root.input"), "{message}");
 }
 
 /// An interleaved input is refused with no window above it to notice it.
@@ -2793,7 +3046,6 @@ fn an_interleaved_input_is_refused_without_a_window() {
     );
     let message = error.to_string();
     assert!(message.contains("Interleaved"), "{message}");
-    assert!(message.contains("root.input"), "{message}");
 }
 
 /// A selection over an interleaved input is refused when the tree is bound, before it can run.
@@ -3335,12 +3587,12 @@ fn a_source_charges_its_queue_and_gives_it_back() {
     let (first_bytes, second_bytes) = (raw_bytes(&first), raw_bytes(&second));
 
     source.enqueue(NativeChunk::Raw(first)).unwrap();
-    assert_eq!(source.buffer.reservation.size(), first_bytes);
+    assert_eq!(source.state.buffer.reservation.size(), first_bytes);
     assert_eq!(pool.reserved(), first_bytes);
 
     source.enqueue(NativeChunk::Raw(second)).unwrap();
     assert_eq!(
-        source.buffer.reservation.size(),
+        source.state.buffer.reservation.size(),
         first_bytes + second_bytes,
         "the queue is not the sum of the estimates it holds"
     );
@@ -3354,7 +3606,7 @@ fn a_source_charges_its_queue_and_gives_it_back() {
     // One table, two queued chunks, two shares of its estimate: what leaves is what the chunk that
     // left was charged, and the other chunk's share stays.
     assert_eq!(
-        source.buffer.reservation.size(),
+        source.state.buffer.reservation.size(),
         second_bytes,
         "the chunk that left did not give its estimate back"
     );
@@ -3364,7 +3616,7 @@ fn a_source_charges_its_queue_and_gives_it_back() {
         .pop_source()
         .unwrap()
         .expect("the queue held two chunks");
-    assert_eq!(source.buffer.reservation.size(), 0);
+    assert_eq!(source.state.buffer.reservation.size(), 0);
     assert_eq!(
         pool.reserved(),
         0,
@@ -3396,8 +3648,11 @@ fn releasing_a_node_drops_its_queue() {
     assert!(pool.reserved() > 0);
 
     source.release();
-    assert!(source.queued.is_empty(), "the queue outlived its release");
-    assert_eq!(source.buffer.reservation.size(), 0);
+    assert!(
+        source.state.queued.is_empty(),
+        "the queue outlived its release"
+    );
+    assert_eq!(source.state.buffer.reservation.size(), 0);
     assert_eq!(pool.reserved(), 0, "the reservation was not returned");
     assert!(source.pop_source().unwrap().is_none());
 }
@@ -3423,7 +3678,7 @@ fn a_series_whose_axis_and_fields_disagree_is_rejected() {
 
     let mut emitted = Emitted::default();
     let error = emitted
-        .occupy(&NodePath::root(), &chunk)
+        .occupy(&chunk)
         .expect_err("a field with fewer samples than the axis places rows was accepted");
     let message = error.to_string();
     assert!(
@@ -3453,7 +3708,6 @@ fn a_series_whose_axis_and_fields_disagree_is_rejected() {
 fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
     let map_grid = grid(0, 60_000, 21);
     let schema = evaluated_schema(Arc::clone(&map_grid));
-    let path = NodePath::root();
     let mut emitted = Emitted::default();
 
     // One row at `position`, which is one run of one position: the same series every time, since a
@@ -3467,7 +3721,7 @@ fn a_sparse_series_that_moves_forward_is_appended_to_its_history() {
             false,
         );
         emitted
-            .occupy(&path, &chunk)
+            .occupy(&chunk)
             .unwrap_or_else(|error| panic!("position {position} was refused: {error}"));
     };
     // The runs stored under the one label set, which is what `absorb` keeps in position order.
@@ -4035,9 +4289,8 @@ fn an_instant_selection_reserves_the_workspace_it_gathers() {
         0,
         "the workspace of the refused gather is still reserved for"
     );
-    assert_eq!(
-        execution.state().nodes_holding_instants(),
-        0,
+    assert!(
+        !root_holds(&execution, holds_instant),
         "the stopped execution still holds the buffered series"
     );
     // A refused gather stops the execution rather than leaving it to be resumed.
@@ -4169,7 +4422,7 @@ fn an_oversized_selection_is_refused_by_the_pool() {
     // Nothing is dropped silently: the execution stops and gives its reservation back.
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
-    assert_eq!(execution.state().nodes_holding_instants(), 0);
+    assert!(!root_holds(&execution, holds_instant));
     let again = execution.next_chunk().unwrap_err();
     assert!(
         again.to_string().contains("stopped after an earlier error"),
@@ -4200,9 +4453,8 @@ fn an_input_that_ends_inside_a_series_is_reported() {
     );
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
-    assert_eq!(
-        execution.state().nodes_holding_instants(),
-        0,
+    assert!(
+        !root_holds(&execution, holds_instant),
         "the stopped execution still holds the buffered series"
     );
 }
@@ -4867,7 +5119,7 @@ fn a_truncated_operand_is_refused_before_the_kernel_runs() {
         "{error}"
     );
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(execution.state().nodes_holding_binary(), 0);
+    assert!(!root_holds(&execution, holds_binary));
 }
 
 /// A workspace the pool cannot hold is refused, and what the node retained is given back with it.
@@ -4892,7 +5144,7 @@ fn an_oversized_binary_workspace_is_refused_by_the_pool() {
     );
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
-    assert_eq!(execution.state().nodes_holding_binary(), 0);
+    assert!(!root_holds(&execution, holds_binary));
 }
 
 /// A pool that cannot hold both operands refuses the second one, and the first is given back.
@@ -4952,28 +5204,28 @@ fn a_binary_operand_reserves_what_it_retains() {
     // the operand keeps would be refused and one reserved for less would leave the pool holding less
     // than the node does.
     let pool = bounded_pool(held);
-    let mut runtime = binary_runtime(&pool, &schema);
-    let before = runtime.buffer.reservation.size();
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(first))
         .unwrap();
     assert_eq!(
-        runtime.buffer.reservation.size() - before,
+        state.buffer.reservation.size() - before,
         first_alone,
         "the first chunk of the operand does not cost what it is estimated at"
     );
-    let before = runtime.buffer.reservation.size();
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second))
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(second))
         .unwrap();
     assert_eq!(
-        runtime.buffer.reservation.size() - before,
+        state.buffer.reservation.size() - before,
         second_alone + boundaries,
         "the closing chunk of the operand does not cost what it is estimated at, and the end it \
          records"
     );
     assert_eq!(
-        runtime.buffer.reservation.size(),
+        state.buffer.reservation.size(),
         held,
         "the operand does not reserve what it holds"
     );
@@ -4983,24 +5235,14 @@ fn a_binary_operand_reserves_what_it_retains() {
     // estimate of the series it carries and the one entry the chunk's end records.
     let own = evaluated_chunk(&schema, 0, vec![1.0, 2.0], true);
     assert_eq!(
-        runtime
-            .binary
-            .as_ref()
-            .unwrap()
-            .pending(&NodePath::root(), 0, &own)
-            .unwrap(),
+        binary.pending(0, &own).unwrap(),
         operand_chunk_bytes(&own.series) + std::mem::size_of::<usize>(),
         "the figure reserved for a chunk is not what the operand grows by"
     );
 
     // Assembling the two chunks keeps the allocation they are slices of: the series the kernel reads
     // is made of their descriptors, and no sample is copied into it.
-    let assembled = runtime
-        .binary
-        .as_ref()
-        .unwrap()
-        .assemble(&NodePath::root())
-        .unwrap();
+    let assembled = binary.assemble().unwrap();
     assert_eq!(
         assembled[0].len(),
         1,
@@ -5053,17 +5295,17 @@ fn a_binary_operand_bills_each_histogram_table_it_retains() {
     let second = evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &other, true);
 
     let pool = pool();
-    let mut runtime = binary_runtime(&pool, &schema);
-    let before = runtime.buffer.reservation.size();
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(first))
         .unwrap();
-    let first_cost = runtime.buffer.reservation.size() - before;
-    let before = runtime.buffer.reservation.size();
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second))
+    let first_cost = state.buffer.reservation.size() - before;
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(second))
         .unwrap();
-    let second_cost = runtime.buffer.reservation.size() - before;
+    let second_cost = state.buffer.reservation.size() - before;
 
     assert_eq!(
         first_cost, second_cost,
@@ -5082,11 +5324,11 @@ fn a_binary_operand_bills_each_histogram_table_it_retains() {
         );
     }
     assert_eq!(
-        runtime.buffer.reservation.size(),
+        state.buffer.reservation.size(),
         first_cost + second_cost,
         "the operand does not reserve what the two chunks it retains cost"
     );
-    assert_eq!(pool.reserved(), runtime.buffer.reservation.size());
+    assert_eq!(pool.reserved(), state.buffer.reservation.size());
 }
 
 /// Two chunks that index one histogram table are billed that table once.
@@ -5111,17 +5353,17 @@ fn a_binary_operand_bills_a_shared_histogram_table_once() {
     let second = evaluated_histogram_chunk_of(&schema, metric(), 1, vec![Some(1)], &table, true);
 
     let pool = pool();
-    let mut runtime = binary_runtime(&pool, &schema);
-    let before = runtime.buffer.reservation.size();
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(first))
         .unwrap();
-    let first_cost = runtime.buffer.reservation.size() - before;
-    let before = runtime.buffer.reservation.size();
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second))
+    let first_cost = state.buffer.reservation.size() - before;
+    let before = state.buffer.reservation.size();
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(second))
         .unwrap();
-    let second_cost = runtime.buffer.reservation.size() - before;
+    let second_cost = state.buffer.reservation.size() - before;
 
     assert!(
         first_cost >= bytes,
@@ -5150,12 +5392,12 @@ fn a_binary_operand_bills_a_shared_histogram_table_once() {
          table between them: the table is billed twice"
     );
     assert!(
-        runtime.buffer.reservation.size() < bytes + 2 * second_cost + 64,
+        state.buffer.reservation.size() < bytes + 2 * second_cost + 64,
         "the operand charges the one table of its two chunks twice: {} bytes for {} bytes of table",
-        runtime.buffer.reservation.size(),
+        state.buffer.reservation.size(),
         bytes
     );
-    assert_eq!(pool.reserved(), runtime.buffer.reservation.size());
+    assert_eq!(pool.reserved(), state.buffer.reservation.size());
 }
 
 /// A pool with room for one histogram table admits one chunk of a table, refuses a second chunk
@@ -5187,46 +5429,50 @@ fn a_pool_that_holds_one_histogram_table_refuses_a_second() {
 
     // What the operand holds once it retains one chunk of a table, measured where the pool admits
     // anything; the pool below is sized from it and half a table.
-    let mut probe = binary_runtime(&pool(), &schema);
-    probe
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first.clone()))
+    let (mut probe_state, mut probe_binary) = binary_runtime(&pool(), &schema);
+    probe_state
+        .retain_binary(&mut probe_binary, 0, NativeChunk::Evaluated(first.clone()))
         .unwrap();
-    let one_chunk = probe.buffer.reservation.size();
+    let one_chunk = probe_state.buffer.reservation.size();
     let budget = one_chunk + bytes / 2;
 
     // A second chunk holding a table of its own does not fit: the pool refuses it and the operand
     // keeps what it had.
-    let mut refused = binary_runtime(&bounded_pool(budget), &schema);
-    refused
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first.clone()))
+    let (mut refused_state, mut refused_binary) = binary_runtime(&bounded_pool(budget), &schema);
+    refused_state
+        .retain_binary(
+            &mut refused_binary,
+            0,
+            NativeChunk::Evaluated(first.clone()),
+        )
         .unwrap();
-    let error = refused
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second_own))
+    let error = refused_state
+        .retain_binary(&mut refused_binary, 0, NativeChunk::Evaluated(second_own))
         .unwrap_err();
     assert!(
         matches!(error, DataFusionError::ResourcesExhausted(_)),
         "a second chunk holding a table of its own was admitted beside the first: {error}"
     );
     assert_eq!(
-        refused.buffer.reservation.size(),
+        refused_state.buffer.reservation.size(),
         one_chunk,
         "the refused chunk moved what the operand reserves"
     );
 
     // The second slice of the one table the operand holds does fit.
-    let mut shared = binary_runtime(&bounded_pool(budget), &schema);
-    shared
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(first))
+    let (mut shared_state, mut shared_binary) = binary_runtime(&bounded_pool(budget), &schema);
+    shared_state
+        .retain_binary(&mut shared_binary, 0, NativeChunk::Evaluated(first))
         .unwrap();
-    shared
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(second_shared))
+    shared_state
+        .retain_binary(&mut shared_binary, 0, NativeChunk::Evaluated(second_shared))
         .unwrap();
     assert!(
-        shared.buffer.reservation.size() > one_chunk,
+        shared_state.buffer.reservation.size() > one_chunk,
         "the second slice of the table was admitted without being charged its own descriptors"
     );
     assert!(
-        shared.buffer.reservation.size() <= budget,
+        shared_state.buffer.reservation.size() <= budget,
         "the operand reserves past the pool it was admitted in"
     );
 }
@@ -5481,25 +5727,25 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
 
     // One byte short of the assembly: the assembly is refused rather than run over the budget.
     let pool = bounded_pool(retained + assembly - 1);
-    let mut runtime = binary_runtime(&pool, &schema);
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left.clone()))
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(left.clone()))
         .unwrap();
-    runtime
-        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right.clone()))
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(right.clone()))
         .unwrap();
-    assert_eq!(runtime.buffer.reservation.size(), retained);
-    let error = runtime.compute_binary(&NodePath::root()).unwrap_err();
+    assert_eq!(state.buffer.reservation.size(), retained);
+    let error = state.compute_binary(&mut binary).unwrap_err();
     assert!(
         matches!(error, DataFusionError::ResourcesExhausted(_)),
         "the assembly was not reserved before it allocated: {error}"
     );
     // The assembly never ran, so its charge is gone: what the node holds is what it retained, and
     // the pool holds no more than that while the runtime is still alive.
-    assert_eq!(runtime.buffer.reservation.size(), retained);
+    assert_eq!(state.buffer.reservation.size(), retained);
     assert_eq!(pool.reserved(), retained);
     assert_eq!(
-        runtime.binary.as_ref().unwrap().retained_bytes(),
+        binary.retained_bytes(),
         retained,
         "the refused assembly changed what the operand retains"
     );
@@ -5507,19 +5753,14 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
     // The figure covers the assembly itself: with exactly that much more, the series are built and
     // hold the rows the chunks carried.
     let pool = bounded_pool(retained + assembly);
-    let mut runtime = binary_runtime(&pool, &schema);
-    runtime
-        .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(left))
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
+    state
+        .retain_binary(&mut binary, 0, NativeChunk::Evaluated(left))
         .unwrap();
-    runtime
-        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(right))
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(right))
         .unwrap();
-    let assembled = runtime
-        .binary
-        .as_ref()
-        .unwrap()
-        .assemble(&NodePath::root())
-        .unwrap();
+    let assembled = binary.assemble().unwrap();
     assert_eq!(assembled[0].len(), 1, "one closed series is one series");
     assert_eq!(assembled[1].len(), 1, "one closed series is one series");
     let built = EvaluatedChunk::try_new(assembled[0][0].clone(), true).unwrap();
@@ -5574,9 +5815,8 @@ fn an_assembly_the_executors_pool_cannot_hold_stops_it() {
         "the stopped execution kept a reservation"
     );
     assert_eq!(execution.state().reserved_bytes(), 0);
-    assert_eq!(
-        execution.state().nodes_holding_binary(),
-        0,
+    assert!(
+        !root_holds(&execution, holds_binary),
         "the stopped execution kept the operands it retained"
     );
     let stopped = execution.next_chunk().unwrap_err();
@@ -5667,16 +5907,16 @@ fn an_assembly_bound_covers_the_capacity_its_flatten_grows_to() {
     );
 
     let pool = pool();
-    let mut runtime = binary_runtime(&pool, &schema);
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
     for chunk in [first, second.clone()] {
-        runtime
-            .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(chunk))
+        state
+            .retain_binary(&mut binary, 0, NativeChunk::Evaluated(chunk))
             .unwrap();
     }
-    runtime
-        .retain_binary(&NodePath::root(), 1, NativeChunk::Evaluated(second))
+    state
+        .retain_binary(&mut binary, 1, NativeChunk::Evaluated(second))
         .unwrap();
-    let assembly = runtime.binary.as_ref().unwrap().assembly_bytes().unwrap();
+    let assembly = binary.assembly_bytes().unwrap();
     assert!(
         peak * std::mem::size_of::<Samples>() <= assembly,
         "the {assembly} bytes reserved for the assembly do not cover the {peak} slots its flatten \
@@ -5684,12 +5924,7 @@ fn an_assembly_bound_covers_the_capacity_its_flatten_grows_to() {
     );
 
     // The assembled series keeps the segments and the one table they index into.
-    let assembled = runtime
-        .binary
-        .as_ref()
-        .unwrap()
-        .assemble(&NodePath::root())
-        .unwrap();
+    let assembled = binary.assemble().unwrap();
     assert_eq!(assembled[0].len(), 1, "one closed series is one series");
     assert_eq!(assembled[0][0].time.len(), segments);
     let field = &assembled[0][0].fields.as_slice()[0];
@@ -5777,18 +6012,13 @@ fn a_mixed_nested_operand_assembles_into_one_series_with_its_holes() {
 
     // The two chunks are collected into the one series the kernel matches.
     let pool = pool();
-    let mut runtime = binary_runtime(&pool, &schema);
+    let (mut state, mut binary) = binary_runtime(&pool, &schema);
     for chunk in [&left_a, &left_b] {
-        runtime
-            .retain_binary(&NodePath::root(), 0, NativeChunk::Evaluated(chunk.clone()))
+        state
+            .retain_binary(&mut binary, 0, NativeChunk::Evaluated(chunk.clone()))
             .unwrap();
     }
-    let assembled = runtime
-        .binary
-        .as_ref()
-        .unwrap()
-        .assemble(&NodePath::root())
-        .unwrap();
+    let assembled = binary.assemble().unwrap();
     assert_eq!(
         assembled[0].len(),
         1,
@@ -5933,9 +6163,8 @@ fn a_binary_beneath_a_map_and_a_window_is_pulled_recursively() {
     // A map over the binary result: the subtraction is mapped to its magnitude.
     let inner_grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&inner_grid));
-    // The map and the window below are the outermost nodes, so the binary node is one step down
-    // from the root and its two inputs one step below that: `root.input.left` and
-    // `root.input.right`, not `root.left` and `root.right`.
+    // The raw sources are the only leaves, one per operand: counted left to right, the left
+    // subtree's is input 0 and the right subtree's input 1, whatever sits above them.
     let (left, right) = (InputId::new(0), InputId::new(1));
     let root = binary_of(
         evaluated_input_of(1, Arc::clone(&inner_grid)),
@@ -6010,17 +6239,13 @@ fn a_binary_over_two_windows_and_selections_is_executed() {
     );
     let tree = NativeTree::try_new(root).unwrap();
     let mut execution = executor(&tree, pool());
-    for (path, key, values) in [
-        (
-            NodePath::root().left().input(),
-            b"series-a".as_slice(),
-            [1.0, 2.0],
-        ),
+    for (input, key, values) in [
+        (InputId::new(0), b"series-a".as_slice(), [1.0, 2.0]),
         (InputId::new(1), b"series-b".as_slice(), [10.0, 20.0]),
     ] {
         execution
             .push_raw(
-                path,
+                input,
                 raw_chunk_of(&schema, key, metric(), &[0, 60_000], &values, true),
             )
             .unwrap();
@@ -6038,13 +6263,13 @@ fn a_binary_over_two_windows_and_selections_is_executed() {
     );
     let tree = NativeTree::try_new(root).unwrap();
     let mut execution = executor(&tree, pool());
-    for (path, key, value) in [
+    for (input, key, value) in [
         (InputId::new(0), b"series-a".as_slice(), 1.0),
         (InputId::new(1), b"series-b".as_slice(), 10.0),
     ] {
         execution
             .push_raw(
-                path,
+                input,
                 raw_chunk_of(&schema, key, metric(), &[0], &[value], true),
             )
             .unwrap();
@@ -6149,7 +6374,7 @@ fn a_chunk_of_another_series_on_one_operand_is_refused() {
     let error = execution.next_chunk().unwrap_err();
     let message = error.to_string();
     assert!(
-        message.contains("the binary node at root")
+        message.contains("the binary node")
             && message.contains("its right operand")
             && message.contains("before"),
         "{message}"
@@ -6157,7 +6382,7 @@ fn a_chunk_of_another_series_on_one_operand_is_refused() {
     // The execution stopped rather than handing on the pairs it had, and it holds nothing.
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
-    assert_eq!(execution.state().nodes_holding_binary(), 0);
+    assert!(!root_holds(&execution, holds_binary));
     let again = execution.next_chunk().unwrap_err();
     assert!(
         again.to_string().contains("stopped after an earlier error"),
@@ -6195,13 +6420,13 @@ fn an_operand_chunk_that_rewinds_is_refused_with_or_without_values() {
     let message = error.to_string();
     assert!(
         message.contains("do not continue each other")
-            && message.contains("the binary node at root")
+            && message.contains("the binary node")
             && message.contains("by its left operand")
             && message.contains("after the series already reached 2"),
         "{message}"
     );
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(execution.state().nodes_holding_binary(), 0);
+    assert!(!root_holds(&execution, holds_binary));
 }
 
 /// A chunk that does not match the layout its operand is bound to is refused before the kernel.
@@ -6265,7 +6490,7 @@ fn a_chunk_that_does_not_match_its_operand_is_refused_before_the_kernel() {
             "{case}: the refused chunk is still held"
         );
         assert_eq!(execution.state().reserved_bytes(), 0, "{case}");
-        assert_eq!(execution.state().nodes_holding_binary(), 0, "{case}");
+        assert!(!root_holds(&execution, holds_binary), "{case}");
     }
 }
 
@@ -6299,7 +6524,7 @@ fn an_absent_operand_yields_no_series() {
     let mut empty = executor(&tree, Arc::clone(&pool));
     assert!(empty.finish().unwrap().is_empty());
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(empty.state().nodes_holding_binary(), 0);
+    assert!(!root_holds(&empty, holds_binary));
 
     // Only the right side ran, and it closed: nothing matches a series that is not there.
     let mut one_side = executor(&tree, Arc::clone(&pool));
@@ -6308,7 +6533,7 @@ fn an_absent_operand_yields_no_series() {
         .unwrap();
     assert!(one_side.finish().unwrap().is_empty());
     assert_eq!(pool.reserved(), 0);
-    assert_eq!(one_side.state().nodes_holding_binary(), 0);
+    assert!(!root_holds(&one_side, holds_binary));
 }
 
 /// A binary node counts the series it closes on its output, and does not count an operand chunk
@@ -7763,9 +7988,17 @@ fn an_aggregate_answers_nothing_until_its_whole_input_ends() {
     ))
     .unwrap();
     let mut execution = executor(&tree, pool());
+    // The root is the aggregate the tree built, and the fold is its own payload: what is read
+    // below is a copy of the flag, not a borrow held across the pulls.
     let computed = |execution: &NativeExecutor| {
-        execution.state().runtimes[0]
-            .aggregate
+        let runtime = execution.state().runtime_tree();
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Aggregate { aggregate, .. } = &guard.root.op else {
+            panic!("the root is not the aggregate the tree built");
+        };
+        aggregate
             .as_ref()
             .expect("the root holds an aggregate")
             .computed
@@ -7887,7 +8120,7 @@ fn an_aggregate_refuses_a_chunk_of_another_layout_and_returns_its_reservation() 
     );
     let message = error.to_string();
     assert!(
-        message.contains("aggregate at root"),
+        message.contains("the `Sum` aggregate"),
         "the refusal does not name the aggregate: {message}"
     );
     assert!(
@@ -7952,31 +8185,47 @@ fn aggregate_runtime_queue_keeps_only_backing_after_pops_until_release() {
     execution.end_of_input().unwrap();
     let first = execution.next_chunk().unwrap().expect("first group output");
     assert_eq!(first.series.time.positions().count(), 1);
-    let runtime = &execution.state().runtimes[0];
     let entry = std::mem::size_of::<(NativeChunk, usize)>();
-    assert_eq!(runtime.queued.len(), 1);
-    let remaining = runtime.queued[0].1;
-    let expected = runtime.queued.capacity() * entry + remaining;
-    assert_eq!(runtime.buffer.reservation.size(), expected);
+    // What the root's queue holds, what the first chunk in it was queued with, the node's
+    // reservation and the backing the queue grew to. The lock is dropped inside the call, so the
+    // pull below is taken with nothing held.
+    let queue = |execution: &NativeExecutor| -> (usize, usize, usize, usize) {
+        let runtime = execution.state().runtime_tree();
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Aggregate { state, .. } = &guard.root.op else {
+            panic!("the root is not the aggregate the tree built");
+        };
+        (
+            state.queued.len(),
+            state.queued.front().map_or(0, |(_, bytes)| *bytes),
+            state.buffer.reservation.size(),
+            state.queued.capacity(),
+        )
+    };
+    let (queued, remaining, held, capacity) = queue(&execution);
+    assert_eq!(queued, 1);
+    assert_eq!(held, capacity * entry + remaining);
+    assert!(remaining > 0, "the queued answer was not charged for");
 
     let second = execution
         .next_chunk()
         .unwrap()
         .expect("second group output");
     assert_eq!(second.series.time.positions().count(), 1);
-    let runtime = &execution.state().runtimes[0];
-    assert!(runtime.queued.is_empty());
-    let backing = runtime.queued.capacity() * entry;
+    let (queued, _, held, capacity) = queue(&execution);
+    assert_eq!(queued, 0);
+    let backing = capacity * entry;
     assert!(backing > 0);
-    assert_eq!(runtime.buffer.reservation.size(), backing);
+    assert_eq!(held, backing);
     assert!(execution.next_chunk().unwrap().is_none());
-    // Pulling the terminal None releases the queue backing; only explicit close checks the
-    // runtime's final cleanup below.
-    assert_eq!(execution.state().runtimes[0].buffer.reservation.size(), 0);
-
-    execution.state.close().unwrap();
-    assert_eq!(execution.state().runtimes[0].queued.capacity(), 0);
-    assert_eq!(execution.state().runtimes[0].buffer.reservation.size(), 0);
+    // The terminal pull is the close: the queue's backing and the reservation go back with it, and
+    // the root reads released rather than only uncharged.
+    let (queued, _, held, capacity) = queue(&execution);
+    assert_eq!(queued, 0);
+    assert_eq!(capacity, 0, "the closed root kept the queue's backing");
+    assert_eq!(held, 0);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -8022,10 +8271,20 @@ fn aggregate_fold_state_is_released_after_input() {
         )
         .unwrap();
     assert!(execution.next_chunk().unwrap().is_none());
-    let runtime = &execution.state.runtimes[0];
-    let aggregate = runtime.aggregate.as_ref().unwrap();
-    assert_eq!(aggregate.groups(), 1);
-    assert!(!aggregate.computed);
+    // The root is the aggregate the tree built: its fold holds one group and has not run. The lock
+    // is dropped before the close below takes the state again.
+    {
+        let runtime = execution.state().runtime_tree();
+        let guard = runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let RuntimeOp::Aggregate { aggregate, .. } = &guard.root.op else {
+            panic!("the root is not the aggregate the tree built");
+        };
+        let aggregate = aggregate.as_ref().expect("the root holds an aggregate");
+        assert_eq!(aggregate.groups(), 1);
+        assert!(!aggregate.computed);
+    }
     assert!(pool.reserved() > 0);
     execution.state.close().unwrap();
     assert_eq!(pool.reserved(), 0);
@@ -8299,9 +8558,9 @@ fn a_binary_node_reads_what_a_vector_node_kept() {
     .unwrap();
     let (left, right) = (InputId::new(0), InputId::new(1));
     let mut execution = executor(&tree, pool());
-    for (path, chunk) in [
+    for (input, chunk) in [
         (
-            &left,
+            left,
             evaluated_chunk_of(
                 &schema,
                 named_metric("m", "a"),
@@ -8311,7 +8570,7 @@ fn a_binary_node_reads_what_a_vector_node_kept() {
             ),
         ),
         (
-            &right,
+            right,
             evaluated_chunk_of(
                 &schema,
                 named_metric("m", "a"),
@@ -8321,7 +8580,7 @@ fn a_binary_node_reads_what_a_vector_node_kept() {
             ),
         ),
         (
-            &left,
+            left,
             evaluated_chunk_of(
                 &schema,
                 named_metric("m", "b"),
@@ -8331,7 +8590,7 @@ fn a_binary_node_reads_what_a_vector_node_kept() {
             ),
         ),
     ] {
-        execution.push_evaluated(path, chunk).unwrap();
+        execution.push_evaluated(input, chunk).unwrap();
     }
     assert_eq!(decided(&run(&mut execution)), vec![(1, Some(15.0))]);
 }
