@@ -514,6 +514,38 @@ impl Instance {
 
 #[async_trait]
 impl PromStoreProtocolHandler for Instance {
+    async fn check_exemplar_sources(
+        &self,
+        sources: &std::collections::BTreeSet<String>,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        let targets = sources
+            .iter()
+            .map(|name| {
+                PermissionTableTarget::new(ctx.current_catalog(), ctx.current_schema(), name)
+            })
+            .collect();
+        self.check_table_permission(
+            &ctx,
+            PermissionReq::Action(PROM_STORE_WRITE),
+            PermissionTableTargets::resolved(targets),
+        )
+        .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    async fn write_exemplars_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        self.inserter
+            .handle_exemplar_inserts(request, ctx, &self.statement_executor)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
+    }
+
     async fn pre_write(
         &self,
         request: &RowInsertRequests,

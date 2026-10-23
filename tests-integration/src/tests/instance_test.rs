@@ -4301,3 +4301,135 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
         }
     }
 }
+
+#[rstest]
+#[case::unbatched(false)]
+#[case::batched(true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_preserves_physical_table_routing(#[case] batching: bool) {
+    use api::greptime_proto::io::prometheus::write::v2;
+    use api::prom_store::remote::{Exemplar, Label, Sample, TimeSeries, WriteRequest};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+    use crate::test_util::build_test_prom_server;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_physical_routing")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    let server = build_test_prom_server(frontend.clone(), batching, None).build();
+    let app = server.build(server.make_app()).unwrap();
+    for version in [1, 2] {
+        let request = WriteRequest {
+            timeseries: ["a", "b"]
+                .into_iter()
+                .map(|suffix| TimeSeries {
+                    labels: vec![
+                        Label {
+                            name: "__name__".into(),
+                            value: format!("routed_{version}_{suffix}"),
+                        },
+                        Label {
+                            name: "__physical_table__".into(),
+                            value: format!("physical_{suffix}"),
+                        },
+                    ],
+                    samples: vec![Sample {
+                        timestamp: 1000,
+                        value: 1.0,
+                    }],
+                    exemplars: if suffix == "a" {
+                        vec![Exemplar {
+                            timestamp: 1000,
+                            value: 0.5,
+                            labels: vec![],
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let (content_type, body) = if version == 1 {
+            ("application/x-protobuf", request.encode_to_vec())
+        } else {
+            let mut converted = v2::Request {
+                symbols: vec![String::new()],
+                timeseries: vec![],
+            };
+            for series in request.timeseries {
+                let mut labels_refs = Vec::new();
+                for label in series.labels {
+                    labels_refs.extend([
+                        converted.symbols.len() as u32,
+                        converted.symbols.len() as u32 + 1,
+                    ]);
+                    converted.symbols.extend([label.name, label.value]);
+                }
+                converted.timeseries.push(v2::TimeSeries {
+                    labels_refs,
+                    samples: vec![v2::Sample {
+                        timestamp: 1000,
+                        value: 1.0,
+                        ..Default::default()
+                    }],
+                    exemplars: series
+                        .exemplars
+                        .into_iter()
+                        .map(|e| v2::Exemplar {
+                            timestamp: e.timestamp,
+                            value: e.value,
+                            labels_refs: vec![],
+                        })
+                        .collect(),
+                    ..Default::default()
+                });
+            }
+            (
+                "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                converted.encode_to_vec(),
+            )
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header("Content-Type", content_type)
+                    .body(Body::from(snappy_compress(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+        for suffix in ["a", "b"] {
+            let table = frontend
+                .catalog_manager()
+                .table(
+                    "greptime",
+                    "public",
+                    &format!("routed_{version}_{suffix}"),
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                table.table_info().meta.options.extra_options["on_physical_table"],
+                format!("physical_{suffix}")
+            );
+        }
+    }
+}

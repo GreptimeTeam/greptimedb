@@ -10165,6 +10165,7 @@ dependencies = [
  "ahash 0.8.12",
  "api",
  "arrow 59.2.0",
+ "arrow-schema 59.2.0",
  "async-stream",
  "async-trait",
  "axum 0.8.4",
