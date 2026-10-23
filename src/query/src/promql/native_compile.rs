@@ -541,8 +541,8 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
         // Both operands are compiled before the node is built, so `a + b` binds one input per
         // selector and `(a + b) / c` nests. Left before right, because a non-commutative operator
         // means what that order says.
-        let left = compile_expr(context, &binary.lhs)?;
-        let right = compile_expr(context, &binary.rhs)?;
+        let left = compile_expr(&context.with_path(context.path.left()), &binary.lhs)?;
+        let right = compile_expr(&context.with_path(context.path.right()), &binary.rhs)?;
         // A vector-typed expression compiles to evaluated samples, so a side that is not one is a
         // compiler defect rather than a query error: the type check above is what a query has to
         // pass.
