@@ -37,7 +37,7 @@ use arrow_schema::{ArrowError, DataType as ArrowDataType, Field, Schema as Arrow
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
-use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector};
 use pgwire::error::{PgWireError, PgWireResult};
 
 use crate::postgres::copy_in::codec::{CopyInCodec, ParsedRow, RecordParser};
