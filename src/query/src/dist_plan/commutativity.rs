@@ -901,7 +901,7 @@ mod tests {
             panic!("expected the ranking to have one input: {plan}");
         };
         assert!(matches!(
-            Categorizer::check_plan(*prefix, None).unwrap(),
+            Categorizer::check_plan(prefix, None).unwrap(),
             Commutativity::Commutative
         ));
         assert!(matches!(
