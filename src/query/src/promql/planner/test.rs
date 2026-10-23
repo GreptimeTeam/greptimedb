@@ -1440,6 +1440,13 @@ async fn build_test_table_provider_with_tsid_fields(
 async fn build_test_table_provider_with_tsid_tag_fields(
     table_specs: &[((String, String), usize, usize)],
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_tsid_tag_fields_and_field_order(table_specs, None).await
+}
+
+async fn build_test_table_provider_with_tsid_tag_fields_and_field_order(
+    table_specs: &[((String, String), usize, usize)],
+    logical_field_order: Option<&[usize]>,
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
 
     let physical_table_name = "phy";
@@ -1543,7 +1550,16 @@ async fn build_test_table_provider_with_tsid_tag_fields(
             )
             .with_time_index(true),
         );
-        for i in 0..*num_field {
+        let field_order = logical_field_order
+            .map(|order| {
+                order
+                    .iter()
+                    .copied()
+                    .filter(|i| i < num_field)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| (0..*num_field).collect());
+        for i in field_order {
             columns.push(ColumnSchema::new(
                 format!("field_{i}"),
                 ConcreteDataType::float64_datatype(),
@@ -1934,6 +1950,22 @@ async fn native_fused_metric_engine_table_is_accepted() {
             .contains("PromRangeManipulate")
     );
     let scan = find_metric_physical_scan(&native).expect("fused route keeps physical scan");
+    let source_schema = scan.source.schema();
+    let projected_names = scan
+        .projection
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|index| source_schema.field(*index).name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        projected_names
+            .iter()
+            .filter(|name| name.starts_with("field_"))
+            .copied()
+            .collect::<Vec<_>>(),
+        vec!["field_0"]
+    );
     assert!(scan.filters.iter().any(|filter| {
         *filter
             == datafusion::logical_expr::Expr::Column(datafusion_common::Column::new(
@@ -1947,6 +1979,48 @@ async fn native_fused_metric_engine_table_is_accepted() {
             .iter()
             .any(|filter| format!("{filter:?}").contains("timestamp"))
     );
+}
+
+/// Metric fields follow logical metadata order even when physical columns use another order.
+#[tokio::test]
+async fn native_fused_metric_fields_follow_logical_order() {
+    let native = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        true,
+        build_test_table_provider_with_tsid_tag_fields_and_field_order(
+            &[(
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                1,
+                2,
+            )],
+            Some(&[1, 0]),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&native).is_some(),
+        "{}",
+        native.display_indent()
+    );
+    let scan = find_metric_physical_scan(&native).expect("fused route keeps physical scan");
+    let source_schema = scan.source.schema();
+    let projected_names = scan
+        .projection
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|index| source_schema.field(*index).name())
+        .collect::<Vec<_>>();
+    assert_eq!(projected_names[..2], ["field_1", "field_0"]);
+    assert!(scan.filters.iter().any(|filter| {
+        *filter
+            == datafusion::logical_expr::Expr::Column(datafusion_common::Column::new(
+                Some(datafusion_common::TableReference::bare("phy")),
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            ))
+            .eq(datafusion::logical_expr::lit(1024u32))
+    }));
 }
 
 /// A metric table without logical-table metadata declines to the legacy plan.
