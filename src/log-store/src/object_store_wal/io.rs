@@ -16,8 +16,10 @@
 //! conditional creates that make a retry of the same object a no-op.
 
 use bytes::Bytes;
+use common_telemetry::warn;
 use object_store::{ErrorKind, ObjectStore};
 use snafu::{OptionExt, ResultExt, ensure};
+use uuid::Uuid;
 
 use crate::error::{
     CorruptedWalObjectSnafu, InvalidWalObjectStoreSnafu, Result, WalObjectConflictSnafu,
@@ -28,6 +30,7 @@ use crate::error::{
 /// [`u64::MAX`] so that lexicographic and numeric order agree.
 const OBJECT_SEQ_WIDTH: usize = 20;
 const OBJECT_SUFFIX: &str = ".wal";
+const PROBE_CONTENT: &[u8] = b"conditional create probe";
 
 /// Outcome of a conditional create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,9 @@ pub(crate) struct ListedObject {
 pub(crate) struct ObjectStoreIo {
     store: ObjectStore,
     object_prefix: String,
+    /// Holds the keys of [`Self::probe_conditional_create`], outside
+    /// `object_prefix` so that no listing of the objects returns one.
+    probe_prefix: String,
 }
 
 impl ObjectStoreIo {
@@ -58,7 +64,7 @@ impl ObjectStoreIo {
     /// conditional creates, which is what keeps a retried write from
     /// overwriting a durable object.
     pub(crate) fn new(store: ObjectStore, prefix: impl AsRef<str>) -> Result<Self> {
-        let object_prefix = normalize_prefix(prefix.as_ref())?;
+        let prefix = normalize_prefix(prefix.as_ref())?;
         ensure!(
             store.info().capability().write_with_if_not_exists,
             InvalidWalObjectStoreSnafu {
@@ -67,8 +73,46 @@ impl ObjectStoreIo {
         );
         Ok(Self {
             store,
-            object_prefix,
+            object_prefix: format!("{prefix}/objects/"),
+            probe_prefix: format!("{prefix}/probes/"),
         })
+    }
+
+    /// Checks that the store refuses a conditional create of an object that
+    /// exists. The capability checked by [`Self::new`] is declared per
+    /// service, and a store behind the S3 service may accept the condition and
+    /// overwrite the object anyway, which would let a retried write replace a
+    /// durable object. The probe creates a key of its own, unique to this
+    /// call, twice, and then deletes it.
+    pub(crate) async fn probe_conditional_create(&self) -> Result<()> {
+        let path = format!("{}{}", self.probe_prefix, Uuid::new_v4());
+        let create = || {
+            self.store
+                .write_with(&path, PROBE_CONTENT)
+                .if_not_exists(true)
+        };
+        create().await.context(WalObjectStoreSnafu {
+            operation: "write",
+            path: path.clone(),
+        })?;
+        let recreated = create().await;
+        if let Err(error) = self.store.delete(&path).await {
+            warn!(error; "Failed to delete the conditional create probe {path} of the object store WAL");
+        }
+        match recreated {
+            Err(error) if reports_existing_object(&error) => Ok(()),
+            Err(error) => Err(error).context(WalObjectStoreSnafu {
+                operation: "write",
+                path,
+            }),
+            Ok(_) => InvalidWalObjectStoreSnafu {
+                reason: format!(
+                    "the object store ({}) overwrote the existing object {path} on a conditional create, but the object store WAL requires conditional create support; a versioned bucket or the S3-compatible endpoint of GCS can cause this",
+                    self.storage()
+                ),
+            }
+            .fail(),
+        }
     }
 
     /// Creates the object `object_seq` unless it already exists. A retry with
@@ -228,7 +272,7 @@ fn normalize_prefix(prefix: &str) -> Result<String> {
             reason: format!("object prefix {prefix:?} has an empty or relative component"),
         }
     );
-    Ok(format!("{prefix}/objects/"))
+    Ok(prefix.to_string())
 }
 
 #[cfg(test)]
