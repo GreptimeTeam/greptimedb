@@ -1586,12 +1586,21 @@ mod test {
         let binding = FusedSeriesBinding {
             grid: statement_grid(&stmt).unwrap(),
         };
+        // The tree names the destination its selector compiled to, which this test reads off the
+        // tree rather than assuming.
+        let mut paths = Vec::new();
+        promql::native::metrics::walk(tree.root(), &mut |node, path| {
+            if matches!(node.expr, promql::native::plan::NativeExpr::Input(_)) {
+                paths.push(path.clone());
+            }
+        });
         let inputs = vec![FusedSeriesInput {
             series_schema,
             metric_name: Some("some_metric".into()),
             time_index: "ts".to_string(),
             tags: Vec::new(),
             input,
+            paths,
         }];
         let output_schema: DFSchemaRef = Arc::new(
             DFSchema::new_with_metadata(
