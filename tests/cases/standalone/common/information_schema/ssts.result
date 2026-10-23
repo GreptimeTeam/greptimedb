@@ -243,6 +243,124 @@ FROM (
 | 1                     |
 +-----------------------+
 
+-- Timestamp filters must run before ordering and limiting. Sort columns must
+-- remain available even when they are absent from the output projection.
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts ASC NULLS LAST, max_ts ASC
+LIMIT 2;
+
++-------------------------+-------------------------+
+| min_ts                  | max_ts                  |
++-------------------------+-------------------------+
+| 1970-01-01T00:00:00.002 | 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 | 1970-01-01T00:00:00.003 |
++-------------------------+-------------------------+
+
+SELECT min_ts, max_ts
+FROM information_schema.ssts_manifest
+WHERE region_id > 0
+ORDER BY max_ts DESC NULLS FIRST, min_ts DESC
+LIMIT 2 OFFSET 1;
+
++-------------------------+-------------------------+
+| min_ts                  | max_ts                  |
++-------------------------+-------------------------+
+| 1970-01-01T00:00:00.100 | 1970-01-01T00:00:00.200 |
+| 1970-01-01T00:00:00.003 | 1970-01-01T00:00:00.003 |
++-------------------------+-------------------------+
+
+SELECT visible
+FROM information_schema.ssts_manifest
+WHERE region_id > 0 AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+ORDER BY min_ts DESC
+LIMIT 2;
+
++---------+
+| visible |
++---------+
+| true    |
+| true    |
++---------+
+
+-- Table predicates share region metadata pruning, including when table_id
+-- is not part of the output projection.
+SELECT min_ts, max_ts FROM information_schema.ssts_manifest
+WHERE table_id > 0 ORDER BY min_ts, max_ts LIMIT 2;
+
++-------------------------+-------------------------+
+| min_ts                  | max_ts                  |
++-------------------------+-------------------------+
+| 1970-01-01T00:00:00.001 | 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 | 1970-01-01T00:00:00.002 |
++-------------------------+-------------------------+
+
+SELECT min_ts FROM information_schema.ssts_manifest
+WHERE table_id = 0 ORDER BY min_ts LIMIT 1;
+
++--------+
+| min_ts |
++--------+
++--------+
+
+-- A false region predicate and a zero limit must produce empty results.
+SELECT min_ts FROM information_schema.ssts_manifest
+WHERE region_id = 0 ORDER BY min_ts LIMIT 1;
+
++--------+
+| min_ts |
++--------+
++--------+
+
+SELECT min_ts FROM information_schema.ssts_manifest
+ORDER BY min_ts LIMIT 0;
+
++--------+
+| min_ts |
++--------+
++--------+
+
+-- COUNT-only output still applies predicates on columns absent from the output.
+SELECT COUNT(*) AS files
+FROM information_schema.ssts_manifest
+WHERE table_id > 0
+  AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+  AND max_ts < '1970-01-01T00:00:00.004Z'::TIMESTAMP_NS;
+
++-------+
+| files |
++-------+
+| 2     |
++-------+
+
+-- Standalone executes these aggregates normally; distributed mode may merge
+-- remote states. Both preserve COUNT/SUM and FILTER semantics.
+SELECT COUNT(*) AS files, COUNT(1) AS files_one,
+  SUM(file_size) > 0 AS has_bytes,
+  COUNT(*) FILTER (WHERE file_size >= 1) AS nonempty_files,
+  COUNT(*) FILTER (WHERE file_size = 0) AS zero_files,
+  SUM(file_size) FILTER (WHERE file_size = 0) AS zero_bytes
+FROM information_schema.ssts_manifest
+WHERE table_id > 0 AND region_id > 0
+  AND min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS
+  AND max_ts < '1970-01-01T00:00:00.004Z'::TIMESTAMP_NS;
+
++-------+-----------+-----------+----------------+------------+------------+
+| files | files_one | has_bytes | nonempty_files | zero_files | zero_bytes |
++-------+-----------+-----------+----------------+------------+------------+
+| 2     | 2         | true      | 2              | 0          |            |
++-------+-----------+-----------+----------------+------------+------------+
+
+SELECT COUNT(*) AS files, COUNT(1) AS files_one, SUM(file_size) AS bytes
+FROM information_schema.ssts_manifest WHERE region_id = 0;
+
++-------+-----------+-------+
+| files | files_one | bytes |
++-------+-----------+-------+
+| 0     | 0         |       |
++-------+-----------+-------+
+
 DROP TABLE sst_case;
 
 Affected Rows: 0

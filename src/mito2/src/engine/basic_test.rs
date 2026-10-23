@@ -2047,3 +2047,243 @@ async fn test_bulk_insert_encode_failure_keeps_worker_batch() {
     assert_eq!(3, scan_num_rows(&engine, region_id).await);
     assert_eq!(2, scan_num_rows(&engine, other_region_id).await);
 }
+
+#[tokio::test]
+async fn test_manifest_scan_region_filter() {
+    use datafusion_expr::{col, lit};
+    use futures::StreamExt;
+
+    let regions = 3;
+    let files_per_region = 64;
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    for number in 0..regions {
+        add_manifest_scan_region(&engine, RegionId::new(11, number), files_per_region).await;
+    }
+
+    let target = RegionId::new(11, 1);
+    let batch_size = 17;
+    let mut reference = None;
+    for pushed in [false, true] {
+        let filters = if pushed {
+            vec![col("region_id").eq(lit(target.as_u64()))]
+        } else {
+            vec![]
+        };
+        let mut stream = engine.scan_ssts_from_manifest(filters, batch_size);
+        let mut examined_entries = 0;
+        let mut selected = Vec::new();
+        while let Some(batch) = stream.next().await {
+            assert!(batch.len() <= batch_size);
+            examined_entries += batch.len();
+            selected.extend(batch.into_iter().filter(|entry| entry.region_id == target));
+        }
+        assert_eq!(selected.len(), files_per_region);
+        assert_eq!(
+            examined_entries,
+            if pushed {
+                files_per_region
+            } else {
+                regions as usize * files_per_region
+            }
+        );
+        selected.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+        if let Some(reference) = &reference {
+            assert_eq!(&selected, reference);
+        } else {
+            reference = Some(selected);
+        }
+    }
+    // Region pruning must happen before acquiring a manifest snapshot. Holding
+    // another region's write lock would deadlock an unpruned enumeration.
+    let unrelated = engine.get_region(RegionId::new(11, 0)).unwrap();
+    let guard = unrelated.manifest_ctx.manifest_manager.write().await;
+    // Node and directory predicates also reject candidates before opening any
+    // manifest; otherwise the locked region would block these empty scans.
+    for predicate in [
+        col("node_id").is_not_null(),
+        col("table_dir").eq(lit("missing/")),
+    ] {
+        let batches = tokio::time::timeout(
+            Duration::from_secs(5),
+            engine
+                .scan_ssts_from_manifest(vec![predicate], batch_size)
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("pruned scan must not acquire a manifest lock");
+        assert!(batches.is_empty());
+    }
+    let filtered =
+        engine.scan_ssts_from_manifest(vec![col("region_id").eq(lit(target.as_u64()))], batch_size);
+    let batches = tokio::time::timeout(Duration::from_secs(5), filtered.collect::<Vec<_>>())
+        .await
+        .expect("filtered scan must not acquire an unrelated manifest lock");
+    assert_eq!(
+        batches.iter().map(Vec::len).sum::<usize>(),
+        files_per_region
+    );
+    drop(guard);
+
+    let schema = store_api::sst_entry::ManifestSstEntry::schema();
+    let projection = ["file_id", "min_ts"]
+        .map(|name| {
+            schema
+                .column_schemas()
+                .iter()
+                .position(|c| c.name == name)
+                .unwrap()
+        })
+        .to_vec();
+    let mut projected = engine.scan_ssts_from_manifest_projected(
+        vec![col("region_id").eq(lit(target.as_u64()))],
+        batch_size,
+        Some(projection.clone()),
+    );
+    let mut projected_entries = Vec::new();
+    while let Some(batch) = projected.next().await {
+        assert!(
+            batch
+                .iter()
+                .all(|entry| entry.table_dir.is_empty() && entry.file_path.is_empty())
+        );
+        projected_entries.extend(batch);
+    }
+    projected_entries.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+    let expected = store_api::sst_entry::ManifestSstEntry::to_projected_record_batch(
+        &reference.unwrap(),
+        Some(&projection),
+    )
+    .unwrap();
+    let actual = store_api::sst_entry::ManifestSstEntry::to_projected_record_batch(
+        &projected_entries,
+        Some(&projection),
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
+    assert!(
+        engine
+            .scan_ssts_from_manifest(vec![col("region_id").eq(lit(0u64))], batch_size)
+            .next()
+            .await
+            .is_none()
+    );
+}
+
+/// Installs synthetic immutable file metadata without creating physical SSTs.
+async fn add_manifest_scan_region(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    files_per_region: usize,
+) {
+    use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+    use crate::sst::file::FileMeta;
+    use store_api::storage::FileId;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let edit = RegionEdit {
+        files_to_add: (0..files_per_region)
+            .map(|index| FileMeta {
+                region_id,
+                file_id: FileId::from_bytes(
+                    (((region_id.region_number() as u128) << 64) | index as u128).to_be_bytes(),
+                ),
+                time_range: (
+                    Timestamp::new_millisecond(index as i64),
+                    Timestamp::new_millisecond(index as i64 + 1),
+                ),
+                file_size: 1024 + index as u64,
+                ..Default::default()
+            })
+            .collect(),
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    };
+    region
+        .manifest_ctx
+        .manifest_manager
+        .write()
+        .await
+        .update(
+            RegionMetaActionList::new(vec![RegionMetaAction::Edit(edit)]),
+            false,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_manifest_scan_table_filter() {
+    use datafusion_expr::{col, lit};
+    use futures::StreamExt;
+    use store_api::sst_entry::ManifestSstEntry;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let target_regions = [RegionId::new(11, 0), RegionId::new(11, 1)];
+    let unrelated_id = RegionId::new(12, 0);
+    for region_id in target_regions.into_iter().chain([unrelated_id]) {
+        add_manifest_scan_region(&engine, region_id, 3).await;
+    }
+    let mut expected = engine.all_ssts_from_manifest().await;
+    expected.retain(|entry| entry.table_id == 11);
+    expected.sort_unstable_by_key(|entry| (entry.region_id, entry.file_id.clone()));
+    assert_eq!(expected.len(), 6);
+
+    // A table predicate must exclude other tables before locking their manifests,
+    // while keeping every region of the selected table (including the same number).
+    let unrelated = engine.get_region(unrelated_id).unwrap();
+    let guard = unrelated.manifest_ctx.manifest_manager.write().await;
+    let batches = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine
+            .scan_ssts_from_manifest(vec![col("table_id").eq(lit(11u32))], 2)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("table filtering must not acquire another table's manifest lock");
+    assert!(batches.iter().all(|batch| batch.len() <= 2));
+    let mut actual = batches.into_iter().flatten().collect::<Vec<_>>();
+    actual.sort_unstable_by_key(|entry| (entry.region_id, entry.file_id.clone()));
+    assert_eq!(actual, expected);
+
+    let schema = ManifestSstEntry::schema();
+    let projection = ["region_id", "file_id"]
+        .map(|name| {
+            schema
+                .column_schemas()
+                .iter()
+                .position(|column| column.name == name)
+                .unwrap()
+        })
+        .to_vec();
+    let batches = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine
+            .scan_ssts_from_manifest_projected(
+                vec![col("table_id").eq(lit(11u32))],
+                2,
+                Some(projection.clone()),
+            )
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("hidden table predicate must prune unrelated manifests");
+    let mut actual = batches.into_iter().flatten().collect::<Vec<_>>();
+    actual.sort_unstable_by_key(|entry| (entry.region_id, entry.file_id.clone()));
+    assert_eq!(
+        ManifestSstEntry::to_projected_record_batch(&actual, Some(&projection)).unwrap(),
+        ManifestSstEntry::to_projected_record_batch(&expected, Some(&projection)).unwrap(),
+    );
+    drop(guard);
+}

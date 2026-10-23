@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod inspect;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -33,6 +35,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{DataFusionSnafu, ListStorageSstsSnafu, Result, UnexpectedSnafu};
 use crate::region_server::RegionServer;
+use crate::region_server::catalog::inspect::{InspectTable, ManifestSstSource};
 
 /// Reserved internal table kinds used.
 /// These are recognized by reserved table names and mapped to providers.
@@ -75,7 +78,7 @@ impl InternalTableKind {
 }
 
 impl RegionServer {
-    /// Expose SSTs listed in Manifest as an in-memory table for inspection.
+    /// Exposes manifest SSTs through a lazy table with metadata predicate pruning.
     pub async fn inspect_sst_manifest_provider(&self) -> Result<Arc<dyn TableProvider>> {
         let mito = {
             let guard = self.inner.mito_engine.read().unwrap();
@@ -84,14 +87,9 @@ impl RegionServer {
             })?
         };
 
-        let entries = mito.all_ssts_from_manifest().await;
-        let schema = ManifestSstEntry::schema().arrow_schema().clone();
-        let batch = ManifestSstEntry::to_record_batch(&entries)
-            .map_err(DataFusionError::from)
-            .context(DataFusionSnafu)?;
-
-        let table = MemTable::try_new(schema, vec![vec![batch]]).context(DataFusionSnafu)?;
-        Ok(Arc::new(table))
+        Ok(Arc::new(InspectTable::new(Arc::new(
+            ManifestSstSource::new(mito),
+        ))))
     }
 
     /// Expose SSTs found in storage as an in-memory table for inspection.
@@ -355,6 +353,8 @@ impl TreeNodeRewriter for NameAwareDataSourceInjector {
 
 #[cfg(test)]
 mod tests {
+    mod manifest;
+
     use std::sync::Arc;
 
     use datafusion::catalog::MemTable as DfMemTable;
