@@ -39,9 +39,12 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
-use common_query::request::QueryRequest;
+use common_query::request::{QueryRequest, RAW_SERIES_READ_EXTENSION_KEY, RegionReadKind};
+use common_query::series_frame::raw_series_frame_ordering;
 use common_recordbatch::adapter::RecordBatchMetrics;
-use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    DfRecordBatch, OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
+};
 use common_runtime::Runtime;
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
@@ -49,7 +52,12 @@ use common_telemetry::{debug, error, info, warn};
 use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
+use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
+use datatypes::series::frame::{
+    RawLabelMode, RawSeriesFrameDecoder, raw_series_frame_label_decode,
+    raw_series_frame_series_schema,
+};
 use either::Either;
 use futures_util::future::try_join_all;
 use futures_util::{Stream, StreamExt};
@@ -104,11 +112,94 @@ use crate::error::{
 };
 use crate::event_listener::RegionServerEventListenerRef;
 use crate::query_stream::QueryRuntimeStream;
-use crate::region_server::catalog::{NameAwareCatalogList, NameAwareDataSourceInjectorBuilder};
+use crate::region_server::catalog::{
+    InternalTableKind, NameAwareCatalogList, NameAwareDataSourceInjectorBuilder,
+};
 use crate::region_server::registrations::RemoteDynFilterRegistry;
 use crate::region_server::remote_dyn_filter::wrap_remote_dyn_filter_guarded_stream;
 
 const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
+
+/// Returns the metric a raw-series read should frame, or `None` when this read is not one.
+///
+/// The answer is the table the request's plan scans, which is the one thing about a frame the
+/// region cannot infer: a frame declares its metric name in its label decode description, and a
+/// metric name is the logical table's identity rather than a column of any region.
+///
+/// Only a plan that *is* that scan, and asks for all of it, qualifies. A frame leaf answers with a
+/// frame where the row leaf would have answered with rows, so every operator above the scan would
+/// read a frame as rows, and a pushed-down fetch would be dropped by a leaf that returns every
+/// chunk of every series. Such raw-series requests are rejected at the read boundary.
+fn raw_series_metric_name(request: &QueryRequest) -> Option<String> {
+    if request.read_kind != RegionReadKind::RawSeries {
+        return None;
+    }
+    let LogicalPlan::TableScan(scan) = &request.plan else {
+        return None;
+    };
+    if scan.fetch.is_some() {
+        return None;
+    }
+    Some(scan.table_name.table().to_string())
+}
+
+/// Publishes the read kind the request asked for, and nothing a caller could have written.
+///
+/// A request header can carry arbitrary query-context extensions, so a context arriving here may
+/// already hold [`RAW_SERIES_READ_EXTENSION_KEY`] with whatever the caller chose. Every read
+/// rewrites the key unconditionally, from the decoded request alone: an ordinary read sets it to
+/// the empty value the region's table provider reads as "no metric", so naming the key in a header
+/// cannot opt a read into frames, and a raw read sets it to the metric derived from its own plan
+/// rather than to a caller-supplied name.
+fn sanitize_remote_read_context(mut ctx: QueryContext) -> QueryContext {
+    ctx.set_extension(RAW_SERIES_READ_EXTENSION_KEY, "");
+    ctx
+}
+
+fn validate_raw_series_request(request: &QueryRequest) -> Result<()> {
+    if request.read_kind != RegionReadKind::RawSeries {
+        return Ok(());
+    }
+    ensure!(
+        matches!(&request.plan, LogicalPlan::TableScan(_)),
+        UnexpectedSnafu {
+            violated: "RawSeries read requires a bare TableScan plan",
+        }
+    );
+    let LogicalPlan::TableScan(scan) = &request.plan else {
+        unreachable!("plan was checked to be a TableScan");
+    };
+    // A bare scan may carry an empty table name, and an empty name is also the sentinel the
+    // region's table provider reads as "no metric": such a read would silently be answered
+    // with rows. A frame names the series it frames, so an unnamed scan is rejected here.
+    ensure!(
+        !scan.table_name.table().is_empty(),
+        UnexpectedSnafu {
+            violated: "RawSeries read requires a named table scan",
+        }
+    );
+    ensure!(
+        scan.fetch.is_none(),
+        UnexpectedSnafu {
+            violated: "RawSeries read does not support fetch",
+        }
+    );
+    ensure!(
+        InternalTableKind::from_table_name(scan.table_name.table()).is_none(),
+        UnexpectedSnafu {
+            violated: "RawSeries read does not support inspection tables",
+        }
+    );
+    Ok(())
+}
+
+fn apply_raw_series_read_key(mut ctx: QueryContext, request: &QueryRequest) -> QueryContext {
+    ctx.set_extension(
+        RAW_SERIES_READ_EXTENSION_KEY,
+        raw_series_metric_name(request).unwrap_or_default(),
+    );
+    ctx
+}
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -296,6 +387,10 @@ impl RegionServer {
             None
         };
 
+        // Remote reads are always row reads; discard any caller-supplied frame opt-in before
+        // constructing the catalog, decoder, or physical providers.
+        let query_ctx = Arc::new(sanitize_remote_read_context(query_ctx.as_ref().clone()));
+
         let region_id = RegionId::from_u64(request.region_id);
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.clone(),
@@ -328,6 +423,9 @@ impl RegionServer {
                     header: request.header,
                     region_id,
                     plan,
+                    // The cross-process request has no way to ask for frames yet, so a remote read
+                    // keeps the ordinary row answer it has always produced.
+                    read_kind: RegionReadKind::Rows,
                 },
                 query_ctx.clone(),
             )
@@ -348,6 +446,7 @@ impl RegionServer {
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+        validate_raw_series_request(&request)?;
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
@@ -365,7 +464,15 @@ impl RegionServer {
                 }
                 .build()
             })?;
-        let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
+        // A read that asked for raw series frames names the metric those frames belong to here,
+        // because the region's table provider cannot see the plan and the metric name is not part
+        // of any region's metadata. Everything else a frame declares is derived region-side. The
+        // key is rewritten on every read, so this is also what stops a caller-supplied header from
+        // asking for frames.
+        let query_ctx = Arc::new(apply_raw_series_read_key(
+            ctx.unwrap_or_else(|| QueryContextBuilder::default().build()),
+            &request,
+        ));
 
         let region_id = request.region_id;
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
@@ -1920,6 +2027,10 @@ impl RegionServerInner {
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
+        //
+        // Captured before the plan moves into the engine: the answer to a raw-series read is
+        // checked against the frame contract below.
+        let raw_series = request.read_kind == RegionReadKind::RawSeries;
 
         let result = self
             .query_engine
@@ -1931,7 +2042,42 @@ impl RegionServerInner {
             OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => {
                 UnsupportedOutputSnafu { expected: "stream" }.fail()
             }
-            OutputData::Stream(stream) => Ok(stream),
+            OutputData::Stream(stream) if !raw_series => Ok(stream),
+            OutputData::Stream(stream) => {
+                // The table provider comes from configuration, so the request being a bare scan
+                // says nothing about the answer's shape: a factory could serve an ordinary row
+                // table for the same name. The declared Arrow schema must therefore be a raw
+                // series frame. The empty batch is decoded to compare the exact fields, types and
+                // order; no row is polled. Rows are left untouched.
+                let arrow = stream.schema().arrow_schema().clone();
+                raw_series_frame_label_decode(&arrow)
+                    .and_then(|decode| {
+                        let mode = if decode.is_some() {
+                            RawLabelMode::Key
+                        } else {
+                            RawLabelMode::Explicit
+                        };
+                        let series = raw_series_frame_series_schema(&arrow)?;
+                        RawSeriesFrameDecoder::try_new(&series, mode)?
+                            .decode(&DfRecordBatch::new_empty(arrow.clone()))?;
+                        Ok(())
+                    })
+                    .map_err(|e| {
+                        UnexpectedSnafu {
+                            violated: format!(
+                                "RawSeries read answered with a non-frame stream: {e}"
+                            ),
+                        }
+                        .build()
+                    })?;
+                raw_series_frame_ordering(&arrow).map_err(|e| {
+                    UnexpectedSnafu {
+                        violated: format!("RawSeries read answered with unusable ordering: {e}"),
+                    }
+                    .build()
+                })?;
+                Ok(stream)
+            }
         }
     }
 
@@ -2052,21 +2198,42 @@ mod tests {
 
     use api::v1::{Rows, SemanticType};
     use common_error::ext::{ErrorExt, RetryHint};
+    use common_query::series_frame::unpack_raw_series;
     use common_recordbatch::RecordBatches;
-    use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+    use common_recordbatch::adapter::{
+        DfRecordBatchStreamAdapter, RecordBatchMetrics, RegionWatermarkEntry,
+    };
+    use common_recordbatch::util as recordbatch_util;
+    use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+    use datafusion::catalog::MemTable;
+    use datatypes::arrow::array::{Array, Int32Array, UInt64Array};
+    use datatypes::arrow::datatypes::Schema as ArrowSchema;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::Int32Vector;
-    use futures_util::StreamExt;
-    use mito2::test_util::CreateRequestBuilder;
-    use query::options::FLOW_RETURN_REGION_SEQ;
-    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
-    use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{
-        PathType, RegionCleanUpRequest, RegionCompactRequest, RegionDeleteRequest,
-        RegionDropRequest, RegionOpenRequest, RegionPutRequest, RegionTruncateRequest,
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::frame::{
+        LABEL_DECODE_VERSION, LabelDecodeEncoding, LabelDecodeSpec, LabelDecodeTag,
     };
+    use datatypes::series::raw::RawSeriesChunk;
+    use datatypes::series::samples::{FieldSpec, SampleRef, SeriesSchema};
+    use datatypes::vectors::Int32Vector;
+    use futures_util::{StreamExt, TryStreamExt};
+    use mito2::config::MitoConfig;
+    use mito2::test_util::{CreateRequestBuilder, TestEnv};
+    use query::QueryEngineFactory;
+    use query::options::{FLOW_RETURN_REGION_SEQ, QueryOptions};
+    use query::query_engine::DefaultSerializer;
+    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
+    use store_api::region_engine::{RegionEngine, RegionRole};
+    use store_api::region_info::RegionInfoEntry;
+    use store_api::region_request::{
+        PathType, RegionCleanUpRequest, RegionCompactRequest, RegionCreateRequest,
+        RegionDeleteRequest, RegionDropRequest, RegionOpenRequest, RegionPutRequest,
+        RegionTruncateRequest,
+    };
+    use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
     use store_api::storage::RegionId;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
     use super::*;
     use crate::tests::{MockRegionEngine, mock_region_server};
@@ -2973,5 +3140,712 @@ mod tests {
             .handle_list_metadata_request(&list_metadata_request)
             .await
             .unwrap_err();
+    }
+
+    fn scan_plan(table: &str) -> LogicalPlan {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        datafusion_expr::table_scan(
+            Some(table),
+            &Schema::new(vec![Field::new("v", DataType::Int32, true)]),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    /// A real Mito region behind a real query engine, so a read exercises the whole
+    /// `RegionServer::handle_read` path instead of a mocked provider.
+    struct RawSeriesFixture {
+        server: RegionServer,
+        engine: Arc<MitoEngine>,
+        region_id: RegionId,
+        create: RegionCreateRequest,
+        arrow_schema: ArrowSchema,
+        /// Kept last so the temporary storage outlives the server and engine that use it.
+        _env: TestEnv,
+    }
+
+    impl RawSeriesFixture {
+        async fn new(prefix: &str, field_num: usize) -> Self {
+            Self::with_factory(prefix, field_num, Arc::new(DummyTableProviderFactory)).await
+        }
+
+        async fn with_factory(
+            prefix: &str,
+            field_num: usize,
+            table_provider_factory: TableProviderFactoryRef,
+        ) -> Self {
+            let mut env = TestEnv::with_prefix(prefix).await;
+            let engine = Arc::new(env.create_engine(MitoConfig::default()).await);
+            let query_engine = QueryEngineFactory::new(
+                ::catalog::memory::MemoryCatalogManager::new(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                QueryOptions::default(),
+            )
+            .query_engine();
+            let mut server = RegionServer::with_table_provider(
+                query_engine,
+                Runtime::builder().build().unwrap(),
+                Box::new(crate::event_listener::NoopRegionServerEventListener),
+                table_provider_factory,
+                0,
+                Duration::from_millis(0),
+                FlightCompression::default(),
+            );
+            server.register_engine(engine.clone());
+            let region_id = RegionId::new(2048, 1);
+            let create = CreateRequestBuilder::new().field_num(field_num).build();
+            server
+                .handle_request(region_id, RegionRequest::Create(create.clone()))
+                .await
+                .unwrap();
+            server
+                .set_region_role(region_id, RegionRole::Leader)
+                .unwrap();
+            let arrow_schema = Schema::new(
+                create
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_schema.clone())
+                    .collect(),
+            )
+            .arrow_schema()
+            .as_ref()
+            .clone();
+            Self {
+                server,
+                engine,
+                region_id,
+                create,
+                arrow_schema,
+                _env: env,
+            }
+        }
+
+        fn scan_plan(&self, table: &str, projection: Option<Vec<usize>>) -> LogicalPlan {
+            datafusion_expr::table_scan(Some(table), &self.arrow_schema, projection)
+                .unwrap()
+                .build()
+                .unwrap()
+        }
+
+        fn request(&self, plan: LogicalPlan, read_kind: RegionReadKind) -> QueryRequest {
+            QueryRequest {
+                header: None,
+                region_id: self.region_id,
+                plan,
+                read_kind,
+            }
+        }
+
+        async fn put(&self, key: &str, timestamps: &[i64], fields: &[(Option<i64>, Option<i64>)]) {
+            mito2::test_util::put_rows(
+                &self.engine,
+                self.region_id,
+                Rows {
+                    schema: mito2::test_util::rows_schema(&self.create),
+                    rows: mito2::test_util::build_rows_with_fields(key, timestamps, fields),
+                },
+            )
+            .await;
+        }
+
+        async fn stop(&self) {
+            self.server.stop().await.unwrap();
+        }
+    }
+
+    /// A configured table provider factory that always serves one ordinary row table.
+    ///
+    /// `RegionServer::with_table_provider` accepts such factories from configuration, so the
+    /// region's metadata does not determine the answer's shape on its own.
+    struct RowsTableProviderFactory(Arc<dyn TableProvider>);
+
+    #[async_trait]
+    impl query::dummy_catalog::TableProviderFactory for RowsTableProviderFactory {
+        async fn create(
+            &self,
+            _region_id: RegionId,
+            _engine: RegionEngineRef,
+            _ctx: Option<QueryContextRef>,
+        ) -> query::error::Result<Arc<dyn TableProvider>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Converts a region read into validated raw-series chunks and the layout it declared.
+    async fn unpack_frames(
+        stream: SendableRecordBatchStream,
+        fields: &[&str],
+    ) -> (
+        Vec<String>,
+        LabelDecodeSpec,
+        SeriesOrdering,
+        Vec<RawSeriesChunk>,
+    ) {
+        let expected = Arc::new(SeriesSchema {
+            fields: fields
+                .iter()
+                .map(|name| FieldSpec {
+                    name: Arc::from(*name),
+                })
+                .collect(),
+            eval_grid: None,
+        });
+        let frames = unpack_raw_series(
+            Box::pin(DfRecordBatchStreamAdapter::new(stream)),
+            Some(expected),
+        )
+        .unwrap();
+        let field_names = frames
+            .schema()
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect();
+        let decode = frames
+            .label_decode_spec()
+            .cloned()
+            .expect("a key-encoded frame declares its label decode description");
+        let ordering = frames.ordering();
+        let chunks = frames.try_collect::<Vec<_>>().await.unwrap();
+        (field_names, decode, ordering, chunks)
+    }
+
+    fn float_at(chunk: &RawSeriesChunk, field: usize, row: usize) -> Option<f64> {
+        match chunk.fields.as_slice()[field].sample(row) {
+            SampleRef::Float(value) => Some(value),
+            SampleRef::Missing => None,
+            SampleRef::Histogram(_) => panic!("the fixture stores float samples"),
+        }
+    }
+
+    fn timestamps(chunk: &RawSeriesChunk) -> Vec<i64> {
+        chunk.time.as_buffer().iter().copied().collect()
+    }
+
+    fn inspection_scan_plan() -> LogicalPlan {
+        datafusion_expr::table_scan(
+            Some(RegionInfoEntry::reserved_table_name_for_inspection()),
+            RegionInfoEntry::schema().arrow_schema().as_ref(),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    fn query_request(plan: LogicalPlan, read_kind: RegionReadKind) -> QueryRequest {
+        QueryRequest {
+            header: None,
+            region_id: RegionId::new(2048, 1),
+            plan,
+            read_kind,
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_series_inspection_table_is_rejected_but_rows_read_region_info() {
+        let fixture = RawSeriesFixture::new("raw-series-inspection", 1).await;
+        let plan = inspection_scan_plan();
+
+        // The same bare scan that is a valid inspection read as rows must not be answered as a
+        // frame: the reserved table is replaced by a row `MemTable`, so no frame can come back.
+        let Err(err) = fixture
+            .server
+            .handle_read(fixture.request(plan.clone(), RegionReadKind::RawSeries))
+            .await
+        else {
+            panic!("a RawSeries read of an inspection table must be rejected");
+        };
+        let crate::error::Error::Unexpected { violated, .. } = &err else {
+            panic!("expected an inspection-specific rejection, got {err}");
+        };
+        assert!(
+            violated.contains("inspection tables"),
+            "unexpected rejection cause: {violated}"
+        );
+
+        let rows = fixture
+            .server
+            .handle_read(fixture.request(plan, RegionReadKind::Rows))
+            .await
+            .unwrap();
+        let batches = recordbatch_util::collect(rows).await.unwrap();
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+        assert_eq!(
+            batch
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|column| (column.name.clone(), column.data_type.clone()))
+                .collect::<Vec<_>>(),
+            RegionInfoEntry::schema()
+                .column_schemas()
+                .iter()
+                .map(|column| (column.name.clone(), column.data_type.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(1, batch.num_rows());
+        let region_id_column: &dyn Array = batch.column(0).as_ref();
+        let region_ids = region_id_column
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(fixture.region_id.as_u64(), region_ids.value(0));
+
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn raw_series_handle_read_answers_region_frames() {
+        let fixture = RawSeriesFixture::new("raw-series-handle-read", 2).await;
+        fixture
+            .put(
+                "host-a",
+                &[1, 2],
+                &[(Some(1), Some(10)), (Some(2), Some(20))],
+            )
+            .await;
+        fixture
+            .put("host-b", &[1, 2], &[(Some(3), None), (Some(4), Some(40))])
+            .await;
+
+        let stream = fixture
+            .server
+            .handle_read(fixture.request(
+                fixture.scan_plan("cpu_usage", None),
+                RegionReadKind::RawSeries,
+            ))
+            .await
+            .unwrap();
+        let (fields, decode, ordering, chunks) =
+            unpack_frames(stream, &["field_0", "field_1"]).await;
+
+        assert_eq!(vec!["field_0".to_string(), "field_1".to_string()], fields);
+        assert_eq!(SeriesOrdering::KeyThenTime, ordering);
+        assert_eq!(LABEL_DECODE_VERSION, decode.version);
+        assert_eq!("cpu_usage", decode.metric_name);
+        assert_eq!(LabelDecodeEncoding::Dense, decode.encoding);
+        assert_eq!(1, decode.primary_key.len());
+        assert_eq!(0, decode.primary_key[0].column_id);
+        assert_eq!("tag_0", decode.primary_key[0].name);
+        assert_eq!(
+            ConcreteDataType::string_datatype(),
+            decode.primary_key[0].physical_type
+        );
+        assert_eq!(
+            vec![LabelDecodeTag {
+                column_id: 0,
+                name: "tag_0".to_string(),
+            }],
+            decode.logical_tags
+        );
+
+        // A producer may split a series across chunks, so group by encoded key and compare the
+        // complete per-series payload rather than assuming one chunk per series.
+        let mut by_key: HashMap<Vec<u8>, Vec<&RawSeriesChunk>> = HashMap::new();
+        for chunk in &chunks {
+            assert!(chunk.metric.is_none(), "key labels stay undecoded");
+            assert!(!chunk.primary_key.is_empty());
+            assert_eq!(2, chunk.fields.len());
+            by_key
+                .entry(chunk.primary_key.to_vec())
+                .or_default()
+                .push(chunk);
+        }
+        assert_eq!(2, by_key.len(), "each series keeps its own encoded key");
+        let series_values = |group: &[&RawSeriesChunk], field: usize| {
+            group
+                .iter()
+                .flat_map(|chunk| (0..chunk.time.len()).map(move |row| float_at(chunk, field, row)))
+                .collect::<Vec<_>>()
+        };
+        let mut payloads = Vec::new();
+        for group in by_key.values() {
+            assert!(group.last().unwrap().is_last);
+            assert_eq!(
+                vec![1000, 2000],
+                group
+                    .iter()
+                    .flat_map(|chunk| timestamps(chunk))
+                    .collect::<Vec<_>>()
+            );
+            payloads.push((series_values(group, 0), series_values(group, 1)));
+        }
+        payloads.sort_by(|left, right| left.0[0].unwrap().total_cmp(&right.0[0].unwrap()));
+        assert_eq!(
+            vec![
+                (vec![Some(1.0), Some(2.0)], vec![Some(10.0), Some(20.0)]),
+                (vec![Some(3.0), Some(4.0)], vec![None, Some(40.0)]),
+            ],
+            payloads
+        );
+
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn raw_series_handle_read_answers_empty_region_with_its_layout() {
+        let fixture = RawSeriesFixture::new("raw-series-handle-read-empty", 2).await;
+        let stream = fixture
+            .server
+            .handle_read(fixture.request(
+                fixture.scan_plan("cpu_usage", None),
+                RegionReadKind::RawSeries,
+            ))
+            .await
+            .unwrap();
+        let (fields, decode, ordering, chunks) =
+            unpack_frames(stream, &["field_0", "field_1"]).await;
+
+        assert_eq!(vec!["field_0".to_string(), "field_1".to_string()], fields);
+        assert_eq!(SeriesOrdering::KeyThenTime, ordering);
+        assert_eq!("cpu_usage", decode.metric_name);
+        assert!(chunks.is_empty(), "an empty region frames no chunk");
+
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn raw_series_handle_read_applies_projection_order_and_pushed_predicate() {
+        let fixture = RawSeriesFixture::new("raw-series-handle-read-projection", 2).await;
+        fixture
+            .put(
+                "host-a",
+                &[1, 2],
+                &[(Some(1), Some(10)), (Some(2), Some(20))],
+            )
+            .await;
+        fixture
+            .put("host-b", &[1, 2], &[(Some(3), None), (Some(4), Some(40))])
+            .await;
+
+        // Read the unfiltered frames once to learn host-a's encoded key.
+        let stream = fixture
+            .server
+            .handle_read(fixture.request(
+                fixture.scan_plan("cpu_usage", None),
+                RegionReadKind::RawSeries,
+            ))
+            .await
+            .unwrap();
+        let (_, _, _, all) = unpack_frames(stream, &["field_0", "field_1"]).await;
+        let host_a_key = all
+            .iter()
+            .find(|chunk| float_at(chunk, 0, 0) == Some(1.0))
+            .expect("host-a's unfiltered chunk")
+            .primary_key
+            .to_vec();
+
+        // A reordered projection selects field_1 before field_0, and a pushed-down tag predicate
+        // keeps only host-a, whose frame must still carry the same complete encoded key.
+        let mut plan = fixture.scan_plan("cpu_usage", Some(vec![3, 2, 1, 0]));
+        let LogicalPlan::TableScan(scan) = &mut plan else {
+            panic!("the fixture builds a table scan");
+        };
+        scan.filters = vec![datafusion_expr::col("tag_0").eq(datafusion_expr::lit("host-a"))];
+        let stream = fixture
+            .server
+            .handle_read(fixture.request(plan, RegionReadKind::RawSeries))
+            .await
+            .unwrap();
+        let (fields, _, _, chunks) = unpack_frames(stream, &["field_1", "field_0"]).await;
+
+        assert_eq!(vec!["field_1".to_string(), "field_0".to_string()], fields);
+        assert!(!chunks.is_empty(), "the pushed predicate keeps one series");
+        assert!(chunks.last().unwrap().is_last);
+        for chunk in &chunks {
+            assert_eq!(host_a_key, chunk.primary_key.to_vec());
+        }
+        let times = chunks.iter().flat_map(timestamps).collect::<Vec<_>>();
+        let field_1 = chunks
+            .iter()
+            .flat_map(|chunk| (0..chunk.time.len()).map(move |row| float_at(chunk, 0, row)))
+            .collect::<Vec<_>>();
+        let field_0 = chunks
+            .iter()
+            .flat_map(|chunk| (0..chunk.time.len()).map(move |row| float_at(chunk, 1, row)))
+            .collect::<Vec<_>>();
+        assert_eq!(vec![1000, 2000], times);
+        assert_eq!(vec![Some(10.0), Some(20.0)], field_1);
+        assert_eq!(vec![Some(1.0), Some(2.0)], field_0);
+
+        fixture.stop().await;
+    }
+
+    /// A configured factory can serve ordinary rows for the same table name, so a raw-series read
+    /// must reject the answer by its declared shape instead of returning rows.
+    #[tokio::test]
+    async fn raw_series_read_rejects_a_configured_factory_that_answers_with_rows() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            true,
+        )]));
+        let values: VectorRef = Arc::new(Int32Vector::from_slice([42]));
+        let batch = RecordBatch::new(schema.clone(), vec![values]).unwrap();
+        let table = MemTable::try_new(
+            schema.arrow_schema().clone(),
+            vec![vec![batch.into_df_record_batch()]],
+        )
+        .unwrap();
+        let fixture = RawSeriesFixture::with_factory(
+            "raw-series-row-factory",
+            2,
+            Arc::new(RowsTableProviderFactory(Arc::new(table))),
+        )
+        .await;
+
+        // `scan_plan`'s single Int32 column `v` is exactly the row table's schema.
+        let plan = scan_plan("cpu");
+        let Err(err) = fixture
+            .server
+            .handle_read(fixture.request(plan.clone(), RegionReadKind::RawSeries))
+            .await
+        else {
+            panic!("a row answer must not satisfy a raw-series read");
+        };
+        assert!(
+            err.to_string().contains("non-frame stream"),
+            "unexpected rejection cause: {err}"
+        );
+
+        // The identical request as an ordinary read keeps the configured provider's row.
+        let stream = fixture
+            .server
+            .handle_read(fixture.request(plan, RegionReadKind::Rows))
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(1, batches.iter().count());
+        let batch = batches.iter().next().unwrap();
+        assert_eq!(1, batch.num_rows());
+        let column: &dyn Array = batch.column(0).as_ref();
+        assert_eq!(
+            42,
+            column
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .value(0)
+        );
+
+        fixture.stop().await;
+    }
+
+    /// A remote read is sanitized from its own context, never from the caller's extensions: even a
+    /// context that already names a raw-series metric must receive ordinary rows.
+    #[tokio::test]
+    async fn remote_read_cannot_be_spoofed_into_raw_series() {
+        let fixture = RawSeriesFixture::new("raw-series-remote-read", 2).await;
+        fixture
+            .put(
+                "host-a",
+                &[1, 2],
+                &[(Some(1), Some(10)), (Some(2), Some(20))],
+            )
+            .await;
+        fixture
+            .put("host-b", &[1, 2], &[(Some(3), None), (Some(4), Some(40))])
+            .await;
+
+        let plan = DFLogicalSubstraitConvertor
+            .encode(&fixture.scan_plan("cpu_usage", None), DefaultSerializer)
+            .unwrap();
+        let spoofed = Arc::new(
+            QueryContextBuilder::default()
+                .extensions(HashMap::from([(
+                    RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+                    "spoofed_metric".to_string(),
+                )]))
+                .build(),
+        );
+        let stream = fixture
+            .server
+            .handle_remote_read(
+                api::v1::region::QueryRequest {
+                    header: None,
+                    region_id: fixture.region_id.as_u64(),
+                    plan: plan.to_vec(),
+                },
+                spoofed,
+            )
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+        let schema = batches.schema();
+        assert_eq!(
+            vec!["tag_0", "field_0", "field_1", "ts"],
+            schema
+                .column_schemas()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![
+                ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::uint32_datatype(),
+                    ConcreteDataType::string_datatype(),
+                ),
+                ConcreteDataType::float64_datatype(),
+                ConcreteDataType::float64_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ],
+            schema
+                .column_schemas()
+                .iter()
+                .map(|column| column.data_type.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            schema
+                .arrow_schema()
+                .metadata()
+                .keys()
+                .all(|key| !key.starts_with("greptime.series.")),
+            "a spoofed remote read must not answer with a raw frame"
+        );
+        let expected = "\
++--------+---------+---------+---------------------+
+| tag_0  | field_0 | field_1 | ts                  |
++--------+---------+---------+---------------------+
+| host-a | 1.0     | 10.0    | 1970-01-01T00:00:01 |
+| host-a | 2.0     | 20.0    | 1970-01-01T00:00:02 |
+| host-b | 3.0     |         | 1970-01-01T00:00:01 |
+| host-b | 4.0     | 40.0    | 1970-01-01T00:00:02 |
++--------+---------+---------+---------------------+";
+        assert_eq!(expected, batches.pretty_print().unwrap());
+
+        fixture.stop().await;
+    }
+
+    #[test]
+    fn raw_series_metric_is_the_table_scan_the_plan_is() {
+        // An ordinary read names no metric, so the region keeps its row answer.
+        assert_eq!(
+            raw_series_metric_name(&query_request(scan_plan("cpu"), RegionReadKind::Rows)),
+            None
+        );
+        // A raw read takes the metric from the scan it was asked to answer, which is the one part
+        // of a frame no region holds.
+        assert_eq!(
+            raw_series_metric_name(&query_request(scan_plan("cpu"), RegionReadKind::RawSeries)),
+            Some("cpu".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_series_read_key_cannot_be_opted_into_by_a_request_header() {
+        // A header's extensions reach the query context verbatim, so this is exactly what a caller
+        // that named the key would have on the ordinary read path.
+        let spoofed = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+                "spoofed_metric".to_string(),
+            )]))
+            .build();
+
+        // An ordinary read overwrites it with the empty value, which the region's table provider
+        // reads as "no metric": the answer is the same `RegionScanExec` it always was.
+        let ctx = apply_raw_series_read_key(
+            spoofed.clone(),
+            &query_request(scan_plan("cpu"), RegionReadKind::Rows),
+        );
+        assert_eq!(ctx.extension(RAW_SERIES_READ_EXTENSION_KEY), Some(""));
+
+        // A raw read overwrites it with the metric its own plan names, never the spoofed one.
+        let ctx = apply_raw_series_read_key(
+            spoofed,
+            &query_request(scan_plan("cpu"), RegionReadKind::RawSeries),
+        );
+        assert_eq!(ctx.extension(RAW_SERIES_READ_EXTENSION_KEY), Some("cpu"));
+    }
+
+    #[test]
+    fn remote_read_sanitizes_spoofed_raw_series_extension() {
+        let spoofed = QueryContextBuilder::default()
+            .extensions(HashMap::from([(
+                RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+                "spoofed_metric".to_string(),
+            )]))
+            .build();
+        let ctx = sanitize_remote_read_context(spoofed);
+        assert_eq!(ctx.extension(RAW_SERIES_READ_EXTENSION_KEY), Some(""));
+    }
+
+    #[test]
+    fn raw_series_request_rejects_an_unnamed_scan() {
+        // An empty table name is also the table provider's "no metric" sentinel, so answering it
+        // would silently downgrade a frame request to rows. The plan builder refuses an empty name,
+        // so this is the hand-built request the check exists for.
+        let mut plan = scan_plan("cpu");
+        let LogicalPlan::TableScan(scan) = &mut plan else {
+            panic!("the fixture is a table scan");
+        };
+        scan.table_name = datafusion_common::TableReference::bare("");
+        let request = query_request(plan, RegionReadKind::RawSeries);
+        let err = validate_raw_series_request(&request).unwrap_err();
+        assert!(
+            err.to_string().contains("named table scan"),
+            "unexpected rejection cause: {err}"
+        );
+    }
+
+    #[test]
+    fn raw_series_request_rejects_a_plan_that_is_not_just_the_scan() {
+        use datafusion_expr::LogicalPlanBuilder;
+
+        let scan = scan_plan("cpu");
+        let projected = LogicalPlanBuilder::from(scan)
+            .project(vec![datafusion_expr::col("v")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let request = query_request(projected, RegionReadKind::RawSeries);
+        assert!(validate_raw_series_request(&request).is_err());
+    }
+
+    #[test]
+    fn raw_series_request_rejects_every_inspection_table_name_case_insensitively() {
+        for name in [
+            ManifestSstEntry::reserved_table_name_for_inspection(),
+            StorageSstEntry::reserved_table_name_for_inspection(),
+            PuffinIndexMetaEntry::reserved_table_name_for_inspection(),
+            RegionInfoEntry::reserved_table_name_for_inspection(),
+        ] {
+            for candidate in [name.to_string(), name.to_ascii_uppercase()] {
+                let plan = scan_plan(&candidate);
+                let request = query_request(plan.clone(), RegionReadKind::RawSeries);
+                let err = validate_raw_series_request(&request).unwrap_err();
+                assert!(
+                    err.to_string().contains("inspection tables"),
+                    "{candidate} must be rejected as an inspection table: {err}"
+                );
+                // The identical scan stays a valid ordinary row read.
+                let request = query_request(plan, RegionReadKind::Rows);
+                assert!(validate_raw_series_request(&request).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn raw_series_request_rejects_a_scan_that_already_limits_its_rows() {
+        // A pushed-down fetch cannot be honoured by a frame leaf and is rejected.
+        let mut limited = scan_plan("cpu");
+        let LogicalPlan::TableScan(scan) = &mut limited else {
+            panic!("the fixture is a table scan");
+        };
+        scan.fetch = Some(1);
+        let request = query_request(limited, RegionReadKind::RawSeries);
+        assert!(validate_raw_series_request(&request).is_err());
     }
 }

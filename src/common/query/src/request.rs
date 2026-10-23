@@ -342,6 +342,29 @@ impl DynFilterUpdate {
     }
 }
 
+/// How a region should shape its answer to a query request.
+///
+/// The framing is opt-in and carries no names: a region already holds the table metadata and
+/// always runs on a scan request, so the only thing it cannot infer is that frames were asked
+/// for at all. Every other part of a frame is derived region-side — the metric name from the
+/// table scan the plan already names, the logical labels from the region's own tag columns, the
+/// projected fields from the scan projection, and the label mode, label decode description and
+/// ordering from the prepared scanner as it describes itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RegionReadKind {
+    /// Ordinary rows. This is the read a region produced before this option existed, and it is
+    /// what every request without an explicit opt-in keeps asking for.
+    #[default]
+    Rows,
+    /// Raw series frames instead of ordinary rows.
+    ///
+    /// A region answers with frames, or fails with an error naming why it could not: it never
+    /// answers a frame request with rows. Rows are a different shape for a plan that was built
+    /// around frames, so a reader that received them would have to notice for itself, and noticing
+    /// is exactly what an explicit request exists to avoid.
+    RawSeries,
+}
+
 /// The query request to be handled by the RegionServer (Datanode).
 #[derive(Clone, Debug)]
 pub struct QueryRequest {
@@ -353,7 +376,23 @@ pub struct QueryRequest {
 
     /// The form of the query: a logical plan.
     pub plan: LogicalPlan,
+
+    /// The answer shape this request asks for.
+    ///
+    /// [`RegionReadKind::Rows`] is the only value any pre-existing caller produces, and the only
+    /// value [`Default`] yields.
+    pub read_kind: RegionReadKind,
 }
+
+/// Query-context key through which the region server tells the region's table provider that this
+/// read asked for raw series frames, and names the metric they belong to.
+///
+/// The value is the metric name for a read that asked for frames, and the empty string for one that
+/// did not. The region server is the only writer: it rewrites the key on every read it handles, so a
+/// value that arrived in a request header is always overwritten and cannot opt a read into frames.
+/// The only reader is the region's dummy table provider, when it selects its scan leaf. A frame
+/// names itself, so nothing else about the frame travels with it.
+pub const RAW_SERIES_READ_EXTENSION_KEY: &str = "region.raw_series.read";
 
 #[cfg(test)]
 mod tests {
@@ -369,6 +408,12 @@ mod tests {
     use datafusion_expr::Operator;
 
     use super::*;
+
+    #[test]
+    fn region_read_kind_defaults_to_ordinary_rows() {
+        assert_eq!(RegionReadKind::default(), RegionReadKind::Rows);
+        assert_ne!(RegionReadKind::default(), RegionReadKind::RawSeries);
+    }
 
     #[test]
     fn dyn_filter_update_sets_protocol_version() {

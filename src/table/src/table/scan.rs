@@ -458,7 +458,8 @@ impl RegionScanExec {
     /// Builds the raw-series binding of authorized logical names from this scanner's metadata.
     ///
     /// The binding copies this scanner's metadata snapshot, and every requested name must resolve
-    /// to a distinct logical column of that snapshot. `None` means at least one name does not.
+    /// to a distinct logical column of that snapshot. Multiple prepared partitions are supported;
+    /// each must preserve series contiguity. `None` means at least one name does not.
     fn resolve_named_series_binding(
         &self,
         metric_name: &str,
@@ -474,10 +475,6 @@ impl RegionScanExec {
         }
         let scanner = self.scanner.lock().unwrap();
         let metadata = scanner.metadata();
-        if scanner.properties().num_partitions().max(1) != 1 {
-            return None;
-        }
-
         let primary_key_ids = metadata
             .primary_key_columns()
             .map(|column| column.column_id)
