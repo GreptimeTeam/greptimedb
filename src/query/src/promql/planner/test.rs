@@ -41,7 +41,9 @@ use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::series::SeriesOrdering;
 use promql::extension_plan::{FusedSeries, HistogramFold};
+use promql::native::plan::NativeExpr;
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
@@ -1812,6 +1814,20 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
             .iter()
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>()
+    );
+    // The scan below is chosen during physical planning, so the route cannot know whether it is
+    // the legacy scan (`KeyThenTime`) or the two-phase one (`Contiguous`) and must bind the weaker
+    // guarantee both provide. `rate` compiles to one window over that raw input.
+    let NativeExpr::Window { input, .. } = &fused.tree().root().expr else {
+        panic!("the root is not a window: {:?}", fused.tree().root().expr);
+    };
+    let NativeExpr::Input(bound) = &input.expr else {
+        panic!("the window's input is not an input: {:?}", input.expr);
+    };
+    assert_eq!(
+        SeriesOrdering::Contiguous,
+        bound.ordering,
+        "the tree claimed an ordering a raw-series scan need not guarantee"
     );
 }
 
